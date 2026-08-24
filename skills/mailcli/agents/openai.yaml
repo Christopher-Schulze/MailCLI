@@ -1,0 +1,4 @@
+interface:
+  display_name: "MailCLI"
+  short_description: "Operate local macOS Mail through MailCLI"
+  default_prompt: "Use $mailcli to inspect or operate my locally configured macOS Mail accounts."

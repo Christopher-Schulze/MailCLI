@@ -1,0 +1,41 @@
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment and secrets
+.env*
+!.env.example
+
+# Build, test, and profiling output
+/bin/
+/dist/
+/coverage.out
+coverage*.out
+/.coverage/
+*.test
+*.prof
+*.pprof
+*.trace
+*.log
+
+# Local analysis output
+/graphify-out/
+
+# Private delivery history
+/docs/tasks.md
+/docs/tasks/
+
+# Mail.app and MailCLI state must never enter the repository
+*.emlx
+*.partial.emlx
+/MailData/
+/Envelope Index*
+/drafts/
+/attachments/
+/exports/
+/mail-access.lock*
+*.mailcli-backup
+*.bak
+*.backup
+*~
