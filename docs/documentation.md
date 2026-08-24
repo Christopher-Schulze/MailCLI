@@ -5,6 +5,7 @@
 - [Composition](#composition)
 - [Data model](#data-model)
 - [Local security and permissions](#local-security-and-permissions)
+- [Release distribution](#release-distribution)
 - [Scope](#scope)
 - [Search](#search)
 - [Setup and usage](#setup-and-usage)
@@ -117,6 +118,14 @@ The calling host needs Full Disk Access to read `~/Library/Mail`; this is the on
 
 Structured output excludes body content unless the command requests it. Diagnostics avoid subjects, bodies, headers, recipient lists, and attachment bytes unless needed to identify the failed operation. MailCLI persists only review drafts and the cross-process access-gate state under `~/Library/Application Support/MailCLI`; it persists no mail corpus or search index. Draft directories use mode `0700` and files use mode `0600`. `drafts discard --confirm` removes only the named local draft.
 
+## Release distribution
+
+Release `v1.0.0` publishes `mailcli_1.0.0_darwin_arm64.tar.gz` and `SHA256SUMS`. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping while retaining `-trimpath`, so identical source and toolchain inputs produce the same binary independently of the current commit or dirty-worktree state. The builder rejects a non-semantic version, non-absolute output directory, existing output asset, non-ARM64 binary, invalid code signature, VCS-stamped binary, or binary-version mismatch.
+
+The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` may select other safe absolute paths. It rejects symbolic-link destinations and pre-existing backup paths. Both payloads are staged and byte-compared before replacement. Existing destinations are moved to dedicated backups, the staged payloads are moved into place, and binary plus skill are verified again. Any failure restores the original destinations; successful verification removes the backups. The installer never changes Full Disk Access, Automation consent, quarantine attributes, or global Gatekeeper settings.
+
+The native release is linker ad-hoc signed but not Apple-notarized because the release host has no Developer ID signing identity. Browser downloads may therefore require an explicit user-approved Gatekeeper remediation after SHA-256 verification. Notarized distribution requires a future Developer ID certificate and Apple notary credentials; absence of those credentials must never be hidden by automatically clearing quarantine.
+
 ## Scope
 
 The supported scope is every active account and every mailbox represented consistently by Mail's Envelope Index and mailbox catalog, including Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested Gmail labels. `mailboxes resolve` accepts one exact `--path` segment per hierarchy level, so localized folders such as `Gesendet` and `Entwürfe` require no guessed identifier. Full and partial local message sources are reported truthfully. A targeted fallback may ask Mail for one uncached body or attachment, but MailCLI never starts Mail to do so.
@@ -142,6 +151,7 @@ Requirements are macOS on Apple silicon, Go 1.27 or newer for development, `/Sys
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
+./scripts/release/build-release.sh 1.0.0
 ./scripts/tests/test-live-responsiveness.sh
 ./scripts/build/install-local.sh
 command -v mailcli
@@ -173,7 +183,7 @@ printf '%s' '{"body":"Thanks.\n"}' | ./bin/mailcli messages reply --message MSG_
 ./bin/mailcli messages search --sender example.com --attachment true --json
 ```
 
-The main test gate validates the syntax and executable bit of every repository shell script before running the Go quality and race gates. Build the binary before invoking `test-live-responsiveness.sh`; that opt-in gate requires an already-running Mail process and Automation permission. `doctor` is non-invasive and checks the read store without Apple Events. `doctor --live` asks an already-running Mail process only for its version and may trigger the one-time Automation prompt; when Mail is closed it returns `mail_not_running` and does not launch it. Body search is bounded per invocation with `--max-messages` and `--max-bytes` and persists nothing. Sending and deletion require `--confirm`; creating, inspecting, and updating a local draft never sends. After `accepted_by_mail` or `outcome_unknown`, never retry send: use `drafts reconcile`. Moving, copying, marking, synchronizing, native draft saving, and confirmed sending or deletion are live Mail operations and should be invoked only when the user requested that mutation.
+The main test gate validates the syntax and executable bit of every repository shell script before running the Go quality, race, and isolated release installation gates. Build the binary before invoking `test-live-responsiveness.sh`; that opt-in gate requires an already-running Mail process and Automation permission. `doctor` is non-invasive and checks the read store without Apple Events. `doctor --live` asks an already-running Mail process only for its version and may trigger the one-time Automation prompt; when Mail is closed it returns `mail_not_running` and does not launch it. Body search is bounded per invocation with `--max-messages` and `--max-bytes` and persists nothing. Sending and deletion require `--confirm`; creating, inspecting, and updating a local draft never sends. After `accepted_by_mail` or `outcome_unknown`, never retry send: use `drafts reconcile`. Moving, copying, marking, synchronizing, native draft saving, and confirmed sending or deletion are live Mail operations and should be invoked only when the user requested that mutation.
 
 ## Technical baseline
 
@@ -187,4 +197,4 @@ Release acceptance requires isolated process-inclusive metadata-list p95 below 5
 
 The implementation uses `github.com/emersion/go-message` for streaming RFC 5322/MIME parsing, `golang.org/x/net/html` for safe text extraction, `golang.org/x/sync/errgroup` for the bounded two-worker body scan, Unicode normalization from `golang.org/x/text`, and `github.com/mattn/go-sqlite3` for one strict read-only SQLite connection. MailCLI binds only explicit writes and targeted incomplete-content fallback to the installed Mail scripting definition. Cross-process serialization uses BSD `flock`; `osascript` runs in an owned process group and is synchronously reaped. No service, daemon, cache, watcher, child process, or goroutine survives a CLI invocation.
 
-The release target is a native `darwin/arm64` binary. Cross-compilation alone is insufficient acceptance evidence because the local store profile, Full Disk Access, Apple Events permission, Mail 16 composition behavior, attachment bytes, send observation, and process non-interference must be exercised on the installed host.
+The release target is a native `darwin/arm64` binary packaged with the companion skill and verified installer. Cross-compilation alone is insufficient acceptance evidence because the local store profile, Full Disk Access, Apple Events permission, Mail 16 composition behavior, attachment bytes, send observation, installation rollback, skill discovery, and process non-interference must be exercised on the installed host.

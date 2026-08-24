@@ -79,17 +79,32 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-Source builds require Go 1.27 or newer and the Xcode Command Line Tools for CGO.
+The `v1.0.0` release archive installs both the native CLI and its companion agent skill:
+
+```bash
+VERSION=1.0.0
+curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
+curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS
+tar -xzf "mailcli_${VERSION}_darwin_arm64.tar.gz"
+"./mailcli_${VERSION}_darwin_arm64/install.sh"
+command -v mailcli
+mailcli version --json
+```
+
+The release installer copies the verified binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`. It stages and verifies both before replacing an existing installation, restores backups on failure, rejects symbolic-link destinations and unresolved backup paths, and never removes macOS security attributes. Start a new agent session after installation so the skill is discovered.
+
+To build from source instead, install Go 1.27 or newer and the Xcode Command Line Tools for CGO:
 
 ```bash
 git clone https://github.com/Christopher-Schulze/MailCLI.git
 cd MailCLI
 ./scripts/build/install-local.sh
-command -v mailcli
-mailcli version --json
 ```
 
-The installer builds a native `darwin/arm64` executable and copies it to `~/.local/bin/mailcli` by default. Pass an explicit destination as the first argument to install elsewhere.
+The source installer builds a native `darwin/arm64` executable and copies only the binary to `~/.local/bin/mailcli` by default. Pass an explicit destination as the first argument to install elsewhere, then install or link [`skills/mailcli`](skills/mailcli) separately when agent support is needed.
+
+The current release binary is ad-hoc signed but not Apple-notarized because no Developer ID identity is available. A browser download can therefore be quarantined by Gatekeeper. Verify `SHA256SUMS` first; if macOS still blocks the verified binary, explicitly remove only that binary's quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`. The installer never performs this bypass automatically.
 
 ### Grant permissions
 
@@ -230,14 +245,14 @@ Exit code `0` means success, `1` means a runtime or Mail failure, and `2` means 
 
 The repository includes a companion skill at [`skills/mailcli`](skills/mailcli). It teaches Codex and compatible agents when to invoke MailCLI, how to paginate every mailbox, how to interpret incomplete search coverage, and when a send must never be retried.
 
-Install it in the agent's skill directory or link the repository copy:
+The release installer places it at `~/.agents/skills/mailcli`, the personal skill location discovered by Codex. For a source checkout, link the repository copy manually:
 
 ```bash
 mkdir -p "${HOME}/.agents/skills"
 ln -s "$(pwd)/skills/mailcli" "${HOME}/.agents/skills/mailcli"
 ```
 
-The command refuses if a skill already exists at that destination. It does not overwrite an installed skill.
+The link command refuses if a skill already exists at that destination. It does not overwrite an installed skill. Start a new agent session after either installation method.
 
 ## Safety model
 
@@ -269,11 +284,12 @@ MailCLI stores only local review drafts and access-gate recovery state under `~/
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
+./scripts/release/build-release.sh 1.0.0
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
 
-The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, uncached race tests, coverage, and architecture regression checks. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds.
+The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds.
 
 ## License
 
