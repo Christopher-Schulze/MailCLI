@@ -204,27 +204,23 @@ func (s *Store) findMailboxCandidate(
 	baseline sendBaseline,
 	draft mail.Draft,
 	requireSentDate bool,
-) (mail.MessageSummary, bool, error) {
+) (result mail.MessageSummary, found bool, resultErr error) {
 	query, arguments := mailboxCandidateQuery(baseline, draft, requireSentDate)
 	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return mail.MessageSummary{}, false, fmt.Errorf("query sent-message observation: %w", err)
 	}
+	defer joinCloseError(&resultErr, rows, "sent-message observation rows")
 	var candidates []messageRecord
 	for rows.Next() {
 		item, err := scanMessageRecord(rows)
 		if err != nil {
-			rows.Close()
 			return mail.MessageSummary{}, false, err
 		}
 		candidates = append(candidates, item)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return mail.MessageSummary{}, false, fmt.Errorf("iterate sent-message observation: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return mail.MessageSummary{}, false, fmt.Errorf("close sent-message observation: %w", err)
 	}
 	var matches []messageRecord
 	for _, item := range candidates {
@@ -342,7 +338,7 @@ func (s *Store) recordHasExactRecipients(
 	ctx context.Context,
 	rowID int64,
 	draft mail.Draft,
-) (bool, error) {
+) (result bool, resultErr error) {
 	expected, valid := draftRecipientAddressSets(draft)
 	if !valid {
 		return false, nil
@@ -356,7 +352,7 @@ func (s *Store) recordHasExactRecipients(
 	if err != nil {
 		return false, fmt.Errorf("query sent-message recipients: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "sent-message recipient rows")
 	actual := newRecipientAddressSets()
 	for rows.Next() {
 		var recipientType int
@@ -369,6 +365,9 @@ func (s *Store) recordHasExactRecipients(
 		if !known || normalized == "" {
 			return false, nil
 		}
+		if _, duplicate := set[normalized]; duplicate {
+			return false, nil
+		}
 		set[normalized] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
@@ -379,6 +378,7 @@ func (s *Store) recordHasExactRecipients(
 
 func draftRecipientAddressSets(draft mail.Draft) (recipientAddressSets, bool) {
 	sets := newRecipientAddressSets()
+	all := make(map[string]struct{})
 	groups := []struct {
 		values []mail.Recipient
 		set    map[string]struct{}
@@ -393,6 +393,10 @@ func draftRecipientAddressSets(draft mail.Draft) (recipientAddressSets, bool) {
 			if address == "" {
 				return recipientAddressSets{}, false
 			}
+			if _, duplicate := all[address]; duplicate {
+				return recipientAddressSets{}, false
+			}
+			all[address] = struct{}{}
 			group.set[address] = struct{}{}
 		}
 	}
@@ -443,7 +447,7 @@ func (s *Store) recordContentMatchesDraft(
 	ctx context.Context,
 	record messageRecord,
 	draft mail.Draft,
-) (bool, error) {
+) (result bool, resultErr error) {
 	location, err := parseMailboxURL(record.PhysicalURL)
 	if err != nil {
 		return false, operationError("unsupported_mail_store_schema", err.Error())
@@ -453,7 +457,7 @@ func (s *Store) recordContentMatchesDraft(
 	if err != nil {
 		return false, candidateSourcePending(err)
 	}
-	defer source.Close()
+	defer joinCloseError(&resultErr, source, "sent-message source")
 	if source.partial {
 		return false, nil
 	}
@@ -465,7 +469,9 @@ func (s *Store) recordContentMatchesDraft(
 	if err != nil || !document.Complete || !bodyHasDraftPrefix(document.Content, draft.Body) {
 		return false, candidateSourcePending(err)
 	}
-	return s.recordAttachmentsMatchDraft(ctx, record, location, document.Parts, draft.Attachments)
+	return s.recordAttachmentsMatchDraft(
+		ctx, record, location, document.Parts, draft.Attachments, draft.ExpectedAttachmentCount,
+	)
 }
 
 func (s *Store) resolveCandidate(record messageRecord, location mailboxLocation) resolvedMessage {
@@ -497,9 +503,9 @@ func candidateSourcePending(err error) error {
 }
 
 func bodyHasDraftPrefix(actual string, expected string) bool {
-	expected = normalizeTextLayout(expected)
+	expected = canonicalSentText(expected)
 	if expected == "" {
-		return false
+		return true
 	}
 	for _, candidate := range normalizedBodyCandidates(actual) {
 		if candidate == expected || strings.HasPrefix(candidate, expected+"\n") {
@@ -510,7 +516,7 @@ func bodyHasDraftPrefix(actual string, expected string) bool {
 }
 
 func normalizedBodyCandidates(value string) []string {
-	normalized := normalizeTextLayout(value)
+	normalized := canonicalSentText(value)
 	candidates := []string{normalized}
 	lines := strings.Split(normalized, "\n")
 	for len(lines) > 0 && strings.Trim(lines[0], " \uFFFC") == "" {
@@ -535,9 +541,15 @@ func normalizedBodyCandidates(value string) []string {
 		quoted = append(quoted, strings.TrimPrefix(line, "> "))
 	}
 	if len(quoted) > 0 {
-		candidates = append(candidates, normalizeTextLayout(strings.Join(quoted, "\n")))
+		candidates = append(candidates, canonicalSentText(strings.Join(quoted, "\n")))
 	}
 	return candidates
+}
+
+func canonicalSentText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.Trim(norm.NFC.String(value), "\n")
 }
 
 func (s *Store) recordAttachmentsMatchDraft(
@@ -546,12 +558,16 @@ func (s *Store) recordAttachmentsMatchDraft(
 	location mailboxLocation,
 	parts map[string]mimePart,
 	expected []mail.DraftAttachment,
+	expectedTotal *int,
 ) (bool, error) {
 	records, err := s.attachmentRecords(ctx, record.RowID)
 	if err != nil {
 		return false, err
 	}
-	if len(parts) != len(expected) {
+	if expectedTotal == nil && len(parts) != len(expected) {
+		return false, nil
+	}
+	if expectedTotal != nil && len(parts) != *expectedTotal {
 		return false, nil
 	}
 	recordsByID := make(map[string]attachmentRecord, len(records))
@@ -578,7 +594,7 @@ func (s *Store) recordAttachmentsMatchDraft(
 		}
 		actual[fingerprint]++
 	}
-	return equalAttachmentFingerprints(actual, expected), nil
+	return attachmentFingerprintsContain(actual, expected, expectedTotal != nil), nil
 }
 
 func fingerprintMIMEPart(part mimePart) (attachmentFingerprint, bool) {
@@ -625,11 +641,12 @@ func (s *Store) observedAttachmentFingerprint(
 	}, true, nil
 }
 
-func equalAttachmentFingerprints(
+func attachmentFingerprintsContain(
 	actual map[attachmentFingerprint]int,
 	expected []mail.DraftAttachment,
+	allowExtra bool,
 ) bool {
-	if len(actual) > len(expected) {
+	if !allowExtra && len(actual) > len(expected) {
 		return false
 	}
 	wanted := make(map[attachmentFingerprint]int, len(expected))
@@ -639,11 +656,11 @@ func equalAttachmentFingerprints(
 			SHA256: strings.ToLower(attachment.SHA256),
 		}]++
 	}
-	if len(wanted) != len(actual) {
+	if !allowExtra && len(wanted) != len(actual) {
 		return false
 	}
 	for fingerprint, count := range wanted {
-		if actual[fingerprint] != count {
+		if actual[fingerprint] < count || (!allowExtra && actual[fingerprint] != count) {
 			return false
 		}
 	}

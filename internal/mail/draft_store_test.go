@@ -11,12 +11,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"mailcli/internal/mailref"
 )
 
 type draftGateway struct {
 	gatewayStub
-	sends int
-	saves int
+	sends   int
+	saves   int
+	sendErr error
+	saveErr error
 }
 
 func (g *draftGateway) SendDraft(context.Context, Draft) (SendEvidence, error) {
@@ -24,12 +28,12 @@ func (g *draftGateway) SendDraft(context.Context, Draft) (SendEvidence, error) {
 	return SendEvidence{
 		InvocationStarted: true, AcceptedByMail: true, SentStoreObserved: true,
 		ObservedMessageRef: "msg_sent",
-	}, nil
+	}, g.sendErr
 }
 
 func (g *draftGateway) SaveDraft(_ context.Context, draft Draft) (MessageSummary, error) {
 	g.saves++
-	return MessageSummary{Ref: "msg_saved", Subject: draft.Subject}, nil
+	return MessageSummary{Ref: "msg_saved", Subject: draft.Subject}, g.saveErr
 }
 
 func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
@@ -50,6 +54,44 @@ func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
 	}
 	if _, err := service.GetDraft(draft.Ref); err == nil {
 		t.Fatal("saved local draft still exists")
+	}
+}
+
+func TestSaveDraftReportsPostflightFailureWithoutRetainingLocalDraft(t *testing.T) {
+	gateway := &draftGateway{saveErr: &OperationError{
+		Code: "bridge_cleanup_failed", Message: "private bridge request remained",
+	}}
+	service := NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "mail@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Saved", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	gateway.accounts = []Account{{EmailAddresses: []string{"mail@example.com"}}}
+	saved, err := service.SaveDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "draft_postflight_failed" || saved.Message.Ref != "msg_saved" {
+		t.Fatalf("SaveDraft() = %+v, error = %v", saved, err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err == nil {
+		t.Fatal("observed native draft left a retryable local draft")
+	}
+}
+
+func TestSendDraftReportsPostflightFailureWithoutRetainingLocalDraft(t *testing.T) {
+	gateway := &draftGateway{sendErr: &OperationError{
+		Code: "attachment_snapshot_cleanup_failed", Message: "private attachment snapshot remained",
+	}}
+	gateway.accounts = []Account{{EmailAddresses: []string{"sender@example.com"}}}
+	service := NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+	draft := createSendTestDraft(t, service)
+	result, err := service.SendDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "send_postflight_failed" || result.Outcome != SendOutcomeObserved || result.DraftRetained {
+		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err == nil {
+		t.Fatal("observed sent message left a retryable local draft")
 	}
 }
 
@@ -125,11 +167,32 @@ func TestDerivedDraftValidation(t *testing.T) {
 	if _, err := service.CreateDraft(CreateDraftRequest{Kind: DraftKindReply, Input: DraftInput{Body: "Reply"}}); err == nil {
 		t.Fatal("reply without source error = nil")
 	}
+	if _, err := service.CreateDraft(CreateDraftRequest{
+		Kind: DraftKindReply, SourceRef: "msg_ref", Input: DraftInput{Body: "Reply"},
+	}); errorCode(err) != "invalid_argument" {
+		t.Fatalf("reply with non-store source error = %v", err)
+	}
+	if _, err := service.CreateDraft(CreateDraftRequest{
+		Kind: DraftKindForward, SourceRef: storeBoundSourceRef(t), Input: DraftInput{Body: "Forward"},
+	}); errorCode(err) != "invalid_argument" {
+		t.Fatalf("forward without recipient error = %v", err)
+	}
 	draft, err := service.CreateDraft(CreateDraftRequest{
-		Kind: DraftKindReply, SourceRef: "msg_ref", ReplyAll: true, Input: DraftInput{Body: "Reply"},
+		Kind: DraftKindReply, SourceRef: storeBoundSourceRef(t), ReplyAll: true, Input: DraftInput{Body: "Reply"},
 	})
 	if err != nil || draft.Kind != DraftKindReply || !draft.ReplyAll {
 		t.Fatalf("reply draft = %+v, error = %v", draft, err)
+	}
+}
+
+func TestDraftValidationRejectsDuplicateRecipientAcrossRoles(t *testing.T) {
+	service := NewServiceWithDraftRoot(&draftGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	_, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "person@example.com"}},
+		CC: []Recipient{{Address: "PERSON@example.com"}}, Body: "Body",
+	}})
+	if errorCode(err) != "invalid_argument" {
+		t.Fatalf("CreateDraft() error = %v, want invalid_argument", err)
 	}
 }
 
@@ -234,7 +297,7 @@ func TestSendDraftIsIdempotentAcrossServiceInstances(t *testing.T) {
 	close(gateway.release)
 	firstResponse := <-firstDone
 	secondResponse := <-secondDone
-	if firstResponse.err != nil || secondResponse.err != nil {
+	if errorCode(firstResponse.err) != "send_not_observed" || errorCode(secondResponse.err) != "send_not_observed" {
 		t.Fatalf("SendDraft() errors = %v, %v", firstResponse.err, secondResponse.err)
 	}
 	if gateway.calls.Load() != 1 || firstResponse.result.AttemptID != secondResponse.result.AttemptID {
@@ -270,7 +333,7 @@ func TestPrepareSendFailureCreatesNoClaimAndDoesNotInvokeSend(t *testing.T) {
 	}
 	gateway.prepareErr = nil
 	gateway.evidence = SendEvidence{InvocationStarted: true, AcceptedByMail: true}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil || gateway.calls.Load() != 1 {
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_not_observed" || gateway.calls.Load() != 1 {
 		t.Fatalf("second SendDraft() error = %v, send calls = %d", err, gateway.calls.Load())
 	}
 }
@@ -347,16 +410,23 @@ func TestSendDraftUnknownOutcomeIsSticky(t *testing.T) {
 func TestSendDraftAcceptedWithoutStoreObservationRetainsDraft(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	gateway := &controlledSendGateway{
-		evidence: SendEvidence{InvocationStarted: true, AcceptedByMail: true},
+		evidence: SendEvidence{
+			InvocationStarted: true, AcceptedByMail: true,
+			Materialized: &SendMaterialization{
+				From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+				Subject: "Materialized subject",
+			},
+		},
 	}
 	service := NewServiceWithDraftRoot(gateway, root)
 	draft := createSendTestDraft(t, service)
 	result, err := service.SendDraft(context.Background(), draft.Ref)
-	if err != nil || result.Outcome != SendOutcomeAccepted || !result.DraftRetained || result.SentStoreObserved {
+	if errorCode(err) != "send_not_observed" || result.Outcome != SendOutcomeAccepted || !result.DraftRetained || result.SentStoreObserved {
 		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
 	}
 	retained, err := service.GetDraft(draft.Ref)
-	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.ID != result.AttemptID {
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.ID != result.AttemptID ||
+		retained.SendAttempt.Materialized == nil || retained.SendAttempt.Materialized.Subject != "Materialized subject" {
 		t.Fatalf("GetDraft() = %+v, error = %v", retained, err)
 	}
 }
@@ -372,9 +442,21 @@ func TestSendDraftNotStartedClearsClaim(t *testing.T) {
 	gateway.err = nil
 	gateway.evidence = SendEvidence{InvocationStarted: true, AcceptedByMail: true}
 	result, err := service.SendDraft(context.Background(), draft.Ref)
-	if err != nil || result.Outcome != SendOutcomeAccepted || gateway.calls.Load() != 2 {
+	if errorCode(err) != "send_not_observed" || result.Outcome != SendOutcomeAccepted || gateway.calls.Load() != 2 {
 		t.Fatalf("second SendDraft() = %+v, error = %v, calls = %d", result, err, gateway.calls.Load())
 	}
+}
+
+func storeBoundSourceRef(t *testing.T) string {
+	t.Helper()
+	ref, err := mailref.EncodeMessage(mailref.Message{
+		AccountID: "account", MailboxPath: []string{"Inbox"}, LibraryID: "42",
+		ExpectedStoreUUID: "store", ExpectedStoreMailboxID: 1,
+	})
+	if err != nil {
+		t.Fatalf("mailref.EncodeMessage() error = %v", err)
+	}
+	return ref
 }
 
 func TestOrphanedSendClaimNeverInvokesGateway(t *testing.T) {
@@ -435,13 +517,17 @@ func TestDraftLeaseSerializesProcesses(t *testing.T) {
 	}
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil || line != "locked\n" {
-		command.Process.Kill()
+		if killErr := command.Process.Kill(); killErr != nil {
+			t.Fatalf("helper readiness = %q, error = %v, kill error = %v", line, err, killErr)
+		}
 		t.Fatalf("helper readiness = %q, error = %v", line, err)
 	}
 	started := time.Now()
 	lease, err := acquireDraftLease(context.Background(), root, ref)
 	if err != nil {
-		command.Process.Kill()
+		if killErr := command.Process.Kill(); killErr != nil {
+			t.Fatalf("acquireDraftLease() error = %v, kill error = %v", err, killErr)
+		}
 		t.Fatalf("acquireDraftLease() error = %v", err)
 	}
 	waited := time.Since(started)

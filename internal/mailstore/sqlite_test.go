@@ -15,7 +15,7 @@ func TestOpenReadOnlyDatabaseSeesWALAndRejectsWrites(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "Envelope Index")
 	writer := openTestWriter(t, path)
-	defer writer.Close()
+	closeTestResource(t, writer, "fixture writer")
 	if _, err := writer.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0"); err != nil {
 		t.Fatalf("disable WAL autocheckpoint: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestOpenReadOnlyDatabaseSeesWALAndRejectsWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openReadOnlyDatabase() error = %v", err)
 	}
-	defer reader.Close()
+	closeTestResource(t, reader, "read-only database")
 	var value string
 	if err := reader.QueryRowContext(ctx, "SELECT value FROM values_table").Scan(&value); err != nil {
 		t.Fatalf("read WAL row: %v", err)
@@ -67,7 +67,7 @@ func TestValidateSchemaAcceptsCapabilitiesAndRejectsMissingColumn(t *testing.T) 
 			if err != nil {
 				t.Fatalf("openReadOnlyDatabase() error = %v", err)
 			}
-			defer reader.Close()
+			closeTestResource(t, reader, "read-only database")
 			capability, err := validateSchema(ctx, reader)
 			if test.wantError == "" {
 				if err != nil || capability.Fingerprint == "" {
@@ -111,7 +111,7 @@ func TestValidateSchemaRejectsUnknownSemanticProfile(t *testing.T) {
 			if err != nil {
 				t.Fatalf("openReadOnlyDatabase() error = %v", err)
 			}
-			defer reader.Close()
+			closeTestResource(t, reader, "read-only database")
 			_, err = validateSchema(ctx, reader)
 			if err == nil || !strings.Contains(err.Error(), "profile") {
 				t.Fatalf("validateSchema() error = %v, want unsupported profile", err)
@@ -126,7 +126,7 @@ func openTestWriter(t *testing.T, path string) *sql.DB {
 		driver: &sqlite3.SQLiteDriver{}, dsn: path,
 	})
 	if _, err := database.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		database.Close()
+		closeTestResourceNow(t, database, "test database")
 		t.Fatalf("enable WAL: %v", err)
 	}
 	return database

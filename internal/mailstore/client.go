@@ -3,7 +3,10 @@ package mailstore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -13,6 +16,13 @@ type Client struct {
 	store    *Store
 	storeErr error
 	fallback mail.Gateway
+}
+
+type draftSaveMaterializer interface {
+	SaveDraftWithMaterialization(
+		ctx context.Context,
+		draft mail.Draft,
+	) (mail.MessageSummary, *mail.SendMaterialization, error)
 }
 
 func NewClient(ctx context.Context, fallback mail.Gateway, config Config) *Client {
@@ -104,47 +114,29 @@ func (c *Client) SearchMessages(
 }
 
 func (c *Client) GetMessage(ctx context.Context, ref string) (mail.Message, error) {
-	var localErr error
-	if c.store != nil {
-		message, err := c.store.GetMessage(ctx, ref)
-		if err == nil && message.ContentComplete {
-			return message, nil
-		}
-		if err == nil && c.fallback == nil {
-			return message, nil
-		}
-		if err != nil && !safeTargetedFallback(err) {
-			return mail.Message{}, err
-		}
-		localErr = err
-	}
-	if c.fallback == nil {
-		if localErr != nil {
-			return mail.Message{}, localErr
-		}
-		return mail.Message{}, c.readUnavailableError()
-	}
-	automationRef, err := c.automationMessageRef(ctx, ref)
-	if err != nil {
-		return mail.Message{}, err
-	}
-	return c.fallback.GetMessage(ctx, automationRef)
+	return c.readMessage(ctx, ref, false)
 }
 
 func (c *Client) OpenDraft(ctx context.Context, ref string) (mail.Message, error) {
+	return c.readMessage(ctx, ref, true)
+}
+
+func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (mail.Message, error) {
+	var local mail.Message
+	hasLocal := false
 	var localErr error
 	if c.store != nil {
-		message, err := c.store.GetMessage(ctx, ref)
-		if err == nil && message.ContentComplete {
-			return message, nil
+		local, localErr = c.store.GetMessage(ctx, ref)
+		hasLocal = localErr == nil
+		if localErr == nil && local.ContentComplete {
+			return local, nil
 		}
-		if err == nil && c.fallback == nil {
-			return message, nil
+		if localErr == nil && c.fallback == nil {
+			return local, nil
 		}
-		if err != nil && !safeTargetedFallback(err) {
-			return mail.Message{}, err
+		if localErr != nil && !safeTargetedFallback(localErr) {
+			return mail.Message{}, localErr
 		}
-		localErr = err
 	}
 	if c.fallback == nil {
 		if localErr != nil {
@@ -156,7 +148,68 @@ func (c *Client) OpenDraft(ctx context.Context, ref string) (mail.Message, error
 	if err != nil {
 		return mail.Message{}, err
 	}
-	return c.fallback.OpenDraft(ctx, automationRef)
+	raw, rawErr := c.fallback.GetRawSource(ctx, automationRef)
+	if rawErr != nil {
+		if hasLocal {
+			return local, nil
+		}
+		return mail.Message{}, rawErr
+	}
+	if !hasLocal {
+		var metadata mail.Message
+		if openDraft {
+			metadata, err = c.fallback.OpenDraft(ctx, automationRef)
+		} else {
+			metadata, err = c.fallback.GetMessage(ctx, automationRef)
+		}
+		if err != nil {
+			return mail.Message{}, err
+		}
+		local = metadata
+	}
+	return messageFromRawFallback(local, raw)
+}
+
+func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error) {
+	document, err := parseMIMEDocument(strings.NewReader(raw), false, false)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	headers, err := readRawHeaders(strings.NewReader(raw))
+	if err != nil {
+		return mail.Message{}, err
+	}
+	identifiers := make([]string, 0, len(document.Parts))
+	for identifier := range document.Parts {
+		identifiers = append(identifiers, identifier)
+	}
+	sort.Strings(identifiers)
+	attachments := make([]mail.Attachment, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		part := document.Parts[identifier]
+		attachment := mail.Attachment{
+			ID: identifier, Name: part.Name,
+			Size: part.Size, SizeKnown: part.Complete, Downloaded: part.Complete,
+		}
+		if part.MIMEType != "" {
+			mediaType := part.MIMEType
+			attachment.MIMEType = &mediaType
+		}
+		attachments = append(attachments, attachment)
+	}
+	base.ReplyTo = document.ReplyTo
+	base.Summary.MessageID = document.MessageID
+	base.Summary.AttachmentCount = len(attachments)
+	base.To = document.To
+	base.CC = document.CC
+	base.BCC = document.BCC
+	base.Headers = headers
+	base.Content = document.Content
+	base.ContentSource = "mail_app_raw"
+	base.ContentComplete = document.Complete
+	base.MissingParts = append([]string(nil), document.MissingParts...)
+	base.Attachments = attachments
+	return base, nil
 }
 
 func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
@@ -211,10 +264,24 @@ func (c *Client) SaveAttachmentTo(
 	if err != nil {
 		return err
 	}
-	return c.fallback.SaveAttachmentTo(ctx, automationRef, attachmentID, outputPath)
+	if c.store == nil {
+		return c.fallback.SaveAttachmentTo(ctx, automationRef, attachmentID, outputPath)
+	}
+	raw, err := c.fallback.GetRawSource(ctx, automationRef)
+	if err != nil {
+		return err
+	}
+	return extractMIMEAttachment(strings.NewReader(raw), attachmentID, outputPath)
 }
 
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
+	if draft.Kind == mail.DraftKindForward {
+		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
+		if err != nil {
+			return mail.MessageSummary{}, err
+		}
+		draft.ExpectedNativeAttachmentCount = len(native)
+	}
 	automationDraft, err := c.automationDraft(ctx, draft)
 	if err != nil {
 		return mail.MessageSummary{}, err
@@ -231,15 +298,24 @@ func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageS
 		)
 		baselineAvailable = err == nil
 	}
-	_, saveErr := c.fallback.SaveDraft(ctx, automationDraft)
+	var materialized *mail.SendMaterialization
+	var saveErr error
+	if gateway, ok := c.fallback.(draftSaveMaterializer); ok {
+		_, materialized, saveErr = gateway.SaveDraftWithMaterialization(ctx, automationDraft)
+	} else {
+		_, saveErr = c.fallback.SaveDraft(ctx, automationDraft)
+	}
 	if baselineAvailable {
-		observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
-		defer cancel()
-		observed, found, observationErr := c.store.observeMailboxCandidate(
-			observationCtx, baseline, draft, false,
-		)
-		if observationErr == nil && found {
-			return observed, nil
+		observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, materialized)
+		if materializationErr == nil {
+			observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
+			defer cancel()
+			observed, found, observationErr := c.store.observeMailboxCandidate(
+				observationCtx, baseline, observationDraft, false,
+			)
+			if observationErr == nil && found {
+				return observed, automationPostflightError(saveErr)
+			}
 		}
 	}
 	if saveErr != nil {
@@ -252,6 +328,13 @@ func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageS
 }
 
 func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvidence, error) {
+	if draft.Kind == mail.DraftKindForward {
+		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
+		if err != nil {
+			return mail.SendEvidence{}, err
+		}
+		draft.ExpectedNativeAttachmentCount = len(native)
+	}
 	automationDraft, err := c.automationDraft(ctx, draft)
 	if err != nil {
 		return mail.SendEvidence{}, err
@@ -268,15 +351,21 @@ func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvid
 	if !evidence.InvocationStarted {
 		return evidence, sendErr
 	}
+	observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, evidence.Materialized)
 	observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
 	defer cancel()
-	observed, found, observationErr := c.store.observeSent(observationCtx, baseline, draft)
+	var observed mail.MessageSummary
+	found := false
+	var observationErr error
+	if materializationErr == nil {
+		observed, found, observationErr = c.store.observeSent(observationCtx, baseline, observationDraft)
+	}
 	if observationErr == nil && found {
 		evidence.SentStoreObserved = true
 		evidence.ObservedMessageRef = observed.Ref
-		return evidence, nil
+		return evidence, automationPostflightError(sendErr)
 	}
-	return evidence, sendErr
+	return evidence, errors.Join(sendErr, materializationErr, observationErr)
 }
 
 func (c *Client) PrepareSend(ctx context.Context, _ mail.Draft) (mail.SendObservationBaseline, error) {
@@ -302,7 +391,11 @@ func (c *Client) ReconcileSend(
 	if err != nil {
 		return mail.SendEvidence{}, err
 	}
-	observed, found, err := c.store.observeSent(ctx, baseline, draft)
+	observationDraft, err := c.materializedObservationDraft(ctx, draft, attempt.Materialized)
+	if err != nil {
+		return mail.SendEvidence{}, err
+	}
+	observed, found, err := c.store.observeSent(ctx, baseline, observationDraft)
 	evidence := mail.SendEvidence{
 		InvocationStarted:   attempt.InvocationStarted,
 		AcceptedByMail:      attempt.AcceptedByMail,
@@ -316,6 +409,100 @@ func (c *Client) ReconcileSend(
 	evidence.SentStoreObserved = true
 	evidence.ObservedMessageRef = observed.Ref
 	return evidence, nil
+}
+
+func (c *Client) materializedObservationDraft(
+	ctx context.Context,
+	draft mail.Draft,
+	materialized *mail.SendMaterialization,
+) (mail.Draft, error) {
+	result := draft
+	if materialized != nil {
+		result.From = materialized.From
+		result.To = append([]mail.Recipient(nil), materialized.To...)
+		result.CC = append([]mail.Recipient(nil), materialized.CC...)
+		result.BCC = append([]mail.Recipient(nil), materialized.BCC...)
+		result.Subject = materialized.Subject
+	} else if draft.Kind == mail.DraftKindReply || draft.Kind == mail.DraftKindForward {
+		if parsedAddress(draft.From) == "" || strings.TrimSpace(draft.Subject) == "" ||
+			len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
+			return mail.Draft{}, operationError(
+				"send_materialization_missing",
+				"Mail.app did not return the native reply or forward headers required for exact Sent observation",
+			)
+		}
+	}
+	if parsedAddress(result.From) == "" || len(result.To)+len(result.CC)+len(result.BCC) == 0 {
+		return mail.Draft{}, operationError(
+			"send_materialization_invalid", "Mail.app returned incomplete native send headers",
+		)
+	}
+	if _, valid := draftRecipientAddressSets(result); !valid {
+		return mail.Draft{}, operationError(
+			"send_materialization_invalid", "Mail.app returned invalid or duplicate native recipients",
+		)
+	}
+	if draft.Kind == mail.DraftKindForward {
+		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
+		if err != nil {
+			return mail.Draft{}, err
+		}
+		result.Attachments = append(native, draft.Attachments...)
+	}
+	if materialized != nil && materialized.AttachmentCount != len(result.Attachments) {
+		if materialized.AttachmentCount < len(result.Attachments) {
+			return mail.Draft{}, operationError(
+				"send_materialization_invalid",
+				fmt.Sprintf("Mail.app materialized %d attachments; at least %d reviewed or forwarded attachments are required", materialized.AttachmentCount, len(result.Attachments)),
+			)
+		}
+	}
+	if materialized != nil {
+		count := materialized.AttachmentCount
+		result.ExpectedAttachmentCount = &count
+	}
+	return result, nil
+}
+
+func (c *Client) sourceAttachmentFingerprints(
+	ctx context.Context,
+	ref string,
+) (result []mail.DraftAttachment, resultErr error) {
+	if c.store == nil {
+		return nil, c.safeWriteUnavailableError()
+	}
+	_, source, err := c.store.openMessageSource(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer joinCloseError(&resultErr, source, "forward source")
+	if source.partial {
+		return nil, operationError(
+			"forward_source_incomplete", "forward source is partial; original attachments cannot be proven",
+		)
+	}
+	document, err := parseMIMEDocument(source.Reader(), false, true)
+	if err != nil {
+		return nil, err
+	}
+	identifiers := make([]string, 0, len(document.Parts))
+	for identifier := range document.Parts {
+		identifiers = append(identifiers, identifier)
+	}
+	sort.Strings(identifiers)
+	attachments := make([]mail.DraftAttachment, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		part := document.Parts[identifier]
+		if part.Name == "" || !part.Complete || part.Size < 0 || part.SHA256 == "" {
+			return nil, operationError(
+				"forward_source_incomplete", "forward source attachment bytes cannot be proven",
+			)
+		}
+		attachments = append(attachments, mail.DraftAttachment{
+			Path: part.Name, Size: part.Size, SHA256: part.SHA256,
+		})
+	}
+	return attachments, nil
 }
 
 func (c *Client) sendBaseline(prepared *mail.SendObservationBaseline) (sendBaseline, error) {
@@ -513,4 +700,35 @@ func safeTargetedFallback(err error) bool {
 	default:
 		return false
 	}
+}
+
+func automationPostflightError(err error) error {
+	return errors.Join(
+		errorWithCode(err, "attachment_snapshot_cleanup_failed"),
+		errorWithCode(err, "bridge_cleanup_failed"),
+	)
+}
+
+func errorWithCode(err error, code string) error {
+	if err == nil {
+		return nil
+	}
+	if coded, ok := err.(interface {
+		error
+		ErrorCode() string
+	}); ok && coded.ErrorCode() == code {
+		return coded
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if matched := errorWithCode(child, code); matched != nil {
+				return matched
+			}
+		}
+		return nil
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return errorWithCode(wrapped.Unwrap(), code)
+	}
+	return nil
 }

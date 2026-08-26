@@ -24,7 +24,7 @@ func TestListMailboxesRejectsIncompleteCatalog(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := newSearchFixture(t)
-			defer store.Close()
+			closeTestResource(t, store, "test store")
 			if test.content != nil {
 				accountRoot := filepath.Join(store.versionRoot, testAccountID)
 				if err := os.MkdirAll(accountRoot, 0o700); err != nil {
@@ -129,7 +129,7 @@ func TestListMailboxesRejectsUnsafeOrAmbiguousCache(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			store, _ := newSearchFixture(t)
-			defer store.Close()
+			closeTestResource(t, store, "test store")
 			accountRoot := filepath.Join(store.versionRoot, testAccountID)
 			if err := os.MkdirAll(accountRoot, 0o700); err != nil {
 				t.Fatalf("MkdirAll() error = %v", err)
@@ -150,7 +150,7 @@ func TestListMailboxesRejectsUnsafeOrAmbiguousCache(t *testing.T) {
 func TestInactiveAccountReferencesAreRejected(t *testing.T) {
 	t.Parallel()
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	inactiveID := "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF"
 	accountRef, err := mailref.EncodeAccount(inactiveID)
 	if err != nil {

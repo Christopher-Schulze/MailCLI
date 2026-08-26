@@ -83,6 +83,59 @@ func TestParseMIMEDocumentNeverClaimsPartialSourceComplete(t *testing.T) {
 	}
 }
 
+func TestParseMIMEDocumentSelectsPlainAlternativeOnce(t *testing.T) {
+	t.Parallel()
+	source := strings.NewReader("Content-Type: multipart/alternative; boundary=alt\r\n\r\n" +
+		"--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlain body\r\n" +
+		"--alt\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>HTML body</p>\r\n--alt--\r\n")
+	document, err := parseMIMEDocument(source, false, false)
+	if err != nil || !document.Complete || document.Content != "Plain body" {
+		t.Fatalf("parseMIMEDocument() = %#v, error = %v", document, err)
+	}
+}
+
+func TestParseMIMEDocumentPreservesMixedPartOrderAroundAlternative(t *testing.T) {
+	t.Parallel()
+	source := strings.NewReader("Content-Type: multipart/mixed; boundary=mix\r\n\r\n" +
+		"--mix\r\nContent-Type: text/plain\r\n\r\nBefore\r\n" +
+		"--mix\r\nContent-Type: multipart/alternative; boundary=alt\r\n\r\n" +
+		"--alt\r\nContent-Type: text/plain\r\n\r\nSelected\r\n" +
+		"--alt\r\nContent-Type: text/html\r\n\r\n<p>Ignored</p>\r\n--alt--\r\n" +
+		"--mix\r\nContent-Type: text/plain\r\n\r\nAfter\r\n--mix--\r\n")
+	document, err := parseMIMEDocument(source, false, false)
+	if err != nil || document.Content != "Before\n\nSelected\n\nAfter" {
+		t.Fatalf("parseMIMEDocument() = %#v, error = %v", document, err)
+	}
+}
+
+func TestParseMIMEDocumentSelectsOneNestedAlternative(t *testing.T) {
+	t.Parallel()
+	source := strings.NewReader("Content-Type: multipart/alternative; boundary=outer\r\n\r\n" +
+		"--outer\r\nContent-Type: multipart/related; boundary=related\r\n\r\n" +
+		"--related\r\nContent-Type: multipart/alternative; boundary=inner\r\n\r\n" +
+		"--inner\r\nContent-Type: text/plain\r\n\r\nNested plain\r\n" +
+		"--inner\r\nContent-Type: text/html\r\n\r\n<p>Nested HTML</p>\r\n--inner--\r\n" +
+		"--related--\r\n" +
+		"--outer\r\nContent-Type: text/html\r\n\r\n<p>Outer HTML</p>\r\n--outer--\r\n")
+	document, err := parseMIMEDocument(source, false, false)
+	if err != nil || document.Content != "Nested plain" {
+		t.Fatalf("parseMIMEDocument() = %#v, error = %v", document, err)
+	}
+}
+
+func TestParseMIMEDocumentMarksMalformedRecipientHeaderIncomplete(t *testing.T) {
+	t.Parallel()
+	document, err := parseMIMEDocument(strings.NewReader(
+		"To: broken <\r\nContent-Type: text/plain\r\n\r\nBody\r\n",
+	), false, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	if document.Complete || !reflect.DeepEqual(document.MissingParts, []string{"header:to"}) {
+		t.Fatalf("parseMIMEDocument() = %#v", document)
+	}
+}
+
 func TestHTMLToTextPreservesReadableLayout(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

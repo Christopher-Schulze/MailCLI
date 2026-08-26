@@ -11,7 +11,7 @@ import (
 func TestStoreReadsNullableMessageIdentity(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL WHERE ROWID = 102`)
 
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
@@ -45,7 +45,7 @@ func TestStoreReadsNullableMessageIdentity(t *testing.T) {
 func TestStoreRejectsRefAfterLogicalMailboxMembershipChanges(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 10,
 	})
@@ -64,7 +64,7 @@ func TestStoreRejectsRefAfterLogicalMailboxMembershipChanges(t *testing.T) {
 func TestMessageAttachmentsDoNotClaimMissingFullSourcePartIsDownloaded(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 10,
 	})
@@ -76,7 +76,7 @@ func TestMessageAttachmentsDoNotClaimMissingFullSourcePartIsDownloaded(t *testin
 	if err != nil {
 		t.Fatalf("openMessageSource() error = %v", err)
 	}
-	defer source.Close()
+	closeTestResource(t, source, "message source")
 	attachments, err := store.messageAttachments(context.Background(), resolved, source, map[string]mimePart{})
 	if err != nil || len(attachments) != 1 || attachments[0].Downloaded {
 		t.Fatalf("messageAttachments() = %+v, error = %v", attachments, err)
@@ -86,7 +86,7 @@ func TestMessageAttachmentsDoNotClaimMissingFullSourcePartIsDownloaded(t *testin
 func TestListCursorIsBoundToMailStore(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})

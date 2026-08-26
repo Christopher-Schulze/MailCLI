@@ -89,21 +89,23 @@ type DraftAttachment struct {
 }
 
 type Draft struct {
-	Ref                  string                   `json:"ref"`
-	Kind                 DraftKind                `json:"kind"`
-	SourceRef            string                   `json:"source_ref,omitempty"`
-	ReplyAll             bool                     `json:"reply_all,omitempty"`
-	From                 string                   `json:"from,omitempty"`
-	To                   []Recipient              `json:"to"`
-	CC                   []Recipient              `json:"cc"`
-	BCC                  []Recipient              `json:"bcc"`
-	Subject              string                   `json:"subject,omitempty"`
-	Body                 string                   `json:"body"`
-	Attachments          []DraftAttachment        `json:"attachments"`
-	CreatedAt            time.Time                `json:"created_at"`
-	UpdatedAt            time.Time                `json:"updated_at"`
-	SendAttempt          *SendAttempt             `json:"send_attempt,omitempty"`
-	PreparedSendBaseline *SendObservationBaseline `json:"-"`
+	Ref                           string                   `json:"ref"`
+	Kind                          DraftKind                `json:"kind"`
+	SourceRef                     string                   `json:"source_ref,omitempty"`
+	ReplyAll                      bool                     `json:"reply_all,omitempty"`
+	From                          string                   `json:"from,omitempty"`
+	To                            []Recipient              `json:"to"`
+	CC                            []Recipient              `json:"cc"`
+	BCC                           []Recipient              `json:"bcc"`
+	Subject                       string                   `json:"subject,omitempty"`
+	Body                          string                   `json:"body"`
+	Attachments                   []DraftAttachment        `json:"attachments"`
+	CreatedAt                     time.Time                `json:"created_at"`
+	UpdatedAt                     time.Time                `json:"updated_at"`
+	SendAttempt                   *SendAttempt             `json:"send_attempt,omitempty"`
+	PreparedSendBaseline          *SendObservationBaseline `json:"-"`
+	ExpectedNativeAttachmentCount int                      `json:"-"`
+	ExpectedAttachmentCount       *int                     `json:"-"`
 }
 
 type SavedDraft struct {
@@ -148,6 +150,16 @@ type SendAttempt struct {
 	SentStoreObserved   bool                     `json:"sent_store_observed"`
 	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
 	ObservationBaseline *SendObservationBaseline `json:"observation_baseline,omitempty"`
+	Materialized        *SendMaterialization     `json:"materialized,omitempty"`
+}
+
+type SendMaterialization struct {
+	From            string      `json:"from"`
+	To              []Recipient `json:"to"`
+	CC              []Recipient `json:"cc"`
+	BCC             []Recipient `json:"bcc"`
+	Subject         string      `json:"subject"`
+	AttachmentCount int         `json:"attachment_count"`
 }
 
 type SendEvidence struct {
@@ -156,6 +168,7 @@ type SendEvidence struct {
 	SentStoreObserved   bool
 	ObservedMessageRef  string
 	ObservationBaseline *SendObservationBaseline
+	Materialized        *SendMaterialization
 }
 
 type SendResult struct {

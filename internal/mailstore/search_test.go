@@ -18,7 +18,7 @@ const testAccountID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
 func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 10,
@@ -78,7 +78,7 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 func TestBodySearchReportsByteLimit(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	query, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
 	})
@@ -97,7 +97,7 @@ func TestBodySearchReportsByteLimit(t *testing.T) {
 func TestBodySearchStopsAtFirstCandidateOutsideByteBudget(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	query, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 256,
 	})
@@ -116,7 +116,7 @@ func TestBodySearchStopsAtFirstCandidateOutsideByteBudget(t *testing.T) {
 func TestAttachmentFilterUsesMIMEWhenEnvelopeCatalogLags(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	attachmentBytes := []byte("catalog-lag attachment")
 	writeFixtureEMLX(
 		t,
@@ -162,7 +162,7 @@ func TestAttachmentFilterUsesMIMEWhenEnvelopeCatalogLags(t *testing.T) {
 func TestAttachmentFilterUsesPositiveCatalogWhenSourceIsMissing(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
 	if err != nil {
 		t.Fatalf("parseMailboxURL() error = %v", err)
@@ -194,7 +194,7 @@ func TestAttachmentFilterUsesPositiveCatalogWhenSourceIsMissing(t *testing.T) {
 func TestSearchCursorIsBoundToMailStore(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	first, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Text: "needle", Limit: 1})
 	if err != nil {
 		t.Fatalf("PrepareQuery() error = %v", err)
@@ -263,7 +263,7 @@ func newSearchFixture(t *testing.T) (*Store, string) {
 	}
 	for _, statement := range statements {
 		if _, err := writer.Exec(statement); err != nil {
-			writer.Close()
+			closeTestResourceNow(t, writer, "fixture database")
 			t.Fatalf("execute fixture statement: %v", err)
 		}
 	}
@@ -286,16 +286,16 @@ func newSearchFixture(t *testing.T) (*Store, string) {
 	for rowID, mailboxURL := range locations {
 		location, err := parseMailboxURL(mailboxURL)
 		if err != nil {
-			store.Close()
+			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("parseMailboxURL() error = %v", err)
 		}
 		base, err := store.messageBasePath(location, rowID)
 		if err != nil {
-			store.Close()
+			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("messageBasePath() error = %v", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
-			store.Close()
+			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("MkdirAll(message) error = %v", err)
 		}
 		source := []byte(fmt.Sprintf(
@@ -305,13 +305,13 @@ func newSearchFixture(t *testing.T) (*Store, string) {
 		framed := append([]byte(fmt.Sprintf("%-10d\n", len(source))), source...)
 		framed = append(framed, validPlistTrailer()...)
 		if err := os.WriteFile(base+".emlx", framed, 0o600); err != nil {
-			store.Close()
+			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("WriteFile(message) error = %v", err)
 		}
 	}
 	inboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"INBOX"})
 	if err != nil {
-		store.Close()
+		closeTestResourceNow(t, store, "test store")
 		t.Fatalf("EncodeMailbox() error = %v", err)
 	}
 	return store, inboxRef

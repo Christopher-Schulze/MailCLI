@@ -55,8 +55,9 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 	}
 	capability, err := validateSchema(ctx, database)
 	if err != nil {
-		database.Close()
-		return nil, err
+		resultErr := err
+		joinCloseError(&resultErr, database, "Envelope Index database")
+		return nil, resultErr
 	}
 	return &Store{
 		database: database, versionRoot: versionRoot, storeUUID: capability.StoreUUID,

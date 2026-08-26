@@ -26,7 +26,7 @@ func TestLiveStoreCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	closeTestResource(t, store, "live Mail store")
 	if store.SchemaFingerprint() == "" {
 		t.Fatal("SchemaFingerprint() is empty")
 	}
@@ -51,7 +51,7 @@ func TestLiveClientListsSendersWithoutAutomation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	closeTestResource(t, store, "live Mail store")
 	spy := &fallbackSpy{}
 	accounts, err := (&Client{store: store, fallback: spy}).ListAccounts(context.Background())
 	if err != nil {
@@ -84,7 +84,7 @@ func TestLiveStoreListsMailboxesAndMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer store.Close()
+	closeTestResource(t, store, "live Mail store")
 	mailboxes, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{})
 	if err != nil {
 		t.Fatalf("ListMailboxes() error = %v", err)
@@ -122,7 +122,7 @@ func TestLiveStoreListsMailboxesAndMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openMessageSource() error = %v", err)
 	}
-	defer source.Close()
+	closeTestResource(t, source, "live message source")
 	if source.length < 1 {
 		t.Fatal("openMessageSource() returned empty RFC source")
 	}

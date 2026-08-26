@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,12 +30,12 @@ func (e *commandError) ErrorCode() string {
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
+		writeLine(stderr, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		fmt.Fprintln(stdout, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
+		writeLine(stdout, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
 		return 0
 	case "create":
 		return runDraftCreate(service, args[1:], stdout, stderr)
@@ -55,7 +56,7 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 	case "discard":
 		return runDraftDiscard(service, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown drafts command %q\n", args[0])
+		writeFormat(stderr, "unknown drafts command %q\n", args[0])
 		return 2
 	}
 }
@@ -81,7 +82,7 @@ func runDraftReconcile(ctx context.Context, service *mail.Service, args []string
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.reconcile", responseData{SendResult: &result})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
+	writeFormat(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
 	return 0
 }
 
@@ -96,12 +97,17 @@ func runDraftSave(ctx context.Context, service *mail.Service, args []string, std
 	defer cancel()
 	saved, err := service.SaveDraft(operationCtx, *ref)
 	if err != nil {
+		if saved.Message.Ref != "" {
+			return failCommandWithData(
+				"drafts.save", *jsonOutput, responseData{SavedDraft: &saved}, err, stdout, stderr,
+			)
+		}
 		return failCommand("drafts.save", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.save", responseData{SavedDraft: &saved})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", saved.Message.Ref, oneLine(saved.Message.Subject))
+	writeFormat(stdout, "%s\t%s\n", saved.Message.Ref, oneLine(saved.Message.Subject))
 	return 0
 }
 
@@ -157,7 +163,7 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &drafts})
 	}
 	for _, draft := range drafts {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", draft.Ref, draft.Kind, draft.UpdatedAt.Format(time.RFC3339), oneLine(draft.Subject))
+		writeFormat(stdout, "%s\t%s\t%s\t%s\n", draft.Ref, draft.Kind, draft.UpdatedAt.Format(time.RFC3339), oneLine(draft.Subject))
 	}
 	return 0
 }
@@ -220,7 +226,7 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.send", responseData{SendResult: &result})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
+	writeFormat(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
 	return 0
 }
 
@@ -241,7 +247,7 @@ func runDraftDiscard(service *mail.Service, args []string, stdout io.Writer, std
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.discard", responseData{})
 	}
-	fmt.Fprintln(stdout, "draft discarded")
+	writeLine(stdout, "draft discarded")
 	return 0
 }
 
@@ -282,18 +288,15 @@ func readDraftInput(path string) (mail.DraftInput, error) {
 	if path == "" {
 		return mail.DraftInput{}, &commandError{code: "invalid_argument", message: "input path is required"}
 	}
-	reader := io.Reader(os.Stdin)
-	var file *os.File
-	if path != "-" {
-		var err error
-		file, err = os.Open(path)
-		if err != nil {
-			return mail.DraftInput{}, fmt.Errorf("open draft input: %w", err)
-		}
-		defer file.Close()
-		reader = file
+	if path == "-" {
+		return decodeDraftInput(os.Stdin)
 	}
-	return decodeDraftInput(reader)
+	file, err := os.Open(path)
+	if err != nil {
+		return mail.DraftInput{}, fmt.Errorf("open draft input: %w", err)
+	}
+	input, decodeErr := decodeDraftInput(file)
+	return input, errors.Join(decodeErr, file.Close())
 }
 
 func decodeDraftInput(reader io.Reader) (mail.DraftInput, error) {
@@ -303,6 +306,17 @@ func decodeDraftInput(reader io.Reader) (mail.DraftInput, error) {
 	}
 	if len(payload) > maximumDraftInputBytes {
 		return mail.DraftInput{}, &commandError{code: "invalid_input", message: "draft input exceeds 16 MiB"}
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
+		return mail.DraftInput{}, &commandError{code: "invalid_input", message: "draft input must be one JSON object"}
+	}
+	body, present := fields["body"]
+	if !present {
+		return mail.DraftInput{}, &commandError{code: "invalid_input", message: "draft input requires an explicit body field"}
+	}
+	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
+		return mail.DraftInput{}, &commandError{code: "invalid_input", message: "draft input body must be a string"}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -321,7 +335,7 @@ func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, json
 	if jsonOutput {
 		return writeSuccess(stdout, command, responseData{Draft: &draft})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\n", draft.Ref, draft.Kind, oneLine(draft.Subject))
+	writeFormat(stdout, "%s\t%s\t%s\n", draft.Ref, draft.Kind, oneLine(draft.Subject))
 	return 0
 }
 

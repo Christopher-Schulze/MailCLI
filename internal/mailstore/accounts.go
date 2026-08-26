@@ -145,7 +145,7 @@ func strictSpecialMailboxIDs(
 func (s *Store) loadSenderIdentities(
 	ctx context.Context,
 	mailboxIDs []int64,
-) ([]senderIdentity, error) {
+) (result []senderIdentity, resultErr error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(mailboxIDs)), ",")
 	arguments := make([]any, 0, len(mailboxIDs)*2)
 	for _, identifier := range mailboxIDs {
@@ -171,7 +171,7 @@ func (s *Store) loadSenderIdentities(
 	if err != nil {
 		return nil, fmt.Errorf("query Sent sender identities: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "Sent sender identity rows")
 	identities := make(map[string]senderIdentity)
 	for rows.Next() {
 		var address string
@@ -204,7 +204,7 @@ func (s *Store) loadSenderIdentities(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate Sent sender identities: %w", err)
 	}
-	result := make([]senderIdentity, 0, len(identities))
+	result = make([]senderIdentity, 0, len(identities))
 	for _, identity := range identities {
 		result = append(result, identity)
 	}

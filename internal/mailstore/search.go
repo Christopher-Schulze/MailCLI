@@ -263,7 +263,7 @@ func (s *Store) querySearchRecords(
 	ctx context.Context,
 	plan searchPlan,
 	limit int,
-) ([]messageRecord, int, error) {
+) (result []messageRecord, total int, resultErr error) {
 	query := `SELECT
 		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
 		m.mailbox, mb.url,
@@ -280,9 +280,8 @@ func (s *Store) querySearchRecords(
 	if err != nil {
 		return nil, 0, fmt.Errorf("query Envelope Index search candidates: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "search candidate rows")
 	items := make([]messageRecord, 0, min(limit, 1024))
-	total := 0
 	for rows.Next() {
 		var item messageRecord
 		if err := rows.Scan(
@@ -478,8 +477,9 @@ func (s *Store) dispatchSearchJobs(
 		select {
 		case jobs <- searchJob{index: index, item: item, source: source}:
 		case <-ctx.Done():
-			source.Close()
-			return false, ctx.Err()
+			resultErr := ctx.Err()
+			joinCloseError(&resultErr, source, "cancelled search source")
+			return false, resultErr
 		}
 	}
 	return false, nil
@@ -508,8 +508,8 @@ func scanCandidate(
 	terms []string,
 	hasAttachment *bool,
 	source *emlxSource,
-) (candidateScan, error) {
-	defer source.Close()
+) (result candidateScan, resultErr error) {
+	defer joinCloseError(&resultErr, source, "search source")
 	if err := ctx.Err(); err != nil {
 		return candidateScan{}, err
 	}

@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -10,18 +11,37 @@ import (
 )
 
 type fallbackSpy struct {
-	accountCalls    int
-	mailboxCalls    int
-	accounts        []mail.Account
-	markRequest     mail.MarkMessageRequest
-	transferRequest mail.TransferMessageRequest
-	deleteRef       string
-	markHook        func()
-	transferHook    func()
-	deleteHook      func()
-	saveHook        func()
-	sendHook        func()
-	sendCalls       int
+	accountCalls        int
+	mailboxCalls        int
+	accounts            []mail.Account
+	markRequest         mail.MarkMessageRequest
+	transferRequest     mail.TransferMessageRequest
+	deleteRef           string
+	markHook            func()
+	transferHook        func()
+	deleteHook          func()
+	saveHook            func()
+	sendHook            func()
+	sendCalls           int
+	sendEvidence        mail.SendEvidence
+	rawSource           string
+	rawCalls            int
+	saveAttachmentCalls int
+	saveErr             error
+	sendErr             error
+}
+
+type materializedSaveFallback struct {
+	fallbackSpy
+	materialized *mail.SendMaterialization
+}
+
+func (s *materializedSaveFallback) SaveDraftWithMaterialization(
+	ctx context.Context,
+	draft mail.Draft,
+) (mail.MessageSummary, *mail.SendMaterialization, error) {
+	summary, err := s.SaveDraft(ctx, draft)
+	return summary, s.materialized, err
 }
 
 func (*fallbackSpy) Probe(context.Context, bool) mail.DiagnosticReport {
@@ -44,20 +64,29 @@ func (*fallbackSpy) GetMessage(context.Context, string) (mail.Message, error) {
 func (*fallbackSpy) OpenDraft(context.Context, string) (mail.Message, error) {
 	return mail.Message{}, nil
 }
-func (*fallbackSpy) GetRawSource(context.Context, string) (string, error)           { return "", nil }
-func (*fallbackSpy) SaveAttachmentTo(context.Context, string, string, string) error { return nil }
+func (s *fallbackSpy) GetRawSource(context.Context, string) (string, error) {
+	s.rawCalls++
+	return s.rawSource, nil
+}
+func (s *fallbackSpy) SaveAttachmentTo(context.Context, string, string, string) error {
+	s.saveAttachmentCalls++
+	return nil
+}
 func (s *fallbackSpy) SaveDraft(context.Context, mail.Draft) (mail.MessageSummary, error) {
 	if s.saveHook != nil {
 		s.saveHook()
 	}
-	return mail.MessageSummary{}, nil
+	return mail.MessageSummary{}, s.saveErr
 }
 func (s *fallbackSpy) SendDraft(context.Context, mail.Draft) (mail.SendEvidence, error) {
 	s.sendCalls++
 	if s.sendHook != nil {
 		s.sendHook()
 	}
-	return mail.SendEvidence{InvocationStarted: true, AcceptedByMail: true}, nil
+	if s.sendEvidence.InvocationStarted {
+		return s.sendEvidence, s.sendErr
+	}
+	return mail.SendEvidence{InvocationStarted: true, AcceptedByMail: true}, s.sendErr
 }
 func (s *fallbackSpy) MarkMessage(
 	_ context.Context,
@@ -90,7 +119,7 @@ func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
 func TestClientListAccountsUsesStoreWithoutFallback(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	insertSentMessageFixture(t, store, 104)
 	spy := &fallbackSpy{accounts: []mail.Account{{EmailAddresses: []string{"fallback@example.com"}}}}
@@ -114,7 +143,7 @@ func TestClientListAccountsUsesStoreWithoutFallback(t *testing.T) {
 
 func TestClientListAccountsFailsClosedWithoutStoreCatalog(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	spy := &fallbackSpy{accounts: []mail.Account{{EmailAddresses: []string{"fallback@example.com"}}}}
 	client := &Client{store: store, fallback: spy}
 	_, err := client.ListAccounts(context.Background())
@@ -148,9 +177,50 @@ func TestClientNeverFallsBackToRecursiveMailboxScan(t *testing.T) {
 	}
 }
 
+func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", []byte(
+		"From: Alice <alice@example.com>\r\nTo: Christopher <christopher@example.com>\r\n"+
+			"Subject: Quarterly Report\r\nContent-Type: text/plain; charset=x-mailcli-unknown\r\n\r\npartial",
+	))
+	raw := "From: Alice <alice@example.com>\r\nTo: Christopher <christopher@example.com>\r\n" +
+		"Subject: Quarterly Report\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nComplete raw body\r\n" +
+		"--b\r\nContent-Disposition: attachment; filename=invoice.pdf\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\naW52b2ljZS1ieXRlcw==\r\n--b--\r\n"
+	spy := &fallbackSpy{rawSource: raw}
+	client := &Client{store: store, fallback: spy}
+	message, err := client.GetMessage(context.Background(), messageRef)
+	if err != nil || !message.ContentComplete || message.ContentSource != "mail_app_raw" ||
+		message.Content != "Complete raw body" || len(message.Attachments) != 1 ||
+		message.Summary.AttachmentCount != 1 || message.Attachments[0].ID != "2" ||
+		!message.Attachments[0].SizeKnown {
+		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	if err := client.SaveAttachmentTo(context.Background(), messageRef, "2", output); err != nil {
+		t.Fatalf("SaveAttachmentTo() error = %v", err)
+	}
+	bytes, err := os.ReadFile(output)
+	if err != nil || string(bytes) != "invoice-bytes" {
+		t.Fatalf("attachment bytes = %q, error = %v", bytes, err)
+	}
+	if spy.saveAttachmentCalls != 0 || spy.rawCalls != 2 {
+		t.Fatalf("fallback raw calls = %d, attachment-id calls = %d", spy.rawCalls, spy.saveAttachmentCalls)
+	}
+}
+
 func TestStoreAccountIdentityValidatesNewDraftSend(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	insertSentMessageFixture(t, store, 104)
 	spy := &fallbackSpy{}
@@ -175,7 +245,7 @@ func TestStoreAccountIdentityValidatesNewDraftSend(t *testing.T) {
 
 func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})
@@ -206,7 +276,7 @@ func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 
 func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})
@@ -233,7 +303,7 @@ func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 
 func TestClientPromotesAcceptedSendToSentStoreObserved(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	spy := &fallbackSpy{}
 	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
@@ -255,9 +325,110 @@ func TestClientPromotesAcceptedSendToSentStoreObserved(t *testing.T) {
 	}
 }
 
+func TestClientPropagatesPrivateCleanupFailureAfterObservedSend(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installSentMailboxFixture(t, store)
+	spy := &fallbackSpy{sendErr: operationError(
+		"attachment_snapshot_cleanup_failed", "private attachment snapshot remained",
+	)}
+	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
+	client := &Client{store: store, fallback: spy}
+	draft := mail.Draft{
+		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Observed send", Body: "Body",
+	}
+	baseline, err := client.PrepareSend(context.Background(), draft)
+	if err != nil {
+		t.Fatalf("PrepareSend() error = %v", err)
+	}
+	draft.PreparedSendBaseline = &baseline
+	evidence, err := client.SendDraft(context.Background(), draft)
+	if !evidence.SentStoreObserved || errorWithCode(err, "attachment_snapshot_cleanup_failed") == nil {
+		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
+	}
+}
+
+func TestClientObservesBodyOnlyNativeReplyFromMaterializedHeaders(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installSentMailboxFixture(t, store)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
+		InvocationStarted: true, AcceptedByMail: true,
+		Materialized: &mail.SendMaterialization{
+			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+			Subject: "Observed send", AttachmentCount: 0,
+		},
+	}}
+	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
+	client := &Client{store: store, fallback: spy}
+	draft := mail.Draft{
+		Kind: mail.DraftKindReply, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
+		Body: "Body",
+	}
+	baseline, err := client.PrepareSend(context.Background(), draft)
+	if err != nil {
+		t.Fatalf("PrepareSend() error = %v", err)
+	}
+	draft.PreparedSendBaseline = &baseline
+	evidence, err := client.SendDraft(context.Background(), draft)
+	if err != nil || !evidence.SentStoreObserved || evidence.ObservedMessageRef == "" {
+		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
+	}
+}
+
+func TestClientObservesForwardWithOriginalAttachmentFingerprint(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installSentMailboxFixture(t, store)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	attachmentBytes := []byte("forwarded source bytes")
+	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", sentFixtureSource(101, sentMessageFixture{
+		Body: "Source body", Attachments: []fixtureAttachment{{Name: "invoice.pdf", Content: attachmentBytes}},
+	}))
+	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
+		InvocationStarted: true, AcceptedByMail: true,
+		Materialized: &mail.SendMaterialization{
+			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+			Subject: "Observed send", AttachmentCount: 1,
+		},
+	}}
+	spy.sendHook = func() {
+		insertSentMessageFixtureWithDetails(t, store, 104, sentMessageFixture{
+			Body: "Body", RecipientTypes: []int{0},
+			Attachments: []fixtureAttachment{{Name: "invoice.pdf", Content: attachmentBytes}},
+		})
+	}
+	client := &Client{store: store, fallback: spy}
+	draft := mail.Draft{
+		Kind: mail.DraftKindForward, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
+		Body: "Body",
+	}
+	baseline, err := client.PrepareSend(context.Background(), draft)
+	if err != nil {
+		t.Fatalf("PrepareSend() error = %v", err)
+	}
+	draft.PreparedSendBaseline = &baseline
+	evidence, err := client.SendDraft(context.Background(), draft)
+	if err != nil || !evidence.SentStoreObserved {
+		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
+	}
+}
+
 func TestClientRefusesUnpreparedSendBeforeAutomation(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	spy := &fallbackSpy{}
 	client := &Client{store: store, fallback: spy}
@@ -272,7 +443,7 @@ func TestClientRefusesUnpreparedSendBeforeAutomation(t *testing.T) {
 
 func TestClientReconcilesPreparedSendFromStoreOnly(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	client := &Client{store: store, fallback: &fallbackSpy{}}
 	draft := mail.Draft{
@@ -300,7 +471,7 @@ func TestClientReconcilesPreparedSendFromStoreOnly(t *testing.T) {
 
 func TestClientReturnsOnlyObservedNativeDraft(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installDraftsMailboxFixture(t, store)
 	spy := &fallbackSpy{}
 	spy.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
@@ -315,9 +486,52 @@ func TestClientReturnsOnlyObservedNativeDraft(t *testing.T) {
 	}
 }
 
+func TestClientPropagatesPrivateCleanupFailureAfterObservedDraftSave(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installDraftsMailboxFixture(t, store)
+	spy := &fallbackSpy{saveErr: operationError(
+		"bridge_cleanup_failed", "private bridge request remained",
+	)}
+	spy.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
+	client := &Client{store: store, fallback: spy}
+	message, err := client.SaveDraft(context.Background(), mail.Draft{
+		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Observed draft", Body: "Body",
+	})
+	if message.Ref == "" || errorWithCode(err, "bridge_cleanup_failed") == nil {
+		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
+	}
+}
+
+func TestClientObservesBodyOnlyNativeReplyDraftFromMaterializedHeaders(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installDraftsMailboxFixture(t, store)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	fallback := &materializedSaveFallback{materialized: &mail.SendMaterialization{
+		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Observed draft", AttachmentCount: 0,
+	}}
+	fallback.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
+	client := &Client{store: store, fallback: fallback}
+	message, err := client.SaveDraft(context.Background(), mail.Draft{
+		Kind: mail.DraftKindReply, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
+		From: "alice@example.com", Body: "Body",
+	})
+	if err != nil || message.Ref == "" || message.Subject != "Observed draft" {
+		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
+	}
+}
+
 func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 3,
@@ -349,7 +563,7 @@ func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 
 func TestTransferCandidatesRequireStableMessageIdentity(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 3,
@@ -391,7 +605,7 @@ func TestTransferCandidatesRequireStableMessageIdentity(t *testing.T) {
 
 func TestCopyObservationRejectsPreexistingDestinationMembership(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	updateFixtureMessage(t, store, `INSERT INTO labels(message_id,mailbox_id) VALUES (102,4)`)
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
@@ -421,7 +635,7 @@ func TestCopyObservationRejectsPreexistingDestinationMembership(t *testing.T) {
 
 func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})
@@ -447,7 +661,7 @@ func updateFixtureMessage(t *testing.T, store *Store, query string) {
 	path := filepath.Join(store.versionRoot, "MailData", envelopeIndexName)
 	writer := openTestWriter(t, path)
 	if _, err := writer.Exec(query); err != nil {
-		writer.Close()
+		closeTestResourceNow(t, writer, "fixture writer")
 		t.Fatalf("update fixture message: %v", err)
 	}
 	if err := writer.Close(); err != nil {

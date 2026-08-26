@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"mailcli/internal/mailref"
 )
 
 const (
@@ -143,6 +145,9 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if draft.Kind == DraftKindNew && strings.TrimSpace(draft.From) == "" {
 		return SendResult{}, validationError("sending a new draft requires an explicit configured from address")
 	}
+	if draft.Kind == DraftKindForward && len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
+		return SendResult{}, validationError("sending a forward draft requires at least one explicit recipient")
+	}
 	if err := s.validateDraftSender(ctx, draft.From); err != nil {
 		return SendResult{}, err
 	}
@@ -188,6 +193,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.AcceptedByMail = evidence.AcceptedByMail
 	attempt.SentStoreObserved = evidence.SentStoreObserved
 	attempt.ObservedMessageRef = evidence.ObservedMessageRef
+	attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
 	if attempt.ObservationBaseline == nil {
 		attempt.ObservationBaseline = cloneSendObservationBaseline(evidence.ObservationBaseline)
 	}
@@ -214,6 +220,12 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			}
 		}
 		result.DraftRetained = false
+		if sendErr != nil {
+			return result, &OperationError{
+				Code:    "send_postflight_failed",
+				Message: fmt.Sprintf("sent message was observed, but private postflight cleanup failed: %v", sendErr),
+			}
+		}
 		return result, nil
 	}
 	if !evidence.AcceptedByMail {
@@ -223,7 +235,10 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		}
 		return result, &OperationError{Code: "send_outcome_unknown", Message: message}
 	}
-	return result, nil
+	return result, &OperationError{
+		Code:    "send_not_observed",
+		Message: "Mail.app accepted the send, but Sent does not yet prove the exact body, recipients, subject, and attachments; the draft is retained and retries are blocked",
+	}
 }
 
 type SendPreparer interface {
@@ -278,7 +293,10 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	}
 	result = resultForReconcile(ref, attempt)
 	if attempt.Outcome == SendOutcomeAccepted {
-		return result, nil
+		return result, &OperationError{
+			Code:    "send_not_observed",
+			Message: "Mail.app accepted the send, but Sent still does not prove the exact message; the draft is retained and retries remain blocked",
+		}
 	}
 	return result, &OperationError{
 		Code:    "send_outcome_unknown",
@@ -330,6 +348,17 @@ func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservati
 	return &clone
 }
 
+func cloneSendMaterialization(value *SendMaterialization) *SendMaterialization {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.To = append([]Recipient(nil), value.To...)
+	clone.CC = append([]Recipient(nil), value.CC...)
+	clone.BCC = append([]Recipient(nil), value.BCC...)
+	return &clone
+}
+
 func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft, resultErr error) {
 	root, err := s.resolveDraftRoot()
 	if err != nil {
@@ -356,14 +385,26 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return SavedDraft{}, err
 	}
-	message, err := s.gateway.SaveDraft(ctx, draft)
-	if err != nil {
-		return SavedDraft{}, err
+	message, saveErr := s.gateway.SaveDraft(ctx, draft)
+	if message.Ref == "" {
+		if saveErr != nil {
+			return SavedDraft{}, saveErr
+		}
+		return SavedDraft{}, &OperationError{
+			Code: "draft_outcome_unknown", Message: "Mail backend returned no observed native draft",
+		}
 	}
+	result = SavedDraft{LocalDraftRef: ref, Message: message}
 	if err := discardDraftFiles(root, ref); err != nil {
-		return SavedDraft{}, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
+		return result, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
 	}
-	return SavedDraft{LocalDraftRef: ref, Message: message}, nil
+	if saveErr != nil {
+		return result, &OperationError{
+			Code:    "draft_postflight_failed",
+			Message: fmt.Sprintf("native Mail.app draft was observed, but private postflight cleanup failed: %v", saveErr),
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) validateDraftSender(ctx context.Context, sender string) error {
@@ -398,8 +439,17 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	if request.Kind != DraftKindNew && request.SourceRef == "" {
 		return Draft{}, validationError("reply and forward drafts require a source message ref")
 	}
+	if request.Kind != DraftKindNew {
+		ref, err := mailref.DecodeMessage(request.SourceRef)
+		if err != nil || !ref.IsStoreBound() {
+			return Draft{}, validationError("reply and forward drafts require a store-bound source message ref")
+		}
+	}
 	if request.Kind == DraftKindNew && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("new drafts require at least one recipient")
+	}
+	if request.Kind == DraftKindForward && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
+		return Draft{}, validationError("forward drafts require at least one explicit recipient")
 	}
 	if err := validateDraftAddresses(request.Input); err != nil {
 		return Draft{}, err
@@ -429,15 +479,22 @@ func validateDraftAddresses(input DraftInput) error {
 			return validationError("invalid from address")
 		}
 	}
+	seen := make(map[string]struct{})
 	for _, group := range [][]Recipient{input.To, input.CC, input.BCC} {
 		for _, recipient := range group {
 			address := recipient.Address
 			if recipient.Name != "" {
 				address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
 			}
-			if _, err := stdmail.ParseAddress(address); err != nil {
+			parsed, err := stdmail.ParseAddress(address)
+			if err != nil {
 				return validationError("invalid recipient address")
 			}
+			normalized := strings.ToLower(parsed.Address)
+			if _, duplicate := seen[normalized]; duplicate {
+				return validationError("duplicate recipient address")
+			}
+			seen[normalized] = struct{}{}
 		}
 	}
 	return nil
@@ -559,8 +616,7 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 		return nil, fmt.Errorf("open draft lock: %w", err)
 	}
 	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("restrict draft lock: %w", err)
+		return nil, errors.Join(fmt.Errorf("restrict draft lock: %w", err), file.Close())
 	}
 	ticker := time.NewTicker(draftLockPoll)
 	defer ticker.Stop()
@@ -711,6 +767,9 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 	if !validObservationBaseline(attempt.ObservationBaseline) {
 		return false
 	}
+	if !validSendMaterialization(attempt.Materialized) {
+		return false
+	}
 	switch attempt.Outcome {
 	case SendOutcomeUnknown:
 		return !attempt.SentStoreObserved && !attempt.AcceptedByMail
@@ -721,6 +780,19 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 	default:
 		return false
 	}
+}
+
+func validSendMaterialization(value *SendMaterialization) bool {
+	if value == nil {
+		return true
+	}
+	if value.AttachmentCount < 0 || strings.TrimSpace(value.From) == "" ||
+		len(value.To)+len(value.CC)+len(value.BCC) == 0 {
+		return false
+	}
+	return validateDraftAddresses(DraftInput{
+		From: value.From, To: value.To, CC: value.CC, BCC: value.BCC,
+	}) == nil
 }
 
 func validObservationBaseline(value *SendObservationBaseline) bool {
@@ -743,7 +815,7 @@ func validObservationBaseline(value *SendObservationBaseline) bool {
 	return true
 }
 
-func replaceSendAttempt(root string, ref string, attempt SendAttempt) error {
+func replaceSendAttempt(root string, ref string, attempt SendAttempt) (resultErr error) {
 	path, err := sendClaimPath(root, ref)
 	if err != nil {
 		return err
@@ -756,7 +828,9 @@ func replaceSendAttempt(root string, ref string, attempt SendAttempt) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(temporary)
+	defer func() {
+		resultErr = errors.Join(resultErr, removeIfPresent(temporary))
+	}()
 	if err := writePrivateFile(temporary, payload); err != nil {
 		return fmt.Errorf("write send claim update: %w", err)
 	}
@@ -803,7 +877,10 @@ func replaySendAttempt(root string, ref string, attempt SendAttempt) (SendResult
 		result.DraftRetained = false
 		return result, nil
 	case SendOutcomeAccepted:
-		return result, nil
+		return result, &OperationError{
+			Code:    "send_not_observed",
+			Message: "Mail.app accepted the send, but Sent does not prove the exact message; the draft is retained and retries are blocked",
+		}
 	default:
 		return result, &OperationError{
 			Code:    "send_outcome_unknown",
@@ -829,7 +906,7 @@ func discardDraftFiles(root string, ref string) error {
 	return removeSendAttempt(root, ref)
 }
 
-func writeDraftFile(root string, draft Draft, exclusive bool) error {
+func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) {
 	path, err := draftPath(root, draft.Ref)
 	if err != nil {
 		return err
@@ -850,7 +927,9 @@ func writeDraftFile(root string, draft Draft, exclusive bool) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(temporary)
+	defer func() {
+		resultErr = errors.Join(resultErr, removeIfPresent(temporary))
+	}()
 	if err := writePrivateFile(temporary, payload); err != nil {
 		return fmt.Errorf("write draft update: %w", err)
 	}
@@ -866,18 +945,17 @@ func writePrivateFile(path string, payload []byte) error {
 		return fmt.Errorf("create private file: %w", err)
 	}
 	if _, err := file.Write(payload); err != nil {
-		file.Close()
-		os.Remove(path)
-		return fmt.Errorf("write private file: %w", err)
+		return errors.Join(
+			fmt.Errorf("write private file: %w", err), file.Close(), removeIfPresent(path),
+		)
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
-		os.Remove(path)
-		return fmt.Errorf("sync private file: %w", err)
+		return errors.Join(
+			fmt.Errorf("sync private file: %w", err), file.Close(), removeIfPresent(path),
+		)
 	}
 	if err := file.Close(); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("close private file: %w", err)
+		return errors.Join(fmt.Errorf("close private file: %w", err), removeIfPresent(path))
 	}
 	return syncDirectory(filepath.Dir(path))
 }

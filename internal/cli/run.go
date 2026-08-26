@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.0.0"
+	version       = "1.0.1"
 	schemaVersion = 1
 )
 
@@ -84,7 +84,17 @@ func Run(
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
-) int {
+) (code int) {
+	trackedStdout := &errorTrackingWriter{writer: stdout}
+	trackedStderr := &errorTrackingWriter{writer: stderr}
+	stdout = trackedStdout
+	stderr = trackedStderr
+	defer func() {
+		if trackedStdout.err != nil || trackedStderr.err != nil {
+			code = 1
+		}
+	}()
+
 	args, jsonOutput := normalizeGlobalJSON(args)
 	if len(args) == 0 {
 		if jsonOutput {
@@ -138,6 +148,52 @@ type countingWriter struct {
 	written int64
 }
 
+type errorTrackingWriter struct {
+	writer io.Writer
+	err    error
+}
+
+func (w *errorTrackingWriter) Write(payload []byte) (int, error) {
+	written, err := w.writer.Write(payload)
+	if err == nil && written != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return written, err
+}
+
+func (w *errorTrackingWriter) recordWriteError(err error) {
+	if w.err == nil {
+		w.err = err
+	}
+}
+
+func writeRaw(writer io.Writer, values ...any) {
+	if _, err := fmt.Fprint(writer, values...); err != nil {
+		recordWriteError(writer, err)
+	}
+}
+
+func writeLine(writer io.Writer, values ...any) {
+	if _, err := fmt.Fprintln(writer, values...); err != nil {
+		recordWriteError(writer, err)
+	}
+}
+
+func writeFormat(writer io.Writer, format string, values ...any) {
+	if _, err := fmt.Fprintf(writer, format, values...); err != nil {
+		recordWriteError(writer, err)
+	}
+}
+
+func recordWriteError(writer io.Writer, err error) {
+	if recorder, ok := writer.(interface{ recordWriteError(error) }); ok {
+		recorder.recordWriteError(err)
+	}
+}
+
 func (w *countingWriter) Write(payload []byte) (int, error) {
 	written, err := w.writer.Write(payload)
 	w.written += int64(written)
@@ -172,7 +228,7 @@ func runCommand(
 	case "sync":
 		return runSync(ctx, mailService, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		writeFormat(stderr, "unknown command %q\n\n", args[0])
 		writeHelp(stderr)
 		return 2
 	}
@@ -200,12 +256,12 @@ func normalizeGlobalJSON(args []string) ([]string, bool) {
 
 func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		fmt.Fprintln(stdout, "usage: mailcli version [--json]")
+		writeLine(stdout, "usage: mailcli version [--json]")
 		return 0
 	}
 	jsonOutput, err := parseBooleanFlags(args, "--json")
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		writeLine(stderr, err)
 		return 2
 	}
 
@@ -218,18 +274,18 @@ func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 		})
 	}
 
-	fmt.Fprintf(stdout, "%s %s\n", name, version)
+	writeFormat(stdout, "%s %s\n", name, version)
 	return 0
 }
 
 func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		fmt.Fprintln(stdout, "usage: mailcli doctor [--json] [--live]")
+		writeLine(stdout, "usage: mailcli doctor [--json] [--live]")
 		return 0
 	}
 	flags, err := parseBooleanFlags(args, "--json", "--live")
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		writeLine(stderr, err)
 		return 2
 	}
 
@@ -262,7 +318,7 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 		}
 	} else {
 		for _, check := range report.Checks {
-			fmt.Fprintf(stdout, "%-28s %-7s %s\n", check.Name, check.Status, check.Detail)
+			writeFormat(stdout, "%-28s %-7s %s\n", check.Name, check.Status, check.Detail)
 		}
 	}
 
@@ -352,7 +408,7 @@ func helpOnly(args []string) bool {
 }
 
 func writeHelp(writer io.Writer) {
-	fmt.Fprint(writer, `MailCLI controls the locally configured macOS Mail app.
+	writeRaw(writer, `MailCLI controls the locally configured macOS Mail app.
 
 Usage:
   mailcli doctor [--json] [--live]

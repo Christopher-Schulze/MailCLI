@@ -127,7 +127,7 @@ func observedTransferCandidates(
 func (s *Store) transferCandidates(
 	ctx context.Context,
 	baseline transferBaseline,
-) ([]messageRecord, error) {
+) (result []messageRecord, resultErr error) {
 	source := baseline.Source.Record
 	rows, err := s.database.QueryContext(ctx, `
 		WITH membership(id) AS (
@@ -171,7 +171,7 @@ func (s *Store) transferCandidates(
 	if err != nil {
 		return nil, fmt.Errorf("query transferred message: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "transfer candidate rows")
 	var records []messageRecord
 	for rows.Next() {
 		record, err := scanMessageRecord(rows)

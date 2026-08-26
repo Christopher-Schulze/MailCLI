@@ -48,85 +48,177 @@ type mimeDocument struct {
 	Parts        map[string]mimePart
 }
 
+type mimeTextRepresentation struct {
+	Text string
+	Rank int
+}
+
+const (
+	mimeTextNone = iota
+	mimeTextHTML
+	mimeTextPlain
+)
+
 func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool) (mimeDocument, error) {
 	entity, readErr := message.Read(reader)
 	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
 		return mimeDocument{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC message: %v", readErr))
 	}
 	document := mimeDocument{Complete: readErr == nil && !partial, Parts: make(map[string]mimePart)}
+	if readErr != nil {
+		document.MissingParts = append(document.MissingParts, "mime-decoding")
+	}
 	header := messageMail.Header{Header: entity.Header}
-	document.MessageID, _ = header.MessageID()
-	document.ReplyTo = firstFormattedAddress(&header, "Reply-To")
-	document.To = headerRecipients(&header, "To")
-	document.CC = headerRecipients(&header, "Cc")
-	document.BCC = headerRecipients(&header, "Bcc")
-	var plainParts []string
-	var htmlParts []string
-	walkErr := entity.Walk(func(path []int, part *message.Entity, partErr error) error {
-		if partErr != nil {
-			document.Complete = false
-		}
-		mediaType, parameters, contentTypeErr := part.Header.ContentType()
-		if contentTypeErr != nil {
-			mediaType = "application/octet-stream"
-			document.Complete = false
-		}
-		mediaType = strings.ToLower(mediaType)
-		if strings.HasPrefix(mediaType, "multipart/") {
-			return nil
-		}
-		disposition, dispositionParameters, dispositionErr := part.Header.ContentDisposition()
-		if dispositionErr != nil && part.Header.Get("Content-Disposition") != "" {
-			document.Complete = false
-		}
-		filename := dispositionParameters["filename"]
-		if filename == "" {
-			filename = parameters["name"]
-		}
-		partID := mimePartID(path)
-		attachment := strings.EqualFold(disposition, "attachment") || filename != ""
-		if attachment {
-			size, digest, err := consumeMIMEAttachment(part.Body, hashAttachments)
-			complete := err == nil && !missingAppleContent(
-				part.Header.Get("X-Apple-Content-Length"), size, true,
-			)
-			document.Parts[partID] = mimePart{
-				ID: partID, Name: filename, MIMEType: mediaType, Size: size,
-				SHA256: digest, Complete: complete,
-			}
-			return nil
-		}
-		if mediaType != "text/plain" && mediaType != "text/html" {
-			if _, err := io.Copy(io.Discard, part.Body); err != nil {
-				document.Complete = false
-			}
-			return nil
-		}
-		body, truncated, err := readBoundedPart(part.Body, maximumTextPartBytes)
-		if err != nil || truncated {
-			document.Complete = false
-		}
-		if missingAppleContent(part.Header.Get("X-Apple-Content-Length"), int64(len(body)), partial) {
-			document.Complete = false
-			document.MissingParts = append(document.MissingParts, partID)
-			return nil
-		}
-		if mediaType == "text/html" {
-			htmlParts = appendNonEmptyText(htmlParts, htmlToText(body))
-		} else {
-			plainParts = appendNonEmptyText(plainParts, string(body))
-		}
-		return nil
-	})
+	if messageID, err := header.MessageID(); err == nil {
+		document.MessageID = messageID
+	}
+	var replyToComplete bool
+	document.ReplyTo, replyToComplete = firstFormattedAddress(&header, "Reply-To")
+	if !replyToComplete {
+		document.Complete = false
+		document.MissingParts = append(document.MissingParts, "header:reply-to")
+	}
+	document.To = documentRecipients(&document, &header, "To")
+	document.CC = documentRecipients(&document, &header, "Cc")
+	document.BCC = documentRecipients(&document, &header, "Bcc")
+	representation, walkErr := parseMIMEEntity(
+		entity, nil, readErr, partial, hashAttachments, &document,
+	)
 	if walkErr != nil {
 		document.Complete = false
+		document.MissingParts = append(document.MissingParts, "mime-structure")
 	}
-	if len(plainParts) > 0 {
-		document.Content = strings.Join(plainParts, "\n\n")
-	} else {
-		document.Content = strings.Join(htmlParts, "\n\n")
-	}
+	document.Content = representation.Text
 	return document, nil
+}
+
+func parseMIMEEntity(
+	entity *message.Entity,
+	path []int,
+	partErr error,
+	partial bool,
+	hashAttachments bool,
+	document *mimeDocument,
+) (mimeTextRepresentation, error) {
+	if partErr != nil {
+		document.Complete = false
+		document.MissingParts = append(document.MissingParts, mimePartID(path))
+	}
+	mediaType, parameters, contentTypeErr := entity.Header.ContentType()
+	if contentTypeErr != nil {
+		mediaType = "application/octet-stream"
+		document.Complete = false
+	}
+	mediaType = strings.ToLower(mediaType)
+	if strings.HasPrefix(mediaType, "multipart/") {
+		return parseMIMEMultipart(entity, path, mediaType, partial, hashAttachments, document)
+	}
+	disposition, dispositionParameters, dispositionErr := entity.Header.ContentDisposition()
+	if dispositionErr != nil && entity.Header.Get("Content-Disposition") != "" {
+		document.Complete = false
+	}
+	filename := dispositionParameters["filename"]
+	if filename == "" {
+		filename = parameters["name"]
+	}
+	partID := mimePartID(path)
+	if strings.EqualFold(disposition, "attachment") || filename != "" {
+		size, digest, err := consumeMIMEAttachment(entity.Body, hashAttachments)
+		complete := err == nil && !missingAppleContent(
+			entity.Header.Get("X-Apple-Content-Length"), size, true,
+		)
+		document.Parts[partID] = mimePart{
+			ID: partID, Name: filename, MIMEType: mediaType, Size: size,
+			SHA256: digest, Complete: complete,
+		}
+		return mimeTextRepresentation{}, nil
+	}
+	if mediaType != "text/plain" && mediaType != "text/html" {
+		_, err := io.Copy(io.Discard, entity.Body)
+		if err != nil {
+			document.Complete = false
+		}
+		return mimeTextRepresentation{}, err
+	}
+	body, truncated, err := readBoundedPart(entity.Body, maximumTextPartBytes)
+	if err != nil || truncated {
+		document.Complete = false
+	}
+	if missingAppleContent(entity.Header.Get("X-Apple-Content-Length"), int64(len(body)), partial) {
+		document.Complete = false
+		document.MissingParts = append(document.MissingParts, partID)
+		return mimeTextRepresentation{}, nil
+	}
+	text := strings.TrimSpace(string(body))
+	rank := mimeTextPlain
+	if mediaType == "text/html" {
+		text = strings.TrimSpace(htmlToText(body))
+		rank = mimeTextHTML
+	}
+	if text == "" {
+		return mimeTextRepresentation{}, err
+	}
+	return mimeTextRepresentation{Text: text, Rank: rank}, err
+}
+
+func parseMIMEMultipart(
+	entity *message.Entity,
+	path []int,
+	mediaType string,
+	partial bool,
+	hashAttachments bool,
+	document *mimeDocument,
+) (result mimeTextRepresentation, resultErr error) {
+	reader := entity.MultipartReader()
+	if reader == nil {
+		return mimeTextRepresentation{}, fmt.Errorf("multipart entity has no reader")
+	}
+	defer joinCloseError(&resultErr, reader, "MIME multipart reader")
+	var children []mimeTextRepresentation
+	for index := 0; ; index++ {
+		child, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if child == nil {
+			return combineMIMEText(mediaType, children), err
+		}
+		if err != nil && !message.IsUnknownCharset(err) && !message.IsUnknownEncoding(err) {
+			return combineMIMEText(mediaType, children), err
+		}
+		childPath := append(append([]int(nil), path...), index)
+		representation, childErr := parseMIMEEntity(
+			child, childPath, err, partial, hashAttachments, document,
+		)
+		children = append(children, representation)
+		if childErr != nil {
+			return combineMIMEText(mediaType, children), childErr
+		}
+	}
+	return combineMIMEText(mediaType, children), nil
+}
+
+func combineMIMEText(mediaType string, children []mimeTextRepresentation) mimeTextRepresentation {
+	if mediaType == "multipart/alternative" {
+		var selected mimeTextRepresentation
+		for _, child := range children {
+			if child.Text != "" && child.Rank >= selected.Rank {
+				selected = child
+			}
+		}
+		return selected
+	}
+	var parts []string
+	rank := mimeTextNone
+	for _, child := range children {
+		if child.Text != "" {
+			parts = append(parts, child.Text)
+		}
+		if child.Rank > rank {
+			rank = child.Rank
+		}
+	}
+	return mimeTextRepresentation{Text: strings.Join(parts, "\n\n"), Rank: rank}
 }
 
 func consumeMIMEAttachment(reader io.Reader, withHash bool) (int64, string, error) {
@@ -194,32 +286,39 @@ func mimePartID(path []int) string {
 	return strings.Join(values, ".")
 }
 
-func headerRecipients(header *messageMail.Header, key string) []mail.Recipient {
+func documentRecipients(document *mimeDocument, header *messageMail.Header, key string) []mail.Recipient {
+	recipients, complete := headerRecipients(header, key)
+	if !complete {
+		document.Complete = false
+		document.MissingParts = append(document.MissingParts, "header:"+strings.ToLower(key))
+	}
+	return recipients
+}
+
+func headerRecipients(header *messageMail.Header, key string) ([]mail.Recipient, bool) {
+	if strings.TrimSpace(header.Get(key)) == "" {
+		return []mail.Recipient{}, true
+	}
 	addresses, err := header.AddressList(key)
 	if err != nil {
-		return []mail.Recipient{}
+		return []mail.Recipient{}, false
 	}
 	recipients := make([]mail.Recipient, 0, len(addresses))
 	for _, address := range addresses {
 		recipients = append(recipients, mail.Recipient{Name: address.Name, Address: address.Address})
 	}
-	return recipients
+	return recipients, true
 }
 
-func firstFormattedAddress(header *messageMail.Header, key string) string {
+func firstFormattedAddress(header *messageMail.Header, key string) (string, bool) {
+	if strings.TrimSpace(header.Get(key)) == "" {
+		return "", true
+	}
 	addresses, err := header.AddressList(key)
 	if err != nil || len(addresses) == 0 {
-		return ""
+		return "", false
 	}
-	return (&stdmail.Address{Name: addresses[0].Name, Address: addresses[0].Address}).String()
-}
-
-func appendNonEmptyText(values []string, value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return values
-	}
-	return append(values, value)
+	return (&stdmail.Address{Name: addresses[0].Name, Address: addresses[0].Address}).String(), true
 }
 
 func htmlToText(source []byte) string {

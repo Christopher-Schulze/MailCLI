@@ -81,7 +81,7 @@ func probeAutomationWithRunner(ctx context.Context, gate accessGate, runner scri
 			return check
 		}
 	}
-	output, err := runner.Run(
+	output, started, err := runner.Run(
 		ctx,
 		fmt.Sprintf(
 			`function run(_) { return String(Application(%d).version()); }`,
@@ -89,7 +89,7 @@ func probeAutomationWithRunner(ctx context.Context, gate accessGate, runner scri
 		),
 		`{}`,
 	)
-	uncertain := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	uncertain := started && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	releaseErr := lease.Release(uncertain)
 	if err != nil {
 		detail := fmt.Sprintf("Apple Events probe failed: %v: %s", err, strings.TrimSpace(string(output)))

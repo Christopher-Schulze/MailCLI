@@ -5,13 +5,17 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 )
 
-func (s *Service) SaveAttachment(ctx context.Context, request SaveAttachmentRequest) (SavedAttachment, error) {
+func (s *Service) SaveAttachment(
+	ctx context.Context,
+	request SaveAttachmentRequest,
+) (saved SavedAttachment, resultErr error) {
 	if err := validateAttachmentRequest(request); err != nil {
 		return SavedAttachment{}, err
 	}
@@ -19,17 +23,18 @@ func (s *Service) SaveAttachment(ctx context.Context, request SaveAttachmentRequ
 	if err != nil {
 		return SavedAttachment{}, err
 	}
-	defer os.Remove(temporaryPath)
+	defer func() {
+		resultErr = errors.Join(resultErr, removeIfPresent(temporaryPath))
+	}()
 	if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, temporaryPath); err != nil {
 		return SavedAttachment{}, err
 	}
 	if err := publishAttachment(temporaryPath, request.OutputPath); err != nil {
 		return SavedAttachment{}, err
 	}
-	saved, err := inspectSavedAttachment(request.AttachmentID, request.OutputPath)
+	saved, err = inspectSavedAttachment(request.AttachmentID, request.OutputPath)
 	if err != nil {
-		os.Remove(request.OutputPath)
-		return SavedAttachment{}, err
+		return SavedAttachment{}, errors.Join(err, removeIfPresent(request.OutputPath))
 	}
 	return saved, nil
 }
@@ -79,18 +84,19 @@ func publishAttachment(temporaryPath string, outputPath string) error {
 		return fmt.Errorf("publish attachment without overwrite: %w", err)
 	}
 	if err := os.Chmod(outputPath, 0o600); err != nil {
-		os.Remove(outputPath)
-		return fmt.Errorf("restrict saved attachment: %w", err)
+		return errors.Join(fmt.Errorf("restrict saved attachment: %w", err), removeIfPresent(outputPath))
 	}
 	return nil
 }
 
-func inspectSavedAttachment(attachmentID string, path string) (SavedAttachment, error) {
+func inspectSavedAttachment(attachmentID string, path string) (saved SavedAttachment, resultErr error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return SavedAttachment{}, fmt.Errorf("open saved attachment: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, file.Close())
+	}()
 	hash := sha256.New()
 	size, err := io.Copy(hash, file)
 	if err != nil {
@@ -100,4 +106,12 @@ func inspectSavedAttachment(attachmentID string, path string) (SavedAttachment, 
 		AttachmentID: attachmentID, Path: path, Size: size,
 		SHA256: hex.EncodeToString(hash.Sum(nil)),
 	}, nil
+}
+
+func removeIfPresent(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }

@@ -54,13 +54,16 @@ func (s *Store) openMessageSource(ctx context.Context, ref string) (resolvedMess
 		}
 		stable, err := s.messageStillMatches(ctx, resolved)
 		if err != nil {
-			source.Close()
-			return resolvedMessage{}, nil, err
+			resultErr := err
+			joinCloseError(&resultErr, source, "message source")
+			return resolvedMessage{}, nil, resultErr
 		}
 		if stable {
 			return resolved, source, nil
 		}
-		source.Close()
+		if err := source.Close(); err != nil {
+			return resolvedMessage{}, nil, fmt.Errorf("close changed message source: %w", err)
+		}
 	}
 	return resolvedMessage{}, nil, operationError(
 		"store_changed", "message moved or changed while its local source was opened",
@@ -226,17 +229,20 @@ func (s *Store) openResolvedSource(resolved resolvedMessage) (*emlxSource, error
 	}
 	openedInfo, err := file.Stat()
 	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("inspect opened EMLX source: %w", err)
+		resultErr := fmt.Errorf("inspect opened EMLX source: %w", err)
+		joinCloseError(&resultErr, file, "EMLX source")
+		return nil, resultErr
 	}
 	if !os.SameFile(info, openedInfo) {
-		file.Close()
-		return nil, operationError("store_changed", "message source changed while opening")
+		resultErr := error(operationError("store_changed", "message source changed while opening"))
+		joinCloseError(&resultErr, file, "EMLX source")
+		return nil, resultErr
 	}
 	length, err := validateEMLXFrame(file, openedInfo.Size())
 	if err != nil {
-		file.Close()
-		return nil, err
+		resultErr := err
+		joinCloseError(&resultErr, file, "EMLX source")
+		return nil, resultErr
 	}
 	return &emlxSource{file: file, length: length, partial: partial, path: path}, nil
 }

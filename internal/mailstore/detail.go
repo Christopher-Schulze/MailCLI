@@ -9,12 +9,12 @@ import (
 	"mailcli/internal/mailref"
 )
 
-func (s *Store) GetMessage(ctx context.Context, ref string) (mail.Message, error) {
+func (s *Store) GetMessage(ctx context.Context, ref string) (result mail.Message, resultErr error) {
 	resolved, source, err := s.openMessageSource(ctx, ref)
 	if err != nil {
 		return mail.Message{}, err
 	}
-	defer source.Close()
+	defer joinCloseError(&resultErr, source, "message source")
 	headers, err := readRawHeaders(source.Reader())
 	if err != nil {
 		return mail.Message{}, err
@@ -51,12 +51,12 @@ func (s *Store) GetMessage(ctx context.Context, ref string) (mail.Message, error
 	}, nil
 }
 
-func (s *Store) GetRawSource(ctx context.Context, ref string) (string, error) {
+func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, resultErr error) {
 	_, source, err := s.openMessageSource(ctx, ref)
 	if err != nil {
 		return "", err
 	}
-	defer source.Close()
+	defer joinCloseError(&resultErr, source, "raw message source")
 	if source.partial {
 		return "", operationError(
 			"raw_source_partial",

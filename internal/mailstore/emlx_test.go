@@ -39,7 +39,7 @@ func TestValidateEMLXFrameExposesOnlyDeclaredSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer file.Close()
+	closeTestResource(t, file, "EMLX fixture")
 	info, err := file.Stat()
 	if err != nil {
 		t.Fatalf("Stat() error = %v", err)
@@ -79,7 +79,7 @@ func TestValidateEMLXFrameRejectsInvalidInput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open() error = %v", err)
 			}
-			defer file.Close()
+			closeTestResource(t, file, "EMLX fixture")
 			info, err := file.Stat()
 			if err != nil {
 				t.Fatalf("Stat() error = %v", err)

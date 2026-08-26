@@ -29,7 +29,7 @@ type sentMessageFixture struct {
 
 func TestSentObservationUsesSpecialUseMailboxAndNewRowIdentity(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -49,7 +49,7 @@ func TestSentObservationUsesSpecialUseMailboxAndNewRowIdentity(t *testing.T) {
 
 func TestSentObservationUsesCompleteMIMEWhenAttachmentCatalogLags(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -93,11 +93,35 @@ func TestBodyHasDraftPrefixAcceptsMailGeneratedQuotedAlternative(t *testing.T) {
 	if bodyHasDraftPrefix(actual, "different body") {
 		t.Fatal("bodyHasDraftPrefix() = true for a different body")
 	}
+	if bodyHasDraftPrefix("one two\n\n--\nsignature", "one  two") {
+		t.Fatal("bodyHasDraftPrefix() accepted changed reviewed whitespace")
+	}
+	if !bodyHasDraftPrefix("--\nMail signature", "") {
+		t.Fatal("bodyHasDraftPrefix() rejected an explicitly empty reviewed body")
+	}
+}
+
+func TestAttachmentFingerprintsAllowOnlyMaterializedMailOwnedExtras(t *testing.T) {
+	reviewed := writeDraftAttachmentFixture(t, "reviewed.bin", []byte("reviewed"))
+	reviewedDigest, err := hashRegularFile(reviewed.Path)
+	if err != nil {
+		t.Fatalf("hashRegularFile() error = %v", err)
+	}
+	actual := map[attachmentFingerprint]int{
+		{Name: "reviewed.bin", Size: reviewed.Size, SHA256: hex.EncodeToString(reviewedDigest[:])}: 1,
+		{Name: "signature.png", Size: 3, SHA256: strings.Repeat("a", sha256.Size*2)}:               1,
+	}
+	if !attachmentFingerprintsContain(actual, []mail.DraftAttachment{reviewed}, true) {
+		t.Fatal("materialized Mail-owned attachment was not allowed")
+	}
+	if attachmentFingerprintsContain(actual, []mail.DraftAttachment{reviewed}, false) {
+		t.Fatal("unmaterialized extra attachment was allowed")
+	}
 }
 
 func TestSentObservationFailsClosedWhenCandidatesAreAmbiguous(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -115,9 +139,9 @@ func TestSentObservationFailsClosedWhenCandidatesAreAmbiguous(t *testing.T) {
 	}
 }
 
-func TestSentObservationRequiresExactRecipientRoles(t *testing.T) {
+func TestSentObservationRejectsDuplicateRecipientAcrossRoles(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -129,15 +153,9 @@ func TestSentObservationRequiresExactRecipientRoles(t *testing.T) {
 	draft := observedDraft("Body")
 	draft.CC = []mail.Recipient{{Address: "christopher@example.com"}}
 	draft.BCC = []mail.Recipient{{Address: "christopher@example.com"}}
-	message, found, err := store.findSentCandidate(context.Background(), baseline, draft)
-	if err != nil || !found || message.Ref == "" {
-		t.Fatalf("exact recipient roles = %+v, found = %t, error = %v", message, found, err)
-	}
-
-	draft.To = nil
-	_, found, err = store.findSentCandidate(context.Background(), baseline, draft)
+	_, found, err := store.findSentCandidate(context.Background(), baseline, draft)
 	if err != nil || found {
-		t.Fatalf("recipient role mismatch found = %t, error = %v", found, err)
+		t.Fatalf("duplicate recipient found = %t, error = %v", found, err)
 	}
 }
 
@@ -183,7 +201,7 @@ func TestSentObservationRejectsIncompleteFingerprint(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store, _ := newSearchFixture(t)
-			defer store.Close()
+			closeTestResource(t, store, "test store")
 			installSentMailboxFixture(t, store)
 			baseline, err := store.captureSendBaseline(context.Background())
 			if err != nil {
@@ -210,7 +228,7 @@ func TestSentObservationRejectsIncompleteFingerprint(t *testing.T) {
 
 func TestSentObservationSelectsOnlyExactParallelFingerprint(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -246,7 +264,7 @@ func TestSentObservationSelectsOnlyExactParallelFingerprint(t *testing.T) {
 
 func TestSentObservationRevalidatesMailboxMembership(t *testing.T) {
 	store, _ := newSearchFixture(t)
-	defer store.Close()
+	closeTestResource(t, store, "test store")
 	installSentMailboxFixture(t, store)
 	baseline, err := store.captureSendBaseline(context.Background())
 	if err != nil {
@@ -284,7 +302,11 @@ func firstMailboxCandidate(
 	if err != nil {
 		t.Fatalf("query mailbox candidate: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("close mailbox candidate rows: %v", err)
+		}
+	}()
 	if !rows.Next() {
 		t.Fatalf("mailbox candidate missing: %v", rows.Err())
 	}
@@ -303,7 +325,7 @@ func installSentMailboxFixture(t *testing.T, store *Store) {
 		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source)
 		 VALUES (4,'imap://` + testAccountID + `/%5BGmail%5D/Sent',0,0,0,1)`,
 	); err != nil {
-		writer.Close()
+		closeTestResourceNow(t, writer, "Sent mailbox writer")
 		t.Fatalf("insert Sent mailbox: %v", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -365,7 +387,7 @@ func insertSentMessageFixtureWithDetails(
 	}
 	for _, statement := range statements {
 		if _, err := writer.Exec(statement.query, statement.args...); err != nil {
-			writer.Close()
+			closeTestResourceNow(t, writer, "sent-message writer")
 			t.Fatalf("insert sent-message fixture: %v", err)
 		}
 	}
@@ -374,7 +396,7 @@ func insertSentMessageFixtureWithDetails(
 			`INSERT INTO recipients(message,address,type,position) VALUES (?,2,?,?)`,
 			rowID, recipientType, position,
 		); err != nil {
-			writer.Close()
+			closeTestResourceNow(t, writer, "sent-message writer")
 			t.Fatalf("insert sent-message recipient: %v", err)
 		}
 	}
@@ -383,7 +405,7 @@ func insertSentMessageFixtureWithDetails(
 			`INSERT INTO attachments(message,attachment_id,name) VALUES (?,?,?)`,
 			rowID, fmt.Sprintf("%d", index+2), attachment.Name,
 		); err != nil {
-			writer.Close()
+			closeTestResourceNow(t, writer, "sent-message writer")
 			t.Fatalf("insert sent-message attachment: %v", err)
 		}
 	}
@@ -445,7 +467,7 @@ func installDraftsMailboxFixture(t *testing.T, store *Store) {
 		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source)
 		 VALUES (5,'imap://` + testAccountID + `/%5BGmail%5D/Drafts',0,0,0,1)`,
 	); err != nil {
-		writer.Close()
+		closeTestResourceNow(t, writer, "Drafts mailbox writer")
 		t.Fatalf("insert Drafts mailbox: %v", err)
 	}
 	if err := writer.Close(); err != nil {
@@ -496,7 +518,7 @@ func insertDraftMessageFixture(t *testing.T, store *Store, rowID int64) {
 	}
 	for _, statement := range statements {
 		if _, err := writer.Exec(statement.query, statement.args...); err != nil {
-			writer.Close()
+			closeTestResourceNow(t, writer, "draft-message writer")
 			t.Fatalf("insert draft-message fixture: %v", err)
 		}
 	}

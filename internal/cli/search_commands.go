@@ -85,15 +85,15 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 	for _, result := range page.Messages {
 		message := result.Summary
-		fmt.Fprintf(
+		writeFormat(
 			stdout, "%s\t%s\t%s\t%s\t%s\n",
 			message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject), oneLine(result.Snippet),
 		)
 	}
 	if page.NextCursor != "" {
-		fmt.Fprintf(stdout, "next_cursor\t%s\n", page.NextCursor)
+		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
-	fmt.Fprintf(
+	writeFormat(
 		stdout, "coverage\t%s\tcorpus_complete=%t\tscanned=%d/%d\tbytes=%d\n",
 		page.Coverage.Backend, page.Coverage.Complete,
 		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages, page.Coverage.ScannedBytes,

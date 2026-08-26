@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,18 @@ type unknownSendGateway struct {
 type reconciledSendGateway struct {
 	testGateway
 	sends int
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(payload []byte) (int, error) {
+	return max(0, len(payload)-1), nil
 }
 
 func (testGateway) Probe(context.Context, bool) mail.DiagnosticReport {
@@ -154,7 +167,7 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.0"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.1"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
 	}
@@ -174,6 +187,29 @@ func TestRunTable(t *testing.T) {
 			}
 			if !strings.Contains(stderr.String(), test.wantStderr) {
 				t.Errorf("stderr = %q, want substring %q", stderr.String(), test.wantStderr)
+			}
+		})
+	}
+}
+
+func TestRunFailsWhenCommandOutputCannotBeWritten(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		stdout io.Writer
+		stderr io.Writer
+	}{
+		{name: "human stdout", args: []string{"version"}, stdout: failingWriter{}, stderr: io.Discard},
+		{name: "JSON stdout", args: []string{"version", "--json"}, stdout: failingWriter{}, stderr: io.Discard},
+		{name: "short stdout", args: []string{"version"}, stdout: shortWriter{}, stderr: io.Discard},
+		{name: "stderr", args: []string{"missing"}, stdout: io.Discard, stderr: failingWriter{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if code := Run(
+				context.Background(), newTestService(), test.args, test.stdout, test.stderr,
+			); code != 1 {
+				t.Fatalf("Run() code = %d, want 1", code)
 			}
 		})
 	}
@@ -368,6 +404,30 @@ func TestDraftSendUnknownJSONPreservesOutcomeEvidence(t *testing.T) {
 		!strings.Contains(stdout.String(), `"ok":false`) ||
 		!strings.Contains(stdout.String(), `"code":"send_outcome_unknown"`) ||
 		!strings.Contains(stdout.String(), `"outcome":"outcome_unknown"`) ||
+		!strings.Contains(stdout.String(), `"draft_retained":true`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestDraftSendAcceptedWithoutObservationIsJSONFailure(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "mail@example.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Accepted", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftSend(
+		context.Background(), service,
+		[]string{"--ref", draft.Ref, "--confirm", "--json"}, &stdout, &stderr,
+	)
+	if code != 1 || stderr.Len() != 0 ||
+		!strings.Contains(stdout.String(), `"ok":false`) ||
+		!strings.Contains(stdout.String(), `"code":"send_not_observed"`) ||
+		!strings.Contains(stdout.String(), `"outcome":"accepted_by_mail"`) ||
 		!strings.Contains(stdout.String(), `"draft_retained":true`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}

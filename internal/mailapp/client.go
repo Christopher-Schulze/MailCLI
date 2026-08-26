@@ -3,12 +3,16 @@ package mailapp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,12 +23,18 @@ import (
 //go:embed scripts/bridge.js
 var bridgeScript string
 
+const (
+	osaCancellationGrace        = 15 * time.Second
+	processGroupTerminationWait = time.Second
+)
+
 type scriptRunner interface {
-	Run(ctx context.Context, script string, request string) ([]byte, error)
+	Run(ctx context.Context, script string, request string) ([]byte, bool, error)
 }
 
 type osaScriptRunner struct {
-	started func(int)
+	started           func(int)
+	cancellationGrace time.Duration
 }
 
 type Client struct {
@@ -60,16 +70,17 @@ type bridgeRequest struct {
 }
 
 type bridgeDraft struct {
-	Kind        mail.DraftKind         `json:"kind"`
-	Source      *messageReference      `json:"source,omitempty"`
-	ReplyAll    bool                   `json:"reply_all,omitempty"`
-	From        string                 `json:"from,omitempty"`
-	To          []mail.Recipient       `json:"to"`
-	CC          []mail.Recipient       `json:"cc"`
-	BCC         []mail.Recipient       `json:"bcc"`
-	Subject     string                 `json:"subject,omitempty"`
-	Body        string                 `json:"body"`
-	Attachments []mail.DraftAttachment `json:"attachments"`
+	Kind                          mail.DraftKind         `json:"kind"`
+	Source                        *messageReference      `json:"source,omitempty"`
+	ReplyAll                      bool                   `json:"reply_all,omitempty"`
+	From                          string                 `json:"from,omitempty"`
+	To                            []mail.Recipient       `json:"to"`
+	CC                            []mail.Recipient       `json:"cc"`
+	BCC                           []mail.Recipient       `json:"bcc"`
+	Subject                       string                 `json:"subject,omitempty"`
+	Body                          string                 `json:"body"`
+	Attachments                   []mail.DraftAttachment `json:"attachments"`
+	ExpectedNativeAttachmentCount int                    `json:"expected_native_attachment_count,omitempty"`
 }
 
 func (c *Client) SaveAttachmentTo(
@@ -97,35 +108,139 @@ func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvid
 	if err != nil {
 		return mail.SendEvidence{}, err
 	}
-	response, started, err := c.invokeWithState(ctx, bridgeRequest{Operation: "drafts.send", Draft: &bridge})
+	bridge, cleanup, err := snapshotBridgeAttachments(bridge)
 	if err != nil {
+		return mail.SendEvidence{}, err
+	}
+	response, started, invokeErr := c.invokeWithState(ctx, bridgeRequest{Operation: "drafts.send", Draft: &bridge})
+	cleanupErr := attachmentSnapshotCleanupError(cleanup())
+	if invokeErr != nil {
 		attempted := started
 		if response.Error != nil {
 			attempted = response.SendAttempted
 		}
-		return mail.SendEvidence{InvocationStarted: attempted}, err
+		return mail.SendEvidence{InvocationStarted: attempted}, errors.Join(invokeErr, cleanupErr)
 	}
-	return mail.SendEvidence{
+	evidence := mail.SendEvidence{
 		InvocationStarted: true,
 		AcceptedByMail:    response.Accepted,
-	}, nil
+		Materialized:      mapSendMaterialization(response.Materialized),
+	}
+	return evidence, cleanupErr
 }
 
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
+	summary, _, err := c.SaveDraftWithMaterialization(ctx, draft)
+	return summary, err
+}
+
+func (c *Client) SaveDraftWithMaterialization(
+	ctx context.Context,
+	draft mail.Draft,
+) (mail.MessageSummary, *mail.SendMaterialization, error) {
 	bridge, err := encodeBridgeDraft(draft)
 	if err != nil {
-		return mail.MessageSummary{}, err
+		return mail.MessageSummary{}, nil, err
+	}
+	bridge, cleanup, err := snapshotBridgeAttachments(bridge)
+	if err != nil {
+		return mail.MessageSummary{}, nil, err
 	}
 	response, err := c.invoke(ctx, bridgeRequest{Operation: "drafts.save", Draft: &bridge})
+	cleanupErr := attachmentSnapshotCleanupError(cleanup())
 	if err != nil {
-		return mail.MessageSummary{}, err
+		return mail.MessageSummary{}, nil, errors.Join(err, cleanupErr)
 	}
 	if !response.Accepted {
-		return mail.MessageSummary{}, &OperationError{
+		return mail.MessageSummary{}, nil, &OperationError{
 			Code: "mutation_not_accepted", Message: "Mail.app did not accept the native draft save",
 		}
 	}
-	return mail.MessageSummary{Subject: draft.Subject}, nil
+	materialized := mapSendMaterialization(response.Materialized)
+	summary := mail.MessageSummary{Subject: draft.Subject}
+	if materialized != nil {
+		summary.Subject = materialized.Subject
+		summary.Sender = materialized.From
+		summary.AttachmentCount = materialized.AttachmentCount
+	}
+	return summary, materialized, cleanupErr
+}
+
+func snapshotBridgeAttachments(draft bridgeDraft) (bridgeDraft, func() error, error) {
+	if len(draft.Attachments) == 0 {
+		return draft, func() error { return nil }, nil
+	}
+	root, err := os.MkdirTemp("", "mailcli-send-attachments-*")
+	if err != nil {
+		return bridgeDraft{}, func() error { return nil }, fmt.Errorf("create private attachment snapshot: %w", err)
+	}
+	cleanup := func() error { return os.RemoveAll(root) }
+	attachments := make([]mail.DraftAttachment, 0, len(draft.Attachments))
+	for index, attachment := range draft.Attachments {
+		directory := filepath.Join(root, fmt.Sprintf("%04d", index))
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			return bridgeDraft{}, func() error { return nil }, errors.Join(
+				fmt.Errorf("create attachment snapshot directory: %w", err), cleanup(),
+			)
+		}
+		target := filepath.Join(directory, filepath.Base(attachment.Path))
+		if err := copyVerifiedAttachment(attachment, target); err != nil {
+			return bridgeDraft{}, func() error { return nil }, errors.Join(err, cleanup())
+		}
+		attachment.Path = target
+		attachments = append(attachments, attachment)
+	}
+	draft.Attachments = attachments
+	return draft, cleanup, nil
+}
+
+func attachmentSnapshotCleanupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &OperationError{
+		Code:    "attachment_snapshot_cleanup_failed",
+		Message: fmt.Sprintf("remove private attachment snapshot: %v", err),
+	}
+}
+
+func copyVerifiedAttachment(attachment mail.DraftAttachment, target string) (resultErr error) {
+	info, err := os.Lstat(attachment.Path)
+	if err != nil {
+		return fmt.Errorf("inspect reviewed attachment: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return &OperationError{Code: "attachment_changed", Message: "reviewed attachment is not a regular file"}
+	}
+	source, err := os.Open(attachment.Path)
+	if err != nil {
+		return fmt.Errorf("open reviewed attachment: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, source.Close())
+	}()
+	opened, err := source.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return &OperationError{Code: "attachment_changed", Message: "reviewed attachment changed while opening"}
+	}
+	destination, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create attachment snapshot: %w", err)
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(destination, hash), source)
+	closeErr := destination.Close()
+	final, statErr := source.Stat()
+	digest := hex.EncodeToString(hash.Sum(nil))
+	if copyErr != nil || closeErr != nil || statErr != nil || !os.SameFile(opened, final) ||
+		opened.Size() != final.Size() || !opened.ModTime().Equal(final.ModTime()) ||
+		written != attachment.Size || !strings.EqualFold(digest, attachment.SHA256) {
+		return errors.Join(
+			&OperationError{Code: "attachment_changed", Message: "reviewed attachment bytes changed before Mail.app composition"},
+			os.Remove(target),
+		)
+	}
+	return nil
 }
 
 func encodeBridgeDraft(draft mail.Draft) (bridgeDraft, error) {
@@ -133,6 +248,7 @@ func encodeBridgeDraft(draft mail.Draft) (bridgeDraft, error) {
 		Kind: draft.Kind, ReplyAll: draft.ReplyAll, From: draft.From,
 		To: draft.To, CC: draft.CC, BCC: draft.BCC,
 		Subject: draft.Subject, Body: draft.Body, Attachments: draft.Attachments,
+		ExpectedNativeAttachmentCount: draft.ExpectedNativeAttachmentCount,
 	}
 	if draft.SourceRef == "" {
 		return bridge, nil
@@ -225,17 +341,38 @@ func (c *Client) Sync(ctx context.Context, accountRef string) error {
 }
 
 type bridgeResponse struct {
-	OK             bool            `json:"ok"`
-	Error          *bridgeError    `json:"error"`
-	Accounts       []bridgeAccount `json:"accounts"`
-	Mailboxes      []bridgeMailbox `json:"mailboxes"`
-	Messages       []bridgeMessage `json:"messages"`
-	Message        *bridgeMessage  `json:"message"`
-	RawSource      string          `json:"raw_source"`
-	NextOffset     *int            `json:"next_offset"`
-	NextPreviousID *string         `json:"next_previous_id"`
-	Accepted       bool            `json:"accepted"`
-	SendAttempted  bool            `json:"send_attempted"`
+	OK             bool                `json:"ok"`
+	Error          *bridgeError        `json:"error"`
+	Accounts       []bridgeAccount     `json:"accounts"`
+	Mailboxes      []bridgeMailbox     `json:"mailboxes"`
+	Messages       []bridgeMessage     `json:"messages"`
+	Message        *bridgeMessage      `json:"message"`
+	RawSource      string              `json:"raw_source"`
+	NextOffset     *int                `json:"next_offset"`
+	NextPreviousID *string             `json:"next_previous_id"`
+	Accepted       bool                `json:"accepted"`
+	SendAttempted  bool                `json:"send_attempted"`
+	Materialized   *bridgeMaterialized `json:"materialized"`
+}
+
+type bridgeMaterialized struct {
+	From            string           `json:"from"`
+	To              []mail.Recipient `json:"to"`
+	CC              []mail.Recipient `json:"cc"`
+	BCC             []mail.Recipient `json:"bcc"`
+	Subject         string           `json:"subject"`
+	AttachmentCount int              `json:"attachment_count"`
+}
+
+func mapSendMaterialization(value *bridgeMaterialized) *mail.SendMaterialization {
+	if value == nil {
+		return nil
+	}
+	return &mail.SendMaterialization{
+		From: value.From, To: append([]mail.Recipient(nil), value.To...),
+		CC: append([]mail.Recipient(nil), value.CC...), BCC: append([]mail.Recipient(nil), value.BCC...),
+		Subject: value.Subject, AttachmentCount: value.AttachmentCount,
+	}
 }
 
 type bridgeError struct {
@@ -292,39 +429,117 @@ func (e *OperationError) ErrorCode() string {
 	return e.Code
 }
 
-func (r osaScriptRunner) Run(ctx context.Context, script string, request string) ([]byte, error) {
+func (r osaScriptRunner) Run(ctx context.Context, script string, request string) ([]byte, bool, error) {
 	return r.run(ctx, script, request)
 }
 
-func (r osaScriptRunner) run(ctx context.Context, script string, request string) ([]byte, error) {
-	command := exec.CommandContext(ctx, osaScriptPath, "-l", "JavaScript", "-e", script, request)
+func (r osaScriptRunner) run(
+	ctx context.Context,
+	script string,
+	request string,
+) (output []byte, started bool, resultErr error) {
+	requestFile, err := os.CreateTemp("", "mailcli-bridge-request-*")
+	if err != nil {
+		return nil, false, fmt.Errorf("create Mail.app bridge request: %w", err)
+	}
+	requestPath := requestFile.Name()
+	defer func() {
+		resultErr = errors.Join(resultErr, bridgeCleanupError("remove private bridge request", os.Remove(requestPath)))
+	}()
+	if _, err := requestFile.WriteString(request); err != nil {
+		return nil, false, errors.Join(
+			fmt.Errorf("write Mail.app bridge request: %w", err), requestFile.Close(),
+		)
+	}
+	if err := requestFile.Close(); err != nil {
+		return nil, false, fmt.Errorf("close Mail.app bridge request: %w", err)
+	}
+
+	cancellationRoot, err := os.MkdirTemp("", "mailcli-bridge-cancellation-*")
+	if err != nil {
+		return nil, false, fmt.Errorf("create Mail.app bridge cancellation directory: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(
+			resultErr,
+			bridgeCleanupError("remove private bridge cancellation directory", os.RemoveAll(cancellationRoot)),
+		)
+	}()
+	cancellationPath := filepath.Join(cancellationRoot, "requested")
+
+	command := exec.CommandContext(
+		ctx, osaScriptPath, "-l", "JavaScript", "-e", script, requestPath, cancellationPath,
+	)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.WaitDelay = time.Second
+	command.WaitDelay = r.cancellationGrace
+	if command.WaitDelay <= 0 {
+		command.WaitDelay = osaCancellationGrace
+	}
 	command.Cancel = func() error {
-		if command.Process == nil {
-			return os.ErrProcessDone
+		marker, createErr := os.OpenFile(cancellationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(createErr, os.ErrExist) {
+			return nil
 		}
-		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
+		if createErr != nil {
+			return createErr
 		}
-		return err
+		return marker.Close()
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		return nil, formatOSAError(ctx, err, nil)
+		return nil, false, formatOSAError(ctx, err, nil)
 	}
 	if r.started != nil {
 		r.started(command.Process.Pid)
 	}
-	err := command.Wait()
-	if err == nil {
-		return stdout.Bytes(), nil
+	err = command.Wait()
+	groupErr := terminateOwnedProcessGroup(command.Process.Pid)
+	if err == nil || command.ProcessState != nil && command.ProcessState.Success() {
+		if groupErr != nil {
+			return stdout.Bytes(), true, bridgeCleanupError("terminate owned osascript process group", groupErr)
+		}
+		return stdout.Bytes(), true, nil
 	}
-	return nil, formatOSAError(ctx, err, stderr.Bytes())
+	return nil, true, errors.Join(formatOSAError(ctx, err, stderr.Bytes()), groupErr)
+}
+
+func bridgeCleanupError(action string, err error) error {
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return &OperationError{Code: "bridge_cleanup_failed", Message: fmt.Sprintf("%s: %v", action, err)}
+}
+
+func terminateOwnedProcessGroup(processID int) error {
+	groupID := -processID
+	probeErr := syscall.Kill(groupID, syscall.Signal(0))
+	if errors.Is(probeErr, syscall.ESRCH) {
+		return nil
+	}
+	if probeErr != nil {
+		return fmt.Errorf("inspect osascript process group %d: %w", processID, probeErr)
+	}
+	if err := syscall.Kill(groupID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("terminate osascript process group %d: %w", processID, err)
+	}
+
+	deadline := time.Now().Add(processGroupTerminationWait)
+	for {
+		err := syscall.Kill(groupID, syscall.Signal(0))
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("verify osascript process group %d termination: %w", processID, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("osascript process group %d remained after termination", processID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func formatOSAError(ctx context.Context, err error, stderr []byte) error {
@@ -485,15 +700,13 @@ func (c *Client) readMessage(ctx context.Context, ref string, operation string) 
 		return mail.Message{}, err
 	}
 	attachments := append([]mail.Attachment(nil), response.Message.Attachments...)
-	for index := range attachments {
-		attachments[index].SizeKnown = true
-	}
 	return mail.Message{
 		Summary: summary, ReplyTo: response.Message.ReplyTo,
 		To: response.Message.To, CC: response.Message.CC, BCC: response.Message.BCC,
 		Headers: response.Message.Headers, Content: response.Message.Content,
-		ContentSource: "mail_app", ContentComplete: true, MissingParts: []string{},
-		Attachments: attachments,
+		ContentSource: "mail_app", ContentComplete: false,
+		MissingParts: []string{"raw RFC 5322 verification required"},
+		Attachments:  attachments,
 	}, nil
 }
 
@@ -598,9 +811,10 @@ func (c *Client) invokeUnlockedWithState(
 	if err != nil {
 		return bridgeResponse{}, false, false, fmt.Errorf("encode Mail.app bridge request: %w", err)
 	}
-	output, err := c.runner.Run(ctx, bridgeScript, string(payload))
-	if err != nil {
-		return bridgeResponse{}, true, false, err
+	output, started, err := c.runner.Run(ctx, bridgeScript, string(payload))
+	postflightErr := errorWithCode(err, "bridge_cleanup_failed")
+	if err != nil && (postflightErr == nil || len(output) == 0) {
+		return bridgeResponse{}, started, false, err
 	}
 
 	var response bridgeResponse
@@ -609,13 +823,39 @@ func (c *Client) invokeUnlockedWithState(
 	}
 	if !response.OK {
 		if response.Error == nil {
-			return response, true, true, fmt.Errorf("mail bridge failed without an error")
+			return response, true, true, errors.Join(
+				fmt.Errorf("mail bridge failed without an error"), postflightErr,
+			)
 		}
-		return response, true, true, &OperationError{
+		return response, true, true, errors.Join(&OperationError{
 			Code: response.Error.Code, Message: response.Error.Message,
-		}
+		}, postflightErr)
 	}
-	return response, true, true, nil
+	return response, true, true, postflightErr
+}
+
+func errorWithCode(err error, code string) error {
+	if err == nil {
+		return nil
+	}
+	if coded, ok := err.(interface {
+		error
+		ErrorCode() string
+	}); ok && coded.ErrorCode() == code {
+		return coded
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if matched := errorWithCode(child, code); matched != nil {
+				return matched
+			}
+		}
+		return nil
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return errorWithCode(wrapped.Unwrap(), code)
+	}
+	return nil
 }
 
 func (c *Client) messagePage(items []bridgeMessage) (mail.MessagePage, error) {

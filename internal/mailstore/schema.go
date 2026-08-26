@@ -24,12 +24,15 @@ type schemaCapability struct {
 	Fingerprint      string
 }
 
-func validateSchema(ctx context.Context, database *sql.DB) (schemaCapability, error) {
+func validateSchema(
+	ctx context.Context,
+	database *sql.DB,
+) (result schemaCapability, resultErr error) {
 	connection, err := database.Conn(ctx)
 	if err != nil {
 		return schemaCapability{}, fmt.Errorf("acquire Envelope Index schema connection: %w", err)
 	}
-	defer connection.Close()
+	defer joinCloseError(&resultErr, connection, "Envelope Index schema connection")
 	var facts []string
 	requiredColumns := requiredColumnCapabilities()
 	requiredIndexes := requiredIndexCapabilities()
@@ -145,12 +148,16 @@ func requiredIndexCapabilities() map[string][][]string {
 	}
 }
 
-func tableColumns(ctx context.Context, connection *sql.Conn, table string) (map[string]string, error) {
+func tableColumns(
+	ctx context.Context,
+	connection *sql.Conn,
+	table string,
+) (result map[string]string, resultErr error) {
 	rows, err := connection.QueryContext(ctx, "PRAGMA table_xinfo("+quoteIdentifier(table)+")")
 	if err != nil {
 		return nil, fmt.Errorf("read Envelope Index %s columns: %w", table, err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "Envelope Index column rows")
 	columns := make(map[string]string)
 	for rows.Next() {
 		var identifier int
@@ -186,10 +193,16 @@ func tableIndexes(ctx context.Context, connection *sql.Conn, table string) ([][]
 		var origin string
 		var partial int
 		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan Envelope Index %s index: %w", table, err)
+			resultErr := fmt.Errorf("scan Envelope Index %s index: %w", table, err)
+			joinCloseError(&resultErr, rows, "Envelope Index index rows")
+			return nil, resultErr
 		}
 		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		resultErr := fmt.Errorf("iterate Envelope Index %s indexes: %w", table, err)
+		joinCloseError(&resultErr, rows, "Envelope Index index rows")
+		return nil, resultErr
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close Envelope Index %s index list: %w", table, err)
@@ -206,10 +219,16 @@ func tableIndexes(ctx context.Context, connection *sql.Conn, table string) ([][]
 			var identifier int
 			var column string
 			if err := indexRows.Scan(&sequence, &identifier, &column); err != nil {
-				indexRows.Close()
-				return nil, fmt.Errorf("scan Envelope Index index %s: %w", name, err)
+				resultErr := fmt.Errorf("scan Envelope Index index %s: %w", name, err)
+				joinCloseError(&resultErr, indexRows, "Envelope Index index detail rows")
+				return nil, resultErr
 			}
 			columns = append(columns, column)
+		}
+		if err := indexRows.Err(); err != nil {
+			resultErr := fmt.Errorf("iterate Envelope Index index %s: %w", name, err)
+			joinCloseError(&resultErr, indexRows, "Envelope Index index detail rows")
+			return nil, resultErr
 		}
 		if err := indexRows.Close(); err != nil {
 			return nil, fmt.Errorf("close Envelope Index index %s: %w", name, err)
@@ -219,7 +238,10 @@ func tableIndexes(ctx context.Context, connection *sql.Conn, table string) ([][]
 	return indexes, nil
 }
 
-func readSchemaProperties(ctx context.Context, connection *sql.Conn) (schemaCapability, error) {
+func readSchemaProperties(
+	ctx context.Context,
+	connection *sql.Conn,
+) (result schemaCapability, resultErr error) {
 	rows, err := connection.QueryContext(ctx, `
 		SELECT key, value FROM properties
 		WHERE key IN ('UUID', 'version', 'minor_version', 'last_write_framework_version')
@@ -227,7 +249,7 @@ func readSchemaProperties(ctx context.Context, connection *sql.Conn) (schemaCapa
 	if err != nil {
 		return schemaCapability{}, fmt.Errorf("read Envelope Index properties: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "Envelope Index property rows")
 	values := make(map[string]string, 4)
 	for rows.Next() {
 		var key string

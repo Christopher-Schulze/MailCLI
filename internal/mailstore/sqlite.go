@@ -43,13 +43,18 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	if err := configureReadConnection(ctx, database, absolutePath); err != nil {
-		database.Close()
-		return nil, err
+		resultErr := err
+		joinCloseError(&resultErr, database, "Envelope Index database")
+		return nil, resultErr
 	}
 	return database, nil
 }
 
-func configureReadConnection(ctx context.Context, database *sql.DB, expectedPath string) error {
+func configureReadConnection(
+	ctx context.Context,
+	database *sql.DB,
+	expectedPath string,
+) (resultErr error) {
 	canonicalExpectedPath, err := filepath.EvalSymlinks(expectedPath)
 	if err != nil {
 		return fmt.Errorf("resolve Envelope Index identity: %w", err)
@@ -58,7 +63,7 @@ func configureReadConnection(ctx context.Context, database *sql.DB, expectedPath
 	if err != nil {
 		return operationError("mail_store_unavailable", fmt.Sprintf("open Envelope Index read-only: %v", err))
 	}
-	defer connection.Close()
+	defer joinCloseError(&resultErr, connection, "Envelope Index connection")
 	for _, statement := range []string{
 		"PRAGMA trusted_schema=OFF", "PRAGMA temp_store=MEMORY",
 	} {
@@ -87,7 +92,7 @@ func configureReadConnection(ctx context.Context, database *sql.DB, expectedPath
 	if err != nil {
 		return fmt.Errorf("read Envelope Index database list: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "Envelope Index database list rows")
 	for rows.Next() {
 		var sequence int
 		var name string

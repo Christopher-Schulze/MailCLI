@@ -18,11 +18,11 @@ func runAttachments(
 	stderr io.Writer,
 ) int {
 	if len(args) > 0 && isHelpArgument(args[0]) {
-		fmt.Fprintln(stdout, "usage: mailcli attachments <list|save> [flags]")
+		writeLine(stdout, "usage: mailcli attachments <list|save> [flags]")
 		return 0
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: mailcli attachments <list|save> [flags]")
+		writeLine(stderr, "usage: mailcli attachments <list|save> [flags]")
 		return 2
 	}
 	if args[0] == "list" {
@@ -31,7 +31,7 @@ func runAttachments(
 	if args[0] == "save" {
 		return runAttachmentsSave(ctx, service, args[1:], stdout, stderr)
 	}
-	fmt.Fprintf(stderr, "unknown attachments command %q\n", args[0])
+	writeFormat(stderr, "unknown attachments command %q\n", args[0])
 	return 2
 }
 
@@ -67,12 +67,12 @@ func runAttachmentsList(
 		if attachment.SizeKnown {
 			size = fmt.Sprintf("%d", attachment.Size)
 		}
-		fmt.Fprintf(
+		writeFormat(
 			stdout, "%s\tsize=%s\tsize_known=%t\tdownloaded=%t\t%s\n",
 			attachment.ID, size, attachment.SizeKnown, attachment.Downloaded, oneLine(attachment.Name),
 		)
 	}
-	fmt.Fprintf(
+	writeFormat(
 		stdout, "content\tsource=%s\tcomplete=%t\tmissing=%s\n",
 		message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
 	)
@@ -105,6 +105,6 @@ func runAttachmentsSave(
 	if *jsonOutput {
 		return writeSuccess(stdout, "attachments.save", responseData{SavedAttachment: &saved})
 	}
-	fmt.Fprintf(stdout, "%s\t%d\t%s\n", saved.Path, saved.Size, saved.SHA256)
+	writeFormat(stdout, "%s\t%d\t%s\n", saved.Path, saved.Size, saved.SHA256)
 	return 0
 }

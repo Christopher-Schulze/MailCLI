@@ -78,12 +78,12 @@ func (s *Store) SaveAttachmentTo(
 	messageRef string,
 	attachmentID string,
 	outputPath string,
-) error {
+) (resultErr error) {
 	resolved, source, err := s.openMessageSource(ctx, messageRef)
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer joinCloseError(&resultErr, source, "message source")
 	records, err := s.attachmentRecords(ctx, resolved.Record.RowID)
 	if err != nil {
 		return err
@@ -158,7 +158,10 @@ func mergeAttachmentRecords(
 	return merged, nil
 }
 
-func (s *Store) attachmentRecords(ctx context.Context, rowID int64) ([]attachmentRecord, error) {
+func (s *Store) attachmentRecords(
+	ctx context.Context,
+	rowID int64,
+) (result []attachmentRecord, resultErr error) {
 	rows, err := s.database.QueryContext(ctx, `
 		SELECT COALESCE(attachment_id, ''), COALESCE(name, '')
 		FROM attachments
@@ -168,7 +171,7 @@ func (s *Store) attachmentRecords(ctx context.Context, rowID int64) ([]attachmen
 	if err != nil {
 		return nil, fmt.Errorf("list Envelope Index attachments: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "attachment rows")
 	var records []attachmentRecord
 	for rows.Next() {
 		var record attachmentRecord
@@ -296,8 +299,7 @@ func selectIdenticalAttachment(files []externalAttachment) (externalAttachment, 
 	return files[0], true, nil
 }
 
-func hashRegularFile(path string) ([sha256.Size]byte, error) {
-	var result [sha256.Size]byte
+func hashRegularFile(path string) (result [sha256.Size]byte, resultErr error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return result, fmt.Errorf("inspect external attachment for hashing: %w", err)
@@ -309,7 +311,7 @@ func hashRegularFile(path string) ([sha256.Size]byte, error) {
 	if err != nil {
 		return result, fmt.Errorf("open external attachment for hashing: %w", err)
 	}
-	defer file.Close()
+	defer joinCloseError(&resultErr, file, "external attachment")
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(info, opened) {
 		return result, operationError("store_changed", "external attachment changed while opening")
@@ -327,7 +329,7 @@ func hashRegularFile(path string) ([sha256.Size]byte, error) {
 	return result, nil
 }
 
-func copyExternalAttachment(sourcePath string, outputPath string) error {
+func copyExternalAttachment(sourcePath string, outputPath string) (resultErr error) {
 	info, err := os.Lstat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("inspect external attachment: %w", err)
@@ -339,7 +341,7 @@ func copyExternalAttachment(sourcePath string, outputPath string) error {
 	if err != nil {
 		return fmt.Errorf("open external attachment: %w", err)
 	}
-	defer source.Close()
+	defer joinCloseError(&resultErr, source, "external attachment")
 	openedInfo, err := source.Stat()
 	if err != nil || !os.SameFile(info, openedInfo) {
 		return operationError("store_changed", "external attachment changed while opening")
@@ -384,11 +386,11 @@ func writeExclusiveFile(path string, reader io.Reader) error {
 	_, copyErr := io.Copy(file, reader)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
-		os.Remove(path)
+		removeErr := os.Remove(path)
 		if copyErr != nil {
-			return fmt.Errorf("write attachment output: %w", copyErr)
+			return errors.Join(fmt.Errorf("write attachment output: %w", copyErr), removeErr)
 		}
-		return fmt.Errorf("close attachment output: %w", closeErr)
+		return errors.Join(fmt.Errorf("close attachment output: %w", closeErr), removeErr)
 	}
 	return nil
 }

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -37,7 +36,7 @@ func runMessageMark(
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.mark", responseData{MessageState: &message})
 	}
-	fmt.Fprintf(stdout, "%s\tread=%t\tflagged=%t\tjunk=%t\n", message.Ref, message.Read, message.Flagged, message.Junk)
+	writeFormat(stdout, "%s\tread=%t\tflagged=%t\tjunk=%t\n", message.Ref, message.Read, message.Flagged, message.Junk)
 	return 0
 }
 
@@ -71,7 +70,7 @@ func runMessageTransfer(
 	if *jsonOutput {
 		return writeSuccess(stdout, command, responseData{MessageState: &message})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", message.Ref, message.MailboxRef)
+	writeFormat(stdout, "%s\t%s\n", message.Ref, message.MailboxRef)
 	return 0
 }
 
@@ -101,7 +100,7 @@ func runMessageDelete(
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.delete", responseData{DeleteResult: &result})
 	}
-	fmt.Fprintf(stdout, "deleted\t%s\n", result.MessageRef)
+	writeFormat(stdout, "deleted\t%s\n", result.MessageRef)
 	return 0
 }
 
@@ -121,6 +120,6 @@ func runSync(ctx context.Context, service *mail.Service, args []string, stdout i
 	if *jsonOutput {
 		return writeSuccess(stdout, "sync", responseData{SyncResult: &result})
 	}
-	fmt.Fprintln(stdout, "mail synchronization triggered")
+	writeLine(stdout, "mail synchronization triggered")
 	return 0
 }

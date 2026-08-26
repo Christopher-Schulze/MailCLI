@@ -18,7 +18,7 @@ mailcli attachments save --message MESSAGE_REF --attachment ATTACHMENT_ID --outp
 
 Apple Mail's scripting interface works well for targeted writes but performs poorly for large read operations. MailCLI separates those workloads.
 
-- Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events.
+- Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events. A targeted incomplete-content fallback accepts only Mail's raw RFC 5322 source as body or MIME-part evidence.
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. MailCLI creates no second mail index.
 - Draft export, send, reply, forward, mark, move, copy, delete, and sync use serialized Apple Events against the exact running Mail process.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
@@ -59,7 +59,7 @@ Mail.app remains the source of truth. MailCLI has no daemon, background process,
 
 The store adapter opens Mail's Envelope Index with SQLite `mode=ro`, `query_only=1`, WAL participation, and a private connection cache. Before reading, it validates the store version, framework version, UUID, required schema, account catalog, mailbox mapping, and filesystem containment. An unknown profile fails with `unsupported_mail_store_schema` before any message query runs.
 
-The write bridge acquires a context-aware BSD advisory lock, requires Mail to be running, and binds each request to the current Mail PID. Each invocation owns one `osascript` process group, waits for the process to exit, and reaps it before releasing the gate. Cancellation terminates that private process group and still waits for cleanup. It never launches, activates, quits, kills, or restarts Mail. A timed-out write enters `mail_recovery_required` because terminating `osascript` does not prove that Mail cancelled an Apple Event already accepted by the application.
+The write bridge acquires a context-aware BSD advisory lock, requires Mail to be running, and binds each request to the current Mail PID. Each invocation owns one `osascript` process group, waits for its leader, terminates any remaining owned group members, and verifies that the group is gone before releasing the gate. Cancellation first writes a private marker so the bridge can close an owned unsent compose object; only an unresponsive bridge is force-stopped after the cleanup grace period. It never launches, activates, quits, kills, or restarts Mail. A timed-out write enters `mail_recovery_required` because caller cancellation does not prove that Mail cancelled an Apple Event already accepted by the application.
 
 See [docs/documentation.md](docs/documentation.md) for the full command, reference, cursor, draft, send, and coverage contracts.
 
@@ -79,10 +79,10 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The `v1.0.0` release archive installs both the native CLI and its companion agent skill:
+The `v1.0.1` release archive installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.0.0
+VERSION=1.0.1
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -168,7 +168,7 @@ mailcli attachments save \
   --json
 ```
 
-`messages get` returns normalized content and completion metadata. `messages raw` returns the RFC 5322 source. Attachment export requires an absolute path and refuses to overwrite an existing file.
+`messages get` returns normalized content and completion metadata. A fallback result is complete only after MailCLI parses a full raw RFC 5322 source; failed Mail scripting properties remain explicitly incomplete. `messages raw` returns the unmodified RFC 5322 message. Attachment IDs are deterministic MIME-part paths, including during targeted fallback, while exported attachment files contain the decoded MIME-part bytes and report their media type, byte count, and SHA-256. Attachment export requires an absolute path and refuses to overwrite an existing file.
 
 ### Create and send a message
 
@@ -189,21 +189,21 @@ mailcli drafts inspect --ref DRAFT_REF --json
 mailcli drafts send --ref DRAFT_REF --confirm --json
 ```
 
-MailCLI records attachment size and SHA-256 when it creates or updates a draft. Send fails if an attachment changes before confirmation.
+Every draft JSON object must contain an explicit `body` field; an intentionally empty string is valid. Duplicate addresses across To, CC, and BCC are rejected. MailCLI records attachment size and SHA-256 when it creates or updates a draft. At send time it byte-verifies each reviewed attachment into a private snapshot, so later filesystem changes cannot alter what Mail reads.
 
 Send results have three explicit outcomes:
 
 | Outcome | Meaning | Next action |
 |---|---|---|
 | `sent_store_observed` | The matching message appeared in Sent | Complete |
-| `accepted_by_mail` | Mail accepted the send, but Sent was not observed in time | Do not send again; reconcile |
+| `accepted_by_mail` | Mail accepted the send, but exact Sent content was not observed in time; command exits `1` with `ok:false` and preserves `data.send_result` | Do not send again; reconcile |
 | `outcome_unknown` | The caller cannot prove whether Mail accepted the operation | Do not send again; reconcile |
 
 ```bash
 mailcli drafts reconcile --ref DRAFT_REF --json
 ```
 
-Reconciliation only checks Sent. It cannot send the draft again.
+Reconciliation only checks Sent. It cannot send the draft again. Until exact Sent evidence exists, it also exits `1` with `send_not_observed`.
 
 ### Reply, forward, and organize
 
@@ -211,7 +211,7 @@ Reconciliation only checks Sent. It cannot send the draft again.
 printf '%s' '{"body":"Thanks, I will review this.\n"}' \
   | mailcli messages reply --message MESSAGE_REF --input - --all --json
 
-printf '%s' '{"body":"For your review.\n"}' \
+printf '%s' '{"to":[{"address":"recipient@example.com"}],"body":"For your review.\n"}' \
   | mailcli messages forward --message MESSAGE_REF --input - --json
 
 mailcli messages mark --ref MESSAGE_REF --read true --flagged false --json
@@ -221,7 +221,7 @@ mailcli messages delete --ref MESSAGE_REF --confirm --json
 mailcli sync --account ACCOUNT_REF --json
 ```
 
-Reply and forward commands create local drafts. Inspect and confirm them through the same draft lifecycle before sending.
+Reply and forward commands require a store-bound source reference and create local drafts. Before send, MailCLI revalidates the exact source in the local store, fingerprints original forward attachments from local MIME, and asks Mail to create the native compose object without redundantly fetching its full RFC source over Apple Events. Each compose phase has a hard five-snapshot budget; a second stable read-back verifies the reviewed body, native quote, recipients, and attachments. Any mismatch closes the unsent compose object and blocks `send()`.
 
 ## JSON contract
 
@@ -264,7 +264,7 @@ The link command refuses if a skill already exists at that destination. It does 
 | No broad Apple Events reads | Uses the store for enumeration and search, with fallback for one resolved incomplete message only |
 | No duplicate send after timeout | Persists a send claim before invoking Mail and blocks every repeated attempt |
 | No Mail.app lifecycle control | Requires the exact running Mail PID and never launches, activates, quits, kills, or restarts Mail.app |
-| No residual bridge process | Owns, terminates when necessary, waits for, and reaps the complete `osascript` process group before command completion |
+| No residual bridge process | Waits for the owned `osascript` leader, terminates residual group members, and verifies process-group absence before command completion |
 | No Apple Events backlog after uncertainty | Records the exact affected Mail PID and rejects every later live operation until that process has been replaced |
 | No accidental overwrite | Attachment export accepts only an absolute destination that does not exist |
 | No silent incomplete search | Reports source completeness and scan bounds on every search page |
@@ -284,7 +284,7 @@ MailCLI stores only local review drafts and access-gate recovery state under `~/
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.0
+./scripts/release/build-release.sh 1.0.1
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```

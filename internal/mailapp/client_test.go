@@ -2,8 +2,11 @@ package mailapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,10 +15,11 @@ import (
 )
 
 type runnerStub struct {
-	response string
-	err      error
-	request  string
-	script   string
+	response   string
+	err        error
+	notStarted bool
+	request    string
+	script     string
 }
 
 type blockedAccessGate struct{}
@@ -50,24 +54,24 @@ type cancelingSuccessRunner struct {
 	cancel context.CancelFunc
 }
 
-func (runner cancelingSuccessRunner) Run(context.Context, string, string) ([]byte, error) {
+func (runner cancelingSuccessRunner) Run(context.Context, string, string) ([]byte, bool, error) {
 	runner.cancel()
-	return []byte(`{"ok":true,"error":null,"accounts":[]}`), nil
+	return []byte(`{"ok":true,"error":null,"accounts":[]}`), true, nil
 }
 
 type cancelingBridgeErrorRunner struct {
 	cancel context.CancelFunc
 }
 
-func (runner cancelingBridgeErrorRunner) Run(context.Context, string, string) ([]byte, error) {
+func (runner cancelingBridgeErrorRunner) Run(context.Context, string, string) ([]byte, bool, error) {
 	runner.cancel()
-	return []byte(`{"ok":false,"error":{"code":"compose_busy","message":"busy"}}`), nil
+	return []byte(`{"ok":false,"error":{"code":"compose_busy","message":"busy"}}`), true, nil
 }
 
-func (runner *runnerStub) Run(_ context.Context, script string, request string) ([]byte, error) {
+func (runner *runnerStub) Run(_ context.Context, script string, request string) ([]byte, bool, error) {
 	runner.script = script
 	runner.request = request
-	return []byte(runner.response), runner.err
+	return []byte(runner.response), !runner.notStarted, runner.err
 }
 
 func TestClientBindsBridgeRequestToGateProcess(t *testing.T) {
@@ -110,6 +114,38 @@ func TestClientMapsAccountsAndMailboxes(t *testing.T) {
 	}
 	if !strings.Contains(runner.request, `"account_id":"account-id"`) {
 		t.Fatalf("bridge request = %q", runner.request)
+	}
+}
+
+func TestSnapshotBridgeAttachmentsPreservesReviewedBytesAndName(t *testing.T) {
+	content := []byte("reviewed attachment")
+	digest := sha256.Sum256(content)
+	path := filepath.Join(t.TempDir(), "evidence.txt")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	draft, cleanup, err := snapshotBridgeAttachments(bridgeDraft{Attachments: []mail.DraftAttachment{{
+		Path: path, Size: int64(len(content)), SHA256: hex.EncodeToString(digest[:]),
+	}}})
+	if err != nil {
+		t.Fatalf("snapshotBridgeAttachments() error = %v", err)
+	}
+	snapshotPath := draft.Attachments[0].Path
+	if filepath.Base(snapshotPath) != "evidence.txt" || snapshotPath == path {
+		t.Fatalf("snapshot path = %q", snapshotPath)
+	}
+	if err := os.WriteFile(path, []byte("changed after snapshot"), 0o600); err != nil {
+		t.Fatalf("change source: %v", err)
+	}
+	snapshot, err := os.ReadFile(snapshotPath)
+	if err != nil || string(snapshot) != string(content) {
+		t.Fatalf("snapshot bytes = %q, error = %v", snapshot, err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup attachment snapshot: %v", err)
+	}
+	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
+		t.Fatalf("snapshot cleanup error = %v", err)
 	}
 }
 
@@ -194,6 +230,21 @@ func TestClientReturnsTypedBridgeError(t *testing.T) {
 	}
 }
 
+func TestClientNeverClaimsConvenienceMessageReadComplete(t *testing.T) {
+	messageRef, err := encodeMessageReference(messageReference{
+		AccountID: "account-id", MailboxPath: []string{"Inbox"}, LibraryID: "42",
+	})
+	if err != nil {
+		t.Fatalf("encodeMessageReference() error = %v", err)
+	}
+	runner := &runnerStub{response: `{"ok":true,"message":{"account_id":"account-id","mailbox_path":["Inbox"],"library_id":"42","content":""}}`}
+	client := &Client{runner: runner}
+	message, err := client.GetMessage(context.Background(), messageRef)
+	if err != nil || message.ContentComplete || len(message.MissingParts) != 1 {
+		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
+	}
+}
+
 func TestClientDoesNotInvokeBridgeWhenAccessGateIsBusy(t *testing.T) {
 	runner := &runnerStub{response: `{"ok":true,"error":null}`}
 	client := &Client{runner: runner, gate: blockedAccessGate{}}
@@ -257,6 +308,22 @@ func TestClientDoesNotMarkCompletedBridgeErrorUncertainAfterConcurrentCancel(t *
 	}
 }
 
+func TestClientTreatsPrivateBridgeCleanupFailureAsCompleted(t *testing.T) {
+	lease := &accessLeaseRecorder{}
+	client := &Client{
+		runner: &runnerStub{
+			response: `{"ok":true,"error":null,"accounts":[]}`,
+			err:      &OperationError{Code: "bridge_cleanup_failed", Message: "private request remained"},
+		},
+		gate: accessGateStub{lease: lease},
+	}
+
+	_, err := client.ListAccounts(context.Background())
+	if errorWithCode(err, "bridge_cleanup_failed") == nil || lease.uncertain {
+		t.Fatalf("ListAccounts() error = %v, lease uncertain = %t", err, lease.uncertain)
+	}
+}
+
 func TestClientFailsClosedAfterIncompleteBridgeCompletion(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -280,6 +347,20 @@ func TestClientFailsClosedAfterIncompleteBridgeCompletion(t *testing.T) {
 				t.Fatal("incomplete bridge completion did not fail closed")
 			}
 		})
+	}
+}
+
+func TestClientDoesNotMarkPreStartRunnerFailureUncertain(t *testing.T) {
+	lease := &accessLeaseRecorder{}
+	client := &Client{
+		runner: &runnerStub{err: errors.New("process did not start"), notStarted: true},
+		gate:   accessGateStub{lease: lease},
+	}
+	if _, err := client.ListAccounts(context.Background()); err == nil {
+		t.Fatal("ListAccounts() error = nil")
+	}
+	if lease.uncertain {
+		t.Fatal("pre-start runner failure marked Mail state uncertain")
 	}
 }
 

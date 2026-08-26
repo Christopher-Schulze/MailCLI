@@ -21,11 +21,11 @@ type codedError interface {
 
 func runAccounts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) > 0 && isHelpArgument(args[0]) {
-		fmt.Fprintln(stdout, "usage: mailcli accounts list [--json]")
+		writeLine(stdout, "usage: mailcli accounts list [--json]")
 		return 0
 	}
 	if len(args) == 0 || args[0] != "list" {
-		fmt.Fprintln(stderr, "usage: mailcli accounts list [--json]")
+		writeLine(stderr, "usage: mailcli accounts list [--json]")
 		return 2
 	}
 	flags := newFlagSet("accounts list", stderr)
@@ -44,21 +44,21 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 		return writeSuccess(stdout, "accounts.list", responseData{Accounts: &accounts})
 	}
 	for _, account := range accounts {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\n", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
+		writeFormat(stdout, "%s\t%s\t%s\n", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
 	}
 	return 0
 }
 
 func runMailboxes(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "usage: mailcli mailboxes <list|resolve> [flags]")
+		writeLine(stdout, "usage: mailcli mailboxes <list|resolve> [flags]")
 		return 0
 	}
 	if args[0] == "resolve" {
 		return runMailboxResolve(ctx, service, args[1:], stdout, stderr)
 	}
 	if args[0] != "list" {
-		fmt.Fprintln(stderr, "usage: mailcli mailboxes <list|resolve> [flags]")
+		writeLine(stderr, "usage: mailcli mailboxes <list|resolve> [flags]")
 		return 2
 	}
 	flags := newFlagSet("mailboxes list", stderr)
@@ -78,7 +78,7 @@ func runMailboxes(ctx context.Context, service *mail.Service, args []string, std
 		return writeSuccess(stdout, "mailboxes.list", responseData{Mailboxes: &mailboxes})
 	}
 	for _, mailbox := range mailboxes {
-		fmt.Fprintf(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
+		writeFormat(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
 	}
 	return 0
 }
@@ -101,7 +101,7 @@ func runMailboxResolve(ctx context.Context, service *mail.Service, args []string
 	if *jsonOutput {
 		return writeSuccess(stdout, "mailboxes.resolve", responseData{Mailbox: &mailbox})
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
+	writeFormat(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
 	return 0
 }
 
@@ -127,12 +127,12 @@ func runMessages(
 	stderr io.Writer,
 ) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
+		writeLine(stderr, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		fmt.Fprintln(stdout, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
+		writeLine(stdout, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
 		return 0
 	case "list":
 		return runMessagesList(ctx, mailService, args[1:], stdout, stderr)
@@ -157,7 +157,7 @@ func runMessages(
 	case "delete":
 		return runMessageDelete(ctx, mailService, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown messages command %q\n", args[0])
+		writeFormat(stderr, "unknown messages command %q\n", args[0])
 		return 2
 	}
 }
@@ -221,7 +221,7 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.raw", responseData{RawSource: &raw})
 	}
-	fmt.Fprint(stdout, raw)
+	writeRaw(stdout, raw)
 	return 0
 }
 
@@ -240,9 +240,9 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 	}
 	if err != nil || flags.NArg() != 0 {
 		if err != nil {
-			fmt.Fprintln(stderr, err)
+			writeLine(stderr, err)
 		} else {
-			fmt.Fprintf(stderr, "unexpected argument %q\n", flags.Arg(0))
+			writeFormat(stderr, "unexpected argument %q\n", flags.Arg(0))
 		}
 		writeFlagUsage(flags, stderr)
 		return 2
@@ -251,7 +251,7 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 }
 
 func writeFlagUsage(flags *flag.FlagSet, writer io.Writer) {
-	fmt.Fprintf(writer, "Usage of %s:\n", flags.Name())
+	writeFormat(writer, "Usage of %s:\n", flags.Name())
 	flags.SetOutput(writer)
 	flags.PrintDefaults()
 	flags.SetOutput(io.Discard)
@@ -270,7 +270,7 @@ func failCommandWithData(
 	stderr io.Writer,
 ) int {
 	if !jsonOutput {
-		fmt.Fprintln(stderr, err)
+		writeLine(stderr, err)
 		return 1
 	}
 	code := "operation_failed"
@@ -302,30 +302,30 @@ func writeMessagePage(stdout io.Writer, command string, page mail.MessagePage, j
 		return writeSuccess(stdout, command, responseData{Page: messageResponsePage(&page)})
 	}
 	for _, message := range page.Messages {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))
+		writeFormat(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))
 	}
 	if page.NextCursor != "" {
-		fmt.Fprintf(stdout, "next_cursor\t%s\n", page.NextCursor)
+		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
 	return 0
 }
 
 func writeMessage(stdout io.Writer, message mail.Message) {
-	fmt.Fprintf(stdout, "Ref: %s\n", message.Summary.Ref)
-	fmt.Fprintf(stdout, "From: %s\n", message.Summary.Sender)
-	fmt.Fprintf(stdout, "To: %s\n", formatRecipients(message.To))
-	fmt.Fprintf(stdout, "CC: %s\n", formatRecipients(message.CC))
-	fmt.Fprintf(stdout, "BCC: %s\n", formatRecipients(message.BCC))
-	fmt.Fprintf(stdout, "Subject: %s\n", message.Summary.Subject)
-	fmt.Fprintf(stdout, "Date received: %s\n", message.Summary.DateReceived)
-	fmt.Fprintf(stdout, "Attachments: %d\n", len(message.Attachments))
-	fmt.Fprintf(stdout, "Content source: %s\n", message.ContentSource)
-	fmt.Fprintf(stdout, "Content complete: %t\n", message.ContentComplete)
+	writeFormat(stdout, "Ref: %s\n", message.Summary.Ref)
+	writeFormat(stdout, "From: %s\n", message.Summary.Sender)
+	writeFormat(stdout, "To: %s\n", formatRecipients(message.To))
+	writeFormat(stdout, "CC: %s\n", formatRecipients(message.CC))
+	writeFormat(stdout, "BCC: %s\n", formatRecipients(message.BCC))
+	writeFormat(stdout, "Subject: %s\n", message.Summary.Subject)
+	writeFormat(stdout, "Date received: %s\n", message.Summary.DateReceived)
+	writeFormat(stdout, "Attachments: %d\n", len(message.Attachments))
+	writeFormat(stdout, "Content source: %s\n", message.ContentSource)
+	writeFormat(stdout, "Content complete: %t\n", message.ContentComplete)
 	if len(message.MissingParts) > 0 {
-		fmt.Fprintf(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", "))
+		writeFormat(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", "))
 	}
-	fmt.Fprintln(stdout)
-	fmt.Fprint(stdout, message.Content)
+	writeLine(stdout)
+	writeRaw(stdout, message.Content)
 }
 
 func formatRecipients(recipients []mail.Recipient) string {

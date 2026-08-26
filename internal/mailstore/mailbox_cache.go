@@ -32,12 +32,16 @@ func (s *Store) loadMailboxCache(ctx context.Context, accountID string) (mailbox
 	return readMailboxCache(ctx, path, info)
 }
 
-func readMailboxCache(ctx context.Context, path string, expected os.FileInfo) (mailboxCache, error) {
+func readMailboxCache(
+	ctx context.Context,
+	path string,
+	expected os.FileInfo,
+) (result mailboxCache, resultErr error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return mailboxCache{}, fmt.Errorf("open mailbox cache: %w", err)
 	}
-	defer file.Close()
+	defer joinCloseError(&resultErr, file, "mailbox cache")
 	opened, err := file.Stat()
 	if err != nil {
 		return mailboxCache{}, fmt.Errorf("inspect opened mailbox cache: %w", err)

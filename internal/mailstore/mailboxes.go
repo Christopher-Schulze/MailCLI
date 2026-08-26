@@ -99,7 +99,7 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 	return mailboxes, nil
 }
 
-func (s *Store) loadMailboxRecords(ctx context.Context) ([]mailboxRecord, error) {
+func (s *Store) loadMailboxRecords(ctx context.Context) (result []mailboxRecord, resultErr error) {
 	rows, err := s.database.QueryContext(ctx, `
 		SELECT ROWID, url, total_count, unread_count
 		FROM mailboxes
@@ -108,7 +108,7 @@ func (s *Store) loadMailboxRecords(ctx context.Context) ([]mailboxRecord, error)
 	if err != nil {
 		return nil, fmt.Errorf("list Envelope Index mailboxes: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "mailbox rows")
 	var records []mailboxRecord
 	for rows.Next() {
 		var record mailboxRecord

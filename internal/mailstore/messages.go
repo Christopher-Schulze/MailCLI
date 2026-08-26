@@ -101,7 +101,7 @@ func (s *Store) queryMailboxMessages(
 	mailboxRowID int64,
 	cursor *listCursor,
 	limit int,
-) ([]messageRecord, error) {
+) (result []messageRecord, resultErr error) {
 	query := mailboxMessagesSQL("")
 	arguments := []any{mailboxRowID, mailboxRowID}
 	if cursor != nil {
@@ -115,7 +115,7 @@ func (s *Store) queryMailboxMessages(
 	if err != nil {
 		return nil, fmt.Errorf("list Envelope Index messages: %w", err)
 	}
-	defer rows.Close()
+	defer joinCloseError(&resultErr, rows, "message rows")
 	items := make([]messageRecord, 0, limit)
 	for rows.Next() {
 		item, err := scanMessageRecord(rows)

@@ -4,6 +4,33 @@ function bridgeError(code, message) {
     throw error;
 }
 
+let bridgeCancellationPath = "";
+
+function cancellationRequested() {
+    return bridgeCancellationPath && Boolean(
+        $.NSFileManager.defaultManager.fileExistsAtPath(bridgeCancellationPath)
+    );
+}
+
+function abortIfCancelled() {
+    if (cancellationRequested()) {
+        bridgeError("operation_cancelled", "Mail.app operation was cancelled before mutation");
+    }
+}
+
+function readBridgeRequest(path) {
+    ObjC.import("Foundation");
+    const data = $.NSData.dataWithContentsOfFile(path);
+    if (!data) {
+        bridgeError("invalid_request", "MailCLI bridge request could not be read");
+    }
+    const value = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+    if (!value) {
+        bridgeError("invalid_request", "MailCLI bridge request is not valid UTF-8");
+    }
+    return JSON.parse(ObjC.unwrap(value));
+}
+
 function safe(read, fallback) {
     try {
         const value = read();
@@ -202,11 +229,23 @@ function saveAttachment(mail, request, resolution) {
 }
 
 function addRecipients(mail, outgoing, property, constructor, values) {
+    const existing = Object.create(null);
+    for (const recipient of outgoing[property]()) {
+        const address = String(recipient.address()).trim().toLowerCase();
+        if (address) {
+            existing[address] = true;
+        }
+    }
     for (const value of values || []) {
+        const address = String(value.address || "").trim().toLowerCase();
+        if (!address || existing[address]) {
+            continue;
+        }
         outgoing[property].push(mail[constructor]({
             address: value.address,
             name: value.name || ""
         }));
+        existing[address] = true;
     }
 }
 
@@ -244,6 +283,192 @@ function outgoingForDraft(mail, draft, resolution) {
     bridgeError("invalid_request", "unsupported draft kind");
 }
 
+function composeRecipients(outgoing, property) {
+    return outgoing[property]().map(recipient => ({
+        name: safe(() => recipient.name(), ""),
+        address: String(recipient.address())
+    }));
+}
+
+function composeAttachmentPaths(outgoing) {
+    return outgoing.content.attachments().map(attachment => String(attachment.fileName()));
+}
+
+function composeSnapshot(outgoing) {
+    return {
+        from: String(outgoing.sender()),
+        to: composeRecipients(outgoing, "toRecipients"),
+        cc: composeRecipients(outgoing, "ccRecipients"),
+        bcc: composeRecipients(outgoing, "bccRecipients"),
+        subject: String(outgoing.subject()),
+        body: String(outgoing.content()),
+        attachment_paths: composeAttachmentPaths(outgoing)
+    };
+}
+
+function stableComposeFingerprint(snapshot) {
+    return JSON.stringify(snapshot);
+}
+
+function sleepForCompose(seconds) {
+    $.NSThread.sleepForTimeInterval(seconds);
+}
+
+function waitForComposeSnapshot(outgoing, accepts, initialDelay, retryDelay, maximumSnapshots, code, message) {
+    abortIfCancelled();
+    sleepForCompose(initialDelay);
+    let previousAccepted = "";
+    for (let attempt = 0; attempt < maximumSnapshots; attempt += 1) {
+        abortIfCancelled();
+        let snapshot;
+        try {
+            snapshot = composeSnapshot(outgoing);
+        } catch (_) {
+            snapshot = null;
+        }
+        if (snapshot !== null && accepts(snapshot)) {
+            const fingerprint = stableComposeFingerprint(snapshot);
+            if (fingerprint === previousAccepted) {
+                return snapshot;
+            }
+            previousAccepted = fingerprint;
+        } else {
+            previousAccepted = "";
+        }
+        if (attempt + 1 < maximumSnapshots) {
+            sleepForCompose(retryDelay);
+        }
+    }
+    bridgeError(code, message);
+}
+
+function waitForStableCompose(outgoing, requiredAttachmentCount) {
+    return waitForComposeSnapshot(
+        outgoing,
+        snapshot => snapshot.attachment_paths.length >= (requiredAttachmentCount || 0),
+        4, 2, 5,
+        "compose_not_ready",
+        "Mail.app did not stabilize the native compose object before the send deadline"
+    );
+}
+
+function canonicalComposeText(value) {
+    return String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n").normalize("NFC");
+}
+
+function recipientAddresses(values) {
+    return values.map(value => String(value.address).trim().toLowerCase());
+}
+
+function hasDuplicateAddresses(values) {
+    const seen = Object.create(null);
+    for (const address of recipientAddresses(values)) {
+        if (!address || seen[address]) {
+            return true;
+        }
+        seen[address] = true;
+    }
+    return false;
+}
+
+function hasDuplicateRecipients(snapshot) {
+    return hasDuplicateAddresses(snapshot.to.concat(snapshot.cc, snapshot.bcc));
+}
+
+function expectedRecipientAddresses(nativeValues, reviewedValues) {
+    const addresses = [];
+    const seen = Object.create(null);
+    for (const value of (nativeValues || []).concat(reviewedValues || [])) {
+        const address = String(value.address || "").trim().toLowerCase();
+        if (address && !seen[address]) {
+            addresses.push(address);
+            seen[address] = true;
+        }
+    }
+    return addresses.sort();
+}
+
+function recipientsMatchMaterialization(actual, nativeValues, reviewedValues) {
+    const actualAddresses = recipientAddresses(actual).sort();
+    const expectedAddresses = expectedRecipientAddresses(nativeValues, reviewedValues);
+    return JSON.stringify(actualAddresses) === JSON.stringify(expectedAddresses);
+}
+
+function normalizedMailbox(value) {
+    const text = String(value || "").trim();
+    const bracketed = text.match(/<([^<>]+)>\s*$/);
+    return String(bracketed ? bracketed[1] : text).trim().toLowerCase();
+}
+
+function basename(path) {
+    const components = String(path).split("/");
+    return components[components.length - 1];
+}
+
+function containsReviewedAttachments(paths, expected) {
+    const counts = Object.create(null);
+    for (const path of paths) {
+        const name = basename(path).normalize("NFC");
+        counts[name] = (counts[name] || 0) + 1;
+    }
+    for (const attachment of expected || []) {
+        const name = basename(attachment.path).normalize("NFC");
+        if (!counts[name]) {
+            return false;
+        }
+        counts[name] -= 1;
+    }
+    return true;
+}
+
+function composeMatchesDraft(snapshot, draft, native) {
+    const body = canonicalComposeText(snapshot.body);
+    const expectedBody = canonicalComposeText(draft.body);
+    const nativeBody = canonicalComposeText(native.body || "");
+    let materializedBody = expectedBody;
+    if (draft.kind !== "new") {
+        materializedBody = expectedBody || nativeBody;
+        if (expectedBody && nativeBody) {
+            materializedBody = expectedBody + "\n\n" + nativeBody;
+        }
+    }
+    if (body !== materializedBody) {
+        return false;
+    }
+    if (normalizedMailbox(snapshot.from) !== normalizedMailbox(draft.from || native.from)) {
+        return false;
+    }
+    if (String(snapshot.subject).normalize("NFC") !== String(draft.subject || native.subject || "").normalize("NFC")) {
+        return false;
+    }
+    if (hasDuplicateRecipients(snapshot)) {
+        return false;
+    }
+    if (!recipientsMatchMaterialization(snapshot.to, native.to, draft.to) ||
+        !recipientsMatchMaterialization(snapshot.cc, native.cc, draft.cc) ||
+        !recipientsMatchMaterialization(snapshot.bcc, native.bcc, draft.bcc)) {
+        return false;
+    }
+    if (snapshot.to.length + snapshot.cc.length + snapshot.bcc.length === 0) {
+        return false;
+    }
+    if (snapshot.attachment_paths.length !== (native.attachment_paths || []).length + (draft.attachments || []).length) {
+        return false;
+    }
+    return containsReviewedAttachments(snapshot.attachment_paths, (native.attachment_paths || []).map(path => ({path: path}))) &&
+        containsReviewedAttachments(snapshot.attachment_paths, draft.attachments);
+}
+
+function waitForPreparedCompose(outgoing, draft, native) {
+    return waitForComposeSnapshot(
+        outgoing,
+        snapshot => composeMatchesDraft(snapshot, draft, native),
+        1.5, 1.5, 5,
+        "compose_integrity_failed",
+        "Mail.app did not retain the reviewed body, recipients, and attachments; send was blocked"
+    );
+}
+
 function applyOutgoingFields(mail, outgoing, draft) {
     if (draft.from) {
         outgoing.sender = draft.from;
@@ -257,12 +482,31 @@ function applyOutgoingFields(mail, outgoing, draft) {
         outgoing.content = draft.body && originalContent
             ? draft.body + "\n\n" + originalContent
             : draft.body || originalContent;
+    } else {
+        outgoing.content = draft.body;
     }
     addRecipients(mail, outgoing, "toRecipients", "ToRecipient", draft.to);
     addRecipients(mail, outgoing, "ccRecipients", "CcRecipient", draft.cc);
     addRecipients(mail, outgoing, "bccRecipients", "BccRecipient", draft.bcc);
     for (const attachment of draft.attachments || []) {
         outgoing.content.attachments.push(mail.Attachment({fileName: Path(attachment.path)}));
+    }
+}
+
+function sendMaterialization(snapshot) {
+    return {
+        from: snapshot.from,
+        to: snapshot.to,
+        cc: snapshot.cc,
+        bcc: snapshot.bcc,
+        subject: snapshot.subject,
+        attachment_count: snapshot.attachment_paths.length
+    };
+}
+
+function ensureComposeAvailable(mail) {
+    if (mail.outgoingMessages().length !== 0) {
+        bridgeError("compose_busy", "Mail.app already has an open compose object; close or save it first");
     }
 }
 
@@ -273,13 +517,31 @@ function sendDraft(mail, request, resolution) {
     if (request.draft.kind === "new" && !request.draft.from) {
         bridgeError("invalid_request", "sending a new draft requires an explicit sender");
     }
+    abortIfCancelled();
+    ensureComposeAvailable(mail);
     const outgoing = outgoingForDraft(mail, request.draft, resolution);
     let sendAttempted = false;
     try {
+        const native = waitForStableCompose(outgoing, request.draft.expected_native_attachment_count);
         applyOutgoingFields(mail, outgoing, request.draft);
+        const finalSnapshot = waitForPreparedCompose(outgoing, request.draft, native);
+        abortIfCancelled();
         sendAttempted = true;
         const accepted = Boolean(outgoing.send());
-        return {accepted: accepted, send_attempted: true};
+        if (!accepted) {
+            const cleaned = safe(() => {
+                outgoing.close({saving: "no"});
+                return true;
+            }, false);
+            if (!cleaned) {
+                bridgeError("compose_cleanup_failed", "Mail.app rejected send and the unsent compose object could not be closed");
+            }
+        }
+        return {
+            accepted: accepted,
+            send_attempted: true,
+            materialized: sendMaterialization(finalSnapshot)
+        };
     } catch (error) {
         error.sendAttempted = sendAttempted;
         if (!sendAttempted) {
@@ -300,16 +562,18 @@ function saveDraft(mail, request, resolution) {
     if (!request.draft || !request.draft.from) {
         bridgeError("invalid_request", "draft with an explicit sender is required");
     }
-    if (mail.outgoingMessages().length !== 0) {
-        bridgeError("compose_busy", "Mail.app already has an open compose object; close or save it before drafts save");
-    }
+    abortIfCancelled();
+    ensureComposeAvailable(mail);
     const outgoing = outgoingForDraft(mail, request.draft, resolution);
     let saveAttempted = false;
     try {
+        const native = waitForStableCompose(outgoing, request.draft.expected_native_attachment_count);
         applyOutgoingFields(mail, outgoing, request.draft);
+        const finalSnapshot = waitForPreparedCompose(outgoing, request.draft, native);
+        abortIfCancelled();
         saveAttempted = true;
-        outgoing.save();
-        return {accepted: true};
+        outgoing.close({saving: "yes"});
+        return {accepted: true, materialized: sendMaterialization(finalSnapshot)};
     } catch (error) {
         if (!saveAttempted) {
             const cleaned = safe(() => {
@@ -487,10 +751,12 @@ function dispatch(mail, request) {
 
 function run(argv) {
     try {
-        if (argv.length !== 1) {
-            bridgeError("invalid_request", "exactly one JSON request is required");
+        if (argv.length !== 2) {
+            bridgeError("invalid_request", "request and cancellation paths are required");
         }
-        const request = JSON.parse(argv[0]);
+        bridgeCancellationPath = argv[1];
+        const request = readBridgeRequest(argv[0]);
+        abortIfCancelled();
         if (!Number.isInteger(request.mail_pid) || request.mail_pid <= 0) {
             bridgeError("mail_not_running", "Mail.app target process is unavailable");
         }
