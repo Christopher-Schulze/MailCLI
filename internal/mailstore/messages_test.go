@@ -2,6 +2,9 @@ package mailstore
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -39,6 +42,27 @@ func TestStoreReadsNullableMessageIdentity(t *testing.T) {
 	}
 	if _, err := store.SearchMessages(context.Background(), query); err != nil {
 		t.Fatalf("SearchMessages() error = %v", err)
+	}
+}
+
+func TestStoreReturnsExactFullRawSource(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Status Update")
+	raw, err := store.GetRawSource(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("GetRawSource() error = %v", err)
+	}
+	if !strings.HasPrefix(raw, "From: Alice <alice@example.com>\r\n") ||
+		!strings.HasSuffix(raw, "needle beta\r\n") {
+		t.Fatal("GetRawSource() did not preserve the exact framed RFC source")
 	}
 }
 
@@ -80,6 +104,42 @@ func TestMessageAttachmentsDoNotClaimMissingFullSourcePartIsDownloaded(t *testin
 	attachments, err := store.messageAttachments(context.Background(), resolved, source, map[string]mimePart{})
 	if err != nil || len(attachments) != 1 || attachments[0].Downloaded {
 		t.Fatalf("messageAttachments() = %+v, error = %v", attachments, err)
+	}
+}
+
+func TestMessageAttachmentsRejectSymlinkedExternalBytes(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	resolved, source, err := store.openMessageSource(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("openMessageSource() error = %v", err)
+	}
+	closeTestResource(t, source, "message source")
+	directory, err := store.attachmentDirectory(resolved, "2")
+	if err != nil {
+		t.Fatalf("attachmentDirectory() error = %v", err)
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "target.pdf")
+	if err := os.WriteFile(target, []byte("untrusted"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(directory, "invoice.pdf")); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	_, err = store.messageAttachments(context.Background(), resolved, source, map[string]mimePart{})
+	if errorCodeForTest(err) != "ambiguous_attachment" {
+		t.Fatalf("messageAttachments() error = %v, want ambiguous_attachment", err)
 	}
 }
 

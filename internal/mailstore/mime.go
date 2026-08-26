@@ -64,7 +64,7 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool) (mi
 	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
 		return mimeDocument{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC message: %v", readErr))
 	}
-	document := mimeDocument{Complete: readErr == nil && !partial, Parts: make(map[string]mimePart)}
+	document := mimeDocument{Complete: readErr == nil && !partial}
 	if readErr != nil {
 		document.MissingParts = append(document.MissingParts, "mime-decoding")
 	}
@@ -127,6 +127,9 @@ func parseMIMEEntity(
 		complete := err == nil && !missingAppleContent(
 			entity.Header.Get("X-Apple-Content-Length"), size, true,
 		)
+		if document.Parts == nil {
+			document.Parts = make(map[string]mimePart)
+		}
 		document.Parts[partID] = mimePart{
 			ID: partID, Name: filename, MIMEType: mediaType, Size: size,
 			SHA256: digest, Complete: complete,

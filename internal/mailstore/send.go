@@ -624,7 +624,7 @@ func (s *Store) observedAttachmentFingerprint(
 		return attachmentFingerprint{}, false, err
 	}
 	if available {
-		digest, err := hashRegularFile(external.Path)
+		digest, err := s.hashStoreFile(external)
 		if err != nil {
 			return attachmentFingerprint{}, false, err
 		}

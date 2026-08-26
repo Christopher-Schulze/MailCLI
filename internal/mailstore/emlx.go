@@ -195,50 +195,40 @@ func (s *Store) openResolvedSource(resolved resolvedMessage) (*emlxSource, error
 	}
 	fullPath := base + ".emlx"
 	partialPath := base + ".partial.emlx"
-	fullInfo, fullErr := os.Lstat(fullPath)
-	partialInfo, partialErr := os.Lstat(partialPath)
+	fullFile, fullInfo, fullErr := openRegularPath(s.versionDirectory, s.versionRoot, fullPath)
+	partialFile, partialInfo, partialErr := openRegularPath(s.versionDirectory, s.versionRoot, partialPath)
+	if fullErr != nil && !os.IsNotExist(fullErr) {
+		if partialFile != nil {
+			joinCloseError(&fullErr, partialFile, "partial EMLX source")
+		}
+		return nil, fullErr
+	}
+	if partialErr != nil && !os.IsNotExist(partialErr) {
+		if fullFile != nil {
+			joinCloseError(&partialErr, fullFile, "full EMLX source")
+		}
+		return nil, partialErr
+	}
 	if fullErr == nil && partialErr == nil {
-		return nil, operationError("ambiguous_message_source", "both full and partial EMLX sources exist")
+		resultErr := error(operationError("ambiguous_message_source", "both full and partial EMLX sources exist"))
+		joinCloseError(&resultErr, fullFile, "full EMLX source")
+		joinCloseError(&resultErr, partialFile, "partial EMLX source")
+		return nil, resultErr
 	}
 	path := fullPath
+	file := fullFile
 	info := fullInfo
 	partial := false
 	if fullErr != nil {
-		if !os.IsNotExist(fullErr) {
-			return nil, fmt.Errorf("inspect full EMLX source: %w", fullErr)
-		}
 		if partialErr != nil {
-			if os.IsNotExist(partialErr) {
-				return nil, operationError("message_source_missing", "message source is not downloaded locally")
-			}
-			return nil, fmt.Errorf("inspect partial EMLX source: %w", partialErr)
+			return nil, operationError("message_source_missing", "message source is not downloaded locally")
 		}
 		path = partialPath
+		file = partialFile
 		info = partialInfo
 		partial = true
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, operationError("unsafe_message_source", "message source is not a regular local file")
-	}
-	if err := validatePathWithoutSymlinks(s.versionRoot, path); err != nil {
-		return nil, err
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open EMLX source: %w", err)
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		resultErr := fmt.Errorf("inspect opened EMLX source: %w", err)
-		joinCloseError(&resultErr, file, "EMLX source")
-		return nil, resultErr
-	}
-	if !os.SameFile(info, openedInfo) {
-		resultErr := error(operationError("store_changed", "message source changed while opening"))
-		joinCloseError(&resultErr, file, "EMLX source")
-		return nil, resultErr
-	}
-	length, err := validateEMLXFrame(file, openedInfo.Size())
+	length, err := validateEMLXFrame(file, info.Size())
 	if err != nil {
 		resultErr := err
 		joinCloseError(&resultErr, file, "EMLX source")

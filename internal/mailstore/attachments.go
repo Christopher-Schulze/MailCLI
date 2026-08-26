@@ -24,8 +24,9 @@ type attachmentRecord struct {
 }
 
 type externalAttachment struct {
-	Path string
-	Size int64
+	Path     string
+	Size     int64
+	identity os.FileInfo
 }
 
 func (s *Store) messageAttachments(
@@ -103,7 +104,7 @@ func (s *Store) SaveAttachmentTo(
 			return err
 		}
 		if available {
-			return copyExternalAttachment(external.Path, outputPath)
+			return s.copyExternalAttachment(external, outputPath)
 		}
 	}
 	document, err := parseMIMEDocument(source.Reader(), source.partial, false)
@@ -192,27 +193,20 @@ func (s *Store) attachmentRecords(
 func (s *Store) findExternalAttachment(
 	resolved resolvedMessage,
 	record attachmentRecord,
-) (externalAttachment, bool, error) {
+) (result externalAttachment, available bool, resultErr error) {
 	directory, err := s.attachmentDirectory(resolved, record.ID)
 	if err != nil {
 		return externalAttachment{}, false, err
 	}
-	info, err := os.Lstat(directory)
+	directoryFile, _, err := openDirectoryPath(s.versionDirectory, s.versionRoot, directory)
 	if os.IsNotExist(err) {
 		return externalAttachment{}, false, nil
 	}
 	if err != nil {
-		return externalAttachment{}, false, fmt.Errorf("inspect external attachment directory: %w", err)
+		return externalAttachment{}, false, externalAttachmentPathError("directory", err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return externalAttachment{}, false, operationError(
-			"ambiguous_attachment", "external attachment location is not a regular directory",
-		)
-	}
-	if err := validatePathWithoutSymlinks(s.versionRoot, directory); err != nil {
-		return externalAttachment{}, false, err
-	}
-	entries, err := os.ReadDir(directory)
+	defer joinCloseError(&resultErr, directoryFile, "external attachment directory")
+	entries, err := directoryFile.ReadDir(-1)
 	if err != nil {
 		return externalAttachment{}, false, fmt.Errorf("list external attachment files: %w", err)
 	}
@@ -221,16 +215,14 @@ func (s *Store) findExternalAttachment(
 	wantedName := norm.NFC.String(record.Name)
 	for _, entry := range entries {
 		path := filepath.Join(directory, entry.Name())
-		fileInfo, err := os.Lstat(path)
+		file, fileInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, path)
 		if err != nil {
-			return externalAttachment{}, false, fmt.Errorf("inspect external attachment file: %w", err)
+			return externalAttachment{}, false, externalAttachmentPathError("file", err)
 		}
-		if !fileInfo.Mode().IsRegular() || fileInfo.Mode()&os.ModeSymlink != 0 {
-			return externalAttachment{}, false, operationError(
-				"ambiguous_attachment", "external attachment directory contains a non-regular file",
-			)
+		if err := file.Close(); err != nil {
+			return externalAttachment{}, false, fmt.Errorf("close external attachment file: %w", err)
 		}
-		candidate := externalAttachment{Path: path, Size: fileInfo.Size()}
+		candidate := externalAttachment{Path: path, Size: fileInfo.Size(), identity: fileInfo}
 		files = append(files, candidate)
 		if wantedName != "" && norm.NFC.String(entry.Name()) == wantedName {
 			nameMatches = append(nameMatches, candidate)
@@ -240,7 +232,7 @@ func (s *Store) findExternalAttachment(
 		return nameMatches[0], true, nil
 	}
 	if len(nameMatches) > 1 {
-		return selectIdenticalAttachment(nameMatches)
+		return s.selectIdenticalAttachment(nameMatches)
 	}
 	if len(files) == 0 {
 		return externalAttachment{}, false, nil
@@ -248,7 +240,17 @@ func (s *Store) findExternalAttachment(
 	if len(files) == 1 {
 		return files[0], true, nil
 	}
-	return selectIdenticalAttachment(files)
+	return s.selectIdenticalAttachment(files)
+}
+
+func externalAttachmentPathError(kind string, err error) error {
+	var typed *Error
+	if errors.As(err, &typed) && typed.Code == "unsafe_message_source" {
+		return operationError(
+			"ambiguous_attachment", "external attachment "+kind+" has an unsafe path",
+		)
+	}
+	return fmt.Errorf("open external attachment %s: %w", kind, err)
 }
 
 func (s *Store) attachmentDirectory(resolved resolvedMessage, attachmentID string) (string, error) {
@@ -278,11 +280,11 @@ func validAttachmentID(value string) bool {
 	return true
 }
 
-func selectIdenticalAttachment(files []externalAttachment) (externalAttachment, bool, error) {
+func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalAttachment, bool, error) {
 	sort.Slice(files, func(left int, right int) bool { return files[left].Path < files[right].Path })
 	var expected [sha256.Size]byte
 	for index, file := range files {
-		digest, err := hashRegularFile(file.Path)
+		digest, err := s.hashStoreFile(file)
 		if err != nil {
 			return externalAttachment{}, false, err
 		}
@@ -297,6 +299,27 @@ func selectIdenticalAttachment(files []externalAttachment) (externalAttachment, 
 		}
 	}
 	return files[0], true, nil
+}
+
+func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]byte, resultErr error) {
+	file, opened, err := openRegularPath(s.versionDirectory, s.versionRoot, selected.Path)
+	if err != nil {
+		return result, fmt.Errorf("open external attachment for hashing: %w", err)
+	}
+	defer joinCloseError(&resultErr, file, "external attachment")
+	if !sameExternalAttachment(selected, opened) {
+		return result, operationError("store_changed", "external attachment changed before hashing")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return result, fmt.Errorf("hash external attachment: %w", err)
+	}
+	final, err := file.Stat()
+	if err != nil || opened.Size() != final.Size() || !opened.ModTime().Equal(final.ModTime()) {
+		return result, operationError("store_changed", "external attachment changed while hashing")
+	}
+	copy(result[:], hash.Sum(nil))
+	return result, nil
 }
 
 func hashRegularFile(path string) (result [sha256.Size]byte, resultErr error) {
@@ -329,24 +352,42 @@ func hashRegularFile(path string) (result [sha256.Size]byte, resultErr error) {
 	return result, nil
 }
 
-func copyExternalAttachment(sourcePath string, outputPath string) (resultErr error) {
-	info, err := os.Lstat(sourcePath)
-	if err != nil {
-		return fmt.Errorf("inspect external attachment: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return operationError("ambiguous_attachment", "external attachment is not a regular file")
-	}
-	source, err := os.Open(sourcePath)
+func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath string) (resultErr error) {
+	source, openedInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, selected.Path)
 	if err != nil {
 		return fmt.Errorf("open external attachment: %w", err)
 	}
-	defer joinCloseError(&resultErr, source, "external attachment")
-	openedInfo, err := source.Stat()
-	if err != nil || !os.SameFile(info, openedInfo) {
-		return operationError("store_changed", "external attachment changed while opening")
+	if !sameExternalAttachment(selected, openedInfo) {
+		resultErr := error(operationError("store_changed", "external attachment changed before copying"))
+		joinCloseError(&resultErr, source, "external attachment")
+		return resultErr
 	}
-	return writeExclusiveFile(outputPath, source)
+	if err := writeExclusiveFile(outputPath, source); err != nil {
+		resultErr := err
+		joinCloseError(&resultErr, source, "external attachment")
+		return resultErr
+	}
+	finalInfo, err := source.Stat()
+	if err != nil || openedInfo.Size() != finalInfo.Size() ||
+		!openedInfo.ModTime().Equal(finalInfo.ModTime()) {
+		removeErr := os.Remove(outputPath)
+		resultErr := errors.Join(
+			operationError("store_changed", "external attachment changed while copying"), removeErr,
+		)
+		joinCloseError(&resultErr, source, "external attachment")
+		return resultErr
+	}
+	if err := source.Close(); err != nil {
+		return errors.Join(
+			fmt.Errorf("close external attachment: %w", err), os.Remove(outputPath),
+		)
+	}
+	return nil
+}
+
+func sameExternalAttachment(selected externalAttachment, opened os.FileInfo) bool {
+	return selected.identity != nil && os.SameFile(selected.identity, opened) &&
+		selected.Size == opened.Size() && selected.identity.ModTime().Equal(opened.ModTime())
 }
 
 func extractMIMEAttachment(reader io.Reader, attachmentID string, outputPath string) error {

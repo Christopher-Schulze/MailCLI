@@ -57,7 +57,7 @@ flowchart LR
 
 Mail.app remains the source of truth. MailCLI has no daemon, background process, watcher, copied corpus, owned search index, or persistent cache of its own.
 
-The store adapter opens Mail's Envelope Index with SQLite `mode=ro`, `query_only=1`, WAL participation, and a private connection cache. Before reading, it validates the store version, framework version, UUID, required schema, account catalog, mailbox mapping, and filesystem containment. An unknown profile fails with `unsupported_mail_store_schema` before any message query runs.
+The store adapter opens Mail's Envelope Index with SQLite `mode=ro`, `query_only=1`, WAL participation, and a private connection cache. Before reading, it validates the store version, framework version, UUID, required schema, account catalog, mailbox mapping, and filesystem containment. Message, mailbox-cache, and external-attachment files are opened relative to one held Mail-store directory descriptor with macOS `O_NOFOLLOW_ANY`; selection, hashing, and copying remain bound to the same regular-file identity. An unknown profile fails with `unsupported_mail_store_schema` before any message query runs.
 
 The write bridge acquires a context-aware BSD advisory lock, requires Mail to be running, and binds each request to the current Mail PID. Each invocation owns one `osascript` process group, waits for its leader, terminates any remaining owned group members, and verifies that the group is gone before releasing the gate. Cancellation first writes a private marker so the bridge can close an owned unsent compose object; only an unresponsive bridge is force-stopped after the cleanup grace period. It never launches, activates, quits, kills, or restarts Mail. A timed-out write enters `mail_recovery_required` because caller cancellation does not prove that Mail cancelled an Apple Event already accepted by the application.
 
@@ -153,7 +153,7 @@ mailcli messages search --sender example.com --after 2026-01-01 --json
 mailcli messages search --query "invoice tracking number" --max-messages 50000 --json
 ```
 
-List, filter, and search commands accept page sizes from 1 through 25. Continue with `data.page.next_cursor` until it is absent. Body search reports candidate counts, scanned messages and bytes, partial sources, missing sources, bounds, and `data.page.coverage.complete`.
+List, filter, and search commands accept page sizes from 1 through 25. Continue with `data.page.next_cursor` until it is absent. Body search starts with the smallest result window needed for the requested page and grows its two-worker scan window only while candidates do not match. It reports candidate counts, scanned messages and bytes, partial sources, missing sources, bounds, and `data.page.coverage.complete`.
 
 ### Read messages and attachments
 
@@ -266,7 +266,7 @@ The link command refuses if a skill already exists at that destination. It does 
 | No Mail.app lifecycle control | Requires the exact running Mail PID and never launches, activates, quits, kills, or restarts Mail.app |
 | No residual bridge process | Waits for the owned `osascript` leader, terminates residual group members, and verifies process-group absence before command completion |
 | No Apple Events backlog after uncertainty | Records the exact affected Mail PID and rejects every later live operation until that process has been replaced |
-| No accidental overwrite | Attachment export accepts only an absolute destination that does not exist |
+| No accidental overwrite or path substitution | Attachment export accepts only an absolute destination that does not exist; Mail-store sources reject symlinks and file-identity replacement |
 | No silent incomplete search | Reports source completeness and scan bounds on every search page |
 
 MailCLI stores only local review drafts and access-gate recovery state under `~/Library/Application Support/MailCLI`. Draft directories use mode `0700`; draft files use mode `0600`.
@@ -289,7 +289,7 @@ MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
 
-The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds.
+The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds.
 
 ## License
 

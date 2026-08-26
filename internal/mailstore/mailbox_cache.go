@@ -18,29 +18,23 @@ func (s *Store) loadMailboxCache(ctx context.Context, accountID string) (mailbox
 		return mailboxCache{}, err
 	}
 	path := filepath.Join(s.versionRoot, accountID, ".mboxCache.plist")
-	info, err := os.Lstat(path)
+	file, info, err := openRegularPath(s.versionDirectory, s.versionRoot, path)
 	if err != nil {
-		return mailboxCache{}, fmt.Errorf("inspect mailbox cache: %w", err)
+		return mailboxCache{}, fmt.Errorf("open mailbox cache: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
-		info.Size() < 1 || info.Size() > maximumMailboxCacheBytes {
-		return mailboxCache{}, fmt.Errorf("mailbox cache is not a bounded regular file")
+	if info.Size() < 1 || info.Size() > maximumMailboxCacheBytes {
+		resultErr := error(fmt.Errorf("mailbox cache is not a bounded regular file"))
+		joinCloseError(&resultErr, file, "mailbox cache")
+		return mailboxCache{}, resultErr
 	}
-	if err := validatePathWithoutSymlinks(s.versionRoot, path); err != nil {
-		return mailboxCache{}, err
-	}
-	return readMailboxCache(ctx, path, info)
+	return readMailboxCache(ctx, file, info)
 }
 
 func readMailboxCache(
 	ctx context.Context,
-	path string,
+	file *os.File,
 	expected os.FileInfo,
 ) (result mailboxCache, resultErr error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return mailboxCache{}, fmt.Errorf("open mailbox cache: %w", err)
-	}
 	defer joinCloseError(&resultErr, file, "mailbox cache")
 	opened, err := file.Stat()
 	if err != nil {

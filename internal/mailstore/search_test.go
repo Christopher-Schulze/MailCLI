@@ -236,8 +236,88 @@ func TestSnippetForDoesNotSplitUTF8(t *testing.T) {
 	}
 }
 
-func newSearchFixture(t *testing.T) (*Store, string) {
+func TestSnippetForTracksUnicodeCaseFoldRuneOffsets(t *testing.T) {
+	t.Parallel()
+	value := strings.Repeat("K", 100) + " target " + strings.Repeat("z", 300)
+	collapsed := collapseSearchText(value)
+	runes := []rune(collapsed)
+	start := 101 - maximumSnippetRunes/3
+	want := "…" + string(runes[start:start+maximumSnippetRunes]) + "…"
+	if got := snippetFor(value, "TARGET"); got != want {
+		t.Fatalf("snippetFor() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSearchTextIsDeterministicAndCollapsed(t *testing.T) {
+	t.Parallel()
+	item := messageRecord{
+		Subject: "  Subject\tline ", SenderName: "Alice", SenderAddress: "alice@example.com",
+		SummaryText: "summary\ntext",
+	}
+	document := mimeDocument{
+		To:      []mail.Recipient{{Name: "Bob", Address: "bob@example.com"}},
+		CC:      []mail.Recipient{{Address: "cc@example.com"}},
+		Content: "body\u00a0 text",
+		Parts: map[string]mimePart{
+			"2": {Name: "zeta.pdf"},
+			"1": {Name: "alpha.txt"},
+		},
+	}
+	want := "Subject line Alice alice@example.com summary text Bob bob@example.com " +
+		"cc@example.com alpha.txt zeta.pdf body text"
+	if got := buildSearchText(item, document); got != want {
+		t.Fatalf("buildSearchText() = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizedSearchTermsDeduplicates(t *testing.T) {
+	t.Parallel()
+	got := normalizedSearchTerms(" Alpha beta ALPHA beta gamma ")
+	want := []string{"alpha", "beta", "gamma"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("normalizedSearchTerms() = %v, want %v", got, want)
+	}
+}
+
+func TestBodySearchDoesNotOpenCandidatesBeyondSmallResultWindow(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 12)
+	closeTestResource(t, store, "test store")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	unsafeBase, err := store.messageBasePath(location, 106)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(unsafeBase + ".emlx"); err != nil {
+		t.Fatalf("remove fixture source: %v", err)
+	}
+	if err := os.Symlink("missing.emlx", unsafeBase+".emlx"); err != nil {
+		t.Fatalf("create unsafe fixture source: %v", err)
+	}
+	query, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil || len(page.Messages) != 1 || page.NextCursor == "" {
+		t.Fatalf("SearchMessages() = %#v, error = %v", page, err)
+	}
+}
+
+func newSearchFixture(t *testing.T, extraMessages ...int) (*Store, string) {
 	t.Helper()
+	extraCount := 0
+	if len(extraMessages) > 1 || len(extraMessages) == 1 && extraMessages[0] < 0 {
+		t.Fatal("newSearchFixture() accepts at most one non-negative extra-message count")
+	}
+	if len(extraMessages) == 1 {
+		extraCount = extraMessages[0]
+	}
 	root := t.TempDir()
 	mailRoot := filepath.Join(root, "Mail")
 	mailData := filepath.Join(mailRoot, "V10", "MailData")
@@ -267,6 +347,25 @@ func newSearchFixture(t *testing.T) (*Store, string) {
 			t.Fatalf("execute fixture statement: %v", err)
 		}
 	}
+	for index := range extraCount {
+		rowID := int64(104 + index)
+		received := int64(1000 - index)
+		_, err := writer.Exec(
+			`INSERT INTO messages(ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			rowID, 1000+rowID, 2000+rowID, 1, 2, 2, received, received, 1,
+			0, 1, 0, 0, 100, rowID, 0, received, 0,
+		)
+		if err != nil {
+			closeTestResourceNow(t, writer, "fixture database")
+			t.Fatalf("insert extra fixture message: %v", err)
+		}
+		if _, err := writer.Exec(
+			`INSERT INTO recipients(message,address,type,position) VALUES (?,2,0,0)`, rowID,
+		); err != nil {
+			closeTestResourceNow(t, writer, "fixture database")
+			t.Fatalf("insert extra fixture recipient: %v", err)
+		}
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close fixture database: %v", err)
 	}
@@ -282,6 +381,11 @@ func newSearchFixture(t *testing.T) (*Store, string) {
 		101: "needle alpha " + strings.Repeat("x", 512),
 		102: "needle beta",
 		103: "ordinary content",
+	}
+	for index := range extraCount {
+		rowID := int64(104 + index)
+		locations[rowID] = "imap://" + testAccountID + "/INBOX"
+		bodies[rowID] = fmt.Sprintf("needle extra %d", index)
 	}
 	for rowID, mailboxURL := range locations {
 		location, err := parseMailboxURL(mailboxURL)

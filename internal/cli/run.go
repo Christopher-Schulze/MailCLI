@@ -112,6 +112,24 @@ func Run(
 	return runJSONCommand(ctx, mailService, args, stdout, stderr)
 }
 
+func RequiresMailService(args []string) bool {
+	args, _ = normalizeGlobalJSON(args)
+	if len(args) == 0 {
+		return false
+	}
+	if helpOnly(args[1:]) {
+		return false
+	}
+	switch args[0] {
+	case "accounts", "mailboxes", "messages", "attachments", "drafts":
+		return len(args) < 2 || !helpOnly(args[2:])
+	case "doctor", "sync":
+		return true
+	default:
+		return false
+	}
+}
+
 func runJSONCommand(
 	ctx context.Context,
 	mailService *mail.Service,

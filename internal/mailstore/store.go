@@ -3,13 +3,16 @@ package mailstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
 type Store struct {
 	database          *sql.DB
 	versionRoot       string
+	versionDirectory  *os.File
 	storeUUID         string
 	activeAccounts    []mailboxLocation
 	activeAccountKeys map[string]struct{}
@@ -48,27 +51,59 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		activeKeys[key] = struct{}{}
 		activeAccounts = append(activeAccounts, location)
 	}
+	versionDirectory, err := openVersionDirectory(versionRoot)
+	if err != nil {
+		return nil, err
+	}
 	databasePath := filepath.Join(versionRoot, "MailData", envelopeIndexName)
 	database, err := openReadOnlyDatabase(ctx, databasePath)
 	if err != nil {
-		return nil, err
+		resultErr := err
+		joinCloseError(&resultErr, versionDirectory, "Mail store root")
+		return nil, resultErr
 	}
 	capability, err := validateSchema(ctx, database)
 	if err != nil {
 		resultErr := err
 		joinCloseError(&resultErr, database, "Envelope Index database")
+		joinCloseError(&resultErr, versionDirectory, "Mail store root")
 		return nil, resultErr
 	}
 	return &Store{
 		database: database, versionRoot: versionRoot, storeUUID: capability.StoreUUID,
-		activeAccounts: activeAccounts, activeAccountKeys: activeKeys, capability: capability,
+		versionDirectory: versionDirectory,
+		activeAccounts:   activeAccounts, activeAccountKeys: activeKeys, capability: capability,
 	}, nil
 }
 
 func (s *Store) Close() error {
-	return s.database.Close()
+	return errors.Join(s.database.Close(), s.versionDirectory.Close())
 }
 
 func (s *Store) SchemaFingerprint() string {
 	return s.capability.Fingerprint
+}
+
+func openVersionDirectory(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Mail store root: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, operationError("unsafe_message_source", "Mail store root is not a regular directory")
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open Mail store root: %w", err)
+	}
+	opened, err := directory.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		resultErr := error(operationError("store_changed", "Mail store root changed while opening"))
+		if err != nil {
+			resultErr = fmt.Errorf("inspect opened Mail store root: %w", err)
+		}
+		joinCloseError(&resultErr, directory, "Mail store root")
+		return nil, resultErr
+	}
+	return directory, nil
 }

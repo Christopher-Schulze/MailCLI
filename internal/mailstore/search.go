@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
@@ -281,7 +281,7 @@ func (s *Store) querySearchRecords(
 		return nil, 0, fmt.Errorf("query Envelope Index search candidates: %w", err)
 	}
 	defer joinCloseError(&resultErr, rows, "search candidate rows")
-	items := make([]messageRecord, 0, min(limit, 1024))
+	var items []messageRecord
 	for rows.Next() {
 		var item messageRecord
 		if err := rows.Scan(
@@ -292,6 +292,9 @@ func (s *Store) querySearchRecords(
 			&item.Junk, &item.Size, &item.AttachmentCount, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
+		}
+		if items == nil {
+			items = make([]messageRecord, 0, min(limit, total))
 		}
 		items = append(items, item)
 	}
@@ -348,9 +351,12 @@ func (s *Store) scanSearchRecords(
 	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
+	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
 	var reservedBytes int64
-	for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; start += searchBatchSize {
-		end := min(start+searchBatchSize, len(items))
+	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
+	for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
+		matchesBefore := len(results)
+		end := min(start+batchSize, len(items))
 		scans, budgetLimited, err := s.scanSearchBatch(
 			ctx, items[start:end], terms, prepared.Query.HasAttachment,
 			prepared.Query.MaxBytes, &reservedBytes,
@@ -372,9 +378,17 @@ func (s *Store) scanSearchRecords(
 			}
 			summary.AttachmentCount = scan.attachments
 			results = append(results, mail.SearchMessage{Summary: summary, Snippet: scan.snippet})
+			resultItems = append(resultItems, items[start+index])
 			if len(results) > prepared.Query.Limit {
 				break
 			}
+		}
+		start = end
+		remaining := prepared.Query.Limit + 1 - len(results)
+		if len(results) == matchesBefore {
+			batchSize = min(searchBatchSize, batchSize*2)
+		} else {
+			batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
 		}
 		if budgetLimited {
 			break
@@ -383,26 +397,18 @@ func (s *Store) scanSearchRecords(
 	hasMore := len(results) > prepared.Query.Limit
 	if hasMore {
 		results = results[:prepared.Query.Limit]
+		resultItems = resultItems[:prepared.Query.Limit]
 	}
 	if coverage.ScannedMessages < coverage.CandidateMessages {
 		coverage.Complete = false
 	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
 	if hasMore && len(results) > 0 {
-		lastRef, err := mailref.DecodeMessage(results[len(results)-1].Summary.Ref)
-		if err != nil {
-			return mail.SearchPage{}, err
-		}
-		rowID, err := parseRowID(lastRef.LibraryID)
-		if err != nil {
-			return mail.SearchPage{}, err
-		}
-		for _, item := range items {
-			if item.RowID == rowID {
-				page.NextCursor, err = searchCursorFor(item, prepared.Fingerprint, s.storeUUID)
-				return page, err
-			}
-		}
+		var err error
+		page.NextCursor, err = searchCursorFor(
+			resultItems[len(resultItems)-1], prepared.Fingerprint, s.storeUUID,
+		)
+		return page, err
 	}
 	return page, nil
 }
@@ -522,25 +528,29 @@ func scanCandidate(
 			bytes: source.length, partial: source.partial, full: !source.partial, contentWhole: false,
 		}, nil
 	}
-	haystack := collapseSearchText(strings.Join([]string{
-		item.Subject, item.SenderName, item.SenderAddress, item.SummaryText,
-		searchRecipientText(document), searchAttachmentText(document), document.Content,
-	}, "\n"))
 	match := true
-	firstTerm := ""
-	if len(terms) > 0 {
-		match, firstTerm = containsAllSearchTerms(haystack, terms)
-	}
 	attachmentCount := max(item.AttachmentCount, len(document.Parts))
-	if match && hasAttachment != nil {
+	if hasAttachment != nil {
 		if *hasAttachment {
 			match = attachmentCount > 0
 		} else {
 			match = document.Complete && attachmentCount == 0
 		}
 	}
+	snippet := ""
+	if match {
+		haystack := buildSearchText(item, document)
+		folded := strings.ToLower(haystack)
+		firstTerm := ""
+		if len(terms) > 0 {
+			match, firstTerm = containsAllFoldedSearchTerms(folded, terms)
+		}
+		if match {
+			snippet = snippetForFolded(haystack, folded, firstTerm)
+		}
+	}
 	return candidateScan{
-		match: match, snippet: snippetFor(haystack, firstTerm), bytes: source.length,
+		match: match, snippet: snippet, bytes: source.length,
 		attachments: attachmentCount,
 		partial:     source.partial, full: !source.partial, contentWhole: document.Complete,
 	}, nil
@@ -567,20 +577,26 @@ func mergeSearchCoverage(coverage *mail.SearchCoverage, scan candidateScan) {
 
 func normalizedSearchTerms(value string) []string {
 	fields := strings.Fields(strings.ToLower(value))
-	terms := make([]string, 0, len(fields))
+	terms := fields[:0]
 	for _, field := range fields {
-		if field != "" {
+		duplicate := false
+		for _, term := range terms {
+			if field == term {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
 			terms = append(terms, field)
 		}
 	}
 	return terms
 }
 
-func containsAllSearchTerms(value string, terms []string) (bool, string) {
-	lower := strings.ToLower(value)
+func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) {
 	first := ""
 	for _, term := range terms {
-		if !strings.Contains(lower, term) {
+		if !strings.Contains(folded, term) {
 			return false, ""
 		}
 		if first == "" {
@@ -592,15 +608,19 @@ func containsAllSearchTerms(value string, terms []string) (bool, string) {
 
 func snippetFor(value string, term string) string {
 	value = collapseSearchText(value)
+	return snippetForFolded(value, strings.ToLower(value), strings.ToLower(term))
+}
+
+func snippetForFolded(value string, folded string, term string) string {
 	if value == "" {
 		return ""
 	}
 	runeCount := utf8.RuneCountInString(value)
 	start := 0
 	if term != "" {
-		byteIndex := strings.Index(strings.ToLower(value), strings.ToLower(term))
+		byteIndex := strings.Index(folded, term)
 		if byteIndex > 0 {
-			start = utf8.RuneCountInString(value[:byteIndex]) - maximumSnippetRunes/3
+			start = utf8.RuneCountInString(folded[:byteIndex]) - maximumSnippetRunes/3
 			if start < 0 {
 				start = 0
 			}
@@ -615,48 +635,99 @@ func snippetFor(value string, term string) string {
 	if end < runeCount {
 		suffix = "…"
 	}
-	return prefix + value[runeByteOffset(value, start):runeByteOffset(value, end)] + suffix
+	startByte, endByte := runeByteRange(value, start, end)
+	return prefix + value[startByte:endByte] + suffix
 }
 
-func runeByteOffset(value string, runeIndex int) int {
+func runeByteRange(value string, startRune int, endRune int) (int, int) {
 	index := 0
-	for count := 0; count < runeIndex && index < len(value); count++ {
+	startByte := 0
+	for count := 0; count < endRune && index < len(value); count++ {
+		if count == startRune {
+			startByte = index
+		}
 		_, size := utf8.DecodeRuneInString(value[index:])
 		index += size
 	}
-	return index
+	if startRune == endRune {
+		startByte = index
+	}
+	return startByte, index
 }
 
 func searchCursorFor(item messageRecord, fingerprint string, storeUUID string) (string, error) {
 	return mail.EncodeSearchCursor(fingerprint, storeUUID, item.DateReceived, item.RowID)
 }
 
-func parseRowID(value string) (int64, error) {
-	rowID, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || rowID < 1 {
-		return 0, operationError("invalid_reference", "message ref has an invalid ROWID")
+func buildSearchText(item messageRecord, document mimeDocument) string {
+	var builder collapsedSearchTextBuilder
+	builder.Grow(searchTextCapacity(item, document))
+	for _, value := range []string{
+		item.Subject, item.SenderName, item.SenderAddress, item.SummaryText,
+	} {
+		builder.Add(value)
 	}
-	return rowID, nil
-}
-
-func searchRecipientText(document mimeDocument) string {
-	groups := [][]mail.Recipient{document.To, document.CC, document.BCC}
-	values := make([]string, 0, len(document.To)+len(document.CC)+len(document.BCC))
-	for _, group := range groups {
-		for _, recipient := range group {
-			values = append(values, recipient.Name, recipient.Address)
+	for _, recipients := range [][]mail.Recipient{document.To, document.CC, document.BCC} {
+		for _, recipient := range recipients {
+			builder.Add(recipient.Name)
+			builder.Add(recipient.Address)
 		}
 	}
-	return strings.Join(values, "\n")
+	names := make([]string, 0, len(document.Parts))
+	for _, part := range document.Parts {
+		names = append(names, part.Name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		builder.Add(name)
+	}
+	builder.Add(document.Content)
+	return builder.String()
 }
 
-func searchAttachmentText(document mimeDocument) string {
-	values := make([]string, 0, len(document.Parts))
-	for _, part := range document.Parts {
-		values = append(values, part.Name)
+func searchTextCapacity(item messageRecord, document mimeDocument) int {
+	size := len(item.Subject) + len(item.SenderName) + len(item.SenderAddress) +
+		len(item.SummaryText) + len(document.Content) + 5 + len(document.Parts)
+	for _, recipients := range [][]mail.Recipient{document.To, document.CC, document.BCC} {
+		size += 2 * len(recipients)
+		for _, recipient := range recipients {
+			size += len(recipient.Name) + len(recipient.Address)
+		}
 	}
-	sort.Strings(values)
-	return strings.Join(values, "\n")
+	for _, part := range document.Parts {
+		size += len(part.Name)
+	}
+	return size
+}
+
+type collapsedSearchTextBuilder struct {
+	output       strings.Builder
+	pendingSpace bool
+}
+
+func (b *collapsedSearchTextBuilder) Grow(size int) {
+	b.output.Grow(size)
+}
+
+func (b *collapsedSearchTextBuilder) Add(value string) {
+	if value != "" && b.output.Len() > 0 {
+		b.pendingSpace = true
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) {
+			b.pendingSpace = b.output.Len() > 0
+			continue
+		}
+		if b.pendingSpace {
+			b.output.WriteByte(' ')
+			b.pendingSpace = false
+		}
+		b.output.WriteRune(character)
+	}
+}
+
+func (b *collapsedSearchTextBuilder) String() string {
+	return b.output.String()
 }
 
 func containsLike(value string) string {

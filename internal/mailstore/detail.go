@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -63,11 +64,12 @@ func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, re
 			"the local EMLX source is partial; exact raw source requires a targeted Mail.app fallback",
 		)
 	}
-	buffer := make([]byte, source.length)
-	if _, err := io.ReadFull(source.Reader(), buffer); err != nil {
+	var output strings.Builder
+	output.Grow(int(source.length))
+	if _, err := io.CopyN(&output, source.Reader(), source.length); err != nil {
 		return "", fmt.Errorf("read RFC message source: %w", err)
 	}
-	return string(buffer), nil
+	return output.String(), nil
 }
 
 func sourceKind(partial bool) string {

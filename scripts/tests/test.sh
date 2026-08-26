@@ -43,5 +43,26 @@ fi
 "${STATICCHECK_BIN}" ./...
 
 go vet ./...
+
+GOLANGCI_LINT_BIN="$(command -v golangci-lint || true)"
+if [[ -z "${GOLANGCI_LINT_BIN}" ]]; then
+  GOLANGCI_LINT_BIN="$(go env GOPATH)/bin/golangci-lint"
+fi
+if [[ ! -x "${GOLANGCI_LINT_BIN}" ]]; then
+  printf 'golangci-lint is required; install it or add it to PATH\n' >&2
+  exit 1
+fi
+"${GOLANGCI_LINT_BIN}" run ./...
+
+GOVULNCHECK_BIN="$(command -v govulncheck || true)"
+if [[ -z "${GOVULNCHECK_BIN}" ]]; then
+  GOVULNCHECK_BIN="$(go env GOPATH)/bin/govulncheck"
+fi
+if [[ ! -x "${GOVULNCHECK_BIN}" ]]; then
+  printf 'govulncheck is required; install it or add it to PATH\n' >&2
+  exit 1
+fi
+"${GOVULNCHECK_BIN}" ./...
+
 go test -count=1 -race -cover ./...
 "${MAILCLI_ROOT}/scripts/tests/test-release.sh"
