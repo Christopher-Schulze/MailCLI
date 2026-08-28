@@ -15,6 +15,7 @@ func TestHelpContractTable(t *testing.T) {
 		notWanted []string
 	}{
 		{name: "top level", args: []string{"help"}, want: "Usage:"},
+		{name: "capabilities", args: []string{"capabilities", "--help"}, want: "mailcli capabilities"},
 		{name: "accounts", args: []string{"accounts", "--help"}, want: "mailcli accounts list"},
 		{name: "accounts list", args: []string{"accounts", "list", "--help"}, want: "Usage of accounts list:"},
 		{name: "mailboxes", args: []string{"mailboxes", "--help"}, want: "mailcli mailboxes"},

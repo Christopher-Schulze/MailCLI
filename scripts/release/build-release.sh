@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="${1:-1.0.1}"
+VERSION="${1:-1.0.2}"
 RELEASE_DIRECTORY="${MAILCLI_RELEASE_DIRECTORY:-${MAILCLI_ROOT}/dist}"
 ARCHIVE_ROOT="mailcli_${VERSION}_darwin_arm64"
 ARCHIVE_PATH="${RELEASE_DIRECTORY}/${ARCHIVE_ROOT}.tar.gz"

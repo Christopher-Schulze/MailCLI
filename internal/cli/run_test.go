@@ -167,7 +167,7 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.1"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.2"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
 	}

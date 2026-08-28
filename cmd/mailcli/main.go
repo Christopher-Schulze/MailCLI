@@ -16,7 +16,7 @@ func main() {
 	ctx := context.Background()
 	args := os.Args[1:]
 	if !cli.RequiresMailService(args) {
-		os.Exit(cli.Run(ctx, nil, args, os.Stdout, os.Stderr))
+		os.Exit(cli.Run(ctx, mail.NewService(nil), args, os.Stdout, os.Stderr))
 	}
 	config, err := mailstore.DefaultConfig()
 	if err != nil {

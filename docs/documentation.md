@@ -43,11 +43,14 @@ The CLI is optimized for both humans and agents:
 - Times are emitted as RFC 3339 with an offset; sizes are bytes.
 - Success uses exit code `0`, runtime or Mail.app failure uses `1`, and invalid CLI usage uses `2`.
 - Destructive operations require an explicit command and confirmation flag. Sending is draft-first.
+- `mailcli capabilities --json` is the authoritative discovery contract. It reports schema and release identity, every command ID, read/write class, confirmation requirement, Mail-store and Mail.app dependencies, result states, and hard limits without opening the Mail store or contacting Mail.app.
+- Capability discovery and local draft create/list/inspect/update/discard commands bypass Mail-store configuration, SQLite, `plutil`, and Mail.app initialization.
 
 Command surface:
 
 | Command | Status | Purpose |
 |---|---|---|
+| `mailcli capabilities` | Implemented | Return the versioned machine-readable command, effect, dependency, result, and limitation contract |
 | `mailcli doctor` | Implemented | Validate platform, Mail.app, scripting support, permissions, and optional live access |
 | `mailcli accounts list` | Implemented | List enabled local Mail accounts and sender identities |
 | `mailcli mailboxes list` | Implemented | Recursively list every mailbox with stable account-relative paths |
@@ -70,7 +73,7 @@ Command surface:
 | `mailcli messages delete` | Implemented | Invoke Mail.app's configured deletion behavior after confirmation |
 | `mailcli sync` | Implemented | Ask Mail.app to check all mail or synchronize one selected account |
 
-Only commands shown by the installed binary's `mailcli help` are executable.
+Agents must discover support from `mailcli capabilities --json`, never by parsing help text. The capability manifest explicitly reports that MailCLI owns no mail index or background process, can read raw MIME, cannot send caller-supplied raw MIME, limits pages to 25 messages, and sends only through a reviewed Mail.app compose object. `mailcli help` remains the human usage surface.
 
 Machine responses use one envelope:
 
@@ -120,7 +123,7 @@ Structured output excludes body content unless the command requests it. Diagnost
 
 ## Release distribution
 
-Release `v1.0.1` publishes `mailcli_1.0.1_darwin_arm64.tar.gz` and `SHA256SUMS`. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping while retaining `-trimpath`, so identical source and toolchain inputs produce the same binary independently of the current commit or dirty-worktree state. The builder rejects a non-semantic version, non-absolute output directory, existing output asset, non-ARM64 binary, invalid code signature, VCS-stamped binary, or binary-version mismatch.
+Release `v1.0.2` publishes `mailcli_1.0.2_darwin_arm64.tar.gz` and `SHA256SUMS`. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping while retaining `-trimpath`, so identical source and toolchain inputs produce the same binary independently of the current commit or dirty-worktree state. The builder rejects a non-semantic version, non-absolute output directory, existing output asset, non-ARM64 binary, invalid code signature, VCS-stamped binary, or binary-version mismatch.
 
 The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` may select other safe absolute paths. It rejects symbolic-link destinations and pre-existing backup paths. Both payloads are staged and byte-compared before replacement. Existing destinations are moved to dedicated backups, the staged payloads are moved into place, and binary plus skill are verified again. Any failure restores the original destinations; successful verification removes the backups. The installer never changes Full Disk Access, Automation consent, quarantine attributes, or global Gatekeeper settings.
 
@@ -151,7 +154,7 @@ Requirements are macOS on Apple silicon, Go 1.27 or newer for development, `/Sys
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.1
+./scripts/release/build-release.sh 1.0.2
 ./scripts/tests/test-live-responsiveness.sh
 ./scripts/build/install-local.sh
 command -v mailcli
@@ -192,7 +195,7 @@ The verified development host is macOS 15.6.1 on `darwin/arm64`, Mail 16.0 build
 
 Directory enumeration is never authoritative because Mail can retain stale or partial filesystem sources. Store rows select candidates, safe mailbox mapping resolves their sources, and every result reports whether the corresponding local content is complete. Spotlight is not a required dependency; full-text search uses the deterministic on-demand MIME scanner and never creates another persistent index.
 
-Mailbox catalogs are parsed in-process from bounded, descriptor-opened XML property lists. Only Mail's binary account-ordering preference requires one `plutil` extraction, and the store-opening context bounds that child process to 15 seconds. `version`, help, command help, and unknown commands bypass configuration, store, SQLite, and `plutil` initialization entirely. Mailbox enumeration launches no per-account conversion processes.
+Mailbox catalogs are parsed in-process from bounded, descriptor-opened XML property lists. Only Mail's binary account-ordering preference requires one `plutil` extraction, and the store-opening context bounds that child process to 15 seconds. `version`, capabilities, help, command help, unknown commands, and local draft create/list/inspect/update/discard bypass configuration, store, SQLite, and `plutil` initialization entirely. Mailbox enumeration launches no per-account conversion processes. On the supported release host, process-inclusive `drafts list --json` peak RSS fell from 10.13-10.45 MB to 6.59-6.78 MB after this boundary was enforced; the figures are host-specific reference measurements.
 
 Release acceptance requires isolated process-inclusive metadata-list p95 below 50 ms and metadata-search p95 below 100 ms on the supported host profile. Direct-store list, filter, and search operations must produce no measurable Mail process CPU increase. On-demand body search is separately bounded by candidate and byte limits because its cost depends on the selected corpus and source completeness.
 

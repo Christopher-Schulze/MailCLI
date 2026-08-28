@@ -28,6 +28,8 @@ Reads of locally available content on the supported store profile add no work to
 
 ## Capabilities
 
+Run `mailcli capabilities --json` before automation. Its versioned response is the authoritative command contract for agents: command IDs, read/write class, confirmation, Mail-store and Mail.app dependencies, result states, and hard limits. Help text is for humans and must not be parsed as capability data.
+
 | Area | Commands | Behavior |
 |---|---|---|
 | Accounts | `accounts list` | Lists configured accounts and sender identities |
@@ -39,7 +41,11 @@ Reads of locally available content on the supported store profile add no work to
 | Organization | `messages mark`, `move`, `copy`, `delete` | Revalidates message identity before each mutation and reads back the result |
 | Synchronization | `sync` | Checks all mail or synchronizes one selected account |
 
-Run `mailcli help` for the installed command contract.
+Run `mailcli help` for human-readable usage.
+
+Capability discovery and local draft creation, listing, inspection, updating,
+and discard bypass the Mail store and Mail.app entirely. They therefore avoid
+SQLite, `plutil`, and Apple Events startup work.
 
 ## Architecture
 
@@ -79,10 +85,10 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The `v1.0.1` release archive installs both the native CLI and its companion agent skill:
+The `v1.0.2` release archive installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.0.1
+VERSION=1.0.2
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -284,12 +290,12 @@ MailCLI stores only local review drafts and access-gate recovery state under `~/
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.1
+./scripts/release/build-release.sh 1.0.2
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
 
-The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds.
+The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded live probes, requires the same Mail PID, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
 
 ## License
 

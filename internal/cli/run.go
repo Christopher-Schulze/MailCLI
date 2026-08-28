@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.0.1"
+	version       = "1.0.2"
 	schemaVersion = 1
 )
 
@@ -29,6 +29,7 @@ type envelope struct {
 type responseData struct {
 	Name            string                `json:"name,omitempty"`
 	Version         string                `json:"version,omitempty"`
+	Capabilities    *capabilityManifest   `json:"capabilities,omitempty"`
 	Checks          []mail.Check          `json:"checks,omitempty"`
 	Accounts        *[]mail.Account       `json:"accounts,omitempty"`
 	Mailboxes       *[]mail.Mailbox       `json:"mailboxes,omitempty"`
@@ -121,7 +122,17 @@ func RequiresMailService(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "accounts", "mailboxes", "messages", "attachments", "drafts":
+	case "drafts":
+		if len(args) < 2 || helpOnly(args[2:]) {
+			return false
+		}
+		switch args[1] {
+		case "create", "list", "inspect", "update", "discard":
+			return false
+		default:
+			return true
+		}
+	case "accounts", "mailboxes", "messages", "attachments":
 		return len(args) < 2 || !helpOnly(args[2:])
 	case "doctor", "sync":
 		return true
@@ -231,6 +242,8 @@ func runCommand(
 		return 0
 	case "version", "--version":
 		return runVersion(args[1:], stdout, stderr)
+	case "capabilities":
+		return runCapabilities(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, mailService, args[1:], stdout, stderr)
 	case "accounts":
@@ -429,6 +442,7 @@ func writeHelp(writer io.Writer) {
 	writeRaw(writer, `MailCLI controls the locally configured macOS Mail app.
 
 Usage:
+  mailcli capabilities [--json]
   mailcli doctor [--json] [--live]
   mailcli accounts list [--json]
   mailcli mailboxes list [--account REF] [--json]
@@ -460,6 +474,7 @@ Usage:
   mailcli help
 
 Commands:
+  capabilities Describe the stable command, effect, dependency, and result contract.
   doctor   Verify macOS ARM64, Mail.app, osascript, and optional Apple Events access.
   accounts List enabled Mail.app accounts and sender identities.
   mailboxes Recursively list or resolve exact mailbox paths.

@@ -10,9 +10,10 @@ Use MailCLI as the single boundary to accounts already configured in macOS Mail.
 ## Discover capabilities
 
 1. Locate the executable with `command -v mailcli`; in this repository, fall back to `./bin/mailcli` after running `./scripts/build/build.sh`.
-2. Run `mailcli help` and use only commands the installed binary exposes.
-3. Run `mailcli doctor --json` before Mail access. It verifies strict read-only store access and reports the exact Full Disk Access remediation when needed. Use `mailcli doctor --live --json` only before an Apple Events operation; Mail must already be running, the probe never launches it, and macOS may request Automation consent.
-4. Prefer `--json`. Require exit code `0`, top-level `ok:true`, and `schema_version:1`; list, filter, and search results are under `data.page`.
+2. Run `mailcli capabilities --json` and use only the returned command IDs. Require top-level `ok:true`, envelope `schema_version:1`, `data.capabilities.schema_version:1`, and a compatible release. Never infer capabilities, confirmation, dependencies, or result states from help text. Respect the reported limits, especially `raw_mime_send:false`.
+3. Run `mailcli help` only when human-readable flag usage is needed.
+4. Run `mailcli doctor --json` before Mail access. It verifies strict read-only store access and reports the exact Full Disk Access remediation when needed. Use `mailcli doctor --live --json` only before an Apple Events operation; Mail must already be running, the probe never launches it, and macOS may request Automation consent.
+5. Prefer `--json`. Require exit code `0`, top-level `ok:true`, and `schema_version:1`; list, filter, and search results are under `data.page`.
 
 MailCLI serializes Apple Events across all local agent processes, waits for its owned `osascript` leader, terminates residual owned process-group members, and verifies that the group is gone before returning. Never issue parallel raw `osascript` calls. `mail_busy` means the operation did not contact Mail; wait for the active operation and retry once. `mail_not_running` means ask the user to open Mail when the requested action needs it. `mail_recovery_required` means a previous operation timed out and Mail may still be processing its Apple Event; do not retry, send another live command, or restart Mail automatically.
 
