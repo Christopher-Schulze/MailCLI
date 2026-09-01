@@ -686,11 +686,10 @@ func runReleaseInstaller(
 	}
 	command := exec.CommandContext(ctx, "/bin/bash", installerPath)
 	command.Env = updateInstallerEnvironment(os.Environ(), homeDirectory, binaryPath)
-	command.WaitDelay = 5 * time.Second
 	var output boundedUpdateOutput
 	command.Stdout = &output
 	command.Stderr = &output
-	if err := command.Run(); err != nil {
+	if err := runOwnedProcess(command, 5*time.Second); err != nil {
 		return fmt.Errorf("release installer failed: %w: %s", err, strings.TrimSpace(output.String()))
 	}
 	return nil

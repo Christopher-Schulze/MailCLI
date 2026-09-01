@@ -4,6 +4,18 @@ set -euo pipefail
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${MAILCLI_ROOT}"
 
+MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
+MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-2}"
+for CONCURRENCY_VALUE in "${MAILCLI_TEST_CPUS}" "${MAILCLI_TEST_PACKAGES}"; do
+  if [[ ! "${CONCURRENCY_VALUE}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'Verification concurrency must be a positive integer: %s\n' "${CONCURRENCY_VALUE}" >&2
+    exit 1
+  fi
+done
+export GOMAXPROCS="${MAILCLI_TEST_CPUS}"
+printf 'Verification concurrency: GOMAXPROCS=%s, packages=%s\n' \
+  "${MAILCLI_TEST_CPUS}" "${MAILCLI_TEST_PACKAGES}"
+
 FORBIDDEN_PATHS=(
   "${MAILCLI_ROOT}/internal/search"
   "${MAILCLI_ROOT}/internal/mailapp/scripts/message_batch.applescript"
@@ -42,7 +54,7 @@ if [[ ! -x "${STATICCHECK_BIN}" ]]; then
 fi
 "${STATICCHECK_BIN}" ./...
 
-go vet ./...
+go vet -p "${MAILCLI_TEST_PACKAGES}" ./...
 
 GOLANGCI_LINT_BIN="$(command -v golangci-lint || true)"
 if [[ -z "${GOLANGCI_LINT_BIN}" ]]; then
@@ -52,7 +64,7 @@ if [[ ! -x "${GOLANGCI_LINT_BIN}" ]]; then
   printf 'golangci-lint is required; install it or add it to PATH\n' >&2
   exit 1
 fi
-"${GOLANGCI_LINT_BIN}" run ./...
+"${GOLANGCI_LINT_BIN}" run --concurrency "${MAILCLI_TEST_CPUS}" ./...
 
 GOVULNCHECK_BIN="$(command -v govulncheck || true)"
 if [[ -z "${GOVULNCHECK_BIN}" ]]; then
@@ -64,5 +76,6 @@ if [[ ! -x "${GOVULNCHECK_BIN}" ]]; then
 fi
 "${GOVULNCHECK_BIN}" ./...
 
-go test -count=1 -race -cover ./...
+go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
+  -parallel "${MAILCLI_TEST_CPUS}" ./...
 "${MAILCLI_ROOT}/scripts/tests/test-release.sh"

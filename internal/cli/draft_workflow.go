@@ -218,7 +218,7 @@ func editDraftInput(
 	process.Stdin = os.Stdin
 	process.Stdout = os.Stdout
 	process.Stderr = os.Stderr
-	if err := process.Run(); err != nil {
+	if err := runOwnedProcess(process, 2*time.Second); err != nil {
 		return mail.Draft{}, &commandError{code: "editor_failed", message: "draft editor failed: " + err.Error()}
 	}
 	edited, err := readDraftInput(path)
