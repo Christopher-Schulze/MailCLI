@@ -85,10 +85,10 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The `v1.0.2` release archive installs both the native CLI and its companion agent skill:
+The `v1.0.3` release archive installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.0.2
+VERSION=1.0.3
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -290,7 +290,7 @@ MailCLI stores only local review drafts and access-gate recovery state under `~/
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.2
+./scripts/release/build-release.sh 1.0.3
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
