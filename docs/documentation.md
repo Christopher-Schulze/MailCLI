@@ -123,7 +123,7 @@ Structured output excludes body content unless the command requests it. Diagnost
 
 ## Release distribution
 
-Release `v1.0.3` publishes `mailcli_1.0.3_darwin_arm64.tar.gz` and `SHA256SUMS`. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping while retaining `-trimpath`, so identical source and toolchain inputs produce the same binary independently of the current commit or dirty-worktree state. The builder rejects a non-semantic version, non-absolute output directory, existing output asset, non-ARM64 binary, invalid code signature, VCS-stamped binary, or binary-version mismatch.
+Release `v1.0.4` publishes `mailcli_1.0.4_darwin_arm64.tar.gz` and `SHA256SUMS`. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping while retaining `-trimpath`, so identical source and toolchain inputs produce the same binary independently of the current commit or dirty-worktree state. The builder rejects a non-semantic version, non-absolute output directory, existing output asset, non-ARM64 binary, invalid code signature, VCS-stamped binary, or binary-version mismatch.
 
 The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` may select other safe absolute paths. It rejects symbolic-link destinations and pre-existing backup paths. Both payloads are staged and byte-compared before replacement. Existing destinations are moved to dedicated backups, the staged payloads are moved into place, and binary plus skill are verified again. Any failure restores the original destinations; successful verification removes the backups. The installer never changes Full Disk Access, Automation consent, quarantine attributes, or global Gatekeeper settings.
 
@@ -154,7 +154,7 @@ Requirements are macOS on Apple silicon, Go 1.27 or newer for development, `/Sys
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.3
+./scripts/release/build-release.sh 1.0.4
 ./scripts/tests/test-live-responsiveness.sh
 ./scripts/build/install-local.sh
 command -v mailcli
