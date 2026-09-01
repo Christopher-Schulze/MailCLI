@@ -483,6 +483,110 @@ function run(_) {
 	}
 }
 
+func TestBridgeNewComposeDefersReviewedBodyUntilNativeStateIsStable(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    let constructorProperties = null;
+    const mail = {
+        OutgoingMessage: properties => {
+            constructorProperties = properties;
+            return {};
+        },
+        outgoingMessages: []
+    };
+    outgoingForDraft(mail, {
+        kind: "new", from: "sender@example.com", subject: "Subject", body: "Reviewed body"
+    }, {});
+    return JSON.stringify({has_content: Object.prototype.hasOwnProperty.call(constructorProperties, "content")});
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"has_content":false}` {
+		t.Fatalf("new compose constructor result = %q", output)
+	}
+}
+
+func TestBridgeNewComposePreservesStableMailSignature(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    const recipients = [];
+    let content = "Automatic signature";
+    const outgoing = {
+        sender: "sender@example.com", subject: "Subject",
+        toRecipients: () => recipients,
+        ccRecipients: () => [],
+        bccRecipients: () => []
+    };
+    Object.defineProperty(outgoing, "content", {
+        get: () => () => content,
+        set: value => { content = value; }
+    });
+    outgoing.toRecipients.push = value => recipients.push(value);
+    outgoing.ccRecipients.push = () => {};
+    outgoing.bccRecipients.push = () => {};
+    const mail = {
+        ToRecipient: value => value,
+        CcRecipient: value => value,
+        BccRecipient: value => value
+    };
+    const draft = {
+        kind: "new", from: "sender@example.com", subject: "Subject", body: "Reviewed body",
+        to: [{address: "to@example.com"}], cc: [], bcc: [], attachments: []
+    };
+    const native = {
+        from: "sender@example.com", to: [], cc: [], bcc: [],
+        subject: "Subject", body: "Automatic signature", attachment_paths: []
+    };
+    applyOutgoingFields(mail, outgoing, draft);
+    const finalSnapshot = {
+        from: outgoing.sender, to: [{address: "to@example.com"}], cc: [], bcc: [],
+        subject: outgoing.subject, body: content, attachment_paths: []
+    };
+    return JSON.stringify({body: content, matches: composeMatchesDraft(finalSnapshot, draft, native)});
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"body":"Reviewed body\n\nAutomatic signature","matches":true}` {
+		t.Fatalf("new compose signature result = %q", output)
+	}
+}
+
+func TestBridgeComposeIntegrityRejectsUnobservedBodySuffix(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    const draft = {
+        kind: "new", from: "sender@example.com", subject: "Subject", body: "Reviewed body",
+        to: [{address: "to@example.com"}], cc: [], bcc: [], attachments: []
+    };
+    const native = {
+        from: "sender@example.com", to: [], cc: [], bcc: [],
+        subject: "Subject", body: "", attachment_paths: []
+    };
+    const snapshot = {
+        from: "sender@example.com", to: [{address: "to@example.com"}], cc: [], bcc: [],
+        subject: "Subject", body: "Reviewed body\n\nUnobserved suffix", attachment_paths: []
+    };
+    return JSON.stringify({matches: composeMatchesDraft(snapshot, draft, native)});
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"matches":false}` {
+		t.Fatalf("unobserved body suffix result = %q", output)
+	}
+}
+
 func TestBridgeComposeIntegrityAcceptsReviewedReplyWithNativeQuote(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
@@ -553,7 +657,7 @@ function run(_) {
     let created = false;
     outgoingForDraft = () => { created = true; return {}; };
     try {
-        sendDraft({outgoingMessages: () => [{}]}, {draft: {
+        sendDraft({outgoingMessages: () => [{visible: () => true}]}, {draft: {
             kind: "new", from: "sender@example.com"
         }});
         return JSON.stringify({code: "none", created: created});
@@ -569,6 +673,27 @@ function run(_) {
 	}
 	if strings.TrimSpace(string(output)) != `{"code":"compose_busy","created":false}` {
 		t.Fatalf("compose-busy result = %q", output)
+	}
+}
+
+func TestBridgeIgnoresHiddenOutgoingBackend(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    try {
+        ensureComposeAvailable({outgoingMessages: () => [{visible: () => false}]});
+        return JSON.stringify({code: "none"});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"code":"none"}` {
+		t.Fatalf("hidden compose availability result = %q", output)
 	}
 }
 
@@ -650,7 +775,7 @@ function run(_) {
     };
     const native = {
         from: "Sender Name <sender@example.com>", to: [], cc: [], bcc: [],
-        subject: "Caf\u00e9", body: "Body", attachment_paths: []
+        subject: "Caf\u00e9", body: "", attachment_paths: []
     };
     const snapshot = {
         from: "Sender Name <SENDER@example.com>", to: [{address: "person@example.com"}],
@@ -872,7 +997,7 @@ func TestInstalledMailDefinitionContainsRequiredWriteSurface(t *testing.T) {
 		`<command name="forward"`, `<command name="reply"`, `<command name="send"`,
 		`<responds-to command="save">`, `<responds-to command="close">`,
 		`<command name="synchronize"`, `<class name="outgoing message"`,
-		`<property name="read status"`, `<property name="flagged status"`,
+		`<property name="visible"`, `<property name="read status"`, `<property name="flagged status"`,
 		`<property name="junk mail status"`, `<class name="mail attachment"`,
 	}
 	for _, fragment := range required {

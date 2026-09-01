@@ -262,7 +262,7 @@ function resolveDraftSource(mail, source, resolution) {
 
 function outgoingForDraft(mail, draft, resolution) {
     if (draft.kind === "new") {
-        const properties = {visible: false, content: draft.body};
+        const properties = {visible: false};
         if (draft.from) {
             properties.sender = draft.from;
         }
@@ -437,12 +437,9 @@ function composeMatchesDraft(snapshot, draft, native) {
     const body = canonicalComposeText(snapshot.body);
     const expectedBody = canonicalComposeText(draft.body);
     const nativeBody = canonicalComposeText(native.body || "");
-    let materializedBody = expectedBody;
-    if (draft.kind !== "new") {
-        materializedBody = expectedBody || nativeBody;
-        if (expectedBody && nativeBody) {
-            materializedBody = expectedBody + "\n\n" + nativeBody;
-        }
+    let materializedBody = expectedBody || nativeBody;
+    if (expectedBody && nativeBody) {
+        materializedBody = expectedBody + "\n\n" + nativeBody;
     }
     if (body !== materializedBody) {
         return false;
@@ -488,15 +485,10 @@ function applyOutgoingFields(mail, outgoing, draft) {
     if (draft.subject) {
         outgoing.subject = draft.subject;
     }
-    const preserveContent = draft.kind !== "new";
-    const originalContent = preserveContent ? String(safe(() => outgoing.content(), "")) : "";
-    if (preserveContent) {
-        outgoing.content = draft.body && originalContent
-            ? draft.body + "\n\n" + originalContent
-            : draft.body || originalContent;
-    } else {
-        outgoing.content = draft.body;
-    }
+    const originalContent = String(safe(() => outgoing.content(), ""));
+    outgoing.content = draft.body && originalContent
+        ? draft.body + "\n\n" + originalContent
+        : draft.body || originalContent;
     addRecipients(mail, outgoing, "toRecipients", "ToRecipient", draft.to);
     addRecipients(mail, outgoing, "ccRecipients", "CcRecipient", draft.cc);
     addRecipients(mail, outgoing, "bccRecipients", "BccRecipient", draft.bcc);
@@ -517,8 +509,11 @@ function sendMaterialization(snapshot) {
 }
 
 function ensureComposeAvailable(mail) {
-    if (mail.outgoingMessages().length !== 0) {
-        bridgeError("compose_busy", "Mail.app already has an open compose object; close or save it first");
+    const visibleComposeExists = mail.outgoingMessages().some(outgoing =>
+        safe(() => Boolean(outgoing.visible()), true)
+    );
+    if (visibleComposeExists) {
+        bridgeError("compose_busy", "Mail.app already has a visible compose window; close or save it first");
     }
 }
 
