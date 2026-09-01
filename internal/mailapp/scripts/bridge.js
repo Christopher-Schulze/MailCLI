@@ -291,7 +291,11 @@ function composeRecipients(outgoing, property) {
 }
 
 function composeAttachmentPaths(outgoing) {
-    return outgoing.content.attachments().map(attachment => String(attachment.fileName()));
+    const attachments = outgoing.content.attachments();
+    if (attachments === null) {
+        return [];
+    }
+    return attachments.map(attachment => String(attachment.fileName()));
 }
 
 function composeSnapshot(outgoing) {
@@ -318,12 +322,16 @@ function waitForComposeSnapshot(outgoing, accepts, initialDelay, retryDelay, max
     abortIfCancelled();
     sleepForCompose(initialDelay);
     let previousAccepted = "";
+    let successfulSnapshotReads = 0;
+    let lastSnapshotError = null;
     for (let attempt = 0; attempt < maximumSnapshots; attempt += 1) {
         abortIfCancelled();
         let snapshot;
         try {
             snapshot = composeSnapshot(outgoing);
-        } catch (_) {
+            successfulSnapshotReads += 1;
+        } catch (error) {
+            lastSnapshotError = error;
             snapshot = null;
         }
         if (snapshot !== null && accepts(snapshot)) {
@@ -338,6 +346,10 @@ function waitForComposeSnapshot(outgoing, accepts, initialDelay, retryDelay, max
         if (attempt + 1 < maximumSnapshots) {
             sleepForCompose(retryDelay);
         }
+    }
+    if (successfulSnapshotReads === 0 && lastSnapshotError !== null) {
+        const detail = String(lastSnapshotError.message || lastSnapshotError);
+        bridgeError(code, message + ": " + detail);
     }
     bridgeError(code, message);
 }
@@ -510,6 +522,29 @@ function ensureComposeAvailable(mail) {
     }
 }
 
+function closeOwnedCompose(outgoing) {
+    try {
+        outgoing.close({saving: "no"});
+    } catch (_) {
+        return false;
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+        let exists;
+        try {
+            exists = Boolean(outgoing.exists());
+        } catch (_) {
+            exists = null;
+        }
+        if (exists === false) {
+            return true;
+        }
+        if (attempt + 1 < 5) {
+            sleepForCompose(0.5);
+        }
+    }
+    return false;
+}
+
 function sendDraft(mail, request, resolution) {
     if (!request.draft) {
         bridgeError("invalid_request", "draft is required");
@@ -529,11 +564,7 @@ function sendDraft(mail, request, resolution) {
         sendAttempted = true;
         const accepted = Boolean(outgoing.send());
         if (!accepted) {
-            const cleaned = safe(() => {
-                outgoing.close({saving: "no"});
-                return true;
-            }, false);
-            if (!cleaned) {
+            if (!closeOwnedCompose(outgoing)) {
                 bridgeError("compose_cleanup_failed", "Mail.app rejected send and the unsent compose object could not be closed");
             }
         }
@@ -545,13 +576,10 @@ function sendDraft(mail, request, resolution) {
     } catch (error) {
         error.sendAttempted = sendAttempted;
         if (!sendAttempted) {
-            const cleaned = safe(() => {
-                outgoing.close({saving: "no"});
-                return true;
-            }, false);
-            if (!cleaned) {
+            if (!closeOwnedCompose(outgoing)) {
+                const preparationMessage = String(error.message || error);
                 error.bridgeCode = "compose_cleanup_failed";
-                error.message = "Mail.app rejected send preparation and the unsent compose object could not be closed";
+                error.message = "Mail.app rejected send preparation and the unsent compose object could not be closed: " + preparationMessage;
             }
         }
         throw error;
@@ -576,13 +604,10 @@ function saveDraft(mail, request, resolution) {
         return {accepted: true, materialized: sendMaterialization(finalSnapshot)};
     } catch (error) {
         if (!saveAttempted) {
-            const cleaned = safe(() => {
-                outgoing.close({saving: "no"});
-                return true;
-            }, false);
-            if (!cleaned) {
+            if (!closeOwnedCompose(outgoing)) {
+                const preparationMessage = String(error.message || error);
                 error.bridgeCode = "compose_cleanup_failed";
-                error.message = "Mail.app rejected draft preparation and the unsaved compose object could not be closed";
+                error.message = "Mail.app rejected draft preparation and the unsaved compose object could not be closed: " + preparationMessage;
             }
         }
         throw error;

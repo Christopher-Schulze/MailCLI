@@ -227,7 +227,7 @@ mailcli messages delete --ref MESSAGE_REF --confirm --json
 mailcli sync --account ACCOUNT_REF --json
 ```
 
-Reply and forward commands require a store-bound source reference and create local drafts. Before send, MailCLI revalidates the exact source in the local store, fingerprints original forward attachments from local MIME, and asks Mail to create the native compose object without redundantly fetching its full RFC source over Apple Events. Each compose phase has a hard five-snapshot budget; a second stable read-back verifies the reviewed body, native quote, recipients, and attachments. Any mismatch closes the unsent compose object and blocks `send()`.
+Reply and forward commands require a store-bound source reference and create local drafts. Before send, MailCLI revalidates the exact source in the local store, fingerprints original forward attachments from local MIME, and asks Mail to create the native compose object without redundantly fetching its full RFC source over Apple Events. Each compose phase has a hard five-snapshot budget; a second stable read-back verifies the reviewed body, native quote, recipients, and attachments. Mail 16's missing value for an empty attachment collection is treated as an empty list, while a real snapshot failure remains visible in the error. Any mismatch blocks `send()`; failed preparation is complete only after MailCLI verifies that the owned unsent compose object disappeared.
 
 ## JSON contract
 

@@ -243,7 +243,12 @@ func TestBridgeMarksOnlyActualSendInvocationAsAttempted(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			testScript := bridgeScript + `
 let closed = false;
-function outgoingForDraft() { return {send: ` + test.sendFunction + `, close: () => { closed = true; }}; }
+let composeExists = true;
+function outgoingForDraft() { return {
+    send: ` + test.sendFunction + `,
+    close: () => { closed = true; composeExists = false; },
+    exists: () => composeExists
+}; }
 ` + test.applyFunction + `
 function waitForStableCompose() { return {attachment_paths: []}; }
 function waitForPreparedCompose() {
@@ -331,6 +336,77 @@ function run(_) {
 	}
 	if strings.TrimSpace(string(output)) != `{"stable_reads":2,"changing_reads":5,"code":"compose_not_ready"}` {
 		t.Fatalf("compose wait result = %q", output)
+	}
+}
+
+func TestBridgeTreatsMissingAttachmentCollectionAsEmpty(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    const outgoing = {content: {attachments: () => null}};
+    return JSON.stringify({paths: composeAttachmentPaths(outgoing)});
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"paths":[]}` {
+		t.Fatalf("attachment paths = %q", output)
+	}
+}
+
+func TestBridgeComposeWaitReportsLastSnapshotFailure(t *testing.T) {
+	testScript := bridgeScript + `
+function sleepForCompose(_) {}
+function run(_) {
+    composeSnapshot = () => { throw new Error("attachment collection unavailable"); };
+    try {
+        waitForStableCompose({}, 0);
+        return JSON.stringify({code: "none", message: ""});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode, message: error.message});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	const want = `{"code":"compose_not_ready","message":"Mail.app did not stabilize the native compose object before the send deadline: attachment collection unavailable"}`
+	if strings.TrimSpace(string(output)) != want {
+		t.Fatalf("compose snapshot failure = %q, want %s", output, want)
+	}
+}
+
+func TestBridgeRejectsUnverifiedComposeCleanup(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    let closeCalls = 0;
+    const outgoing = {
+        close: () => { closeCalls += 1; },
+        exists: () => true
+    };
+    outgoingForDraft = () => outgoing;
+    waitForStableCompose = () => { throw new Error("prepare failed"); };
+    try {
+        sendDraft({outgoingMessages: () => []}, {draft: {
+            kind: "new", from: "sender@example.com"
+        }});
+        return JSON.stringify({code: "none", close_calls: closeCalls});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode, close_calls: closeCalls});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"code":"compose_cleanup_failed","close_calls":1}` {
+		t.Fatalf("compose cleanup result = %q", output)
 	}
 }
 
@@ -604,7 +680,12 @@ const native = {
     from: "sender@example.com", to: [], cc: [], bcc: [],
     subject: "Subject", body: "Body", attachment_paths: []
 };
-function outgoingForDraft() { return {send: () => false, close: () => { closed = true; }}; }
+let composeExists = true;
+function outgoingForDraft() { return {
+    send: () => false,
+    close: () => { closed = true; composeExists = false; },
+    exists: () => composeExists
+}; }
 function applyOutgoingFields() {}
 function waitForStableCompose() { return native; }
 function waitForPreparedCompose() { return snapshot; }
