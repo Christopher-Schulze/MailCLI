@@ -100,7 +100,7 @@ func (testGateway) TransferMessage(_ context.Context, request mail.TransferMessa
 	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox}, nil
 }
 
-func (testGateway) DeleteMessage(context.Context, string) error {
+func (testGateway) DeleteMessage(context.Context, mail.DeleteMessageRequest) error {
 	return nil
 }
 
@@ -167,7 +167,8 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.4"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.5"},
+		{name: "update help", args: []string{"update", "--help"}, wantCode: 0, wantStdout: "mailcli update [options]"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
 	}
@@ -189,6 +190,15 @@ func TestRunTable(t *testing.T) {
 				t.Errorf("stderr = %q, want substring %q", stderr.String(), test.wantStderr)
 			}
 		})
+	}
+}
+
+func TestUnknownCommandDoesNotDumpHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(), []string{"missing"}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || strings.Contains(stderr.String(), "Commands:") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 

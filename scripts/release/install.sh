@@ -45,6 +45,11 @@ if [[ ! -x "${SOURCE_BINARY}" ]]; then
   printf 'Release binary is missing or not executable: %s\n' "${SOURCE_BINARY}" >&2
   exit 1
 fi
+if ! SOURCE_VERSION_OUTPUT="$("${SOURCE_BINARY}" version)" ||
+  [[ ! "${SOURCE_VERSION_OUTPUT}" =~ ^mailcli\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'Release binary version output is invalid\n' >&2
+  exit 1
+fi
 if [[ ! -f "${SOURCE_SKILL}/SKILL.md" || ! -f "${SOURCE_SKILL}/agents/openai.yaml" ]]; then
   printf 'Release skill is incomplete: %s\n' "${SOURCE_SKILL}" >&2
   exit 1
@@ -121,6 +126,7 @@ SKILL_INSTALLED=1
 
 cmp -s "${SOURCE_BINARY}" "${BINARY_DESTINATION}"
 diff -qr "${SOURCE_SKILL}" "${SKILL_DESTINATION}" >/dev/null
+[[ "$("${BINARY_DESTINATION}" version)" == "${SOURCE_VERSION_OUTPUT}" ]]
 
 INSTALL_COMPLETE=1
 if [[ "${BINARY_BACKED_UP}" -eq 1 ]]; then

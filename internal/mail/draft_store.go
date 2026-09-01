@@ -139,6 +139,12 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
+	if err := validateStoredDraftLimits(draft); err != nil {
+		return SendResult{}, err
+	}
+	if err := composeWriteSupportError(s.gateway); err != nil {
+		return SendResult{}, err
+	}
 	if draft.SendAttempt != nil {
 		return replaySendAttempt(root, ref, *draft.SendAttempt)
 	}
@@ -243,6 +249,24 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 
 type SendPreparer interface {
 	PrepareSend(ctx context.Context, draft Draft) (SendObservationBaseline, error)
+}
+
+type ComposeWriteGate interface {
+	ComposeWriteSupportError() error
+}
+
+func composeWriteSupportError(gateway Gateway) error {
+	if gateway == nil {
+		return &OperationError{
+			Code:    "compose_automation_unsupported",
+			Message: "Mail 16 compose scripting is disabled because it cannot preserve reviewed content reliably; use Mail's UI for send and native draft save",
+		}
+	}
+	capability, ok := gateway.(ComposeWriteGate)
+	if !ok {
+		return nil
+	}
+	return capability.ComposeWriteSupportError()
 }
 
 type SendReconciler interface {
@@ -356,7 +380,17 @@ func cloneSendMaterialization(value *SendMaterialization) *SendMaterialization {
 	clone.To = append([]Recipient(nil), value.To...)
 	clone.CC = append([]Recipient(nil), value.CC...)
 	clone.BCC = append([]Recipient(nil), value.BCC...)
+	if value.Body != nil {
+		body := *value.Body
+		clone.Body = &body
+	}
 	return &clone
+}
+
+type DraftSaveBackend interface {
+	PrepareDraftSave(ctx context.Context, draft Draft) (SendObservationBaseline, error)
+	SaveDraftWithEvidence(ctx context.Context, draft Draft) (DraftSaveEvidence, error)
+	ReconcileDraftSave(ctx context.Context, draft Draft, attempt DraftSaveAttempt) (DraftSaveEvidence, error)
 }
 
 func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft, resultErr error) {
@@ -373,7 +407,23 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err != nil {
 		return SavedDraft{}, err
 	}
-	if err := rejectClaimedDraft(draft); err != nil {
+	if err := validateStoredDraftLimits(draft); err != nil {
+		return SavedDraft{}, err
+	}
+	if draft.SendAttempt != nil {
+		return SavedDraft{}, rejectClaimedDraft(draft)
+	}
+	backend, durable := s.gateway.(DraftSaveBackend)
+	if draft.SaveAttempt != nil {
+		if !durable {
+			return SavedDraft{}, &OperationError{
+				Code:    "draft_save_reconcile_unavailable",
+				Message: "the selected Mail backend cannot reconcile the existing native draft-save attempt",
+			}
+		}
+		return reconcileNativeDraftSave(ctx, backend, root, ref, draft, *draft.SaveAttempt)
+	}
+	if err := composeWriteSupportError(s.gateway); err != nil {
 		return SavedDraft{}, err
 	}
 	if draft.From == "" {
@@ -385,6 +435,66 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return SavedDraft{}, err
 	}
+	if !durable {
+		return s.saveDraftLegacy(ctx, root, ref, draft)
+	}
+	baseline, err := backend.PrepareDraftSave(ctx, draft)
+	if err != nil {
+		return SavedDraft{}, err
+	}
+	if !validObservationBaseline(&baseline) {
+		return SavedDraft{}, &OperationError{
+			Code: "draft_save_prepare_failed", Message: "Mail backend returned an invalid Drafts observation baseline",
+		}
+	}
+	attempt, err := beginDraftSaveAttempt(root, ref, &baseline)
+	if err != nil {
+		return SavedDraft{}, err
+	}
+	draft.PreparedSaveBaseline = cloneSendObservationBaseline(&baseline)
+	evidence, saveErr := backend.SaveDraftWithEvidence(ctx, draft)
+	if !evidence.InvocationStarted {
+		if cleanupErr := removeDraftSaveAttempt(root, ref); cleanupErr != nil {
+			return SavedDraft{}, &OperationError{
+				Code:    "draft_save_state_cleanup_failed",
+				Message: fmt.Sprintf("native draft save did not start, but its local claim could not be cleared: %v", cleanupErr),
+			}
+		}
+		if saveErr == nil {
+			saveErr = &OperationError{Code: "draft_save_not_started", Message: "Mail.app draft save did not start"}
+		}
+		return SavedDraft{}, saveErr
+	}
+	attempt.InvocationStarted = true
+	attempt.AcceptedByMail = evidence.AcceptedByMail
+	attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
+	attempt.ObservedMessageRef = evidence.ObservedMessage.Ref
+	if attempt.ObservationBaseline == nil {
+		attempt.ObservationBaseline = cloneSendObservationBaseline(evidence.ObservationBaseline)
+	}
+	attempt.UpdatedAt = time.Now().UTC()
+	if err := replaceDraftSaveAttempt(root, ref, attempt); err != nil {
+		return SavedDraft{}, &OperationError{
+			Code:    "draft_save_outcome_unknown",
+			Message: fmt.Sprintf("native draft save started, but its outcome state could not be recorded safely: %v", err),
+		}
+	}
+	if evidence.ObservedMessage.Ref != "" {
+		return finishObservedDraftSave(root, ref, evidence.ObservedMessage, saveErr)
+	}
+	message := "Mail.app draft-save outcome is not yet proven; the local draft is retained and duplicate saves are blocked"
+	if saveErr != nil {
+		message += ": " + saveErr.Error()
+	}
+	return SavedDraft{}, &OperationError{Code: "draft_save_outcome_unknown", Message: message}
+}
+
+func (s *Service) saveDraftLegacy(
+	ctx context.Context,
+	root string,
+	ref string,
+	draft Draft,
+) (SavedDraft, error) {
 	message, saveErr := s.gateway.SaveDraft(ctx, draft)
 	if message.Ref == "" {
 		if saveErr != nil {
@@ -394,7 +504,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 			Code: "draft_outcome_unknown", Message: "Mail backend returned no observed native draft",
 		}
 	}
-	result = SavedDraft{LocalDraftRef: ref, Message: message}
+	result := SavedDraft{LocalDraftRef: ref, Message: message}
 	if err := discardDraftFiles(root, ref); err != nil {
 		return result, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
 	}
@@ -402,6 +512,59 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 		return result, &OperationError{
 			Code:    "draft_postflight_failed",
 			Message: fmt.Sprintf("native Mail.app draft was observed, but private postflight cleanup failed: %v", saveErr),
+		}
+	}
+	return result, nil
+}
+
+func reconcileNativeDraftSave(
+	ctx context.Context,
+	backend DraftSaveBackend,
+	root string,
+	ref string,
+	draft Draft,
+	attempt DraftSaveAttempt,
+) (SavedDraft, error) {
+	evidence, err := backend.ReconcileDraftSave(ctx, draft, attempt)
+	if err != nil {
+		return SavedDraft{}, err
+	}
+	if evidence.ObservedMessage.Ref == "" {
+		return SavedDraft{}, &OperationError{
+			Code:    "draft_save_outcome_unknown",
+			Message: "Drafts still does not prove the prior native save; the local draft is retained and duplicate saves remain blocked",
+		}
+	}
+	attempt.InvocationStarted = true
+	attempt.AcceptedByMail = true
+	attempt.ObservedMessageRef = evidence.ObservedMessage.Ref
+	if evidence.Materialized != nil {
+		attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
+	}
+	attempt.UpdatedAt = time.Now().UTC()
+	if err := replaceDraftSaveAttempt(root, ref, attempt); err != nil {
+		return SavedDraft{}, &OperationError{
+			Code:    "draft_save_reconcile_state_failed",
+			Message: fmt.Sprintf("native draft was observed, but its reconciled state could not be recorded: %v", err),
+		}
+	}
+	return finishObservedDraftSave(root, ref, evidence.ObservedMessage, nil)
+}
+
+func finishObservedDraftSave(
+	root string,
+	ref string,
+	message MessageSummary,
+	postflightErr error,
+) (SavedDraft, error) {
+	result := SavedDraft{LocalDraftRef: ref, Message: message}
+	if err := discardDraftFiles(root, ref); err != nil {
+		return result, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
+	}
+	if postflightErr != nil {
+		return result, &OperationError{
+			Code:    "draft_postflight_failed",
+			Message: fmt.Sprintf("native Mail.app draft was observed, but private postflight cleanup failed: %v", postflightErr),
 		}
 	}
 	return result, nil
@@ -451,6 +614,9 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	if request.Kind == DraftKindForward && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("forward drafts require at least one explicit recipient")
 	}
+	if err := validateDraftLimits(request.Input); err != nil {
+		return Draft{}, err
+	}
 	if err := validateDraftAddresses(request.Input); err != nil {
 		return Draft{}, err
 	}
@@ -471,6 +637,34 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 		Body: request.Input.Body, Attachments: attachments,
 		CreatedAt: now, UpdatedAt: now,
 	}, nil
+}
+
+func validateDraftLimits(input DraftInput) error {
+	return validateDraftResourceLimits(
+		len(input.Subject), len(input.Body), len(input.To)+len(input.CC)+len(input.BCC), len(input.Attachments),
+	)
+}
+
+func validateStoredDraftLimits(draft Draft) error {
+	return validateDraftResourceLimits(
+		len(draft.Subject), len(draft.Body), len(draft.To)+len(draft.CC)+len(draft.BCC), len(draft.Attachments),
+	)
+}
+
+func validateDraftResourceLimits(subjectBytes int, bodyBytes int, recipients int, attachments int) error {
+	if subjectBytes > MaximumDraftSubjectBytes {
+		return validationError("draft subject exceeds 64 KiB")
+	}
+	if bodyBytes > MaximumDraftBodyBytes {
+		return validationError("draft body exceeds 4 MiB")
+	}
+	if recipients > MaximumDraftRecipients {
+		return validationError("draft exceeds 200 total recipients")
+	}
+	if attachments > MaximumDraftAttachments {
+		return validationError("draft exceeds 100 attachments")
+	}
+	return nil
 }
 
 func validateDraftAddresses(input DraftInput) error {
@@ -502,20 +696,22 @@ func validateDraftAddresses(input DraftInput) error {
 
 func fingerprintAttachments(paths []string) ([]DraftAttachment, error) {
 	attachments := make([]DraftAttachment, 0, len(paths))
+	remaining := MaximumDraftAttachmentBytes
 	for _, path := range paths {
 		if !filepath.IsAbs(path) {
 			return nil, validationError("draft attachment paths must be absolute")
 		}
-		attachment, err := fingerprintAttachment(path)
+		attachment, err := fingerprintAttachment(path, remaining)
 		if err != nil {
 			return nil, err
 		}
 		attachments = append(attachments, attachment)
+		remaining -= attachment.Size
 	}
 	return attachments, nil
 }
 
-func fingerprintAttachment(path string) (DraftAttachment, error) {
+func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return DraftAttachment{}, fmt.Errorf("open draft attachment: %w", err)
@@ -529,6 +725,11 @@ func fingerprintAttachment(path string) (DraftAttachment, error) {
 			validationError("draft attachment must be a regular file"), file.Close(),
 		)
 	}
+	if info.Size() < 0 || info.Size() > maximumSize {
+		return DraftAttachment{}, errors.Join(
+			validationError("draft attachments exceed 512 MiB total"), file.Close(),
+		)
+	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return DraftAttachment{}, errors.Join(fmt.Errorf("hash draft attachment: %w", err), file.Close())
@@ -540,14 +741,22 @@ func fingerprintAttachment(path string) (DraftAttachment, error) {
 }
 
 func verifyDraftAttachments(attachments []DraftAttachment) error {
+	if len(attachments) > MaximumDraftAttachments {
+		return validationError("draft exceeds 100 attachments")
+	}
+	remaining := MaximumDraftAttachmentBytes
 	for _, expected := range attachments {
-		actual, err := fingerprintAttachment(expected.Path)
+		if expected.Size < 0 || expected.Size > remaining {
+			return validationError("draft attachments exceed 512 MiB total")
+		}
+		actual, err := fingerprintAttachment(expected.Path, remaining)
 		if err != nil {
 			return err
 		}
 		if actual.Size != expected.Size || actual.SHA256 != expected.SHA256 {
 			return validationError("draft attachment changed after review; update the draft before sending")
 		}
+		remaining -= actual.Size
 	}
 	return nil
 }
@@ -602,6 +811,13 @@ func sendClaimPath(root string, ref string) (string, error) {
 	return filepath.Join(root, ref+".send-claim"), nil
 }
 
+func saveClaimPath(root string, ref string) (string, error) {
+	if _, err := draftPath(root, ref); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, ref+".save-claim"), nil
+}
+
 type draftLease struct {
 	file *os.File
 }
@@ -649,16 +865,25 @@ func (l *draftLease) release() error {
 }
 
 func rejectClaimedDraft(draft Draft) error {
-	if draft.SendAttempt == nil {
-		return nil
+	if draft.SendAttempt != nil {
+		return &OperationError{
+			Code: "send_retry_blocked",
+			Message: fmt.Sprintf(
+				"draft has send attempt %s with outcome %s; inspect it and discard explicitly instead of retrying",
+				draft.SendAttempt.ID, draft.SendAttempt.Outcome,
+			),
+		}
 	}
-	return &OperationError{
-		Code: "send_retry_blocked",
-		Message: fmt.Sprintf(
-			"draft has send attempt %s with outcome %s; inspect it and discard explicitly instead of retrying",
-			draft.SendAttempt.ID, draft.SendAttempt.Outcome,
-		),
+	if draft.SaveAttempt != nil {
+		return &OperationError{
+			Code: "draft_save_retry_blocked",
+			Message: fmt.Sprintf(
+				"draft has native save attempt %s; run drafts save again only to reconcile it, or discard explicitly",
+				draft.SaveAttempt.ID,
+			),
+		}
 	}
+	return nil
 }
 
 func beginSendAttempt(root string, ref string) (SendAttempt, error) {
@@ -735,10 +960,10 @@ func readSendAttempt(root string, ref string) (*SendAttempt, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect send claim: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > 64*1024 {
+	if !info.Mode().IsRegular() || info.Size() > maximumDraftStateBytes {
 		return nil, fmt.Errorf("send claim is not a bounded regular file")
 	}
-	payload, err := readBoundedRegularFile(path, info, 64*1024)
+	payload, err := readBoundedRegularFile(path, info, maximumDraftStateBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read send claim: %w", err)
 	}
@@ -788,6 +1013,9 @@ func validSendMaterialization(value *SendMaterialization) bool {
 	}
 	if value.AttachmentCount < 0 || strings.TrimSpace(value.From) == "" ||
 		len(value.To)+len(value.CC)+len(value.BCC) == 0 {
+		return false
+	}
+	if value.Body != nil && int64(len(*value.Body)) > maximumDraftStateBytes {
 		return false
 	}
 	return validateDraftAddresses(DraftInput{
@@ -851,6 +1079,150 @@ func removeSendAttempt(root string, ref string) error {
 	return syncDirectory(root)
 }
 
+type storedDraftSaveAttempt struct {
+	Version  int              `json:"version"`
+	DraftRef string           `json:"draft_ref"`
+	Attempt  DraftSaveAttempt `json:"attempt"`
+}
+
+func beginDraftSaveAttempt(
+	root string,
+	ref string,
+	baseline *SendObservationBaseline,
+) (DraftSaveAttempt, error) {
+	id, err := newDraftSaveAttemptID()
+	if err != nil {
+		return DraftSaveAttempt{}, err
+	}
+	now := time.Now().UTC()
+	attempt := DraftSaveAttempt{
+		ID: id, StartedAt: now, UpdatedAt: now,
+		ObservationBaseline: cloneSendObservationBaseline(baseline),
+	}
+	path, err := saveClaimPath(root, ref)
+	if err != nil {
+		return DraftSaveAttempt{}, err
+	}
+	payload, err := encodeDraftSaveAttempt(ref, attempt)
+	if err != nil {
+		return DraftSaveAttempt{}, err
+	}
+	if err := writePrivateFile(path, payload); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return DraftSaveAttempt{}, &OperationError{
+				Code: "draft_save_retry_blocked", Message: "draft already has a native save attempt",
+			}
+		}
+		return DraftSaveAttempt{}, fmt.Errorf("create draft-save claim: %w", err)
+	}
+	return attempt, nil
+}
+
+func newDraftSaveAttemptID() (string, error) {
+	var value [18]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate draft-save attempt id: %w", err)
+	}
+	return "save_" + base64.RawURLEncoding.EncodeToString(value[:]), nil
+}
+
+func encodeDraftSaveAttempt(ref string, attempt DraftSaveAttempt) ([]byte, error) {
+	payload, err := json.MarshalIndent(storedDraftSaveAttempt{
+		Version: 1, DraftRef: ref, Attempt: attempt,
+	}, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode draft-save claim: %w", err)
+	}
+	payload = append(payload, '\n')
+	if int64(len(payload)) > maximumDraftStateBytes {
+		return nil, validationError("draft-save claim exceeds 20 MiB")
+	}
+	return payload, nil
+}
+
+func readDraftSaveAttempt(root string, ref string) (*DraftSaveAttempt, error) {
+	path, err := saveClaimPath(root, ref)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect draft-save claim: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maximumDraftStateBytes {
+		return nil, fmt.Errorf("draft-save claim is not a bounded regular file")
+	}
+	payload, err := readBoundedRegularFile(path, info, maximumDraftStateBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read draft-save claim: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.DisallowUnknownFields()
+	var stored storedDraftSaveAttempt
+	if err := decoder.Decode(&stored); err != nil {
+		return nil, fmt.Errorf("decode draft-save claim: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("draft-save claim must contain exactly one JSON object")
+	}
+	if !validDraftSaveAttempt(stored, ref) {
+		return nil, fmt.Errorf("draft-save claim is invalid")
+	}
+	return &stored.Attempt, nil
+}
+
+func validDraftSaveAttempt(stored storedDraftSaveAttempt, ref string) bool {
+	attempt := stored.Attempt
+	if stored.Version != 1 || stored.DraftRef != ref || attempt.ID == "" ||
+		attempt.StartedAt.IsZero() || attempt.UpdatedAt.IsZero() ||
+		attempt.ObservationBaseline == nil || !validObservationBaseline(attempt.ObservationBaseline) ||
+		!validSendMaterialization(attempt.Materialized) {
+		return false
+	}
+	if attempt.AcceptedByMail && !attempt.InvocationStarted {
+		return false
+	}
+	return attempt.ObservedMessageRef == "" || attempt.InvocationStarted && attempt.AcceptedByMail
+}
+
+func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt) (resultErr error) {
+	path, err := saveClaimPath(root, ref)
+	if err != nil {
+		return err
+	}
+	payload, err := encodeDraftSaveAttempt(ref, attempt)
+	if err != nil {
+		return err
+	}
+	temporary, err := attachmentTemporaryPath(path)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, removeIfPresent(temporary)) }()
+	if err := writePrivateFile(temporary, payload); err != nil {
+		return fmt.Errorf("write draft-save claim update: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return fmt.Errorf("publish draft-save claim update: %w", err)
+	}
+	return syncDirectory(root)
+}
+
+func removeDraftSaveAttempt(root string, ref string) error {
+	path, err := saveClaimPath(root, ref)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove draft-save claim: %w", err)
+	}
+	return syncDirectory(root)
+}
+
 func resultForAttempt(ref string, attempt SendAttempt, draftRetained bool) SendResult {
 	return SendResult{
 		DraftRef: ref, AttemptID: attempt.ID, Outcome: attempt.Outcome,
@@ -903,7 +1275,7 @@ func discardDraftFiles(root string, ref string) error {
 	if err := syncDirectory(root); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return removeSendAttempt(root, ref)
+	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref))
 }
 
 func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) {
@@ -912,6 +1284,7 @@ func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) 
 		return err
 	}
 	draft.SendAttempt = nil
+	draft.SaveAttempt = nil
 	payload, err := json.MarshalIndent(draft, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode draft: %w", err)
@@ -998,6 +1371,15 @@ func readDraftFile(root string, ref string) (Draft, error) {
 		return Draft{}, err
 	}
 	draft.SendAttempt = attempt
+	draft.SaveAttempt = nil
+	saveAttempt, err := readDraftSaveAttempt(root, ref)
+	if err != nil {
+		return Draft{}, err
+	}
+	draft.SaveAttempt = saveAttempt
+	if draft.SendAttempt != nil && draft.SaveAttempt != nil {
+		return Draft{}, fmt.Errorf("draft has conflicting send and save claims")
+	}
 	return draft, nil
 }
 

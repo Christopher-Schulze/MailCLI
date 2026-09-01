@@ -6,8 +6,15 @@ import (
 )
 
 const (
-	DefaultPageLimit = 10
-	MaximumPageLimit = 25
+	DefaultPageLimit            = 10
+	MaximumPageLimit            = 25
+	MaximumDraftSubjectBytes    = 64 * 1024
+	MaximumDraftBodyBytes       = 4 * 1024 * 1024
+	MaximumDraftRecipients      = 200
+	MaximumDraftAttachments     = 100
+	MaximumDraftAttachmentBytes = int64(512 * 1024 * 1024)
+	MaximumComposeBodyBytes     = 16 * 1024 * 1024
+	MaximumRawSourceBytes       = int64(64 * 1024 * 1024)
 )
 
 type Check struct {
@@ -103,9 +110,12 @@ type Draft struct {
 	CreatedAt                     time.Time                `json:"created_at"`
 	UpdatedAt                     time.Time                `json:"updated_at"`
 	SendAttempt                   *SendAttempt             `json:"send_attempt,omitempty"`
+	SaveAttempt                   *DraftSaveAttempt        `json:"save_attempt,omitempty"`
 	PreparedSendBaseline          *SendObservationBaseline `json:"-"`
+	PreparedSaveBaseline          *SendObservationBaseline `json:"-"`
 	ExpectedNativeAttachmentCount int                      `json:"-"`
 	ExpectedAttachmentCount       *int                     `json:"-"`
+	ExpectedBody                  *string                  `json:"-"`
 }
 
 type SavedDraft struct {
@@ -159,6 +169,7 @@ type SendMaterialization struct {
 	CC              []Recipient `json:"cc"`
 	BCC             []Recipient `json:"bcc"`
 	Subject         string      `json:"subject"`
+	Body            *string     `json:"body,omitempty"`
 	AttachmentCount int         `json:"attachment_count"`
 }
 
@@ -167,6 +178,25 @@ type SendEvidence struct {
 	AcceptedByMail      bool
 	SentStoreObserved   bool
 	ObservedMessageRef  string
+	ObservationBaseline *SendObservationBaseline
+	Materialized        *SendMaterialization
+}
+
+type DraftSaveAttempt struct {
+	ID                  string                   `json:"id"`
+	StartedAt           time.Time                `json:"started_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	InvocationStarted   bool                     `json:"invocation_started"`
+	AcceptedByMail      bool                     `json:"accepted_by_mail"`
+	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
+	ObservationBaseline *SendObservationBaseline `json:"observation_baseline"`
+	Materialized        *SendMaterialization     `json:"materialized,omitempty"`
+}
+
+type DraftSaveEvidence struct {
+	InvocationStarted   bool
+	AcceptedByMail      bool
+	ObservedMessage     MessageSummary
 	ObservationBaseline *SendObservationBaseline
 	Materialized        *SendMaterialization
 }
@@ -202,16 +232,23 @@ type MessageSummary struct {
 }
 
 type MarkMessageRequest struct {
-	Ref     string
-	Read    *bool
-	Flagged *bool
-	Junk    *bool
+	Ref                string
+	Read               *bool
+	Flagged            *bool
+	Junk               *bool
+	AllowDraftMutation bool
 }
 
 type TransferMessageRequest struct {
 	Ref                string
 	DestinationMailbox string
 	Copy               bool
+	AllowDraftMutation bool
+}
+
+type DeleteMessageRequest struct {
+	Ref                string
+	AllowDraftMutation bool
 }
 
 type DeleteResult struct {
@@ -266,6 +303,6 @@ type Gateway interface {
 	SendDraft(ctx context.Context, draft Draft) (SendEvidence, error)
 	MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error)
 	TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error)
-	DeleteMessage(ctx context.Context, ref string) error
+	DeleteMessage(ctx context.Context, request DeleteMessageRequest) error
 	Sync(ctx context.Context, accountRef string) error
 }

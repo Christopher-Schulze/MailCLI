@@ -173,6 +173,34 @@ function run(_) {
 	}
 }
 
+func TestBridgeBoundsRawSourceBeforeMaterializingLargeMessages(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    let sourceReads = 0;
+    const declared = {messageSize: () => 11, source: () => { sourceReads += 1; return "small"; }};
+    const encoded = {messageSize: () => 5, source: () => "123456"};
+    const results = [];
+    for (const message of [declared, encoded]) {
+        try {
+            boundedRawSource(message, 5);
+            results.push("none");
+        } catch (error) {
+            results.push(error.bridgeCode);
+        }
+    }
+    return JSON.stringify({results: results, source_reads: sourceReads});
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"results":["raw_source_too_large","raw_source_too_large"],"source_reads":0}` {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestBridgeDraftLookupDoesNotScanMailboxAfterStaleLibraryID(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
@@ -231,12 +259,12 @@ func TestBridgeMarksOnlyActualSendInvocationAsAttempted(t *testing.T) {
 		{
 			name:          "field preparation failed",
 			applyFunction: `function applyOutgoingFields() { throw new Error("prepare"); }`,
-			sendFunction:  `() => true`, want: `{"attempted":false,"closed":true}`,
+			sendFunction:  `() => true`, want: `{"attempted":false,"recovery_required":false,"closed":true}`,
 		},
 		{
 			name:          "send invocation failed",
 			applyFunction: `function applyOutgoingFields() {}`,
-			sendFunction:  `() => { throw new Error("send"); }`, want: `{"attempted":true,"closed":false}`,
+			sendFunction:  `() => { throw new Error("send"); }`, want: `{"attempted":true,"recovery_required":true,"closed":false}`,
 		},
 	}
 	for _, test := range tests {
@@ -263,9 +291,13 @@ function run(_) {
 			kind: "new", from: "sender@example.com", to: [{address: "to@example.com"}],
 			cc: [], bcc: [], subject: "", body: "", attachments: []
 		}});
-        return JSON.stringify({attempted: true, closed: closed});
+        return JSON.stringify({attempted: true, recovery_required: false, closed: closed});
     } catch (error) {
-        return JSON.stringify({attempted: Boolean(error.sendAttempted), closed: closed});
+        return JSON.stringify({
+            attempted: Boolean(error.sendAttempted),
+            recovery_required: Boolean(error.recoveryRequired),
+            closed: closed
+        });
     }
 }`
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -339,6 +371,114 @@ function run(_) {
 	}
 }
 
+func TestBridgeRejectsOversizedComposeBodyAfterOneRead(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    let bodyReads = 0;
+    const oversized = "x".repeat(16 * 1024 * 1024 + 1);
+    const outgoing = {
+        sender: () => "sender@example.com",
+        toRecipients: () => [], ccRecipients: () => [], bccRecipients: () => [],
+        subject: () => "Subject",
+        content: () => { bodyReads += 1; return oversized; }
+    };
+    try {
+        composeSnapshot(outgoing);
+        return JSON.stringify({code: "none", body_reads: bodyReads});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode, body_reads: bodyReads});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"code":"compose_body_too_large","body_reads":1}` {
+		t.Fatalf("compose body bound result = %q", output)
+	}
+}
+
+func TestBridgeRejectsOversizedComposeSubject(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    const outgoing = {
+        sender: () => "sender@example.com",
+        toRecipients: () => [], ccRecipients: () => [], bccRecipients: () => [],
+        subject: () => "x".repeat(64 * 1024 + 1),
+        content: Object.assign(() => "Body", {attachments: () => []})
+    };
+    try {
+        composeSnapshot(outgoing);
+        return JSON.stringify({code: "none"});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"code":"compose_subject_too_large"}` {
+		t.Fatalf("compose subject bound result = %q", output)
+	}
+}
+
+func TestBridgeMutationErrorsRequireRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		call string
+	}{
+		{
+			name: "mark",
+			call: `
+    const message = {};
+    Object.defineProperty(message, "readStatus", {set: () => { throw new Error("mark failed"); }});
+    findMessage = () => message;
+    markMessage({}, {read: true}, {});`,
+		},
+		{
+			name: "transfer",
+			call: `
+    findMessage = () => ({});
+    transferMessage({move: () => { throw new Error("move failed"); }}, {copy: false}, {});`,
+		},
+		{
+			name: "delete",
+			call: `
+    findMessage = () => ({});
+    deleteMessage({delete: () => { throw new Error("delete failed"); }}, {}, {});`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testScript := bridgeScript + `
+function run(_) {
+    resolveAccount = () => ({id: "account", object: {}});
+    resolveMailbox = () => ({});
+    validateMessageIdentity = () => {};
+    try {` + test.call + `
+        return JSON.stringify({recovery_required: false});
+    } catch (error) {
+        return JSON.stringify({recovery_required: Boolean(error.recoveryRequired)});
+    }
+}`
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+			if err != nil {
+				t.Fatalf("osaScriptRunner.Run() error = %v", err)
+			}
+			if strings.TrimSpace(string(output)) != `{"recovery_required":true}` {
+				t.Fatalf("mutation recovery result = %q", output)
+			}
+		})
+	}
+}
+
 func TestBridgeTreatsMissingAttachmentCollectionAsEmpty(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
@@ -396,7 +536,7 @@ function run(_) {
         }});
         return JSON.stringify({code: "none", close_calls: closeCalls});
     } catch (error) {
-        return JSON.stringify({code: error.bridgeCode, close_calls: closeCalls});
+        return JSON.stringify({code: error.bridgeCode, recovery_required: Boolean(error.recoveryRequired), close_calls: closeCalls});
     }
 }`
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -405,8 +545,73 @@ function run(_) {
 	if err != nil {
 		t.Fatalf("osaScriptRunner.Run() error = %v", err)
 	}
-	if strings.TrimSpace(string(output)) != `{"code":"compose_cleanup_failed","close_calls":1}` {
+	if strings.TrimSpace(string(output)) != `{"code":"compose_cleanup_failed","recovery_required":true,"close_calls":1}` {
 		t.Fatalf("compose cleanup result = %q", output)
+	}
+}
+
+func TestBridgeReportsUnknownComposeVisibilityTruthfully(t *testing.T) {
+	testScript := bridgeScript + `
+function sleepForCompose(_) {}
+function run(_) {
+    try {
+        ensureComposeAvailable({outgoingMessages: () => [{visible: () => undefined}]});
+        return JSON.stringify({code: "none"});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode, message: error.message});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	const want = `{"code":"compose_state_unknown","message":"Mail.app compose-window visibility could not be verified safely"}`
+	if strings.TrimSpace(string(output)) != want {
+		t.Fatalf("compose visibility result = %q", output)
+	}
+}
+
+func TestBridgeMapsAutomationDenial(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    const error = new Error("Not authorized to send Apple events. (-1743)");
+    error.number = -1743;
+    return JSON.stringify(bridgeFailure(error));
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if !strings.Contains(string(output), `"code":"mail_automation_denied"`) ||
+		!strings.Contains(string(output), `System Settings > Privacy & Security > Automation`) {
+		t.Fatalf("automation failure = %q", output)
+	}
+}
+
+func TestBridgeRejectsNonMailProcessIdentity(t *testing.T) {
+	testScript := bridgeScript + `
+function run(_) {
+    ObjC.import("Foundation");
+    const processID = Number($.NSProcessInfo.processInfo.processIdentifier);
+    try {
+        verifyMailProcess(processID);
+        return JSON.stringify({code: "none"});
+    } catch (error) {
+        return JSON.stringify({code: error.bridgeCode});
+    }
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil {
+		t.Fatalf("osaScriptRunner.Run() error = %v", err)
+	}
+	if strings.TrimSpace(string(output)) != `{"code":"mail_process_changed"}` {
+		t.Fatalf("process identity result = %q", output)
 	}
 }
 
@@ -634,6 +839,7 @@ function run(_) {
     waitForStableCompose = () => snapshot;
     applyOutgoingFields = () => {};
     waitForPreparedCompose = () => snapshot;
+    writeDraftSaveEvidence = () => {};
     const result = saveDraft({outgoingMessages: () => []}, {draft: {
         kind: "new", from: "sender@example.com", to: [{address: "to@example.com"}],
         cc: [], bcc: [], subject: "Subject", body: "Body", attachments: []
@@ -648,6 +854,36 @@ function run(_) {
 	}
 	if strings.TrimSpace(string(output)) != `{"accepted":true,"close_option":"yes","save_calls":0}` {
 		t.Fatalf("save lifecycle result = %q", output)
+	}
+}
+
+func TestBridgePersistsDraftSaveEvidenceBeforeMutation(t *testing.T) {
+	evidencePath := t.TempDir() + "/materialization.json"
+	encodedPath, err := json.Marshal(evidencePath)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	testScript := bridgeScript + `
+function run(_) {
+    writeDraftSaveEvidence(` + string(encodedPath) + `, {
+        from: "sender@example.com", to: [{address: "to@example.com"}], cc: [], bcc: [],
+        subject: "Subject", body: "Body", attachment_paths: []
+    });
+    return "written";
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
+	if err != nil || strings.TrimSpace(string(output)) != "written" {
+		t.Fatalf("osaScriptRunner.Run() output = %q, error = %v", output, err)
+	}
+	payload, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var evidence bridgeMaterialized
+	if err := json.Unmarshal(payload, &evidence); err != nil || evidence.Body == nil || *evidence.Body != "Body" {
+		t.Fatalf("evidence = %+v, error = %v", evidence, err)
 	}
 }
 
@@ -676,7 +912,7 @@ function run(_) {
 	}
 }
 
-func TestBridgeIgnoresHiddenOutgoingBackend(t *testing.T) {
+func TestBridgeRejectsHiddenOutgoingBackendTruthfully(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
     try {
@@ -692,7 +928,7 @@ function run(_) {
 	if err != nil {
 		t.Fatalf("osaScriptRunner.Run() error = %v", err)
 	}
-	if strings.TrimSpace(string(output)) != `{"code":"none"}` {
+	if strings.TrimSpace(string(output)) != `{"code":"compose_backend_busy"}` {
 		t.Fatalf("hidden compose availability result = %q", output)
 	}
 }

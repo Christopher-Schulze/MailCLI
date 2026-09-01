@@ -25,9 +25,24 @@ type draftSaveMaterializer interface {
 	) (mail.MessageSummary, *mail.SendMaterialization, error)
 }
 
+type draftSaveInvocationMaterializer interface {
+	SaveDraftWithInvocationState(
+		ctx context.Context,
+		draft mail.Draft,
+	) (mail.MessageSummary, *mail.SendMaterialization, bool, bool, error)
+}
+
 func NewClient(ctx context.Context, fallback mail.Gateway, config Config) *Client {
 	store, err := Open(ctx, config)
 	return &Client{store: store, storeErr: err, fallback: fallback}
+}
+
+func (c *Client) ComposeWriteSupportError() error {
+	capability, ok := c.fallback.(mail.ComposeWriteGate)
+	if !ok {
+		return nil
+	}
+	return capability.ComposeWriteSupportError()
 }
 
 func (c *Client) Close() error {
@@ -275,56 +290,149 @@ func (c *Client) SaveAttachmentTo(
 }
 
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
+	evidence, err := c.SaveDraftWithEvidence(ctx, draft)
+	return evidence.ObservedMessage, err
+}
+
+func (c *Client) PrepareDraftSave(
+	ctx context.Context,
+	_ mail.Draft,
+) (mail.SendObservationBaseline, error) {
+	if c.store == nil {
+		return mail.SendObservationBaseline{}, c.safeWriteUnavailableError()
+	}
+	baseline, err := c.store.captureMailboxBaseline(
+		ctx, mailboxAttributeDrafts, "draft_store_unavailable",
+		"no active Drafts mailbox is available in the local Mail store",
+	)
+	if err != nil {
+		return mail.SendObservationBaseline{}, err
+	}
+	return *c.store.exportSendBaseline(baseline), nil
+}
+
+func (c *Client) SaveDraftWithEvidence(
+	ctx context.Context,
+	draft mail.Draft,
+) (mail.DraftSaveEvidence, error) {
+	baseline, err := c.draftSaveBaseline(ctx, draft.PreparedSaveBaseline)
+	if err != nil {
+		return mail.DraftSaveEvidence{}, err
+	}
+	evidence := mail.DraftSaveEvidence{ObservationBaseline: c.store.exportSendBaseline(baseline)}
 	if draft.Kind == mail.DraftKindForward {
 		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
 		if err != nil {
-			return mail.MessageSummary{}, err
+			return evidence, err
 		}
 		draft.ExpectedNativeAttachmentCount = len(native)
 	}
 	automationDraft, err := c.automationDraft(ctx, draft)
 	if err != nil {
-		return mail.MessageSummary{}, err
+		return evidence, err
 	}
 	if c.fallback == nil {
-		return mail.MessageSummary{}, c.writeUnavailableError()
-	}
-	var baseline sendBaseline
-	baselineAvailable := false
-	if c.store != nil {
-		baseline, err = c.store.captureMailboxBaseline(
-			ctx, mailboxAttributeDrafts, "draft_store_unavailable",
-			"no active Drafts mailbox is available in the local Mail store",
-		)
-		baselineAvailable = err == nil
+		return evidence, c.writeUnavailableError()
 	}
 	var materialized *mail.SendMaterialization
+	var invocationStarted bool
+	var accepted bool
 	var saveErr error
-	if gateway, ok := c.fallback.(draftSaveMaterializer); ok {
+	if gateway, ok := c.fallback.(draftSaveInvocationMaterializer); ok {
+		_, materialized, invocationStarted, accepted, saveErr = gateway.SaveDraftWithInvocationState(
+			ctx, automationDraft,
+		)
+	} else if gateway, ok := c.fallback.(draftSaveMaterializer); ok {
 		_, materialized, saveErr = gateway.SaveDraftWithMaterialization(ctx, automationDraft)
+		invocationStarted = materialized != nil || saveErr == nil
+		accepted = saveErr == nil
 	} else {
 		_, saveErr = c.fallback.SaveDraft(ctx, automationDraft)
+		invocationStarted = saveErr == nil
+		accepted = saveErr == nil
 	}
-	if baselineAvailable {
-		observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, materialized)
-		if materializationErr == nil {
-			observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
-			defer cancel()
-			observed, found, observationErr := c.store.observeMailboxCandidate(
-				observationCtx, baseline, observationDraft, false,
-			)
-			if observationErr == nil && found {
-				return observed, automationPostflightError(saveErr)
-			}
+	evidence.InvocationStarted = invocationStarted
+	evidence.AcceptedByMail = accepted
+	evidence.Materialized = cloneSaveMaterialization(materialized)
+	observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, materialized)
+	var observationErr error
+	if materializationErr == nil {
+		observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
+		defer cancel()
+		var found bool
+		evidence.ObservedMessage, found, observationErr = c.store.observeMailboxCandidate(
+			observationCtx, baseline, observationDraft, false,
+		)
+		if found && observationErr == nil {
+			return evidence, automationPostflightError(saveErr)
 		}
 	}
 	if saveErr != nil {
-		return mail.MessageSummary{}, saveErr
+		return evidence, errors.Join(saveErr, materializationErr, observationErr)
 	}
-	return mail.MessageSummary{}, operationError(
+	return evidence, errors.Join(materializationErr, observationErr, operationError(
 		"draft_outcome_unknown",
 		"Mail.app accepted the native draft save, but the local Drafts store did not expose a unique result; the local review draft was retained",
+	))
+}
+
+func (c *Client) ReconcileDraftSave(
+	ctx context.Context,
+	draft mail.Draft,
+	attempt mail.DraftSaveAttempt,
+) (mail.DraftSaveEvidence, error) {
+	baseline, err := c.draftSaveBaseline(ctx, attempt.ObservationBaseline)
+	if err != nil {
+		return mail.DraftSaveEvidence{}, err
+	}
+	evidence := mail.DraftSaveEvidence{
+		InvocationStarted: attempt.InvocationStarted, AcceptedByMail: attempt.AcceptedByMail,
+		ObservationBaseline: c.store.exportSendBaseline(baseline),
+		Materialized:        cloneSaveMaterialization(attempt.Materialized),
+	}
+	observationDraft, err := c.materializedObservationDraft(ctx, draft, attempt.Materialized)
+	if err != nil {
+		return evidence, err
+	}
+	observed, found, err := c.store.observeMailboxCandidate(ctx, baseline, observationDraft, false)
+	if err != nil || !found {
+		return evidence, err
+	}
+	evidence.InvocationStarted = true
+	evidence.AcceptedByMail = true
+	evidence.ObservedMessage = observed
+	return evidence, nil
+}
+
+func (c *Client) draftSaveBaseline(
+	ctx context.Context,
+	prepared *mail.SendObservationBaseline,
+) (sendBaseline, error) {
+	if c.store == nil {
+		return sendBaseline{}, c.safeWriteUnavailableError()
+	}
+	if prepared != nil {
+		return c.store.importSendBaseline(prepared)
+	}
+	return c.store.captureMailboxBaseline(
+		ctx, mailboxAttributeDrafts, "draft_store_unavailable",
+		"no active Drafts mailbox is available in the local Mail store",
 	)
+}
+
+func cloneSaveMaterialization(value *mail.SendMaterialization) *mail.SendMaterialization {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.To = append([]mail.Recipient(nil), value.To...)
+	clone.CC = append([]mail.Recipient(nil), value.CC...)
+	clone.BCC = append([]mail.Recipient(nil), value.BCC...)
+	if value.Body != nil {
+		body := *value.Body
+		clone.Body = &body
+	}
+	return &clone
 }
 
 func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvidence, error) {
@@ -416,22 +524,26 @@ func (c *Client) materializedObservationDraft(
 	draft mail.Draft,
 	materialized *mail.SendMaterialization,
 ) (mail.Draft, error) {
-	result := draft
-	if materialized != nil {
-		result.From = materialized.From
-		result.To = append([]mail.Recipient(nil), materialized.To...)
-		result.CC = append([]mail.Recipient(nil), materialized.CC...)
-		result.BCC = append([]mail.Recipient(nil), materialized.BCC...)
-		result.Subject = materialized.Subject
-	} else if draft.Kind == mail.DraftKindReply || draft.Kind == mail.DraftKindForward {
-		if parsedAddress(draft.From) == "" || strings.TrimSpace(draft.Subject) == "" ||
-			len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
-			return mail.Draft{}, operationError(
-				"send_materialization_missing",
-				"Mail.app did not return the native reply or forward headers required for exact Sent observation",
-			)
-		}
+	if materialized == nil {
+		return mail.Draft{}, operationError(
+			"send_materialization_missing",
+			"Mail.app did not return the final native headers and body required for exact store observation",
+		)
 	}
+	if materialized.Body == nil {
+		return mail.Draft{}, operationError(
+			"send_materialization_invalid",
+			"Mail.app returned no final native body for exact store observation",
+		)
+	}
+	result := draft
+	result.From = materialized.From
+	result.To = append([]mail.Recipient(nil), materialized.To...)
+	result.CC = append([]mail.Recipient(nil), materialized.CC...)
+	result.BCC = append([]mail.Recipient(nil), materialized.BCC...)
+	result.Subject = materialized.Subject
+	body := *materialized.Body
+	result.ExpectedBody = &body
 	if parsedAddress(result.From) == "" || len(result.To)+len(result.CC)+len(result.BCC) == 0 {
 		return mail.Draft{}, operationError(
 			"send_materialization_invalid", "Mail.app returned incomplete native send headers",
@@ -449,7 +561,7 @@ func (c *Client) materializedObservationDraft(
 		}
 		result.Attachments = append(native, draft.Attachments...)
 	}
-	if materialized != nil && materialized.AttachmentCount != len(result.Attachments) {
+	if materialized.AttachmentCount != len(result.Attachments) {
 		if materialized.AttachmentCount < len(result.Attachments) {
 			return mail.Draft{}, operationError(
 				"send_materialization_invalid",
@@ -457,10 +569,8 @@ func (c *Client) materializedObservationDraft(
 			)
 		}
 	}
-	if materialized != nil {
-		count := materialized.AttachmentCount
-		result.ExpectedAttachmentCount = &count
-	}
+	count := materialized.AttachmentCount
+	result.ExpectedAttachmentCount = &count
 	return result, nil
 }
 
@@ -524,6 +634,9 @@ func (c *Client) MarkMessage(
 	if c.store == nil {
 		return mail.MessageSummary{}, c.safeWriteUnavailableError()
 	}
+	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
+		return mail.MessageSummary{}, err
+	}
 	storeRequest := request
 	automationRef, err := c.automationWriteRef(ctx, request.Ref)
 	if err != nil {
@@ -557,6 +670,11 @@ func (c *Client) TransferMessage(
 	if c.store == nil {
 		return mail.MessageSummary{}, c.safeWriteUnavailableError()
 	}
+	if !request.Copy {
+		if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
+			return mail.MessageSummary{}, err
+		}
+	}
 	baseline, err := c.store.captureTransferBaseline(
 		ctx, request.Ref, request.DestinationMailbox,
 	)
@@ -588,21 +706,26 @@ func (c *Client) TransferMessage(
 	)
 }
 
-func (c *Client) DeleteMessage(ctx context.Context, ref string) error {
+func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) error {
 	if c.store == nil {
 		return c.safeWriteUnavailableError()
 	}
-	automationRef, err := c.automationWriteRef(ctx, ref)
+	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
+		return err
+	}
+	automationRef, err := c.automationWriteRef(ctx, request.Ref)
 	if err != nil {
 		return err
 	}
 	if c.fallback == nil {
 		return c.writeUnavailableError()
 	}
-	mutationErr := c.fallback.DeleteMessage(ctx, automationRef)
+	automationRequest := request
+	automationRequest.Ref = automationRef
+	mutationErr := c.fallback.DeleteMessage(ctx, automationRequest)
 	observationCtx, cancel := context.WithTimeout(context.Background(), mutationObservationWindow)
 	defer cancel()
-	observed, observationErr := c.store.observeMessageRemovedFromMailbox(observationCtx, ref)
+	observed, observationErr := c.store.observeMessageRemovedFromMailbox(observationCtx, request.Ref)
 	if observationErr == nil && observed {
 		return nil
 	}
@@ -611,6 +734,23 @@ func (c *Client) DeleteMessage(ctx context.Context, ref string) error {
 	}
 	return operationError(
 		"mutation_not_observed", "Mail.app accepted deletion, but the message remained in its original mailbox",
+	)
+}
+
+func (c *Client) rejectUnconfirmedDraftMutation(ctx context.Context, ref string, allowed bool) error {
+	if allowed {
+		return nil
+	}
+	isDraft, err := c.store.messageInSpecialMailbox(ctx, ref, mailboxAttributeDrafts)
+	if err != nil {
+		return err
+	}
+	if !isDraft {
+		return nil
+	}
+	return operationError(
+		"draft_mutation_confirmation_required",
+		"source message is in Drafts; repeat with --allow-draft only after closing any editor for that draft",
 	)
 }
 
@@ -625,7 +765,7 @@ func (c *Client) automationDraft(ctx context.Context, draft mail.Draft) (mail.Dr
 	if draft.SourceRef == "" {
 		return draft, nil
 	}
-	ref, err := c.automationWriteRef(ctx, draft.SourceRef)
+	ref, err := c.automationMessageRef(ctx, draft.SourceRef)
 	if err != nil {
 		return mail.Draft{}, err
 	}
@@ -648,11 +788,18 @@ func (c *Client) automationMessageRef(ctx context.Context, value string) (string
 	if err != nil {
 		return "", err
 	}
+	expectedMessageID := ref.ExpectedMessageID
+	if expectedMessageID == "" {
+		if messageID, identityErr := c.localMessageID(resolved); identityErr == nil {
+			expectedMessageID = messageID
+		}
+	}
 	return mailref.EncodeMessage(mailref.Message{
-		AccountID:       resolved.PhysicalLocation.AccountID,
-		MailboxPath:     resolved.PhysicalLocation.VisiblePath,
-		LibraryID:       strconv.FormatInt(resolved.Record.RowID, 10),
-		ExpectedSubject: resolved.Record.Subject,
+		AccountID:         resolved.PhysicalLocation.AccountID,
+		MailboxPath:       resolved.PhysicalLocation.VisiblePath,
+		LibraryID:         strconv.FormatInt(resolved.Record.RowID, 10),
+		ExpectedMessageID: expectedMessageID,
+		ExpectedSubject:   resolved.Record.Subject,
 	})
 }
 
@@ -667,7 +814,34 @@ func (c *Client) automationWriteRef(ctx context.Context, value string) (string, 
 			"message write requires a store-bound ref; list or search the message again",
 		)
 	}
-	return c.automationMessageRef(ctx, value)
+	automationRef, err := c.automationMessageRef(ctx, value)
+	if err != nil {
+		return "", err
+	}
+	decoded, err := mailref.DecodeMessage(automationRef)
+	if err != nil {
+		return "", operationError("invalid_reference", "invalid automation message ref: "+err.Error())
+	}
+	if decoded.ExpectedMessageID == "" {
+		return "", operationError(
+			"message_identity_unavailable",
+			"message mutation requires a locally verified RFC Message-ID; no Apple Events mutation was attempted",
+		)
+	}
+	return automationRef, nil
+}
+
+func (c *Client) localMessageID(resolved resolvedMessage) (result string, resultErr error) {
+	source, err := c.store.openResolvedSource(resolved)
+	if err != nil {
+		return "", err
+	}
+	defer joinCloseError(&resultErr, source, "message identity source")
+	document, err := parseMIMEDocument(source.Reader(), source.partial, false)
+	if err != nil {
+		return "", err
+	}
+	return document.MessageID, nil
 }
 
 func (c *Client) readUnavailableError() error {

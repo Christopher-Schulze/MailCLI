@@ -38,8 +38,9 @@ type osaScriptRunner struct {
 }
 
 type Client struct {
-	runner scriptRunner
-	gate   accessGate
+	runner                 scriptRunner
+	gate                   accessGate
+	blockComposeAutomation bool
 }
 
 type OperationError struct {
@@ -67,6 +68,8 @@ type bridgeRequest struct {
 	DestinationAccountID   string       `json:"destination_account_id,omitempty"`
 	DestinationMailboxPath []string     `json:"destination_mailbox_path,omitempty"`
 	Copy                   bool         `json:"copy,omitempty"`
+	MaximumRawSourceBytes  int64        `json:"maximum_raw_source_bytes,omitempty"`
+	EvidencePath           string       `json:"evidence_path,omitempty"`
 }
 
 type bridgeDraft struct {
@@ -104,6 +107,9 @@ func (c *Client) SaveAttachmentTo(
 }
 
 func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvidence, error) {
+	if err := c.validateComposeDraft(draft); err != nil {
+		return mail.SendEvidence{}, err
+	}
 	bridge, err := encodeBridgeDraft(draft)
 	if err != nil {
 		return mail.SendEvidence{}, err
@@ -130,7 +136,7 @@ func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvid
 }
 
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
-	summary, _, err := c.SaveDraftWithMaterialization(ctx, draft)
+	summary, _, _, _, err := c.SaveDraftWithInvocationState(ctx, draft)
 	return summary, err
 }
 
@@ -138,32 +144,120 @@ func (c *Client) SaveDraftWithMaterialization(
 	ctx context.Context,
 	draft mail.Draft,
 ) (mail.MessageSummary, *mail.SendMaterialization, error) {
+	summary, materialized, _, _, err := c.SaveDraftWithInvocationState(ctx, draft)
+	return summary, materialized, err
+}
+
+func (c *Client) SaveDraftWithInvocationState(
+	ctx context.Context,
+	draft mail.Draft,
+) (result mail.MessageSummary, materialized *mail.SendMaterialization, invocationStarted bool, accepted bool, resultErr error) {
+	if err := c.validateComposeDraft(draft); err != nil {
+		return mail.MessageSummary{}, nil, false, false, err
+	}
 	bridge, err := encodeBridgeDraft(draft)
 	if err != nil {
-		return mail.MessageSummary{}, nil, err
+		return mail.MessageSummary{}, nil, false, false, err
 	}
 	bridge, cleanup, err := snapshotBridgeAttachments(bridge)
 	if err != nil {
-		return mail.MessageSummary{}, nil, err
+		return mail.MessageSummary{}, nil, false, false, err
 	}
-	response, err := c.invoke(ctx, bridgeRequest{Operation: "drafts.save", Draft: &bridge})
-	cleanupErr := attachmentSnapshotCleanupError(cleanup())
+	evidenceRoot, err := os.MkdirTemp("", "mailcli-save-evidence-*")
 	if err != nil {
-		return mail.MessageSummary{}, nil, errors.Join(err, cleanupErr)
+		return mail.MessageSummary{}, nil, false, false, errors.Join(err, attachmentSnapshotCleanupError(cleanup()))
+	}
+	defer func() {
+		resultErr = errors.Join(
+			resultErr,
+			bridgeCleanupError("remove private draft-save evidence", os.RemoveAll(evidenceRoot)),
+		)
+	}()
+	evidencePath := filepath.Join(evidenceRoot, "materialization.json")
+	response, _, invokeErr := c.invokeWithState(ctx, bridgeRequest{
+		Operation: "drafts.save", Draft: &bridge, EvidencePath: evidencePath,
+	})
+	cleanupErr := attachmentSnapshotCleanupError(cleanup())
+	materialized, evidenceErr := readDraftSaveEvidence(evidencePath)
+	invocationStarted = materialized != nil
+	if response.Materialized != nil {
+		materialized = mapSendMaterialization(response.Materialized)
+		invocationStarted = true
+	}
+	if invokeErr != nil {
+		return mail.MessageSummary{}, materialized, invocationStarted, response.Accepted, errors.Join(invokeErr, evidenceErr, cleanupErr)
 	}
 	if !response.Accepted {
-		return mail.MessageSummary{}, nil, &OperationError{
+		return mail.MessageSummary{}, materialized, invocationStarted, false, errors.Join(&OperationError{
 			Code: "mutation_not_accepted", Message: "Mail.app did not accept the native draft save",
-		}
+		}, evidenceErr, cleanupErr)
 	}
-	materialized := mapSendMaterialization(response.Materialized)
 	summary := mail.MessageSummary{Subject: draft.Subject}
 	if materialized != nil {
 		summary.Subject = materialized.Subject
 		summary.Sender = materialized.From
 		summary.AttachmentCount = materialized.AttachmentCount
 	}
-	return summary, materialized, cleanupErr
+	return summary, materialized, invocationStarted, true, errors.Join(evidenceErr, cleanupErr)
+}
+
+func (c *Client) validateComposeDraft(draft mail.Draft) error {
+	if err := c.ComposeWriteSupportError(); err != nil {
+		return err
+	}
+	if len(draft.Attachments) == 0 {
+		return nil
+	}
+	return &OperationError{
+		Code:    "compose_attachments_unsupported",
+		Message: "Mail 16 rejects scripted compose attachments; remove reviewed attachments or add them manually in Mail",
+	}
+}
+
+func (c *Client) ComposeWriteSupportError() error {
+	if !c.blockComposeAutomation {
+		return nil
+	}
+	return &OperationError{
+		Code:    "compose_automation_unsupported",
+		Message: "Mail 16 compose scripting discards reviewed content or creates phantom drafts; use Mail's UI for send and native draft save",
+	}
+}
+
+func readDraftSaveEvidence(path string) (*mail.SendMaterialization, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect draft-save evidence: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 20*1024*1024 {
+		return nil, fmt.Errorf("draft-save evidence is not a bounded regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open draft-save evidence: %w", err)
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(file, 20*1024*1024+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	if len(payload) > 20*1024*1024 {
+		return nil, fmt.Errorf("draft-save evidence exceeds 20 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var evidence bridgeMaterialized
+	if err := decoder.Decode(&evidence); err != nil {
+		return nil, fmt.Errorf("decode draft-save evidence: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("draft-save evidence must contain one JSON object")
+	}
+	return mapSendMaterialization(&evidence), nil
 }
 
 func snapshotBridgeAttachments(draft bridgeDraft) (bridgeDraft, func() error, error) {
@@ -314,8 +408,8 @@ func (c *Client) TransferMessage(
 	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox}, nil
 }
 
-func (c *Client) DeleteMessage(ctx context.Context, value string) error {
-	ref, err := decodeMessageReference(value)
+func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) error {
+	ref, err := decodeMessageReference(request.Ref)
 	if err != nil {
 		return invalidReference("message ref", err)
 	}
@@ -341,18 +435,19 @@ func (c *Client) Sync(ctx context.Context, accountRef string) error {
 }
 
 type bridgeResponse struct {
-	OK             bool                `json:"ok"`
-	Error          *bridgeError        `json:"error"`
-	Accounts       []bridgeAccount     `json:"accounts"`
-	Mailboxes      []bridgeMailbox     `json:"mailboxes"`
-	Messages       []bridgeMessage     `json:"messages"`
-	Message        *bridgeMessage      `json:"message"`
-	RawSource      string              `json:"raw_source"`
-	NextOffset     *int                `json:"next_offset"`
-	NextPreviousID *string             `json:"next_previous_id"`
-	Accepted       bool                `json:"accepted"`
-	SendAttempted  bool                `json:"send_attempted"`
-	Materialized   *bridgeMaterialized `json:"materialized"`
+	OK               bool                `json:"ok"`
+	Error            *bridgeError        `json:"error"`
+	Accounts         []bridgeAccount     `json:"accounts"`
+	Mailboxes        []bridgeMailbox     `json:"mailboxes"`
+	Messages         []bridgeMessage     `json:"messages"`
+	Message          *bridgeMessage      `json:"message"`
+	RawSource        string              `json:"raw_source"`
+	NextOffset       *int                `json:"next_offset"`
+	NextPreviousID   *string             `json:"next_previous_id"`
+	Accepted         bool                `json:"accepted"`
+	SendAttempted    bool                `json:"send_attempted"`
+	RecoveryRequired bool                `json:"recovery_required"`
+	Materialized     *bridgeMaterialized `json:"materialized"`
 }
 
 type bridgeMaterialized struct {
@@ -361,6 +456,7 @@ type bridgeMaterialized struct {
 	CC              []mail.Recipient `json:"cc"`
 	BCC             []mail.Recipient `json:"bcc"`
 	Subject         string           `json:"subject"`
+	Body            *string          `json:"body"`
 	AttachmentCount int              `json:"attachment_count"`
 }
 
@@ -371,8 +467,16 @@ func mapSendMaterialization(value *bridgeMaterialized) *mail.SendMaterialization
 	return &mail.SendMaterialization{
 		From: value.From, To: append([]mail.Recipient(nil), value.To...),
 		CC: append([]mail.Recipient(nil), value.CC...), BCC: append([]mail.Recipient(nil), value.BCC...),
-		Subject: value.Subject, AttachmentCount: value.AttachmentCount,
+		Subject: value.Subject, Body: cloneStringPointer(value.Body), AttachmentCount: value.AttachmentCount,
 	}
+}
+
+func cloneStringPointer(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 type bridgeError struct {
@@ -418,7 +522,10 @@ type bridgeMessage struct {
 }
 
 func NewClient() *Client {
-	return &Client{runner: osaScriptRunner{}, gate: newFileAccessGate()}
+	return &Client{
+		runner: osaScriptRunner{}, gate: newFileAccessGate(),
+		blockComposeAutomation: true,
+	}
 }
 
 func (e *OperationError) Error() string {
@@ -719,9 +826,13 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		Operation: "messages.raw", AccountID: messageRef.AccountID,
 		MailboxPath: messageRef.MailboxPath, MessageID: messageRef.LibraryID,
 		ExpectedMessageID: messageRef.ExpectedMessageID, ExpectedSubject: messageRef.ExpectedSubject,
+		MaximumRawSourceBytes: mail.MaximumRawSourceBytes,
 	})
 	if err != nil {
 		return "", err
+	}
+	if int64(len(response.RawSource)) > mail.MaximumRawSourceBytes {
+		return "", &OperationError{Code: "raw_source_too_large", Message: "raw RFC message source exceeds 64 MiB"}
 	}
 	return response.RawSource, nil
 }
@@ -750,8 +861,23 @@ func (c *Client) invokeWithState(
 		return bridgeResponse{}, false, err
 	}
 	request.MailPID = release.TargetPID()
+	mutation := operationCanLeaveUncertainMailState(request.Operation)
+	if mutation {
+		if armErr := release.ArmUncertainState(); armErr != nil {
+			releaseErr := release.Release(false)
+			return bridgeResponse{}, false, errors.Join(&OperationError{
+				Code: "mail_access_gate_failed",
+				Message: fmt.Sprintf(
+					"MailCLI could not durably arm recovery state; the Mail.app operation did not start: %v",
+					armErr,
+				),
+			}, releaseErr)
+		}
+	}
 	response, started, completed, invokeErr := c.invokeUnlockedWithState(ctx, request)
-	uncertain := started && !completed
+	uncertain := response.RecoveryRequired ||
+		started && !completed && mutation &&
+			!isAutomationDenial(invokeErr)
 	releaseErr := release.Release(uncertain)
 	if releaseErr != nil {
 		releaseErr = fmt.Errorf("release Mail.app access gate: %w", releaseErr)
@@ -761,6 +887,25 @@ func (c *Client) invokeWithState(
 		return bridgeResponse{}, started, releaseErr
 	}
 	return response, started, invokeErr
+}
+
+func operationCanLeaveUncertainMailState(operation string) bool {
+	switch operation {
+	case "drafts.send", "drafts.save", "messages.mark", "messages.transfer", "messages.delete":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAutomationDenial(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	return strings.Contains(detail, "-1743") ||
+		strings.Contains(detail, "not authorized to send apple events") ||
+		strings.Contains(detail, "not authorised to send apple events")
 }
 
 func (c *Client) acquireAccess(ctx context.Context) (accessLease, error) {
@@ -788,6 +933,13 @@ func mapAccessGateError(err error) error {
 			Message: "a previous Mail.app operation timed out and may still be running; quit and reopen Mail before retrying",
 		}
 	}
+	var invalidState *invalidAccessGateStateError
+	if errors.As(err, &invalidState) {
+		return &OperationError{
+			Code:    "mail_access_gate_corrupt",
+			Message: "MailCLI recovery state is invalid; quit Mail, remove ~/Library/Application Support/MailCLI/mail-access.lock, then reopen Mail",
+		}
+	}
 	var notRunning *mailNotRunningError
 	if errors.As(err, &notRunning) {
 		return &OperationError{
@@ -800,8 +952,9 @@ func mapAccessGateError(err error) error {
 
 type noOpAccessLease struct{}
 
-func (noOpAccessLease) TargetPID() int     { return 0 }
-func (noOpAccessLease) Release(bool) error { return nil }
+func (noOpAccessLease) TargetPID() int           { return 0 }
+func (noOpAccessLease) ArmUncertainState() error { return nil }
+func (noOpAccessLease) Release(bool) error       { return nil }
 
 func (c *Client) invokeUnlockedWithState(
 	ctx context.Context,

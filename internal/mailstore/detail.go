@@ -64,6 +64,9 @@ func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, re
 			"the local EMLX source is partial; exact raw source requires a targeted Mail.app fallback",
 		)
 	}
+	if source.length < 0 || source.length > mail.MaximumRawSourceBytes {
+		return "", operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
+	}
 	var output strings.Builder
 	output.Grow(int(source.length))
 	if _, err := io.CopyN(&output, source.Reader(), source.length); err != nil {

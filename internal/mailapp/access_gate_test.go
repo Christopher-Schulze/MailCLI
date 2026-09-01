@@ -92,6 +92,13 @@ func TestFileAccessGateFailsClosedAfterTimedOutOperation(t *testing.T) {
 	if lease.TargetPID() != 42 {
 		t.Fatalf("lease target PID = %d, want 42", lease.TargetPID())
 	}
+	if err := lease.ArmUncertainState(); err != nil {
+		t.Fatalf("ArmUncertainState() error = %v", err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil || string(payload) != `{"mail_pid":42}` {
+		t.Fatalf("armed gate state = %q, error = %v", payload, err)
+	}
 	if err := lease.Release(true); err != nil {
 		t.Fatalf("uncertain Release() error = %v", err)
 	}
@@ -119,6 +126,132 @@ func TestFileAccessGateFailsClosedAfterTimedOutOperation(t *testing.T) {
 	}
 }
 
+func TestFileAccessGateRecordsUncertaintyWithoutASecondPIDLookup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mail.lock")
+	lookups := 0
+	lookup := func(context.Context) (int, error) {
+		lookups++
+		if lookups > 1 {
+			return 0, fmt.Errorf("transient pgrep failure")
+		}
+		return 42, nil
+	}
+	lease, err := (&fileAccessGate{path: path, mailPID: lookup}).Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := lease.ArmUncertainState(); err != nil {
+		t.Fatalf("ArmUncertainState() error = %v", err)
+	}
+	if err := lease.Release(true); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if lookups != 1 {
+		t.Fatalf("Mail PID lookups = %d, want 1", lookups)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil || string(payload) != `{"mail_pid":42}` {
+		t.Fatalf("gate state = %q, error = %v", payload, err)
+	}
+}
+
+func TestFileAccessGateClearsPrearmedStateAfterDefiniteCompletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mail.lock")
+	gate := &fileAccessGate{
+		path: path, mailPID: func(context.Context) (int, error) { return 42, nil },
+	}
+	lease, err := gate.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := lease.ArmUncertainState(); err != nil {
+		t.Fatalf("ArmUncertainState() error = %v", err)
+	}
+	if err := lease.Release(false); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() != 0 {
+		t.Fatalf("gate state after definite completion = %+v, error = %v", info, err)
+	}
+}
+
+func TestFileAccessGatePrearmedStateSurvivesCallerExit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mail.lock")
+	command := exec.Command(os.Args[0], "-test.run=TestFileAccessGatePrearmedCrashHelper")
+	command.Env = append(os.Environ(), "MAILCLI_GATE_CRASH_HELPER=1", "MAILCLI_GATE_PATH="+path)
+	output, err := command.CombinedOutput()
+	if err != nil || string(output) != "armed\n" {
+		t.Fatalf("crash helper output = %q, error = %v", output, err)
+	}
+
+	gate := &fileAccessGate{
+		path: path, mailPID: func(context.Context) (int, error) { return 42, nil },
+	}
+	_, err = gate.Acquire(context.Background())
+	var uncertain *uncertainMailStateError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("Acquire() after caller exit error = %v, want uncertain state", err)
+	}
+}
+
+func TestFileAccessGatePrearmedCrashHelper(t *testing.T) {
+	if os.Getenv("MAILCLI_GATE_CRASH_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	gate := &fileAccessGate{
+		path:    os.Getenv("MAILCLI_GATE_PATH"),
+		mailPID: func(context.Context) (int, error) { return 42, nil },
+	}
+	lease, err := gate.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.ArmUncertainState(); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("armed")
+	os.Exit(0)
+}
+
+func TestFileAccessGateRejectsCorruptRecoveryState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mail.lock")
+	if err := os.WriteFile(path, []byte(`{"mail_pid":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gate := &fileAccessGate{path: path, mailPID: func(context.Context) (int, error) { return 42, nil }}
+	_, err := gate.Acquire(context.Background())
+	var invalid *invalidAccessGateStateError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Acquire() error = %v, want invalidAccessGateStateError", err)
+	}
+	mapped := mapAccessGateError(err)
+	var operation *OperationError
+	if !errors.As(mapped, &operation) || operation.Code != "mail_access_gate_corrupt" {
+		t.Fatalf("mapAccessGateError() = %v", mapped)
+	}
+}
+
+func TestFileAccessGateRejectsSymbolicLinkLock(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("preserve"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "mail.lock")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	gate := &fileAccessGate{path: path, mailPID: func(context.Context) (int, error) { return 42, nil }}
+	if _, err := gate.Acquire(context.Background()); err == nil {
+		t.Fatal("Acquire() accepted a symbolic-link lock")
+	}
+	payload, err := os.ReadFile(target)
+	if err != nil || string(payload) != "preserve" {
+		t.Fatalf("lock target changed to %q, error = %v", payload, err)
+	}
+}
+
 func TestFileAccessGateDoesNotBindUncertaintyToReplacementMailProcess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mail.lock")
 	pid := 42
@@ -129,6 +262,9 @@ func TestFileAccessGateDoesNotBindUncertaintyToReplacementMailProcess(t *testing
 		t.Fatalf("Acquire() error = %v", err)
 	}
 	pid = 43
+	if err := lease.ArmUncertainState(); err != nil {
+		t.Fatalf("ArmUncertainState() error = %v", err)
+	}
 	if err := lease.Release(true); err != nil {
 		t.Fatalf("Release() after Mail replacement error = %v", err)
 	}

@@ -32,7 +32,7 @@ func Probe(ctx context.Context, live bool, gate accessGate) mail.DiagnosticRepor
 		checks = append(checks, mail.Check{
 			Name:   "mail-automation",
 			Status: "not-run",
-			Detail: "use doctor --live to request a read-only Mail.app Apple Events probe",
+			Detail: "use doctor --live to verify read-only Apple Events access and Mail process identity",
 		})
 	}
 
@@ -81,16 +81,25 @@ func probeAutomationWithRunner(ctx context.Context, gate accessGate, runner scri
 			return check
 		}
 	}
-	output, started, err := runner.Run(
+	output, _, err := runner.Run(
 		ctx,
 		fmt.Sprintf(
-			`function run(_) { return String(Application(%d).version()); }`,
+			`function run(_) {
+    ObjC.import("AppKit");
+    const processID = %d;
+    const running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(processID);
+    let bundleIdentifier = "";
+    try { bundleIdentifier = ObjC.unwrap(running.bundleIdentifier); } catch (_) {}
+    if (bundleIdentifier !== "com.apple.mail") {
+        throw new Error("Mail.app process identity changed before the Apple Events probe");
+    }
+    return String(Application(processID).version());
+}`,
 			lease.TargetPID(),
 		),
 		`{}`,
 	)
-	uncertain := started && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-	releaseErr := lease.Release(uncertain)
+	releaseErr := lease.Release(false)
 	if err != nil {
 		detail := fmt.Sprintf("Apple Events probe failed: %v: %s", err, strings.TrimSpace(string(output)))
 		if releaseErr != nil {
@@ -122,7 +131,7 @@ func classifyAutomationFailure(err error, output []byte) (string, string) {
 			"; allow the calling host to control Mail in System Settings > Privacy & Security > Automation"
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "mail_automation_timeout", "; quit and reopen Mail before another Automation operation"
+		return "mail_automation_timeout", "; retry after Mail.app becomes responsive"
 	}
 	return "mail_automation_failed", ""
 }

@@ -18,6 +18,15 @@ function abortIfCancelled() {
     }
 }
 
+function verifyMailProcess(processID) {
+    ObjC.import("AppKit");
+    const running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(processID);
+    const bundleIdentifier = safe(() => ObjC.unwrap(running.bundleIdentifier), "");
+    if (bundleIdentifier !== "com.apple.mail") {
+        bridgeError("mail_process_changed", "Mail.app process identity changed before the Apple Events operation");
+    }
+}
+
 function readBridgeRequest(path) {
     ObjC.import("Foundation");
     const data = $.NSData.dataWithContentsOfFile(path);
@@ -260,7 +269,7 @@ function resolveDraftSource(mail, source, resolution) {
     return message;
 }
 
-function outgoingForDraft(mail, draft, resolution) {
+function outgoingForDraft(mail, draft, resolution, resolvedSource) {
     if (draft.kind === "new") {
         const properties = {visible: false};
         if (draft.from) {
@@ -273,7 +282,7 @@ function outgoingForDraft(mail, draft, resolution) {
         mail.outgoingMessages.push(outgoing);
         return outgoing;
     }
-    const source = resolveDraftSource(mail, draft.source, resolution);
+    const source = resolvedSource || resolveDraftSource(mail, draft.source, resolution);
     if (draft.kind === "reply") {
         return source.reply({openingWindow: false, replyToAll: Boolean(draft.reply_all)});
     }
@@ -284,7 +293,11 @@ function outgoingForDraft(mail, draft, resolution) {
 }
 
 function composeRecipients(outgoing, property) {
-    return outgoing[property]().map(recipient => ({
+    const values = outgoing[property]();
+    if (values.length > 200) {
+        bridgeError("compose_recipients_too_large", "Mail.app compose exceeds 200 total recipients");
+    }
+    return values.map(recipient => ({
         name: safe(() => recipient.name(), ""),
         address: String(recipient.address())
     }));
@@ -295,17 +308,37 @@ function composeAttachmentPaths(outgoing) {
     if (attachments === null) {
         return [];
     }
+    if (attachments.length > 100) {
+        bridgeError("compose_attachments_too_large", "Mail.app compose exceeds 100 attachments");
+    }
     return attachments.map(attachment => String(attachment.fileName()));
 }
 
 function composeSnapshot(outgoing) {
+    const body = String(outgoing.content());
+    const subject = String(outgoing.subject());
+    ObjC.import("Foundation");
+    const bodyBytes = Number($(body).lengthOfBytesUsingEncoding($.NSUTF8StringEncoding));
+    if (bodyBytes > 16 * 1024 * 1024) {
+        bridgeError("compose_body_too_large", "Mail.app compose body exceeds 16 MiB");
+    }
+    const subjectBytes = Number($(subject).lengthOfBytesUsingEncoding($.NSUTF8StringEncoding));
+    if (subjectBytes > 64 * 1024) {
+        bridgeError("compose_subject_too_large", "Mail.app compose subject exceeds 64 KiB");
+    }
+    const to = composeRecipients(outgoing, "toRecipients");
+    const cc = composeRecipients(outgoing, "ccRecipients");
+    const bcc = composeRecipients(outgoing, "bccRecipients");
+    if (to.length + cc.length + bcc.length > 200) {
+        bridgeError("compose_recipients_too_large", "Mail.app compose exceeds 200 total recipients");
+    }
     return {
         from: String(outgoing.sender()),
-        to: composeRecipients(outgoing, "toRecipients"),
-        cc: composeRecipients(outgoing, "ccRecipients"),
-        bcc: composeRecipients(outgoing, "bccRecipients"),
-        subject: String(outgoing.subject()),
-        body: String(outgoing.content()),
+        to: to,
+        cc: cc,
+        bcc: bcc,
+        subject: subject,
+        body: body,
         attachment_paths: composeAttachmentPaths(outgoing)
     };
 }
@@ -492,9 +525,6 @@ function applyOutgoingFields(mail, outgoing, draft) {
     addRecipients(mail, outgoing, "toRecipients", "ToRecipient", draft.to);
     addRecipients(mail, outgoing, "ccRecipients", "CcRecipient", draft.cc);
     addRecipients(mail, outgoing, "bccRecipients", "BccRecipient", draft.bcc);
-    for (const attachment of draft.attachments || []) {
-        outgoing.content.attachments.push(mail.Attachment({fileName: Path(attachment.path)}));
-    }
 }
 
 function sendMaterialization(snapshot) {
@@ -504,17 +534,61 @@ function sendMaterialization(snapshot) {
         cc: snapshot.cc,
         bcc: snapshot.bcc,
         subject: snapshot.subject,
+        body: snapshot.body,
         attachment_count: snapshot.attachment_paths.length
     };
 }
 
-function ensureComposeAvailable(mail) {
-    const visibleComposeExists = mail.outgoingMessages().some(outgoing =>
-        safe(() => Boolean(outgoing.visible()), true)
-    );
-    if (visibleComposeExists) {
-        bridgeError("compose_busy", "Mail.app already has a visible compose window; close or save it first");
+function writeDraftSaveEvidence(path, snapshot) {
+    ObjC.import("Foundation");
+    if (!path) {
+        bridgeError("invalid_request", "draft save requires a private evidence path");
     }
+    const payload = $(JSON.stringify(sendMaterialization(snapshot))).dataUsingEncoding($.NSUTF8StringEncoding);
+    if (!payload || !payload.writeToFileAtomically(path, true)) {
+        bridgeError("draft_save_evidence_failed", "MailCLI could not persist native draft-save evidence before mutation");
+    }
+}
+
+function ensureComposeAvailable(mail) {
+    let outgoingMessages;
+    try {
+        outgoingMessages = mail.outgoingMessages();
+    } catch (_) {
+        bridgeError("compose_state_unknown", "Mail.app compose-window state could not be read safely");
+    }
+    let visibilityUnknown = false;
+    for (const outgoing of outgoingMessages) {
+        let visible = null;
+        for (let attempt = 0; attempt < 3 && visible === null; attempt += 1) {
+            try {
+                const value = outgoing.visible();
+                visible = typeof value === "boolean" ? value : null;
+            } catch (_) {
+                visible = null;
+            }
+            if (visible === null && attempt + 1 < 3) {
+                sleepForCompose(0.25);
+            }
+        }
+        if (visible === true) {
+            bridgeError("compose_busy", "Mail.app already has a visible compose window; close or save it first");
+        }
+        if (visible === false) {
+            bridgeError("compose_backend_busy", "Mail.app retains a hidden outgoing backend; restart Mail before composing");
+        }
+        visibilityUnknown = visibilityUnknown || visible === null;
+    }
+    if (visibilityUnknown) {
+        bridgeError("compose_state_unknown", "Mail.app compose-window visibility could not be verified safely");
+    }
+}
+
+function throwComposeCleanupFailure(message) {
+    const error = new Error(message);
+    error.bridgeCode = "compose_cleanup_failed";
+    error.recoveryRequired = true;
+    throw error;
 }
 
 function closeOwnedCompose(outgoing) {
@@ -549,9 +623,12 @@ function sendDraft(mail, request, resolution) {
     }
     abortIfCancelled();
     ensureComposeAvailable(mail);
-    const outgoing = outgoingForDraft(mail, request.draft, resolution);
+    const source = request.draft.kind === "new"
+        ? null : resolveDraftSource(mail, request.draft.source, resolution);
+    let outgoing = null;
     let sendAttempted = false;
     try {
+        outgoing = outgoingForDraft(mail, request.draft, resolution, source);
         const native = waitForStableCompose(outgoing, request.draft.expected_native_attachment_count);
         applyOutgoingFields(mail, outgoing, request.draft);
         const finalSnapshot = waitForPreparedCompose(outgoing, request.draft, native);
@@ -560,7 +637,7 @@ function sendDraft(mail, request, resolution) {
         const accepted = Boolean(outgoing.send());
         if (!accepted) {
             if (!closeOwnedCompose(outgoing)) {
-                bridgeError("compose_cleanup_failed", "Mail.app rejected send and the unsent compose object could not be closed");
+                throwComposeCleanupFailure("Mail.app rejected send and the unsent compose object could not be closed");
             }
         }
         return {
@@ -570,12 +647,21 @@ function sendDraft(mail, request, resolution) {
         };
     } catch (error) {
         error.sendAttempted = sendAttempted;
-        if (!sendAttempted) {
+        if (outgoing === null) {
+            error.recoveryRequired = true;
+            if (!error.bridgeCode) {
+                error.bridgeCode = "compose_creation_failed";
+                error.message = "Mail.app compose creation failed with an unknown backend state";
+            }
+        } else if (!sendAttempted) {
             if (!closeOwnedCompose(outgoing)) {
                 const preparationMessage = String(error.message || error);
                 error.bridgeCode = "compose_cleanup_failed";
+                error.recoveryRequired = true;
                 error.message = "Mail.app rejected send preparation and the unsent compose object could not be closed: " + preparationMessage;
             }
+        } else {
+            error.recoveryRequired = true;
         }
         throw error;
     }
@@ -587,23 +673,36 @@ function saveDraft(mail, request, resolution) {
     }
     abortIfCancelled();
     ensureComposeAvailable(mail);
-    const outgoing = outgoingForDraft(mail, request.draft, resolution);
+    const source = request.draft.kind === "new"
+        ? null : resolveDraftSource(mail, request.draft.source, resolution);
+    let outgoing = null;
     let saveAttempted = false;
     try {
+        outgoing = outgoingForDraft(mail, request.draft, resolution, source);
         const native = waitForStableCompose(outgoing, request.draft.expected_native_attachment_count);
         applyOutgoingFields(mail, outgoing, request.draft);
         const finalSnapshot = waitForPreparedCompose(outgoing, request.draft, native);
         abortIfCancelled();
+        writeDraftSaveEvidence(request.evidence_path, finalSnapshot);
         saveAttempted = true;
         outgoing.close({saving: "yes"});
         return {accepted: true, materialized: sendMaterialization(finalSnapshot)};
     } catch (error) {
-        if (!saveAttempted) {
+        if (outgoing === null) {
+            error.recoveryRequired = true;
+            if (!error.bridgeCode) {
+                error.bridgeCode = "compose_creation_failed";
+                error.message = "Mail.app compose creation failed with an unknown backend state";
+            }
+        } else if (!saveAttempted) {
             if (!closeOwnedCompose(outgoing)) {
                 const preparationMessage = String(error.message || error);
                 error.bridgeCode = "compose_cleanup_failed";
+                error.recoveryRequired = true;
                 error.message = "Mail.app rejected draft preparation and the unsaved compose object could not be closed: " + preparationMessage;
             }
+        } else {
+            error.recoveryRequired = true;
         }
         throw error;
     }
@@ -614,14 +713,23 @@ function markMessage(mail, request, resolution) {
     const mailbox = resolveMailbox(account, request.mailbox_path, resolution);
     const message = findMessage(mailbox, request.message_id);
     validateMessageIdentity(message, request.expected_message_id, request.expected_subject);
-    if (request.read !== undefined) {
-        message.readStatus = Boolean(request.read);
-    }
-    if (request.flagged !== undefined) {
-        message.flaggedStatus = Boolean(request.flagged);
-    }
-    if (request.junk !== undefined) {
-        message.junkMailStatus = Boolean(request.junk);
+    let mutationAttempted = false;
+    try {
+        if (request.read !== undefined) {
+            mutationAttempted = true;
+            message.readStatus = Boolean(request.read);
+        }
+        if (request.flagged !== undefined) {
+            mutationAttempted = true;
+            message.flaggedStatus = Boolean(request.flagged);
+        }
+        if (request.junk !== undefined) {
+            mutationAttempted = true;
+            message.junkMailStatus = Boolean(request.junk);
+        }
+    } catch (error) {
+        error.recoveryRequired = mutationAttempted;
+        throw error;
     }
     return {accepted: true};
 }
@@ -633,9 +741,14 @@ function transferMessage(mail, request, resolution) {
     validateMessageIdentity(message, request.expected_message_id, request.expected_subject);
     const destinationAccount = resolveAccount(mail, request.destination_account_id, resolution);
     const destination = resolveMailbox(destinationAccount, request.destination_mailbox_path, resolution);
-    request.copy
-        ? mail.duplicate(message, {to: destination})
-        : mail.move(message, {to: destination});
+    try {
+        request.copy
+            ? mail.duplicate(message, {to: destination})
+            : mail.move(message, {to: destination});
+    } catch (error) {
+        error.recoveryRequired = true;
+        throw error;
+    }
     return {accepted: true};
 }
 
@@ -644,7 +757,12 @@ function deleteMessage(mail, request, resolution) {
     const mailbox = resolveMailbox(account, request.mailbox_path, resolution);
     const message = findMessage(mailbox, request.message_id);
     validateMessageIdentity(message, request.expected_message_id, request.expected_subject);
-    mail.delete(message);
+    try {
+        mail.delete(message);
+    } catch (error) {
+        error.recoveryRequired = true;
+        throw error;
+    }
     return {accepted: true};
 }
 
@@ -706,6 +824,26 @@ function listMessages(mail, request, resolution) {
     };
 }
 
+function boundedRawSource(message, maximum) {
+    ObjC.import("Foundation");
+    const declaredSize = Number(safe(() => message.messageSize(), 0));
+    if (!(maximum > 0)) {
+        bridgeError("invalid_request", "maximum_raw_source_bytes is required");
+    }
+    if (!Number.isFinite(declaredSize) || declaredSize <= 0) {
+        bridgeError("raw_source_size_unknown", "Mail.app did not expose a safe raw-source size");
+    }
+    if (declaredSize > maximum) {
+        bridgeError("raw_source_too_large", "raw RFC message source exceeds 64 MiB");
+    }
+    const rawSource = String(message.source());
+    const encodedSize = Number($(rawSource).lengthOfBytesUsingEncoding($.NSUTF8StringEncoding));
+    if (encodedSize > maximum) {
+        bridgeError("raw_source_too_large", "raw RFC message source exceeds 64 MiB");
+    }
+    return rawSource;
+}
+
 function dispatch(mail, request) {
     const resolution = createResolutionContext();
     switch (request.operation) {
@@ -748,7 +886,8 @@ function dispatch(mail, request) {
         const mailbox = resolveMailbox(account, request.mailbox_path, resolution);
         const message = findMessage(mailbox, request.message_id);
         validateMessageIdentity(message, request.expected_message_id, request.expected_subject);
-        return {raw_source: message.source()};
+        const maximum = Number(request.maximum_raw_source_bytes || 0);
+        return {raw_source: boundedRawSource(message, maximum)};
     }
     case "attachments.save":
         return saveAttachment(mail, request, resolution);
@@ -769,6 +908,28 @@ function dispatch(mail, request) {
     }
 }
 
+function bridgeFailure(error) {
+    const nativeDetail = String(error.message || error);
+    const automationDenied = Number(error.number) === -1743 || nativeDetail.includes("-1743") ||
+        nativeDetail.toLowerCase().includes("not authorized to send apple events") ||
+        nativeDetail.toLowerCase().includes("not authorised to send apple events");
+    let errorCode = "mail_error";
+    let errorMessage = "Mail.app Apple Events operation failed";
+    if (error.bridgeCode) {
+        errorCode = error.bridgeCode;
+        errorMessage = error.message;
+    } else if (automationDenied) {
+        errorCode = "mail_automation_denied";
+        errorMessage = "Automation access to Mail is denied; allow the calling host in System Settings > Privacy & Security > Automation";
+    }
+    return {
+        ok: false,
+        send_attempted: Boolean(error.sendAttempted),
+        recovery_required: Boolean(error.recoveryRequired),
+        error: {code: errorCode, message: errorMessage}
+    };
+}
+
 function run(argv) {
     try {
         if (argv.length !== 2) {
@@ -780,18 +941,14 @@ function run(argv) {
         if (!Number.isInteger(request.mail_pid) || request.mail_pid <= 0) {
             bridgeError("mail_not_running", "Mail.app target process is unavailable");
         }
-        const response = dispatch(Application(request.mail_pid), request);
+        verifyMailProcess(request.mail_pid);
+        const mail = Application(request.mail_pid);
+        verifyMailProcess(request.mail_pid);
+        const response = dispatch(mail, request);
         response.ok = true;
         response.error = null;
         return JSON.stringify(response);
     } catch (error) {
-        return JSON.stringify({
-            ok: false,
-            send_attempted: Boolean(error.sendAttempted),
-            error: {
-                code: error.bridgeCode || "mail_error",
-                message: error.bridgeCode ? error.message : "Mail.app Apple Events operation failed"
-            }
-        });
+        return JSON.stringify(bridgeFailure(error));
     }
 }

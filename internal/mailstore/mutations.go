@@ -25,6 +25,53 @@ type transferBaseline struct {
 	DestinationHadSource bool
 }
 
+func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, attribute int) (bool, error) {
+	resolved, err := s.resolveMessage(ctx, messageRef)
+	if err != nil {
+		return false, err
+	}
+	var flaggedDraft bool
+	if err := s.database.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM server_messages WHERE message = ? AND draft != 0
+		)
+	`, resolved.Record.RowID).Scan(&flaggedDraft); err != nil {
+		return false, fmt.Errorf("inspect message draft state: %w", err)
+	}
+	if flaggedDraft {
+		return true, nil
+	}
+	records, err := s.loadMailboxRecords(ctx)
+	if err != nil {
+		return false, err
+	}
+	byPath := make(map[string]mailboxRecord, len(records))
+	for _, record := range records {
+		byPath[mailboxPathKey(record.Location.AccountID, record.Location.VisiblePath)] = record
+	}
+	cached, err := s.loadMailboxCache(ctx, resolved.Reference.AccountID)
+	if err != nil {
+		return false, fmt.Errorf("inspect Drafts mailbox identity: %w", err)
+	}
+	identifiers := make(map[int64]struct{})
+	collectMailboxIDs(
+		cached.Mailboxes, nil, resolved.Reference.AccountID, resolved.PhysicalLocation.Scheme,
+		attribute, byPath, identifiers,
+	)
+	_, protected := identifiers[resolved.Record.StoreMailboxID]
+	if protected {
+		return true, nil
+	}
+	sourceMailbox, err := s.mailboxRecordForRef(
+		ctx, resolved.Reference.AccountID, resolved.Reference.MailboxPath,
+	)
+	if err != nil {
+		return false, err
+	}
+	_, protected = identifiers[sourceMailbox.RowID]
+	return protected, nil
+}
+
 func (s *Store) captureTransferBaseline(
 	ctx context.Context,
 	messageRef string,

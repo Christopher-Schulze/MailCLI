@@ -30,12 +30,12 @@ func (e *commandError) ErrorCode() string {
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		writeLine(stderr, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
+		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "usage: mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [flags]")
+		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|update|save|open|send|reconcile|discard> [options]")
 		return 0
 	case "create":
 		return runDraftCreate(service, args[1:], stdout, stderr)

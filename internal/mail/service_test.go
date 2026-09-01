@@ -76,7 +76,7 @@ func (g *gatewayStub) TransferMessage(context.Context, TransferMessageRequest) (
 	return MessageSummary{}, nil
 }
 
-func (g *gatewayStub) DeleteMessage(context.Context, string) error {
+func (g *gatewayStub) DeleteMessage(context.Context, DeleteMessageRequest) error {
 	return nil
 }
 
@@ -148,7 +148,7 @@ func TestMutationValidationTable(t *testing.T) {
 			return err
 		}},
 		{name: "delete without ref", run: func() error {
-			_, err := service.DeleteMessage(context.Background(), "")
+			_, err := service.DeleteMessage(context.Background(), DeleteMessageRequest{})
 			return err
 		}},
 	}

@@ -36,11 +36,7 @@ func TestSentObservationUsesSpecialUseMailboxAndNewRowIdentity(t *testing.T) {
 		t.Fatalf("captureSendBaseline() error = %v", err)
 	}
 	insertSentMessageFixture(t, store, 104)
-	draft := mail.Draft{
-		From:    "Alice <alice@example.com>",
-		To:      []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed send", Body: "Body",
-	}
+	draft := observedDraft("Body")
 	message, found, err := store.findSentCandidate(context.Background(), baseline, draft)
 	if err != nil || !found || message.Subject != draft.Subject || message.Ref == "" {
 		t.Fatalf("findSentCandidate() = %+v, found = %t, error = %v", message, found, err)
@@ -84,20 +80,36 @@ func TestSentObservationUsesCompleteMIMEWhenAttachmentCatalogLags(t *testing.T) 
 	}
 }
 
-func TestBodyHasDraftPrefixAcceptsMailGeneratedQuotedAlternative(t *testing.T) {
-	expected := "Hello Christopher,\n\nReviewed body.\n\nRegards\nChristopher\n"
+func TestBodyMatchesExactNativeMaterialization(t *testing.T) {
+	expected := "Hello Christopher,\n\nReviewed body.\n\nRegards\nChristopher\n\n--\nMail signature"
+	draft := observedDraft("Reviewed body")
+	draft.ExpectedBody = &expected
 	actual := "\uFFFC\n> Hello Christopher,\n>\n> Reviewed body.\n>\n> Regards\n> Christopher\n\n--\nMail signature"
-	if !bodyHasDraftPrefix(actual, expected) {
-		t.Fatal("bodyHasDraftPrefix() = false for Mail-generated quoted alternative")
+	if !bodyMatchesDraft(actual, draft) {
+		t.Fatal("bodyMatchesDraft() rejected an exact normalized native body")
 	}
-	if bodyHasDraftPrefix(actual, "different body") {
-		t.Fatal("bodyHasDraftPrefix() = true for a different body")
+	if bodyMatchesDraft(actual+" changed", draft) {
+		t.Fatal("bodyMatchesDraft() accepted a changed native suffix")
 	}
-	if bodyHasDraftPrefix("one two\n\n--\nsignature", "one  two") {
-		t.Fatal("bodyHasDraftPrefix() accepted changed reviewed whitespace")
+}
+
+func TestBodyMatchRequiresNativeMaterialization(t *testing.T) {
+	draft := observedDraft("Body")
+	draft.ExpectedBody = nil
+	if bodyMatchesDraft("Body", draft) || bodyMatchesDraft("Body\n\n--\nMail signature", draft) {
+		t.Fatal("bodyMatchesDraft() accepted a body without exact native materialization")
 	}
-	if !bodyHasDraftPrefix("--\nMail signature", "") {
-		t.Fatal("bodyHasDraftPrefix() rejected an explicitly empty reviewed body")
+}
+
+func TestBodyMatchesExactEmptyNativeMaterialization(t *testing.T) {
+	expected := ""
+	draft := observedDraft("")
+	draft.ExpectedBody = &expected
+	if !bodyMatchesDraft("", draft) {
+		t.Fatal("bodyMatchesDraft() rejected an exact empty body")
+	}
+	if bodyMatchesDraft("--\nMail signature", draft) {
+		t.Fatal("bodyMatchesDraft() accepted an unmaterialized signature for an empty body")
 	}
 }
 
@@ -283,10 +295,11 @@ func TestSentObservationRevalidatesMailboxMembership(t *testing.T) {
 }
 
 func observedDraft(body string) mail.Draft {
+	expectedBody := body + "\n\n--\nMail signature"
 	return mail.Draft{
 		From:    "Alice <alice@example.com>",
 		To:      []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed send", Body: body,
+		Subject: "Observed send", Body: body, ExpectedBody: &expectedBody,
 	}
 }
 

@@ -7,6 +7,8 @@ MAILCLI_OUTPUT="${MAILCLI_ROOT}/bin/mailcli"
 mkdir -p "${MAILCLI_ROOT}/bin"
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build \
   -buildvcs=false \
+  -ldflags='-s -w' \
+  -mod=readonly \
   -trimpath \
   -o "${MAILCLI_OUTPUT}" \
   "${MAILCLI_ROOT}/cmd/mailcli"

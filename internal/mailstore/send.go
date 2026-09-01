@@ -466,7 +466,7 @@ func (s *Store) recordContentMatchesDraft(
 		return false, err
 	}
 	document, err := parseMIMEDocument(source.Reader(), false, true)
-	if err != nil || !document.Complete || !bodyHasDraftPrefix(document.Content, draft.Body) {
+	if err != nil || !document.Complete || !bodyMatchesDraft(document.Content, draft) {
 		return false, candidateSourcePending(err)
 	}
 	return s.recordAttachmentsMatchDraft(
@@ -502,13 +502,13 @@ func candidateSourcePending(err error) error {
 	return err
 }
 
-func bodyHasDraftPrefix(actual string, expected string) bool {
-	expected = canonicalSentText(expected)
-	if expected == "" {
-		return true
+func bodyMatchesDraft(actual string, draft mail.Draft) bool {
+	if draft.ExpectedBody == nil {
+		return false
 	}
+	expected := canonicalSentText(*draft.ExpectedBody)
 	for _, candidate := range normalizedBodyCandidates(actual) {
-		if candidate == expected || strings.HasPrefix(candidate, expected+"\n") {
+		if candidate == expected {
 			return true
 		}
 	}
@@ -530,18 +530,25 @@ func normalizedBodyCandidates(value string) []string {
 		candidates = append(candidates, withoutPlaceholders)
 	}
 	quoted := make([]string, 0, len(lines))
+	quotedLines := 0
 	for _, line := range lines {
 		if line == ">" {
 			quoted = append(quoted, "")
+			quotedLines++
 			continue
 		}
 		if !strings.HasPrefix(line, "> ") {
 			break
 		}
 		quoted = append(quoted, strings.TrimPrefix(line, "> "))
+		quotedLines++
 	}
 	if len(quoted) > 0 {
-		candidates = append(candidates, canonicalSentText(strings.Join(quoted, "\n")))
+		unquoted := strings.Join(quoted, "\n")
+		if quotedLines < len(lines) {
+			unquoted += "\n" + strings.Join(lines[quotedLines:], "\n")
+		}
+		candidates = append(candidates, canonicalSentText(unquoted))
 	}
 	return candidates
 }

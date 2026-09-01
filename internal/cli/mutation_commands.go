@@ -22,11 +22,13 @@ func runMessageMark(
 	addOptionalBoolFlag(flags, "read", "read status", &request.Read)
 	addOptionalBoolFlag(flags, "flagged", "flagged status", &request.Flagged)
 	addOptionalBoolFlag(flags, "junk", "junk status", &request.Junk)
+	allowDraft := flags.Bool("allow-draft", false, "allow mutation when the source message is a draft")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 	request.Ref = *ref
+	request.AllowDraftMutation = *allowDraft
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	message, err := service.MarkMessage(operationCtx, request)
@@ -55,6 +57,11 @@ func runMessageTransfer(
 	flags := newFlagSet(strings.ReplaceAll(command, ".", " "), stderr)
 	ref := flags.String("ref", "", "message ref")
 	mailboxRef := flags.String("mailbox", "", "destination mailbox ref")
+	allowDraftDescription := "allow moving a source message that is a draft"
+	if copyMessage {
+		allowDraftDescription = "allow copying a source message that is a draft"
+	}
+	allowDraft := flags.Bool("allow-draft", false, allowDraftDescription)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -63,6 +70,7 @@ func runMessageTransfer(
 	defer cancel()
 	message, err := service.TransferMessage(operationCtx, mail.TransferMessageRequest{
 		Ref: *ref, DestinationMailbox: *mailboxRef, Copy: copyMessage,
+		AllowDraftMutation: *allowDraft,
 	})
 	if err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
@@ -84,6 +92,7 @@ func runMessageDelete(
 	flags := newFlagSet("messages delete", stderr)
 	ref := flags.String("ref", "", "message ref")
 	confirm := flags.Bool("confirm", false, "confirm Mail.app deletion behavior")
+	allowDraft := flags.Bool("allow-draft", false, "allow deleting a source message that is a draft")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -93,7 +102,9 @@ func runMessageDelete(
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	result, err := service.DeleteMessage(operationCtx, *ref)
+	result, err := service.DeleteMessage(operationCtx, mail.DeleteMessageRequest{
+		Ref: *ref, AllowDraftMutation: *allowDraft,
+	})
 	if err != nil {
 		return failCommand("messages.delete", *jsonOutput, err, stdout, stderr)
 	}

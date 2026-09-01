@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -26,6 +28,7 @@ type accessGate interface {
 
 type accessLease interface {
 	TargetPID() int
+	ArmUncertainState() error
 	Release(uncertain bool) error
 }
 
@@ -38,12 +41,15 @@ type fileAccessGate struct {
 }
 
 type fileAccessLease struct {
-	file      *os.File
-	targetPID int
-	mailPID   func(context.Context) (int, error)
+	file         *os.File
+	targetPID    int
+	stateTouched bool
+	armed        bool
 }
 
 type uncertainMailStateError struct{}
+
+type invalidAccessGateStateError struct{}
 
 type mailNotRunningError struct{}
 
@@ -66,12 +72,27 @@ func (g *fileAccessGate) Acquire(ctx context.Context) (accessLease, error) {
 	if g.pathError != nil {
 		return nil, g.pathError
 	}
-	if err := os.MkdirAll(filepath.Dir(g.path), 0o700); err != nil {
+	stateDirectory := filepath.Dir(g.path)
+	if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
 		return nil, fmt.Errorf("create MailCLI access directory: %w", err)
 	}
-	file, err := os.OpenFile(g.path, os.O_CREATE|os.O_RDWR, 0o600)
+	stateInfo, err := os.Lstat(stateDirectory)
+	if err != nil || !stateInfo.IsDir() || stateInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("MailCLI access path is not a real directory")
+	}
+	if err := os.Chmod(stateDirectory, 0o700); err != nil {
+		return nil, fmt.Errorf("secure MailCLI access directory: %w", err)
+	}
+	fileDescriptor, err := unix.Open(
+		g.path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("open Mail.app access gate: %w", err)
+	}
+	file := os.NewFile(uintptr(fileDescriptor), g.path)
+	if file == nil {
+		_ = unix.Close(fileDescriptor)
+		return nil, fmt.Errorf("open Mail.app access gate: invalid file descriptor")
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return nil, errors.Join(
@@ -100,7 +121,7 @@ func (g *fileAccessGate) Acquire(ctx context.Context) (accessLease, error) {
 		}
 		targetPID = pid
 	}
-	return &fileAccessLease{file: file, targetPID: targetPID, mailPID: mailPID}, nil
+	return &fileAccessLease{file: file, targetPID: targetPID}, nil
 }
 
 func (g *fileAccessGate) acquireFile(ctx context.Context, file *os.File) error {
@@ -154,13 +175,27 @@ func (g *fileAccessGate) acquireFile(ctx context.Context, file *os.File) error {
 func (l *fileAccessLease) Release(uncertain bool) error {
 	var stateErr error
 	if uncertain {
-		stateErr = writeUncertainState(l.file, l.targetPID, l.mailPID)
+		stateErr = l.ArmUncertainState()
+	} else if l.stateTouched {
+		stateErr = clearAccessGateState(l.file)
 	}
 	return errors.Join(stateErr, releaseFileLock(l.file))
 }
 
 func (l *fileAccessLease) TargetPID() int {
 	return l.targetPID
+}
+
+func (l *fileAccessLease) ArmUncertainState() error {
+	if l.armed {
+		return nil
+	}
+	l.stateTouched = true
+	if err := writeUncertainState(l.file, l.targetPID); err != nil {
+		return err
+	}
+	l.armed = true
+	return nil
 }
 
 func releaseFileLock(file *os.File) error {
@@ -181,7 +216,7 @@ func validateAccessGateState(
 		return nil
 	}
 	if info.Size() > 4096 {
-		return fmt.Errorf("mail.app access gate state is invalid")
+		return &invalidAccessGateStateError{}
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek Mail.app access gate: %w", err)
@@ -192,7 +227,7 @@ func validateAccessGateState(
 	}
 	var state accessGateState
 	if err := json.Unmarshal(payload, &state); err != nil || state.MailPID <= 0 {
-		return fmt.Errorf("mail.app access gate state is invalid")
+		return &invalidAccessGateStateError{}
 	}
 	currentPID, err := mailPID(ctx)
 	if err != nil {
@@ -204,32 +239,23 @@ func validateAccessGateState(
 	return clearAccessGateState(file)
 }
 
-func writeUncertainState(
-	file *os.File,
-	targetPID int,
-	mailPID func(context.Context) (int, error),
-) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	currentPID, err := mailPID(ctx)
-	if err != nil {
-		return err
-	}
+func writeUncertainState(file *os.File, targetPID int) error {
 	if targetPID <= 0 {
 		return fmt.Errorf("record Mail.app uncertainty: target process is invalid")
-	}
-	if currentPID != targetPID {
-		return clearAccessGateState(file)
 	}
 	payload, err := json.Marshal(accessGateState{MailPID: targetPID})
 	if err != nil {
 		return fmt.Errorf("encode Mail.app access gate state: %w", err)
 	}
-	if err := clearAccessGateState(file); err != nil {
-		return err
-	}
-	if _, err := file.Write(payload); err != nil {
+	written, err := file.WriteAt(payload, 0)
+	if err != nil {
 		return fmt.Errorf("write Mail.app access gate state: %w", err)
+	}
+	if written != len(payload) {
+		return fmt.Errorf("write Mail.app access gate state: wrote %d of %d bytes", written, len(payload))
+	}
+	if err := file.Truncate(int64(len(payload))); err != nil {
+		return fmt.Errorf("truncate Mail.app access gate state: %w", err)
 	}
 	return file.Sync()
 }
@@ -238,6 +264,9 @@ func clearAccessGateState(file *os.File) error {
 	if err := file.Truncate(0); err != nil {
 		return fmt.Errorf("clear Mail.app access gate state: %w", err)
 	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync cleared Mail.app access gate state: %w", err)
+	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek cleared Mail.app access gate: %w", err)
 	}
@@ -245,7 +274,9 @@ func clearAccessGateState(file *os.File) error {
 }
 
 func currentMailPID(ctx context.Context) (int, error) {
-	output, err := exec.CommandContext(ctx, "/usr/bin/pgrep", "-x", "Mail").Output()
+	output, err := exec.CommandContext(
+		ctx, "/usr/bin/pgrep", "-f", "-x", "/System/Applications/Mail.app/Contents/MacOS/Mail",
+	).Output()
 	if err != nil {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
@@ -263,6 +294,10 @@ func currentMailPID(ctx context.Context) (int, error) {
 
 func (*uncertainMailStateError) Error() string {
 	return "a previous Mail.app operation timed out and may still be running"
+}
+
+func (*invalidAccessGateStateError) Error() string {
+	return "Mail.app access gate recovery state is invalid"
 }
 
 func (*mailNotRunningError) Error() string {

@@ -11,6 +11,7 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "no command"},
 		{name: "help", args: []string{"help"}},
 		{name: "version", args: []string{"version", "--json"}},
+		{name: "update", args: []string{"update", "--json"}},
 		{name: "capabilities", args: []string{"capabilities", "--json"}},
 		{name: "global JSON version", args: []string{"--json", "version"}},
 		{name: "unknown command", args: []string{"unknown"}},
@@ -18,16 +19,20 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "command help with JSON", args: []string{"drafts", "help", "--json"}},
 		{name: "subcommand help", args: []string{"messages", "search", "--help"}},
 		{name: "global JSON subcommand help", args: []string{"--json", "attachments", "save", "-h"}},
+		{name: "missing group subcommand", args: []string{"messages"}},
+		{name: "unknown group subcommand", args: []string{"messages", "missing"}},
 		{name: "local draft create", args: []string{"drafts", "create", "--input", "-"}},
 		{name: "local draft list", args: []string{"drafts", "list"}},
 		{name: "local draft inspect", args: []string{"drafts", "inspect", "--ref", "draft"}},
 		{name: "local draft update", args: []string{"drafts", "update", "--ref", "draft", "--input", "-"}},
 		{name: "local draft discard", args: []string{"drafts", "discard", "--ref", "draft", "--confirm"}},
+		{name: "local reply draft", args: []string{"messages", "reply", "--message", "ref"}},
+		{name: "local forward draft", args: []string{"messages", "forward", "--message", "ref"}},
+		{name: "blocked Mail draft save", args: []string{"drafts", "save", "--ref", "draft"}},
+		{name: "blocked Mail draft send", args: []string{"drafts", "send", "--ref", "draft", "--confirm"}},
 		{name: "doctor", args: []string{"doctor"}, want: true},
 		{name: "list accounts", args: []string{"accounts", "list"}, want: true},
 		{name: "read message", args: []string{"--json", "messages", "get", "--ref", "ref"}, want: true},
-		{name: "save Mail draft", args: []string{"drafts", "save", "--ref", "draft"}, want: true},
-		{name: "send draft", args: []string{"drafts", "send", "--ref", "draft", "--confirm"}, want: true},
 		{name: "reconcile draft", args: []string{"drafts", "reconcile", "--ref", "draft"}, want: true},
 	}
 
@@ -37,5 +42,27 @@ func TestRequiresMailService(t *testing.T) {
 				t.Fatalf("RequiresMailService(%q) = %t, want %t", test.args, got, test.want)
 			}
 		})
+	}
+}
+
+func TestRequiresSignalContext(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"version"}},
+		{args: []string{"help"}},
+		{args: []string{"capabilities", "--json"}},
+		{args: []string{"drafts", "list"}},
+		{args: []string{"messages", "reply", "--message", "ref"}},
+		{args: []string{"update"}, want: true},
+		{args: []string{"--json", "update"}, want: true},
+		{args: []string{"messages", "search", "--query", "text"}, want: true},
+		{args: []string{"sync"}, want: true},
+	}
+	for _, test := range tests {
+		if got := RequiresSignalContext(test.args); got != test.want {
+			t.Fatalf("RequiresSignalContext(%q) = %t, want %t", test.args, got, test.want)
+		}
 	}
 }

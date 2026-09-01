@@ -29,15 +29,24 @@ func (blockedAccessGate) Acquire(context.Context) (accessLease, error) {
 }
 
 type accessLeaseRecorder struct {
-	uncertain bool
-	targetPID int
+	armErr       error
+	armCalls     int
+	releaseCalls int
+	uncertain    bool
+	targetPID    int
 }
 
 func (lease *accessLeaseRecorder) TargetPID() int {
 	return lease.targetPID
 }
 
+func (lease *accessLeaseRecorder) ArmUncertainState() error {
+	lease.armCalls++
+	return lease.armErr
+}
+
 func (lease *accessLeaseRecorder) Release(uncertain bool) error {
+	lease.releaseCalls++
 	lease.uncertain = uncertain
 	return nil
 }
@@ -61,6 +70,24 @@ func (runner cancelingSuccessRunner) Run(context.Context, string, string) ([]byt
 
 type cancelingBridgeErrorRunner struct {
 	cancel context.CancelFunc
+}
+
+type saveEvidenceFailureRunner struct{}
+
+func (saveEvidenceFailureRunner) Run(
+	_ context.Context,
+	_ string,
+	request string,
+) ([]byte, bool, error) {
+	var decoded bridgeRequest
+	if err := json.Unmarshal([]byte(request), &decoded); err != nil {
+		return nil, false, err
+	}
+	payload := []byte(`{"from":"sender@example.com","to":[{"address":"to@example.com"}],"cc":[],"bcc":[],"subject":"Subject","body":"Body\n\n--\nSignature","attachment_count":0}`)
+	if err := os.WriteFile(decoded.EvidencePath, payload, 0o600); err != nil {
+		return nil, false, err
+	}
+	return nil, true, context.DeadlineExceeded
 }
 
 func (runner cancelingBridgeErrorRunner) Run(context.Context, string, string) ([]byte, bool, error) {
@@ -89,6 +116,24 @@ func TestClientBindsBridgeRequestToGateProcess(t *testing.T) {
 	}
 	if request.MailPID != 42 {
 		t.Fatalf("bridge mail PID = %d, want 42", request.MailPID)
+	}
+}
+
+func TestSaveDraftRecoversNativeEvidenceAfterRunnerTimeout(t *testing.T) {
+	client := &Client{runner: saveEvidenceFailureRunner{}}
+	_, materialized, started, accepted, err := client.SaveDraftWithInvocationState(
+		context.Background(),
+		mail.Draft{
+			Kind: mail.DraftKindNew, From: "sender@example.com",
+			To: []mail.Recipient{{Address: "to@example.com"}}, Subject: "Subject", Body: "Body",
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) || !started || accepted || materialized == nil ||
+		materialized.Body == nil || !strings.Contains(*materialized.Body, "Signature") {
+		t.Fatalf(
+			"SaveDraftWithInvocationState() materialized = %+v, started = %t, accepted = %t, error = %v",
+			materialized, started, accepted, err,
+		)
 	}
 }
 
@@ -146,6 +191,58 @@ func TestSnapshotBridgeAttachmentsPreservesReviewedBytesAndName(t *testing.T) {
 	}
 	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
 		t.Fatalf("snapshot cleanup error = %v", err)
+	}
+}
+
+func TestClientRejectsScriptedComposeAttachmentsBeforeMailApp(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*Client) error
+	}{
+		{
+			name: "send",
+			run: func(client *Client) error {
+				_, err := client.SendDraft(context.Background(), mail.Draft{
+					Attachments: []mail.DraftAttachment{{Path: "/reviewed/file.txt"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "save",
+			run: func(client *Client) error {
+				_, err := client.SaveDraft(context.Background(), mail.Draft{
+					Attachments: []mail.DraftAttachment{{Path: "/reviewed/file.txt"}},
+				})
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &runnerStub{}
+			err := test.run(&Client{runner: runner})
+			var operationError *OperationError
+			if !errors.As(err, &operationError) || operationError.Code != "compose_attachments_unsupported" {
+				t.Fatalf("error = %v", err)
+			}
+			if runner.request != "" {
+				t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
+			}
+		})
+	}
+}
+
+func TestProductionClientBlocksUnsafeMail16ComposeBeforeMailApp(t *testing.T) {
+	runner := &runnerStub{}
+	client := &Client{runner: runner, blockComposeAutomation: true}
+	_, err := client.SendDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
+	var operationError *OperationError
+	if !errors.As(err, &operationError) || operationError.Code != "compose_automation_unsupported" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if runner.request != "" {
+		t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
 	}
 }
 
@@ -308,6 +405,19 @@ func TestClientDoesNotMarkCompletedBridgeErrorUncertainAfterConcurrentCancel(t *
 	}
 }
 
+func TestClientLatchesBridgeRequestedRecovery(t *testing.T) {
+	lease := &accessLeaseRecorder{}
+	client := &Client{
+		runner: &runnerStub{response: `{"ok":false,"recovery_required":true,"error":{"code":"compose_cleanup_failed","message":"retained"}}`},
+		gate:   accessGateStub{lease: lease},
+	}
+	_, err := client.ListAccounts(context.Background())
+	var operationError *OperationError
+	if !errors.As(err, &operationError) || operationError.Code != "compose_cleanup_failed" || !lease.uncertain {
+		t.Fatalf("ListAccounts() error = %v, lease uncertain = %t", err, lease.uncertain)
+	}
+}
+
 func TestClientTreatsPrivateBridgeCleanupFailureAsCompleted(t *testing.T) {
 	lease := &accessLeaseRecorder{}
 	client := &Client{
@@ -324,7 +434,7 @@ func TestClientTreatsPrivateBridgeCleanupFailureAsCompleted(t *testing.T) {
 	}
 }
 
-func TestClientFailsClosedAfterIncompleteBridgeCompletion(t *testing.T) {
+func TestClientDoesNotLatchIncompleteReadCompletion(t *testing.T) {
 	tests := []struct {
 		name     string
 		response string
@@ -343,10 +453,64 @@ func TestClientFailsClosedAfterIncompleteBridgeCompletion(t *testing.T) {
 			if _, err := client.ListAccounts(context.Background()); err == nil {
 				t.Fatal("ListAccounts() error = nil")
 			}
-			if !lease.uncertain {
-				t.Fatal("incomplete bridge completion did not fail closed")
+			if lease.uncertain {
+				t.Fatal("incomplete read-only bridge completion latched Mail recovery")
 			}
 		})
+	}
+}
+
+func TestClientLatchesOnlyIncompleteMutations(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		err       error
+		want      bool
+	}{
+		{name: "compose mutation", operation: "drafts.save", err: errors.New("transport failed"), want: true},
+		{name: "message mutation", operation: "messages.delete", err: errors.New("transport failed"), want: true},
+		{name: "sync", operation: "mail.sync", err: context.DeadlineExceeded},
+		{name: "read", operation: "messages.raw", err: context.DeadlineExceeded},
+		{name: "automation denial", operation: "drafts.send", err: errors.New("not authorized to send Apple events (-1743)")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lease := &accessLeaseRecorder{}
+			client := &Client{
+				runner: &runnerStub{err: test.err}, gate: accessGateStub{lease: lease},
+			}
+			_, _, _ = client.invokeWithState(context.Background(), bridgeRequest{Operation: test.operation})
+			wantArmCalls := 0
+			if operationCanLeaveUncertainMailState(test.operation) {
+				wantArmCalls = 1
+			}
+			if lease.armCalls != wantArmCalls {
+				t.Fatalf("lease arm calls = %d, want %d", lease.armCalls, wantArmCalls)
+			}
+			if lease.uncertain != test.want {
+				t.Fatalf("lease uncertain = %t, want %t", lease.uncertain, test.want)
+			}
+		})
+	}
+}
+
+func TestClientDoesNotStartMutationWhenRecoveryStateCannotBeArmed(t *testing.T) {
+	lease := &accessLeaseRecorder{armErr: errors.New("disk write failed")}
+	runner := &runnerStub{response: `{"ok":true,"accepted":true}`}
+	client := &Client{runner: runner, gate: accessGateStub{lease: lease}}
+
+	_, _, err := client.invokeWithState(
+		context.Background(), bridgeRequest{Operation: "messages.delete"},
+	)
+	var operationError *OperationError
+	if !errors.As(err, &operationError) || operationError.Code != "mail_access_gate_failed" {
+		t.Fatalf("invokeWithState() error = %v", err)
+	}
+	if runner.request != "" {
+		t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
+	}
+	if lease.armCalls != 1 || lease.releaseCalls != 1 || lease.uncertain {
+		t.Fatalf("lease = %+v", lease)
 	}
 }
 
@@ -379,7 +543,9 @@ func TestProbeTargetsTheGatedMailProcess(t *testing.T) {
 		accessGateStub{lease: &accessLeaseRecorder{targetPID: 77}},
 		runner,
 	)
-	if check.Status != "pass" || !strings.Contains(runner.script, "Application(77)") ||
+	if check.Status != "pass" || !strings.Contains(runner.script, "const processID = 77") ||
+		!strings.Contains(runner.script, "Application(processID)") ||
+		!strings.Contains(runner.script, `bundleIdentifier !== "com.apple.mail"`) ||
 		strings.Contains(runner.script, `Application("Mail")`) {
 		t.Fatalf("probe check = %+v, script = %q", check, runner.script)
 	}
@@ -398,7 +564,7 @@ func TestProbeMapsAutomationFailureTable(t *testing.T) {
 			response: "Not authorized to send Apple events to Mail. (-1743)",
 			wantCode: "mail_automation_denied", wantDetail: "System Settings > Privacy & Security > Automation",
 		},
-		{name: "timeout", err: context.DeadlineExceeded, wantCode: "mail_automation_timeout", wantDetail: "quit and reopen Mail"},
+		{name: "timeout", err: context.DeadlineExceeded, wantCode: "mail_automation_timeout", wantDetail: "retry after Mail.app becomes responsive"},
 		{name: "other", err: errors.New("transport"), wantCode: "mail_automation_failed"},
 	}
 	for _, test := range tests {
@@ -412,7 +578,7 @@ func TestProbeMapsAutomationFailureTable(t *testing.T) {
 				!strings.Contains(check.Detail, test.wantDetail) {
 				t.Fatalf("check = %+v", check)
 			}
-			if lease.uncertain != errors.Is(test.err, context.DeadlineExceeded) {
+			if lease.uncertain {
 				t.Fatalf("lease uncertain = %t", lease.uncertain)
 			}
 		})

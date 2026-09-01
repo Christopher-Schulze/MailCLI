@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.0.4"
+	version       = "1.0.5"
 	schemaVersion = 1
 )
 
@@ -49,6 +49,7 @@ type responseData struct {
 	SendResult      *mail.SendResult      `json:"send_result,omitempty"`
 	DeleteResult    *mail.DeleteResult    `json:"delete_result,omitempty"`
 	SyncResult      *mail.SyncResult      `json:"sync_result,omitempty"`
+	UpdateResult    *updateResult         `json:"update_result,omitempty"`
 }
 
 type responsePage struct {
@@ -127,18 +128,43 @@ func RequiresMailService(args []string) bool {
 			return false
 		}
 		switch args[1] {
-		case "create", "list", "inspect", "update", "discard":
+		case "create", "list", "inspect", "update", "save", "send", "discard":
 			return false
-		default:
+		case "open", "reconcile":
 			return true
+		default:
+			return false
 		}
-	case "accounts", "mailboxes", "messages", "attachments":
-		return len(args) < 2 || !helpOnly(args[2:])
+	case "accounts":
+		return len(args) >= 2 && args[1] == "list" && !helpOnly(args[2:])
+	case "mailboxes":
+		return len(args) >= 2 && (args[1] == "list" || args[1] == "resolve") && !helpOnly(args[2:])
+	case "messages":
+		if len(args) < 2 || helpOnly(args[2:]) {
+			return false
+		}
+		switch args[1] {
+		case "reply", "forward":
+			return false
+		case "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
+			return true
+		default:
+			return false
+		}
+	case "attachments":
+		return len(args) >= 2 && (args[1] == "list" || args[1] == "save") && !helpOnly(args[2:])
 	case "doctor", "sync":
 		return true
+	case "update":
+		return false
 	default:
 		return false
 	}
+}
+
+func RequiresSignalContext(args []string) bool {
+	args, _ = normalizeGlobalJSON(args)
+	return RequiresMailService(args) || len(args) > 0 && args[0] == "update"
 }
 
 func runJSONCommand(
@@ -242,6 +268,8 @@ func runCommand(
 		return 0
 	case "version", "--version":
 		return runVersion(args[1:], stdout, stderr)
+	case "update":
+		return runUpdate(ctx, args[1:], stdout, stderr)
 	case "capabilities":
 		return runCapabilities(args[1:], stdout, stderr)
 	case "doctor":
@@ -259,8 +287,7 @@ func runCommand(
 	case "sync":
 		return runSync(ctx, mailService, args[1:], stdout, stderr)
 	default:
-		writeFormat(stderr, "unknown command %q\n\n", args[0])
-		writeHelp(stderr)
+		writeFormat(stderr, "unknown command %q\nRun 'mailcli help' to list available commands.\n", args[0])
 		return 2
 	}
 }
@@ -287,7 +314,7 @@ func normalizeGlobalJSON(args []string) ([]string, bool) {
 
 func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		writeLine(stdout, "usage: mailcli version [--json]")
+		writeLine(stdout, "Usage:\n  mailcli version [--json]")
 		return 0
 	}
 	jsonOutput, err := parseBooleanFlags(args, "--json")
@@ -311,7 +338,7 @@ func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		writeLine(stdout, "usage: mailcli doctor [--json] [--live]")
+		writeLine(stdout, "Usage:\n  mailcli doctor [--json] [--live]")
 		return 0
 	}
 	flags, err := parseBooleanFlags(args, "--json", "--live")
@@ -439,55 +466,26 @@ func helpOnly(args []string) bool {
 }
 
 func writeHelp(writer io.Writer) {
-	writeRaw(writer, `MailCLI controls the locally configured macOS Mail app.
+	writeRaw(writer, `MailCLI
+Local Apple Mail access for the shell and coding agents.
 
 Usage:
-  mailcli capabilities [--json]
-  mailcli doctor [--json] [--live]
-  mailcli accounts list [--json]
-  mailcli mailboxes list [--account REF] [--json]
-  mailcli mailboxes resolve --account REF --path SEGMENT [--path SEGMENT] [--json]
-  mailcli messages list --mailbox REF [--limit N] [--cursor CURSOR] [--json]
-  mailcli messages filter [filters] [--limit N] [--cursor CURSOR] [--json]
-  mailcli messages search [filters] [--limit N] [--cursor CURSOR] [--json]
-  mailcli messages get --ref REF [--json]
-  mailcli messages raw --ref REF [--json]
-  mailcli attachments list --message REF [--json]
-  mailcli attachments save --message REF --attachment ID --output ABSOLUTE_PATH [--json]
-  mailcli drafts create --input FILE|- [--json]
-  mailcli drafts list [--json]
-  mailcli drafts inspect --ref REF [--json]
-  mailcli drafts update --ref REF --input FILE|- [--json]
-  mailcli drafts save --ref REF [--json]
-  mailcli drafts open --message REF [--json]
-  mailcli drafts send --ref REF --confirm [--json]
-  mailcli drafts reconcile --ref REF [--json]
-  mailcli drafts discard --ref REF --confirm [--json]
-  mailcli messages reply --message REF --input FILE|- [--all] [--json]
-  mailcli messages forward --message REF --input FILE|- [--json]
-  mailcli messages mark --ref REF [--read true|false] [--flagged true|false] [--junk true|false] [--json]
-  mailcli messages move --ref REF --mailbox REF [--json]
-  mailcli messages copy --ref REF --mailbox REF [--json]
-  mailcli messages delete --ref REF --confirm [--json]
-  mailcli sync [--account REF] [--json]
-  mailcli version [--json]
-  mailcli help
+  mailcli <command> [flags]
 
 Commands:
-  capabilities Describe the stable command, effect, dependency, and result contract.
-  doctor   Verify macOS ARM64, Mail.app, osascript, and optional Apple Events access.
-  accounts List enabled Mail.app accounts and sender identities.
-  mailboxes Recursively list or resolve exact mailbox paths.
-  messages List, filter, search, read, or return raw source for messages.
-  attachments List or save received message attachments without overwriting files.
-  drafts    Manage review drafts and save or open drafts through Mail.app.
-  sync      Ask Mail.app to check all mail or synchronize one account.
-  version  Print the CLI version.
+  accounts      List configured accounts and sender identities
+  mailboxes     List and resolve exact mailbox paths
+  messages      List, search, read, reply, forward, and organize messages
+  attachments   List and save received attachments
+  drafts        Create and review local drafts; inspect Mail drafts
+  sync          Ask Mail.app to check for new mail
+  update        Check GitHub and install the latest verified release
+  doctor        Verify the local MailCLI environment
+  capabilities  Print the machine-readable command contract
+  version       Print the installed version
+  help          Show this command overview
 
-Flags:
-  --json   Emit a stable machine-readable JSON envelope.
-  --live   Run the Mail.app Automation permission probe; macOS may request permission.
-
-Run 'mailcli <command> --help' for command-specific flags.
+Mail 16 native compose, save, and send are disabled; see 'mailcli capabilities'.
+Run 'mailcli <command> --help' for focused usage and flags.
 `)
 }

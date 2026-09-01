@@ -47,7 +47,9 @@ func runMessagesQuery(
 		return code
 	}
 
-	page, err := service.SearchMessages(ctx, query)
+	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	page, err := service.SearchMessages(operationCtx, query)
 	if err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}

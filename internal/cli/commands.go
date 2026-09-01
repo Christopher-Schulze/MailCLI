@@ -21,11 +21,11 @@ type codedError interface {
 
 func runAccounts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) > 0 && isHelpArgument(args[0]) {
-		writeLine(stdout, "usage: mailcli accounts list [--json]")
+		writeLine(stdout, "Usage:\n  mailcli accounts list [--json]")
 		return 0
 	}
 	if len(args) == 0 || args[0] != "list" {
-		writeLine(stderr, "usage: mailcli accounts list [--json]")
+		writeLine(stderr, "Usage:\n  mailcli accounts list [--json]")
 		return 2
 	}
 	flags := newFlagSet("accounts list", stderr)
@@ -51,14 +51,14 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 
 func runMailboxes(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		writeLine(stdout, "usage: mailcli mailboxes <list|resolve> [flags]")
+		writeLine(stdout, "Usage:\n  mailcli mailboxes <list|resolve> [options]")
 		return 0
 	}
 	if args[0] == "resolve" {
 		return runMailboxResolve(ctx, service, args[1:], stdout, stderr)
 	}
 	if args[0] != "list" {
-		writeLine(stderr, "usage: mailcli mailboxes <list|resolve> [flags]")
+		writeLine(stderr, "Usage:\n  mailcli mailboxes <list|resolve> [options]")
 		return 2
 	}
 	flags := newFlagSet("mailboxes list", stderr)
@@ -127,12 +127,12 @@ func runMessages(
 	stderr io.Writer,
 ) int {
 	if len(args) == 0 {
-		writeLine(stderr, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
+		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "usage: mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [flags]")
+		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [options]")
 		return 0
 	case "list":
 		return runMessagesList(ctx, mailService, args[1:], stdout, stderr)
@@ -232,6 +232,10 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.Writer) int {
+	if helpOnly(args) {
+		writeFlagUsage(flags, stdout)
+		return 0
+	}
 	flags.SetOutput(io.Discard)
 	err := flags.Parse(args)
 	if errors.Is(err, flag.ErrHelp) {
@@ -251,10 +255,82 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 }
 
 func writeFlagUsage(flags *flag.FlagSet, writer io.Writer) {
-	writeFormat(writer, "Usage of %s:\n", flags.Name())
-	flags.SetOutput(writer)
-	flags.PrintDefaults()
-	flags.SetOutput(io.Discard)
+	type optionHelp struct {
+		synopsis    string
+		description string
+	}
+	options := make([]optionHelp, 0, flags.NFlag()+1)
+	width := 0
+	flags.VisitAll(func(option *flag.Flag) {
+		valueName, description := flag.UnquoteUsage(option)
+		valueName, description = polishedFlagValue(option.Name, valueName, description)
+		synopsis := "--" + option.Name
+		if valueName != "" {
+			synopsis += " <" + valueName + ">"
+		}
+		description = capitalizeHelp(description)
+		if value := visibleFlagDefault(option); value != "" {
+			description += " (default: " + value + ")"
+		}
+		options = append(options, optionHelp{synopsis: synopsis, description: description})
+		width = max(width, len(synopsis))
+	})
+	helpSynopsis := "-h, --help"
+	options = append(options, optionHelp{synopsis: helpSynopsis, description: "Show command help"})
+	width = max(width, len(helpSynopsis))
+
+	writeFormat(writer, "Usage:\n  mailcli %s [options]\n\nOptions:\n", flags.Name())
+	for _, option := range options {
+		writeFormat(writer, "  %-*s  %s\n", width, option.synopsis, option.description)
+	}
+}
+
+func polishedFlagValue(name string, inferred string, description string) (string, string) {
+	if strings.Contains(description, " (true|false)") {
+		return "true|false", strings.Replace(description, " (true|false)", "", 1)
+	}
+	switch name {
+	case "account", "mailbox", "message", "ref":
+		return "ref", description
+	case "attachment":
+		return "id", description
+	case "after", "before":
+		return "date", description
+	case "cursor":
+		return "token", description
+	case "input", "output":
+		return "path", description
+	case "limit", "max-messages":
+		return "number", description
+	case "max-bytes":
+		return "bytes", description
+	case "path":
+		return "segment", description
+	case "query", "recipient", "sender", "subject":
+		return "text", description
+	default:
+		return inferred, description
+	}
+}
+
+func visibleFlagDefault(option *flag.Flag) string {
+	switch option.DefValue {
+	case "", "0", "false":
+		return ""
+	case "-":
+		return "standard input"
+	}
+	if option.Name == "max-bytes" && option.DefValue == "4294967296" {
+		return "4 GiB"
+	}
+	return option.DefValue
+}
+
+func capitalizeHelp(value string) string {
+	if value == "" || value[0] < 'a' || value[0] > 'z' {
+		return value
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func failCommand(command string, jsonOutput bool, err error, stdout io.Writer, stderr io.Writer) int {

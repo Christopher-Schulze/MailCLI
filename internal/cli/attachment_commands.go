@@ -18,11 +18,11 @@ func runAttachments(
 	stderr io.Writer,
 ) int {
 	if len(args) > 0 && isHelpArgument(args[0]) {
-		writeLine(stdout, "usage: mailcli attachments <list|save> [flags]")
+		writeLine(stdout, "Usage:\n  mailcli attachments <list|save> [options]")
 		return 0
 	}
 	if len(args) == 0 {
-		writeLine(stderr, "usage: mailcli attachments <list|save> [flags]")
+		writeLine(stderr, "Usage:\n  mailcli attachments <list|save> [options]")
 		return 2
 	}
 	if args[0] == "list" {

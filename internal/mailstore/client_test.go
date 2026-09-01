@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -78,7 +79,14 @@ func (s *fallbackSpy) SaveDraft(context.Context, mail.Draft) (mail.MessageSummar
 	}
 	return mail.MessageSummary{}, s.saveErr
 }
-func (s *fallbackSpy) SendDraft(context.Context, mail.Draft) (mail.SendEvidence, error) {
+func (s *fallbackSpy) SaveDraftWithMaterialization(
+	ctx context.Context,
+	draft mail.Draft,
+) (mail.MessageSummary, *mail.SendMaterialization, error) {
+	summary, err := s.SaveDraft(ctx, draft)
+	return summary, materializationForDraft(draft), err
+}
+func (s *fallbackSpy) SendDraft(_ context.Context, draft mail.Draft) (mail.SendEvidence, error) {
 	s.sendCalls++
 	if s.sendHook != nil {
 		s.sendHook()
@@ -86,7 +94,9 @@ func (s *fallbackSpy) SendDraft(context.Context, mail.Draft) (mail.SendEvidence,
 	if s.sendEvidence.InvocationStarted {
 		return s.sendEvidence, s.sendErr
 	}
-	return mail.SendEvidence{InvocationStarted: true, AcceptedByMail: true}, s.sendErr
+	return mail.SendEvidence{
+		InvocationStarted: true, AcceptedByMail: true, Materialized: sentMaterializationForDraft(draft),
+	}, s.sendErr
 }
 func (s *fallbackSpy) MarkMessage(
 	_ context.Context,
@@ -108,14 +118,30 @@ func (s *fallbackSpy) TransferMessage(
 	}
 	return mail.MessageSummary{}, nil
 }
-func (s *fallbackSpy) DeleteMessage(_ context.Context, ref string) error {
-	s.deleteRef = ref
+func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessageRequest) error {
+	s.deleteRef = request.Ref
 	if s.deleteHook != nil {
 		s.deleteHook()
 	}
 	return nil
 }
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
+
+func materializationForDraft(draft mail.Draft) *mail.SendMaterialization {
+	body := draft.Body
+	return &mail.SendMaterialization{
+		From: draft.From, To: append([]mail.Recipient(nil), draft.To...),
+		CC: append([]mail.Recipient(nil), draft.CC...), BCC: append([]mail.Recipient(nil), draft.BCC...),
+		Subject: draft.Subject, Body: &body, AttachmentCount: len(draft.Attachments),
+	}
+}
+
+func sentMaterializationForDraft(draft mail.Draft) *mail.SendMaterialization {
+	materialized := materializationForDraft(draft)
+	body := draft.Body + "\n\n--\nMail signature"
+	materialized.Body = &body
+	return materialized
+}
 
 func TestClientListAccountsUsesStoreWithoutFallback(t *testing.T) {
 	store, _ := newSearchFixture(t)
@@ -259,7 +285,7 @@ func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	client := &Client{store: store, fallback: spy}
 	read := true
 	result, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
-		Ref: page.Messages[0].Ref, Read: &read,
+		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
 	})
 	if err != nil || !result.Read {
 		t.Fatalf("MarkMessage() = %+v, error = %v", result, err)
@@ -269,6 +295,7 @@ func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 		t.Fatalf("DecodeMessage(automation ref) error = %v", err)
 	}
 	if automationRef.Version != mailref.FormatVersion || automationRef.IsStoreBound() || automationRef.LibraryID != "101" ||
+		automationRef.ExpectedMessageID != "101@example.com" ||
 		len(automationRef.MailboxPath) != 1 || automationRef.MailboxPath[0] != "All" {
 		t.Fatalf("automation ref = %+v", automationRef)
 	}
@@ -325,6 +352,49 @@ func TestClientPromotesAcceptedSendToSentStoreObserved(t *testing.T) {
 	}
 }
 
+func TestClientRefusesSentObservationWithoutExactNativeBody(t *testing.T) {
+	tests := []struct {
+		name         string
+		materialized *mail.SendMaterialization
+		wantCode     string
+	}{
+		{name: "missing materialization", wantCode: "send_materialization_missing"},
+		{
+			name: "missing body",
+			materialized: &mail.SendMaterialization{
+				From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+				Subject: "Observed send",
+			},
+			wantCode: "send_materialization_invalid",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			installSentMailboxFixture(t, store)
+			spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
+				InvocationStarted: true, AcceptedByMail: true, Materialized: test.materialized,
+			}}
+			spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
+			client := &Client{store: store, fallback: spy}
+			draft := mail.Draft{
+				From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+				Subject: "Observed send", Body: "Body",
+			}
+			baseline, err := client.PrepareSend(context.Background(), draft)
+			if err != nil {
+				t.Fatalf("PrepareSend() error = %v", err)
+			}
+			draft.PreparedSendBaseline = &baseline
+			evidence, err := client.SendDraft(context.Background(), draft)
+			if evidence.SentStoreObserved || errorWithCode(err, test.wantCode) == nil {
+				t.Fatalf("SendDraft() = %+v, error = %v, want %s", evidence, err, test.wantCode)
+			}
+		})
+	}
+}
+
 func TestClientPropagatesPrivateCleanupFailureAfterObservedSend(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -359,11 +429,12 @@ func TestClientObservesBodyOnlyNativeReplyFromMaterializedHeaders(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
+	materializedBody := "Body\n\n--\nMail signature"
 	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
 		InvocationStarted: true, AcceptedByMail: true,
 		Materialized: &mail.SendMaterialization{
 			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-			Subject: "Observed send", AttachmentCount: 0,
+			Subject: "Observed send", Body: &materializedBody, AttachmentCount: 0,
 		},
 	}}
 	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
@@ -397,11 +468,12 @@ func TestClientObservesForwardWithOriginalAttachmentFingerprint(t *testing.T) {
 	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", sentFixtureSource(101, sentMessageFixture{
 		Body: "Source body", Attachments: []fixtureAttachment{{Name: "invoice.pdf", Content: attachmentBytes}},
 	}))
+	materializedBody := "Body\n\n--\nMail signature"
 	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
 		InvocationStarted: true, AcceptedByMail: true,
 		Materialized: &mail.SendMaterialization{
 			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-			Subject: "Observed send", AttachmentCount: 1,
+			Subject: "Observed send", Body: &materializedBody, AttachmentCount: 1,
 		},
 	}}
 	spy.sendHook = func() {
@@ -457,6 +529,7 @@ func TestClientReconcilesPreparedSendFromStoreOnly(t *testing.T) {
 	insertSentMessageFixture(t, store, 104)
 	evidence, err := client.ReconcileSend(context.Background(), draft, mail.SendAttempt{
 		InvocationStarted: true, ObservationBaseline: &baseline,
+		Materialized: sentMaterializationForDraft(draft),
 	})
 	if err != nil || !evidence.SentStoreObserved || evidence.ObservedMessageRef == "" {
 		t.Fatalf("ReconcileSend() = %+v, error = %v", evidence, err)
@@ -504,6 +577,25 @@ func TestClientPropagatesPrivateCleanupFailureAfterObservedDraftSave(t *testing.
 	}
 }
 
+func TestClientRefusesDraftObservationWithoutExactNativeBody(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installDraftsMailboxFixture(t, store)
+	fallback := &materializedSaveFallback{materialized: &mail.SendMaterialization{
+		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Observed draft",
+	}}
+	fallback.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
+	client := &Client{store: store, fallback: fallback}
+	evidence, err := client.SaveDraftWithEvidence(context.Background(), mail.Draft{
+		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Observed draft", Body: "Body",
+	})
+	if evidence.ObservedMessage.Ref != "" || errorWithCode(err, "send_materialization_invalid") == nil {
+		t.Fatalf("SaveDraftWithEvidence() = %+v, error = %v", evidence, err)
+	}
+}
+
 func TestClientObservesBodyOnlyNativeReplyDraftFromMaterializedHeaders(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -514,9 +606,10 @@ func TestClientObservesBodyOnlyNativeReplyDraftFromMaterializedHeaders(t *testin
 	if err != nil {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
+	materializedBody := "Body"
 	fallback := &materializedSaveFallback{materialized: &mail.SendMaterialization{
 		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft", AttachmentCount: 0,
+		Subject: "Observed draft", Body: &materializedBody, AttachmentCount: 0,
 	}}
 	fallback.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
 	client := &Client{store: store, fallback: fallback}
@@ -647,12 +740,78 @@ func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 		updateFixtureMessage(t, store, `DELETE FROM labels WHERE message_id = 101 AND mailbox_id = 1`)
 	}
 	client := &Client{store: store, fallback: spy}
-	if err := client.DeleteMessage(context.Background(), page.Messages[0].Ref); err != nil {
+	if err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
+	}); err != nil {
 		t.Fatalf("DeleteMessage() error = %v", err)
 	}
 	forwarded, err := mailref.DecodeMessage(spy.deleteRef)
 	if err != nil || forwarded.Version != mailref.FormatVersion || forwarded.IsStoreBound() {
 		t.Fatalf("forwarded delete ref = %+v, error = %v", forwarded, err)
+	}
+}
+
+func TestClientFailsClosedWhenDraftMailboxIdentityIsUnavailable(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	spy := &fallbackSpy{}
+	client := &Client{store: store, fallback: spy}
+	read := true
+	_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: page.Messages[0].Ref, Read: &read,
+	})
+	if err == nil || !strings.Contains(err.Error(), "inspect Drafts mailbox identity") {
+		t.Fatalf("MarkMessage() error = %v", err)
+	}
+	if spy.markRequest.Ref != "" {
+		t.Fatalf("fallback received mutation after incomplete Drafts identity: %+v", spy.markRequest)
+	}
+}
+
+func TestClientBlocksUnconfirmedDraftMutations(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installDraftsMailboxFixture(t, store)
+	insertDraftMessageFixture(t, store, 104)
+	draftsRef, err := mailref.EncodeMailbox(testAccountID, []string{"Drafts"})
+	if err != nil {
+		t.Fatalf("EncodeMailbox() error = %v", err)
+	}
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: draftsRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages(Drafts) = %+v, error = %v", page, err)
+	}
+	ref := page.Messages[0].Ref
+	spy := &fallbackSpy{}
+	client := &Client{store: store, fallback: spy}
+	read := false
+	_, markErr := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: ref, Read: &read,
+	})
+	_, moveErr := client.TransferMessage(context.Background(), mail.TransferMessageRequest{
+		Ref: ref, DestinationMailbox: inboxRef,
+	})
+	deleteErr := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{Ref: ref})
+	for name, mutationErr := range map[string]error{
+		"mark": markErr, "move": moveErr, "delete": deleteErr,
+	} {
+		if errorCodeForTest(mutationErr) != "draft_mutation_confirmation_required" {
+			t.Errorf("%s error = %v", name, mutationErr)
+		}
+	}
+	if spy.markRequest.Ref != "" || spy.transferRequest.Ref != "" || spy.deleteRef != "" {
+		t.Fatalf("fallback received blocked draft mutation: %+v", spy)
+	}
+	if err := client.rejectUnconfirmedDraftMutation(context.Background(), ref, true); err != nil {
+		t.Fatalf("explicit draft mutation confirmation error = %v", err)
 	}
 }
 

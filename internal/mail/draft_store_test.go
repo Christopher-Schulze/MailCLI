@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,49 @@ type draftGateway struct {
 	saveErr error
 }
 
+type durableDraftSaveGateway struct {
+	gatewayStub
+	saveCalls      int
+	reconcileCalls int
+}
+
+func (g *durableDraftSaveGateway) PrepareDraftSave(
+	context.Context,
+	Draft,
+) (SendObservationBaseline, error) {
+	return SendObservationBaseline{
+		StoreUUID: "store", MaximumRowID: 10, CapturedUnix: 1, SentMailboxIDs: []int64{5},
+	}, nil
+}
+
+func (g *durableDraftSaveGateway) SaveDraftWithEvidence(
+	_ context.Context,
+	draft Draft,
+) (DraftSaveEvidence, error) {
+	g.saveCalls++
+	body := draft.Body
+	return DraftSaveEvidence{
+		InvocationStarted: true, AcceptedByMail: true,
+		Materialized: &SendMaterialization{
+			From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
+			Subject: draft.Subject, Body: &body, AttachmentCount: len(draft.Attachments),
+		},
+	}, context.DeadlineExceeded
+}
+
+func (g *durableDraftSaveGateway) ReconcileDraftSave(
+	_ context.Context,
+	_ Draft,
+	attempt DraftSaveAttempt,
+) (DraftSaveEvidence, error) {
+	g.reconcileCalls++
+	return DraftSaveEvidence{
+		InvocationStarted: true, AcceptedByMail: true,
+		ObservedMessage:     MessageSummary{Ref: "msg_observed", Subject: "Saved once"},
+		ObservationBaseline: attempt.ObservationBaseline, Materialized: attempt.Materialized,
+	}, nil
+}
+
 func (g *draftGateway) SendDraft(context.Context, Draft) (SendEvidence, error) {
 	g.sends++
 	return SendEvidence{
@@ -34,6 +78,71 @@ func (g *draftGateway) SendDraft(context.Context, Draft) (SendEvidence, error) {
 func (g *draftGateway) SaveDraft(_ context.Context, draft Draft) (MessageSummary, error) {
 	g.saves++
 	return MessageSummary{Ref: "msg_saved", Subject: draft.Subject}, g.saveErr
+}
+
+func TestPrepareDraftRejectsResourceExhaustion(t *testing.T) {
+	recipient := Recipient{Address: "recipient@example.com"}
+	tests := []struct {
+		name  string
+		input DraftInput
+	}{
+		{name: "subject", input: DraftInput{
+			To: []Recipient{recipient}, Subject: strings.Repeat("x", MaximumDraftSubjectBytes+1), Body: "Body",
+		}},
+		{name: "body", input: DraftInput{
+			To: []Recipient{recipient}, Body: strings.Repeat("x", MaximumDraftBodyBytes+1),
+		}},
+		{name: "recipients", input: DraftInput{
+			To: make([]Recipient, MaximumDraftRecipients+1), Body: "Body",
+		}},
+		{name: "attachment count", input: DraftInput{
+			To: []Recipient{recipient}, Body: "Body",
+			Attachments: make([]string, MaximumDraftAttachments+1),
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := prepareDraft(CreateDraftRequest{Input: test.input}); err == nil {
+				t.Fatal("prepareDraft() error = nil")
+			}
+		})
+	}
+
+	attachment, err := os.CreateTemp(t.TempDir(), "oversized-attachment-")
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	if err := attachment.Truncate(MaximumDraftAttachmentBytes + 1); err != nil {
+		t.Fatalf("Truncate() error = %v", err)
+	}
+	if err := attachment.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := prepareDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{recipient}, Body: "Body", Attachments: []string{attachment.Name()},
+	}}); err == nil {
+		t.Fatal("prepareDraft(oversized attachment) error = nil")
+	}
+}
+
+func TestMissingGatewayRejectsComposeWithoutPanicking(t *testing.T) {
+	service := NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Local review", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SaveDraft(context.Background(), draft.Ref); errorCode(err) != "compose_automation_unsupported" {
+		t.Fatalf("SaveDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "compose_automation_unsupported" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("GetDraft() after blocked compose error = %v", err)
+	}
 }
 
 func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
@@ -54,6 +163,41 @@ func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
 	}
 	if _, err := service.GetDraft(draft.Ref); err == nil {
 		t.Fatal("saved local draft still exists")
+	}
+}
+
+func TestSaveDraftDurablyReconcilesWithoutDuplicateInvocation(t *testing.T) {
+	gateway := &durableDraftSaveGateway{}
+	gateway.accounts = []Account{{EmailAddresses: []string{"mail@example.com"}}}
+	service := NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "mail@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Saved once", Body: strings.Repeat("body", 20*1024),
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SaveDraft(context.Background(), draft.Ref); errorCode(err) != "draft_save_outcome_unknown" {
+		t.Fatalf("first SaveDraft() error = %v", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SaveAttempt == nil || retained.SaveAttempt.Materialized == nil {
+		t.Fatalf("retained draft = %+v, error = %v", retained, err)
+	}
+	if _, err := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, Input: DraftInput{
+		To: draft.To, Body: draft.Body,
+	}}); errorCode(err) != "draft_save_retry_blocked" {
+		t.Fatalf("UpdateDraft() error = %v", err)
+	}
+	saved, err := service.SaveDraft(context.Background(), draft.Ref)
+	if err != nil || saved.Message.Ref != "msg_observed" {
+		t.Fatalf("reconciled SaveDraft() = %+v, error = %v", saved, err)
+	}
+	if gateway.saveCalls != 1 || gateway.reconcileCalls != 1 {
+		t.Fatalf("save calls = %d, reconcile calls = %d", gateway.saveCalls, gateway.reconcileCalls)
+	}
+	if _, err := service.GetDraft(draft.Ref); errorCode(err) != "not_found" {
+		t.Fatalf("GetDraft() after reconcile error = %v", err)
 	}
 }
 

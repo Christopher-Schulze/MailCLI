@@ -122,14 +122,14 @@ func (s *Service) TransferMessage(ctx context.Context, request TransferMessageRe
 	return s.gateway.TransferMessage(ctx, request)
 }
 
-func (s *Service) DeleteMessage(ctx context.Context, ref string) (DeleteResult, error) {
-	if ref == "" {
+func (s *Service) DeleteMessage(ctx context.Context, request DeleteMessageRequest) (DeleteResult, error) {
+	if request.Ref == "" {
 		return DeleteResult{}, validationError("message ref is required")
 	}
-	if err := s.gateway.DeleteMessage(ctx, ref); err != nil {
+	if err := s.gateway.DeleteMessage(ctx, request); err != nil {
 		return DeleteResult{}, err
 	}
-	return DeleteResult{MessageRef: ref, Deleted: true}, nil
+	return DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
 }
 
 func (s *Service) Sync(ctx context.Context, accountRef string) (SyncResult, error) {

@@ -27,15 +27,24 @@ type commandCapability struct {
 }
 
 type capabilityLimits struct {
-	Platform               string `json:"platform"`
-	Architecture           string `json:"architecture"`
-	OwnsMailIndex          bool   `json:"owns_mail_index"`
-	BackgroundProcess      bool   `json:"background_process"`
-	RawMIMERead            bool   `json:"raw_mime_read"`
-	RawMIMESend            bool   `json:"raw_mime_send"`
-	SendTransport          string `json:"send_transport"`
-	MaximumPageSize        int    `json:"maximum_page_size"`
-	MaximumDraftInputBytes int    `json:"maximum_draft_input_bytes"`
+	Platform                    string `json:"platform"`
+	Architecture                string `json:"architecture"`
+	OwnsMailIndex               bool   `json:"owns_mail_index"`
+	BackgroundProcess           bool   `json:"background_process"`
+	RawMIMERead                 bool   `json:"raw_mime_read"`
+	RawMIMESend                 bool   `json:"raw_mime_send"`
+	ComposeWrite                bool   `json:"compose_write"`
+	ComposeAttachmentWrite      bool   `json:"compose_attachment_write"`
+	SendTransport               string `json:"send_transport"`
+	MaximumPageSize             int    `json:"maximum_page_size"`
+	MaximumDraftInputBytes      int    `json:"maximum_draft_input_bytes"`
+	MaximumDraftSubjectBytes    int    `json:"maximum_draft_subject_bytes"`
+	MaximumDraftBodyBytes       int    `json:"maximum_draft_body_bytes"`
+	MaximumDraftRecipients      int    `json:"maximum_draft_recipients"`
+	MaximumDraftAttachments     int    `json:"maximum_draft_attachments"`
+	MaximumDraftAttachmentBytes int64  `json:"maximum_draft_attachment_bytes"`
+	MaximumComposeBodyBytes     int    `json:"maximum_compose_body_bytes"`
+	MaximumRawSourceBytes       int64  `json:"maximum_raw_source_bytes"`
 }
 
 func capabilities() capabilityManifest {
@@ -58,48 +67,57 @@ func capabilities() capabilityManifest {
 		Commands: []commandCapability{
 			read("capabilities", "none", "none", "available"),
 			read("version", "none", "none", "available"),
+			write("update", "local-write", "none", "none", "none", "updated", "up_to_date"),
 			read("doctor", "mail-store", "optional-automation", "healthy", "unhealthy"),
-			read("accounts.list", "mail-store", "none", "complete"),
+			read("accounts.list", "mail-store", "fallback-automation", "complete"),
 			read("mailboxes.list", "mail-store", "none", "complete"),
 			read("mailboxes.resolve", "mail-store", "none", "resolved"),
-			read("messages.list", "mail-store", "none", "complete"),
+			read("messages.list", "mail-store", "fallback-automation", "complete"),
 			read("messages.filter", "mail-store", "none", "complete"),
 			read("messages.search", "mail-store", "none", "complete"),
 			read("messages.get", "mail-store", "fallback-automation", "complete", "partial"),
-			read("messages.raw", "mail-store", "none", "complete"),
+			read("messages.raw", "mail-store", "fallback-automation", "complete"),
 			read("attachments.list", "mail-store", "fallback-automation", "complete", "partial"),
 			write("attachments.save", "filesystem-write", "none", "mail-store", "fallback-automation", "saved"),
 			write("drafts.create", "local-write", "none", "draft-store", "none", "created"),
 			read("drafts.list", "draft-store", "none", "complete"),
 			read("drafts.inspect", "draft-store", "none", "complete"),
 			write("drafts.update", "local-write", "none", "draft-store", "none", "updated"),
-			write("drafts.save", "mail-write", "none", "mail-and-draft-store", "automation", "saved"),
-			read("drafts.open", "mail-store", "automation", "complete"),
-			write("drafts.send", "external-effect", "required-flag", "mail-and-draft-store", "automation", "sent_store_observed", "accepted_by_mail", "outcome_unknown"),
+			write("drafts.save", "unsupported", "none", "draft-store", "none", "compose_automation_unsupported"),
+			read("drafts.open", "mail-store", "fallback-automation", "complete"),
+			write("drafts.send", "unsupported", "required-flag", "draft-store", "none", "compose_automation_unsupported"),
 			read("drafts.reconcile", "mail-and-draft-store", "none", "sent_store_observed", "accepted_by_mail", "outcome_unknown"),
 			write("drafts.discard", "local-write", "required-flag", "draft-store", "none", "discarded"),
-			write("messages.reply", "local-write", "none", "mail-and-draft-store", "none", "created"),
-			write("messages.forward", "local-write", "none", "mail-and-draft-store", "none", "created"),
-			write("messages.mark", "mail-write", "none", "mail-store", "automation", "updated"),
-			write("messages.move", "mail-write", "none", "mail-store", "automation", "moved"),
+			write("messages.reply", "local-write", "none", "draft-store", "none", "created"),
+			write("messages.forward", "local-write", "none", "draft-store", "none", "created"),
+			write("messages.mark", "mail-write", "draft-flag", "mail-store", "automation", "updated"),
+			write("messages.move", "mail-write", "draft-flag", "mail-store", "automation", "moved"),
 			write("messages.copy", "mail-write", "none", "mail-store", "automation", "copied"),
-			write("messages.delete", "mail-write", "required-flag", "mail-store", "automation", "deleted"),
+			write("messages.delete", "mail-write", "required-and-draft-flags", "mail-store", "automation", "deleted"),
 			write("sync", "mail-write", "none", "mail-store", "automation", "triggered"),
 		},
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
 			OwnsMailIndex: false, BackgroundProcess: false,
-			RawMIMERead: true, RawMIMESend: false,
-			SendTransport:          "mail-app-compose",
-			MaximumPageSize:        mail.MaximumPageLimit,
-			MaximumDraftInputBytes: maximumDraftInputBytes,
+			RawMIMERead: true, RawMIMESend: false, ComposeWrite: false,
+			ComposeAttachmentWrite:      false,
+			SendTransport:               "none",
+			MaximumPageSize:             mail.MaximumPageLimit,
+			MaximumDraftInputBytes:      maximumDraftInputBytes,
+			MaximumDraftSubjectBytes:    mail.MaximumDraftSubjectBytes,
+			MaximumDraftBodyBytes:       mail.MaximumDraftBodyBytes,
+			MaximumDraftRecipients:      mail.MaximumDraftRecipients,
+			MaximumDraftAttachments:     mail.MaximumDraftAttachments,
+			MaximumDraftAttachmentBytes: mail.MaximumDraftAttachmentBytes,
+			MaximumComposeBodyBytes:     mail.MaximumComposeBodyBytes,
+			MaximumRawSourceBytes:       mail.MaximumRawSourceBytes,
 		},
 	}
 }
 
 func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		writeLine(stdout, "usage: mailcli capabilities [--json]")
+		writeLine(stdout, "Usage:\n  mailcli capabilities [--json]")
 		return 0
 	}
 	flags, err := parseBooleanFlags(args, "--json")

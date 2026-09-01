@@ -15,61 +15,119 @@ func TestHelpContractTable(t *testing.T) {
 		notWanted []string
 	}{
 		{name: "top level", args: []string{"help"}, want: "Usage:"},
+		{name: "update", args: []string{"update", "--help"}, want: "mailcli update [options]"},
 		{name: "capabilities", args: []string{"capabilities", "--help"}, want: "mailcli capabilities"},
 		{name: "accounts", args: []string{"accounts", "--help"}, want: "mailcli accounts list"},
-		{name: "accounts list", args: []string{"accounts", "list", "--help"}, want: "Usage of accounts list:"},
+		{name: "accounts list", args: []string{"accounts", "list", "--help"}, want: "mailcli accounts list [options]"},
 		{name: "mailboxes", args: []string{"mailboxes", "--help"}, want: "mailcli mailboxes"},
-		{name: "mailboxes list", args: []string{"mailboxes", "list", "--help"}, want: "Usage of mailboxes list:"},
-		{name: "mailboxes resolve", args: []string{"mailboxes", "resolve", "--help"}, want: "Usage of mailboxes resolve:"},
+		{name: "mailboxes list", args: []string{"mailboxes", "list", "--help"}, want: "mailcli mailboxes list [options]"},
+		{name: "mailboxes resolve", args: []string{"mailboxes", "resolve", "--help"}, want: "mailcli mailboxes resolve [options]"},
 		{name: "messages", args: []string{"messages", "--help"}, want: "mailcli messages"},
-		{name: "messages list", args: []string{"messages", "list", "--help"}, want: "Usage of messages list:"},
+		{name: "messages list", args: []string{"messages", "list", "--help"}, want: "mailcli messages list [options]"},
 		{
 			name: "messages filter", args: []string{"messages", "filter", "--help"},
-			want: "Usage of messages filter:", notWanted: []string{"max-bytes", "max-messages"},
+			want: "mailcli messages filter [options]", notWanted: []string{"max-bytes", "max-messages"},
 		},
-		{name: "messages search", args: []string{"messages", "search", "--help"}, want: "Usage of messages search:"},
-		{name: "messages get", args: []string{"messages", "get", "--help"}, want: "Usage of messages get:"},
-		{name: "messages raw", args: []string{"messages", "raw", "--help"}, want: "Usage of messages raw:"},
-		{name: "messages reply", args: []string{"messages", "reply", "--help"}, want: "Usage of messages reply:"},
+		{name: "messages search", args: []string{"messages", "search", "--help"}, want: "mailcli messages search [options]"},
+		{name: "messages get", args: []string{"messages", "get", "--help"}, want: "mailcli messages get [options]"},
+		{name: "messages raw", args: []string{"messages", "raw", "--help"}, want: "mailcli messages raw [options]"},
+		{name: "messages reply", args: []string{"messages", "reply", "--help"}, want: "mailcli messages reply [options]"},
 		{
 			name: "messages forward", args: []string{"messages", "forward", "--help"},
-			want: "Usage of messages forward:", notWanted: []string{"-all"},
+			want: "mailcli messages forward [options]", notWanted: []string{"--all"},
 		},
-		{name: "messages mark", args: []string{"messages", "mark", "--help"}, want: "Usage of messages mark:"},
-		{name: "messages move", args: []string{"messages", "move", "--help"}, want: "Usage of messages move:"},
-		{name: "messages copy", args: []string{"messages", "copy", "--help"}, want: "Usage of messages copy:"},
-		{name: "messages delete", args: []string{"messages", "delete", "--help"}, want: "Usage of messages delete:"},
+		{name: "messages mark", args: []string{"messages", "mark", "--help"}, want: "mailcli messages mark [options]"},
+		{name: "messages move", args: []string{"messages", "move", "--help"}, want: "mailcli messages move [options]"},
+		{name: "messages copy", args: []string{"messages", "copy", "--help"}, want: "mailcli messages copy [options]"},
+		{name: "messages delete", args: []string{"messages", "delete", "--help"}, want: "mailcli messages delete [options]"},
 		{name: "attachments", args: []string{"attachments", "--help"}, want: "mailcli attachments"},
-		{name: "attachments list", args: []string{"attachments", "list", "--help"}, want: "Usage of attachments list:"},
-		{name: "attachments save", args: []string{"attachments", "save", "--help"}, want: "Usage of attachments save:"},
+		{name: "attachments list", args: []string{"attachments", "list", "--help"}, want: "mailcli attachments list [options]"},
+		{name: "attachments save", args: []string{"attachments", "save", "--help"}, want: "mailcli attachments save [options]"},
 		{name: "drafts", args: []string{"drafts", "--help"}, want: "mailcli drafts"},
-		{name: "drafts create", args: []string{"drafts", "create", "--help"}, want: "Usage of drafts create:"},
-		{name: "drafts list", args: []string{"drafts", "list", "--help"}, want: "Usage of drafts list:"},
-		{name: "drafts inspect", args: []string{"drafts", "inspect", "--help"}, want: "Usage of drafts inspect:"},
-		{name: "drafts update", args: []string{"drafts", "update", "--help"}, want: "Usage of drafts update:"},
-		{name: "drafts save", args: []string{"drafts", "save", "--help"}, want: "Usage of drafts save:"},
-		{name: "drafts open", args: []string{"drafts", "open", "--help"}, want: "Usage of drafts open:"},
-		{name: "drafts send", args: []string{"drafts", "send", "--help"}, want: "Usage of drafts send:"},
-		{name: "drafts reconcile", args: []string{"drafts", "reconcile", "--help"}, want: "Usage of drafts reconcile:"},
-		{name: "drafts discard", args: []string{"drafts", "discard", "--help"}, want: "Usage of drafts discard:"},
-		{name: "sync", args: []string{"sync", "--help"}, want: "Usage of sync:"},
+		{name: "drafts create", args: []string{"drafts", "create", "--help"}, want: "mailcli drafts create [options]"},
+		{name: "drafts list", args: []string{"drafts", "list", "--help"}, want: "mailcli drafts list [options]"},
+		{name: "drafts inspect", args: []string{"drafts", "inspect", "--help"}, want: "mailcli drafts inspect [options]"},
+		{name: "drafts update", args: []string{"drafts", "update", "--help"}, want: "mailcli drafts update [options]"},
+		{name: "drafts save", args: []string{"drafts", "save", "--help"}, want: "mailcli drafts save [options]"},
+		{name: "drafts open", args: []string{"drafts", "open", "--help"}, want: "mailcli drafts open [options]"},
+		{name: "drafts send", args: []string{"drafts", "send", "--help"}, want: "mailcli drafts send [options]"},
+		{name: "drafts reconcile", args: []string{"drafts", "reconcile", "--help"}, want: "mailcli drafts reconcile [options]"},
+		{name: "drafts discard", args: []string{"drafts", "discard", "--help"}, want: "mailcli drafts discard [options]"},
+		{name: "sync", args: []string{"sync", "--help"}, want: "mailcli sync [options]"},
 		{name: "doctor", args: []string{"doctor", "--help"}, want: "mailcli doctor"},
 		{name: "version", args: []string{"version", "--help"}, want: "mailcli version"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			code := Run(context.Background(), newTestService(), test.args, &stdout, &stderr)
-			if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), test.want) {
-				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			variants := [][]string{test.args}
+			if test.args[len(test.args)-1] == "--help" {
+				wordVariant := append([]string(nil), test.args...)
+				wordVariant[len(wordVariant)-1] = "help"
+				variants = append(variants, wordVariant)
 			}
-			for _, unwanted := range test.notWanted {
-				if strings.Contains(stdout.String(), unwanted) {
-					t.Fatalf("stdout = %q, must not contain %q", stdout.String(), unwanted)
+			for _, args := range variants {
+				var stdout bytes.Buffer
+				var stderr bytes.Buffer
+				code := Run(context.Background(), newTestService(), args, &stdout, &stderr)
+				if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), test.want) {
+					t.Fatalf("args = %q, code = %d, stdout = %q, stderr = %q", args, code, stdout.String(), stderr.String())
+				}
+				for _, unwanted := range test.notWanted {
+					if strings.Contains(stdout.String(), unwanted) {
+						t.Fatalf("args = %q, stdout = %q, must not contain %q", args, stdout.String(), unwanted)
+					}
 				}
 			}
 		})
+	}
+}
+
+func TestTopLevelHelpIsCompact(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(), []string{"help"}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if lines := strings.Count(strings.TrimSpace(stdout.String()), "\n") + 1; lines > 24 {
+		t.Fatalf("help has %d lines, want at most 24:\n%s", lines, stdout.String())
+	}
+	for _, command := range []string{"messages", "drafts", "update", "doctor", "help"} {
+		if !strings.Contains(stdout.String(), command) {
+			t.Fatalf("help does not contain %q: %s", command, stdout.String())
+		}
+	}
+	if !strings.Contains(stdout.String(), "Mail 16 native compose, save, and send are disabled") {
+		t.Fatalf("help omits the Mail 16 compose limitation: %s", stdout.String())
+	}
+}
+
+func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
+	tests := []struct {
+		args []string
+		want []string
+	}{
+		{
+			args: []string{"messages", "search", "help"},
+			want: []string{"Options:", "--mailbox <ref>", "--attachment <true|false>", "--max-bytes <bytes>", "(default: 4 GiB)", "-h, --help"},
+		},
+		{
+			args: []string{"messages", "copy", "help"},
+			want: []string{"--allow-draft", "Allow copying a source message that is a draft"},
+		},
+	}
+	for _, test := range tests {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run(context.Background(), newTestService(), test.args, &stdout, &stderr)
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("args = %q, code = %d, stderr = %q", test.args, code, stderr.String())
+		}
+		for _, wanted := range test.want {
+			if !strings.Contains(stdout.String(), wanted) {
+				t.Fatalf("args = %q, stdout = %q, want %q", test.args, stdout.String(), wanted)
+			}
+		}
 	}
 }
 

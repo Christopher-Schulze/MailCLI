@@ -10,12 +10,25 @@ if [[ ! -x "${MAILCLI_BINARY}" ]]; then
   exit 1
 fi
 
-MAIL_PIDS="$(pgrep -x Mail || true)"
+MAIL_EXECUTABLE="/System/Applications/Mail.app/Contents/MacOS/Mail"
+MAIL_PIDS="$(pgrep -f -x "${MAIL_EXECUTABLE}" || true)"
 if [[ -z "${MAIL_PIDS}" || "${MAIL_PIDS}" == *$'\n'* ]]; then
   printf 'Responsiveness gate requires exactly one running Mail process\n' >&2
   exit 1
 fi
 MAIL_PID="${MAIL_PIDS}"
+
+compose_count() {
+  /usr/bin/osascript -l JavaScript -e "
+ObjC.import('AppKit');
+const processID = ${MAIL_PID};
+const running = $.NSRunningApplication.runningApplicationWithProcessIdentifier(processID);
+if (ObjC.unwrap(running.bundleIdentifier) !== 'com.apple.mail') throw new Error('Mail identity changed');
+Application(processID).outgoingMessages().length;
+"
+}
+
+BASELINE_COMPOSE_COUNT="$(compose_count)"
 
 if pgrep -x mailcli >/dev/null || pgrep -x osascript >/dev/null; then
   printf 'Responsiveness gate requires no pre-existing mailcli or osascript process\n' >&2
@@ -39,12 +52,16 @@ assert_quiescent() {
     printf 'MailCLI or osascript remained after the completed command\n' >&2
     exit 1
   fi
-  if [[ "$(pgrep -x Mail || true)" != "${MAIL_PID}" ]]; then
+  if [[ "$(pgrep -f -x "${MAIL_EXECUTABLE}" || true)" != "${MAIL_PID}" ]]; then
     printf 'Mail process changed during the responsiveness gate\n' >&2
     exit 1
   fi
   if lsof -p "${MAIL_PID}" 2>/dev/null | grep -F "${MAILCLI_ROOT}" >/dev/null; then
     printf 'Mail retained an open handle into the MailCLI repository\n' >&2
+    exit 1
+  fi
+  if [[ "$(compose_count)" != "${BASELINE_COMPOSE_COUNT}" ]]; then
+    printf 'Mail compose object count changed during the responsiveness gate\n' >&2
     exit 1
   fi
 }
@@ -77,5 +94,5 @@ if ! awk -v baseline="${BASELINE_SECONDS}" -v post="${POST_SECONDS}" \
   exit 1
 fi
 
-printf 'Mail responsiveness gate passed: pid=%s baseline=%ss operation=%ss post=%ss; no residual processes or handles\n' \
-  "${MAIL_PID}" "${BASELINE_SECONDS}" "${OPERATION_SECONDS}" "${POST_SECONDS}"
+printf 'Mail responsiveness gate passed: pid=%s baseline=%ss operation=%ss post=%ss compose_objects=%s; no residual processes or handles\n' \
+  "${MAIL_PID}" "${BASELINE_SECONDS}" "${OPERATION_SECONDS}" "${POST_SECONDS}" "${BASELINE_COMPOSE_COUNT}"
