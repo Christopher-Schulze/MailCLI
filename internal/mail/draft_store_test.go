@@ -145,6 +145,35 @@ func TestMissingGatewayRejectsComposeWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestPrepareDraftHandoffRejectsUnsupportedSemantics(t *testing.T) {
+	tests := []struct {
+		name  string
+		input DraftInput
+	}{
+		{name: "explicit sender", input: DraftInput{
+			From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body",
+		}},
+		{name: "CC", input: DraftInput{
+			To: []Recipient{{Address: "recipient@example.com"}}, CC: []Recipient{{Address: "cc@example.com"}}, Body: "Body",
+		}},
+		{name: "BCC", input: DraftInput{
+			To: []Recipient{{Address: "recipient@example.com"}}, BCC: []Recipient{{Address: "bcc@example.com"}}, Body: "Body",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewServiceWithDraftRoot(&gatewayStub{}, filepath.Join(t.TempDir(), "drafts"))
+			draft, err := service.CreateDraft(CreateDraftRequest{Input: test.input})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.PrepareDraftHandoff(draft.Ref); err == nil {
+				t.Fatal("PrepareDraftHandoff() error = nil")
+			}
+		})
+	}
+}
+
 func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
 	gateway := &draftGateway{}
 	gateway.mailboxes = nil

@@ -28,6 +28,11 @@ type DiagnosticReport struct {
 	Checks []Check `json:"checks"`
 }
 
+type DiagnosticTiming struct {
+	Phase        string  `json:"phase"`
+	Milliseconds float64 `json:"milliseconds"`
+}
+
 type Account struct {
 	Ref            string   `json:"ref"`
 	Name           string   `json:"name"`
@@ -73,20 +78,27 @@ type SaveAttachmentRequest struct {
 
 type DraftKind string
 
+type DraftBodyFormat string
+
 const (
 	DraftKindNew     DraftKind = "new"
 	DraftKindReply   DraftKind = "reply"
 	DraftKindForward DraftKind = "forward"
+
+	DraftBodyPlain    DraftBodyFormat = "plain"
+	DraftBodyMarkdown DraftBodyFormat = "markdown"
+	DraftBodyHTML     DraftBodyFormat = "html"
 )
 
 type DraftInput struct {
-	From        string      `json:"from,omitempty"`
-	To          []Recipient `json:"to,omitempty"`
-	CC          []Recipient `json:"cc,omitempty"`
-	BCC         []Recipient `json:"bcc,omitempty"`
-	Subject     string      `json:"subject,omitempty"`
-	Body        string      `json:"body"`
-	Attachments []string    `json:"attachments,omitempty"`
+	From        string          `json:"from,omitempty"`
+	To          []Recipient     `json:"to,omitempty"`
+	CC          []Recipient     `json:"cc,omitempty"`
+	BCC         []Recipient     `json:"bcc,omitempty"`
+	Subject     string          `json:"subject,omitempty"`
+	Body        string          `json:"body"`
+	BodyFormat  DraftBodyFormat `json:"body_format,omitempty"`
+	Attachments []string        `json:"attachments,omitempty"`
 }
 
 type DraftAttachment struct {
@@ -106,6 +118,9 @@ type Draft struct {
 	BCC                           []Recipient              `json:"bcc"`
 	Subject                       string                   `json:"subject,omitempty"`
 	Body                          string                   `json:"body"`
+	BodyFormat                    DraftBodyFormat          `json:"body_format"`
+	BodySource                    string                   `json:"body_source,omitempty"`
+	BodyHTML                      string                   `json:"body_html,omitempty"`
 	Attachments                   []DraftAttachment        `json:"attachments"`
 	CreatedAt                     time.Time                `json:"created_at"`
 	UpdatedAt                     time.Time                `json:"updated_at"`

@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +97,25 @@ func TestPerformUpdateRejectsChecksumMismatch(t *testing.T) {
 	}
 	if verifyErr := verifyBinaryVersion(context.Background(), environment.executablePath, "1.0.4"); verifyErr != nil {
 		t.Fatalf("previous binary changed after checksum rejection: %v", verifyErr)
+	}
+}
+
+func TestPerformUpdateRejectsInvalidReleaseSignature(t *testing.T) {
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)
+	server := newUpdateTestServerWithSignature(t, "1.0.5", archive, checksums, true)
+	defer server.Close()
+	environment := updateTestEnvironment(t, server, "1.0.4")
+	createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
+
+	_, err := performUpdate(
+		context.Background(), environment, newUpdateReporter(io.Discard, false, false),
+	)
+	if updateErrorCodeForTest(err) != "update_signature_invalid" {
+		t.Fatalf("performUpdate() error = %v", err)
+	}
+	if verifyErr := verifyBinaryVersion(context.Background(), environment.executablePath, "1.0.4"); verifyErr != nil {
+		t.Fatalf("previous binary changed after signature rejection: %v", verifyErr)
 	}
 }
 
@@ -235,13 +257,37 @@ func TestUpdateLockSerializesConcurrentInstallers(t *testing.T) {
 	}
 }
 
+type updateTestServer struct {
+	*httptest.Server
+	publicKey ed25519.PublicKey
+}
+
 func newUpdateTestServer(
 	t *testing.T,
 	releaseVersion string,
 	archive []byte,
 	checksums []byte,
-) *httptest.Server {
+) *updateTestServer {
+	return newUpdateTestServerWithSignature(t, releaseVersion, archive, checksums, false)
+}
+
+func newUpdateTestServerWithSignature(
+	t *testing.T,
+	releaseVersion string,
+	archive []byte,
+	checksums []byte,
+	corruptSignature bool,
+) *updateTestServer {
 	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(privateKey, checksums)
+	if corruptSignature {
+		signature[0] ^= 0xff
+	}
+	encodedSignature := []byte(base64.StdEncoding.EncodeToString(signature) + "\n")
 	archiveName := "mailcli_" + releaseVersion + "_darwin_arm64.tar.gz"
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -252,21 +298,24 @@ func newUpdateTestServer(
 				writer,
 				`{"tag_name":"v%s","html_url":"%s/release","assets":[`+
 					`{"name":"%s","browser_download_url":"%s/archive"},`+
-					`{"name":"SHA256SUMS","browser_download_url":"%s/checksums"}]}`,
-				releaseVersion, server.URL, archiveName, server.URL, server.URL,
+					`{"name":"SHA256SUMS","browser_download_url":"%s/checksums"},`+
+					`{"name":"SHA256SUMS.sig","browser_download_url":"%s/signature"}]}`,
+				releaseVersion, server.URL, archiveName, server.URL, server.URL, server.URL,
 			)
 		case "/archive":
 			_, _ = writer.Write(archive)
 		case "/checksums":
 			_, _ = writer.Write(checksums)
+		case "/signature":
+			_, _ = writer.Write(encodedSignature)
 		default:
 			http.NotFound(writer, request)
 		}
 	}))
-	return server
+	return &updateTestServer{Server: server, publicKey: publicKey}
 }
 
-func updateTestEnvironment(t *testing.T, server *httptest.Server, currentVersion string) updateEnvironment {
+func updateTestEnvironment(t *testing.T, server *updateTestServer, currentVersion string) updateEnvironment {
 	t.Helper()
 	testRoot := t.TempDir()
 	environment := updateEnvironment{
@@ -276,6 +325,7 @@ func updateTestEnvironment(t *testing.T, server *httptest.Server, currentVersion
 		allowInsecureURLs: true,
 		verifyPackage:     verifyBinaryVersion, installPackage: runReleaseInstaller,
 		verifyInstallation: verifyBinaryVersion,
+		releasePublicKey:   server.publicKey,
 	}
 	if err := os.MkdirAll(environment.homeDirectory, 0o700); err != nil {
 		t.Fatal(err)

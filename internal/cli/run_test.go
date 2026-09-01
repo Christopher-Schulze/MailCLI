@@ -167,7 +167,7 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.0.5"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.1.0"},
 		{name: "update help", args: []string{"update", "--help"}, wantCode: 0, wantStdout: "mailcli update [options]"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
@@ -190,6 +190,23 @@ func TestRunTable(t *testing.T) {
 				t.Errorf("stderr = %q, want substring %q", stderr.String(), test.wantStderr)
 			}
 		})
+	}
+}
+
+func TestDoctorDiagnosticsExposeTimingsWithoutPrivateData(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(), newTestService(), []string{"doctor", "--diagnostics", "--json"},
+		&stdout, &stderr,
+	)
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"timings":[{"phase":"probe"`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	for _, forbidden := range []string{"@example.com", "/Users/", "Subject", "Body"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("diagnostics leaked %q: %s", forbidden, stdout.String())
+		}
 	}
 }
 

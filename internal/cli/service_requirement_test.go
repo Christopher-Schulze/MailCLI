@@ -24,6 +24,9 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "local draft create", args: []string{"drafts", "create", "--input", "-"}},
 		{name: "local draft list", args: []string{"drafts", "list"}},
 		{name: "local draft inspect", args: []string{"drafts", "inspect", "--ref", "draft"}},
+		{name: "local draft preview", args: []string{"drafts", "preview", "--ref", "draft"}},
+		{name: "local draft edit", args: []string{"drafts", "edit", "--ref", "draft"}},
+		{name: "visible draft handoff", args: []string{"drafts", "handoff", "--ref", "draft"}},
 		{name: "local draft update", args: []string{"drafts", "update", "--ref", "draft", "--input", "-"}},
 		{name: "local draft discard", args: []string{"drafts", "discard", "--ref", "draft", "--confirm"}},
 		{name: "local reply draft", args: []string{"messages", "reply", "--message", "ref"}},
@@ -54,6 +57,8 @@ func TestRequiresSignalContext(t *testing.T) {
 		{args: []string{"help"}},
 		{args: []string{"capabilities", "--json"}},
 		{args: []string{"drafts", "list"}},
+		{args: []string{"drafts", "edit", "--ref", "draft"}, want: true},
+		{args: []string{"drafts", "handoff", "--ref", "draft"}, want: true},
 		{args: []string{"messages", "reply", "--message", "ref"}},
 		{args: []string{"update"}, want: true},
 		{args: []string{"--json", "update"}, want: true},
@@ -63,6 +68,21 @@ func TestRequiresSignalContext(t *testing.T) {
 	for _, test := range tests {
 		if got := RequiresSignalContext(test.args); got != test.want {
 			t.Fatalf("RequiresSignalContext(%q) = %t, want %t", test.args, got, test.want)
+		}
+	}
+}
+
+func TestRequiresMainThread(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"drafts", "list"}},
+		{args: []string{"drafts", "handoff", "--ref", "draft"}, want: true},
+		{args: []string{"--json", "drafts", "handoff", "--ref", "draft"}, want: true},
+	} {
+		if got := RequiresMainThread(test.args); got != test.want {
+			t.Fatalf("RequiresMainThread(%q) = %t, want %t", test.args, got, test.want)
 		}
 	}
 }

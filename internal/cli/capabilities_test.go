@@ -36,6 +36,9 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if manifest.Limits.ComposeWrite {
 		t.Fatal("Mail 16 scripted compose writes must not be advertised")
 	}
+	if !manifest.Limits.VisibleComposeHandoff || !manifest.Limits.VisibleAttachmentHandoff {
+		t.Fatal("visible system compose handoff must be advertised")
+	}
 	if manifest.Limits.SendTransport != "none" {
 		t.Fatalf("send transport = %q, want none", manifest.Limits.SendTransport)
 	}
@@ -55,7 +58,8 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"capabilities", "version", "update", "doctor", "accounts.list", "mailboxes.list", "mailboxes.resolve",
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
-		"drafts.update", "drafts.save", "drafts.open", "drafts.send", "drafts.reconcile", "drafts.discard",
+		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
+		"drafts.send", "drafts.reconcile", "drafts.discard",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync",
 	}

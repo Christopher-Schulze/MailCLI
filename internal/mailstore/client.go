@@ -4,18 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
 
 type Client struct {
-	store    *Store
-	storeErr error
-	fallback mail.Gateway
+	store             *Store
+	storeErr          error
+	fallback          mail.Gateway
+	storeOpenDuration time.Duration
 }
 
 type draftSaveMaterializer interface {
@@ -33,8 +36,9 @@ type draftSaveInvocationMaterializer interface {
 }
 
 func NewClient(ctx context.Context, fallback mail.Gateway, config Config) *Client {
+	started := time.Now()
 	store, err := Open(ctx, config)
-	return &Client{store: store, storeErr: err, fallback: fallback}
+	return &Client{store: store, storeErr: err, fallback: fallback, storeOpenDuration: time.Since(started)}
 }
 
 func (c *Client) ComposeWriteSupportError() error {
@@ -53,7 +57,20 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Probe(ctx context.Context, live bool) mail.DiagnosticReport {
+	report, _ := c.ProbeWithDiagnostics(ctx, live)
+	return report
+}
+
+func (c *Client) ProbeWithDiagnostics(
+	ctx context.Context,
+	live bool,
+) (mail.DiagnosticReport, []mail.DiagnosticTiming) {
+	platformStarted := time.Now()
 	checks := c.platformChecks(ctx, live)
+	timings := []mail.DiagnosticTiming{
+		{Phase: "store_open", Milliseconds: float64(c.storeOpenDuration.Microseconds()) / 1000},
+		{Phase: "platform_probe", Milliseconds: float64(time.Since(platformStarted).Microseconds()) / 1000},
+	}
 	if c.storeErr != nil {
 		code := "mail_store_unavailable"
 		var typed interface{ ErrorCode() string }
@@ -63,13 +80,13 @@ func (c *Client) Probe(ctx context.Context, live bool) mail.DiagnosticReport {
 		checks = append(checks, mail.Check{
 			Name: "mail-store-read", Status: "fail", Code: code, Detail: c.storeErr.Error(),
 		})
-		return mail.DiagnosticReport{Checks: checks}
+		return mail.DiagnosticReport{Checks: checks}, timings
 	}
 	checks = append(checks, mail.Check{
 		Name: "mail-store-read", Status: "pass",
 		Detail: "strict read-only WAL access; schema " + c.store.SchemaFingerprint(),
 	})
-	return mail.DiagnosticReport{Checks: checks}
+	return mail.DiagnosticReport{Checks: checks}, timings
 }
 
 func (c *Client) platformChecks(ctx context.Context, live bool) []mail.Check {
@@ -250,6 +267,38 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		return "", err
 	}
 	return c.fallback.GetRawSource(ctx, automationRef)
+}
+
+func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
+	var localErr error
+	if c.store != nil {
+		err := c.store.WriteRawSource(ctx, ref, writer)
+		if err == nil {
+			return nil
+		}
+		if !safeTargetedFallback(err) {
+			return err
+		}
+		localErr = err
+	}
+	if c.fallback == nil {
+		if localErr != nil {
+			return localErr
+		}
+		return c.readUnavailableError()
+	}
+	automationRef, err := c.automationMessageRef(ctx, ref)
+	if err != nil {
+		return err
+	}
+	raw, err := c.fallback.GetRawSource(ctx, automationRef)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(writer, raw); err != nil {
+		return fmt.Errorf("write Mail.app RFC source fallback: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) SaveAttachmentTo(

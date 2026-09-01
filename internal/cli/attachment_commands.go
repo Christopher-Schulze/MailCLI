@@ -62,6 +62,21 @@ func runAttachmentsList(
 			ContentComplete: &complete, MissingParts: &missing,
 		})
 	}
+	rows := make([][]string, 0, len(message.Attachments))
+	for _, attachment := range message.Attachments {
+		size := "unknown"
+		if attachment.SizeKnown {
+			size = fmt.Sprintf("%d", attachment.Size)
+		}
+		rows = append(rows, []string{attachment.ID, size, fmt.Sprint(attachment.Downloaded), attachment.Name})
+	}
+	if writeTerminalTable(stdout, []string{"ID", "BYTES", "DOWNLOADED", "NAME"}, rows) {
+		writeFormat(
+			stdout, "\nContent: source=%s, complete=%t, missing=%s\n",
+			message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
+		)
+		return 0
+	}
 	for _, attachment := range message.Attachments {
 		size := "unknown"
 		if attachment.SizeKnown {

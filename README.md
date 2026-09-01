@@ -21,7 +21,7 @@ Apple Mail's scripting interface can perform targeted mailbox mutations but perf
 - Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events. A targeted incomplete-content fallback accepts only Mail's raw RFC 5322 source as body or MIME-part evidence.
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. MailCLI creates no second mail index.
 - Mark, move, copy, delete, sync, and targeted incomplete-content fallback use serialized Apple Events against the exact running Mail process.
-- Local new, reply, reply-all, and forward drafts remain fully reviewable. Native compose, draft export, outbound attachments, and send report `compose_automation_unsupported` before contacting Mail because live Mail 16 tests discarded body/recipient data and retained phantom drafts.
+- Local new, reply, reply-all, and forward drafts remain fully reviewable. A new draft can be handed to Apple's visible Compose Email sharing service without sending; unreliable scripted save/send remains blocked before contacting Mail.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
 
 Reads of locally available content on the supported store profile add no work to the Mail process. Requesting content that Mail has not downloaded may use one targeted Apple Event. Explicit writes still require Mail.app to do the requested work. MailCLI bounds and serializes those calls so multiple agents cannot build an Apple Events queue behind the application.
@@ -36,11 +36,11 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 | Mailboxes | `mailboxes list`, `mailboxes resolve` | Handles Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested labels |
 | Messages | `messages list`, `filter`, `search`, `get`, `raw` | Pages metadata, applies typed filters, scans bodies, and returns normalized or RFC 5322 content |
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |
-| Composition | `drafts create`, `list`, `inspect`, `update`, `open`, `discard` | Manages reviewable local drafts and inspects existing Mail drafts; `save` and `send` are blocked on Mail 16 |
+| Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard` | Manages plain, Markdown, or safe HTML drafts and opens a reviewed new draft visibly; `save` and `send` remain blocked |
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Organization | `messages mark`, `move`, `copy`, `delete` | Revalidates message identity before each mutation and reads back the result |
 | Synchronization | `sync` | Checks all mail or synchronizes one selected account |
-| Maintenance | `update` | Checks GitHub, verifies the release checksum, and atomically updates the binary and companion skill |
+| Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 
 Run `mailcli help` for the compact command overview. Focused command help accepts
 `help`, `-h`, or `--help` and renders aligned long options with semantic value
@@ -89,12 +89,13 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The `v1.0.4` release archive installs both the native CLI and its companion agent skill:
+The `v1.1.0` release archive installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.0.4
+VERSION=1.1.0
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
+curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS.sig"
 shasum -a 256 -c SHA256SUMS
 tar -xzf "mailcli_${VERSION}_darwin_arm64.tar.gz"
 "./mailcli_${VERSION}_darwin_arm64/install.sh"
@@ -111,7 +112,7 @@ mailcli update
 mailcli update --json
 ```
 
-Interactive terminals show bounded progress while MailCLI checks GitHub, downloads the exact `darwin/arm64` asset, verifies `SHA256SUMS`, validates the package binary and signature, and runs the rollback-safe installer. JSON mode emits exactly one envelope and no animation. Concurrent updaters are serialized, release URLs must use HTTPS, and shell startup injection variables are removed from the installer environment.
+Interactive terminals show bounded progress while MailCLI checks GitHub, verifies the exact `SHA256SUMS` bytes against its pinned Ed25519 release key, downloads the named `darwin/arm64` asset, verifies its digest and Mach-O code signature, and runs the rollback-safe installer. JSON mode emits exactly one envelope and no animation. Concurrent updaters are serialized, release URLs must use HTTPS, and shell startup injection variables are removed from the installer environment.
 
 To build from source instead, install Go 1.27 or newer and the Xcode Command Line Tools for CGO:
 
@@ -187,7 +188,7 @@ mailcli attachments save \
   --json
 ```
 
-`messages get` returns normalized content and completion metadata. A fallback result is complete only after MailCLI parses a full raw RFC 5322 source; failed Mail scripting properties remain explicitly incomplete. `messages raw` returns the unmodified RFC 5322 message and rejects sources above 64 MiB before materializing them through Mail.app. Attachment IDs are deterministic MIME-part paths, including during targeted fallback, while exported attachment files contain the decoded MIME-part bytes and report their media type, byte count, and SHA-256. Attachment export requires an absolute path and refuses to overwrite an existing file.
+`messages get` returns normalized content and completion metadata. A fallback result is complete only after MailCLI parses a full raw RFC 5322 source; failed Mail scripting properties remain explicitly incomplete. In human mode, `messages raw` streams a complete local `.emlx` source directly to stdout instead of allocating a second 64 MiB string; JSON and targeted Mail.app fallback remain bounded. Attachment IDs are deterministic MIME-part paths, including during targeted fallback, while exported attachment files contain the decoded MIME-part bytes and report their media type, byte count, and SHA-256. Attachment export requires an absolute path and refuses to overwrite an existing file.
 
 ### Create and review a message
 
@@ -205,11 +206,31 @@ printf '%s' '{
 }' | mailcli drafts create --input - --json
 
 mailcli drafts inspect --ref DRAFT_REF --json
+mailcli drafts preview --ref DRAFT_REF --format plain
 ```
+
+The same draft can be created without JSON plumbing:
+
+```bash
+mailcli drafts create \
+  --to "Recipient <recipient@example.com>" \
+  --subject "Project update" \
+  --body-file /absolute/path/message.md \
+  --format markdown \
+  --attach /absolute/path/report.pdf \
+  --json
+
+mailcli drafts edit --ref DRAFT_REF
+mailcli drafts handoff --ref DRAFT_REF
+```
+
+Markdown is rendered with Goldmark. HTML uses a strict allowlist, removes active and remotely loaded content, and is converted to a canonical plain-text counterpart before storage. `drafts edit` invokes the configured editor directly without a shell, validates the complete result, and only then atomically replaces the local draft.
+
+`drafts handoff` uses Apple's documented `NSSharingServiceNameComposeEmail`, waits for its delegate to confirm the handoff, opens a visible compose window, retains the local draft, and never sends. It requires Mail.app to be the current default email application so a misconfigured `mailto:` handler cannot launch another app. Apple's API cannot guarantee From, CC, BCC, or reply/forward threading, so handoff rejects those semantics instead of silently dropping them. Select the sender and add CC/BCC in Mail.app when required.
 
 Every draft JSON object must contain an explicit `body` field; an intentionally empty string is valid. Duplicate addresses across To, CC, and BCC are rejected. Hard limits are 64 KiB of subject text, 4 MiB of reviewed body text, 200 total recipients, 100 attachments, and 512 MiB of attachment bytes. MailCLI records attachment size and SHA-256 when it creates or updates a local draft.
 
-On the verified Mail 16 build, `drafts save` and `drafts send` return `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore reports `compose_write:false`, `compose_attachment_write:false`, and `send_transport:"none"`. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count. Use Mail's UI for final composition and sending.
+On the verified Mail 16 build, `drafts save` and `drafts send` return `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore keeps scripted `compose_write:false`, `compose_attachment_write:false`, and `send_transport:"none"`, while separately advertising visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
 
 ### Reply, forward, and organize
 
@@ -270,7 +291,7 @@ The link command refuses if a skill already exists at that destination. It does 
 | No Mail database writes | Opens the Envelope Index read-only and rejects journal or schema mutations |
 | No owned mail index | Searches current local sources on demand and persists no corpus |
 | No broad Apple Events reads | Uses the store for enumeration and search, with fallback for one resolved incomplete message only |
-| No corrupted or phantom compose data | Blocks native compose, draft export, outbound attachment insertion, and send on Mail 16 before any Apple Event |
+| No corrupted or phantom scripted compose data | Blocks scripted draft export and send; visible handoff uses Apple's sharing service, retains the reviewed local draft, and never sends |
 | No Mail.app lifecycle control | Requires the exact running Mail PID and never launches, activates, quits, kills, or restarts Mail.app |
 | No residual bridge process | Waits for the owned `osascript` leader, terminates residual group members, and verifies process-group absence before command completion |
 | No Apple Events backlog after uncertainty | Durably pre-arms the exact affected Mail PID before mutation and rejects every later live operation after an incomplete caller until that process has been replaced |
@@ -281,7 +302,8 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 
 ## Limitations
 
-- Mail 16 native composition is disabled. Scripted plain text, HTML, recipient, attachment, save, and send behavior is not reliable enough to preserve reviewed data.
+- Mail 16 scripted save/send remains disabled. Visible handoff supports new drafts only and requires Mail.app as the default email application.
+- Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts capture intent but cannot guarantee Mail-native threading, quoted content, or original forwarded attachments until completed in Mail's UI.
 - `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it.
 - Messages that are not fully downloaded may need one targeted Apple Events fallback. The result reports remaining missing parts instead of claiming completeness.
@@ -292,12 +314,12 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.0.5
+./scripts/release/build-release.sh 1.1.0
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
 
-The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the combined archive plus `SHA256SUMS` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Release binaries use `-trimpath -ldflags='-s -w'`; the release test rejects DWARF sections and binaries above 10 MiB. On the verified Go 1.27 host this reduced the executable from 15,496,930 to 9,431,826 bytes without changing runtime code or dependencies. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded read-only live probes, requires the exact same Mail process identity and compose-object count, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
+The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. The release builder refuses to overwrite assets and writes the archive, `SHA256SUMS`, and `SHA256SUMS.sig` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Release binaries use `-trimpath -ldflags='-s -w'`; the release test rejects DWARF sections and binaries above 10 MiB. The verified v1.1.0 executable is 10,460,706 bytes, preserving the budget after adding AppKit handoff, Markdown rendering, adaptive terminal tables, streaming raw output, privacy-safe timing diagnostics, and Ed25519 verification. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded read-only live probes, requires the exact same Mail process identity and compose-object count, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
 
 ## License
 

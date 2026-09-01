@@ -3,7 +3,9 @@ package mail
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
+	"time"
 )
 
 type Service struct {
@@ -46,6 +48,21 @@ func (e *OperationError) ErrorCode() string {
 
 func (s *Service) Probe(ctx context.Context, live bool) DiagnosticReport {
 	return s.gateway.Probe(ctx, live)
+}
+
+func (s *Service) ProbeWithDiagnostics(ctx context.Context, live bool) (DiagnosticReport, []DiagnosticTiming) {
+	if prober, ok := s.gateway.(interface {
+		ProbeWithDiagnostics(context.Context, bool) (DiagnosticReport, []DiagnosticTiming)
+	}); ok {
+		return prober.ProbeWithDiagnostics(ctx, live)
+	}
+	started := time.Now()
+	report := s.Probe(ctx, live)
+	return report, []DiagnosticTiming{{Phase: "probe", Milliseconds: elapsedMilliseconds(started)}}
+}
+
+func elapsedMilliseconds(started time.Time) float64 {
+	return float64(time.Since(started).Microseconds()) / 1000
 }
 
 func (s *Service) ListAccounts(ctx context.Context) ([]Account, error) {
@@ -103,6 +120,25 @@ func (s *Service) GetRawSource(ctx context.Context, ref string) (string, error) 
 		return "", validationError("message ref is required")
 	}
 	return s.gateway.GetRawSource(ctx, ref)
+}
+
+func (s *Service) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
+	if ref == "" {
+		return validationError("message ref is required")
+	}
+	if streamer, ok := s.gateway.(interface {
+		WriteRawSource(context.Context, string, io.Writer) error
+	}); ok {
+		return streamer.WriteRawSource(ctx, ref, writer)
+	}
+	raw, err := s.gateway.GetRawSource(ctx, ref)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(writer, raw); err != nil {
+		return fmt.Errorf("write RFC message source: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -15,6 +16,9 @@ import (
 )
 
 func main() {
+	if cli.RequiresMainThread(os.Args[1:]) {
+		runtime.LockOSThread()
+	}
 	os.Exit(run())
 }
 

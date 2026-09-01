@@ -85,6 +85,22 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 }
 
 func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
+	rows := make([][]string, 0, len(page.Messages))
+	for _, result := range page.Messages {
+		message := result.Summary
+		rows = append(rows, []string{message.Ref, message.DateReceived, message.Sender, message.Subject, result.Snippet})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "RECEIVED", "FROM", "SUBJECT", "MATCH"}, rows) {
+		if page.NextCursor != "" {
+			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
+		}
+		writeFormat(
+			stdout, "Coverage: %s, complete=%t, scanned=%d/%d, bytes=%d\n",
+			page.Coverage.Backend, page.Coverage.Complete,
+			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages, page.Coverage.ScannedBytes,
+		)
+		return
+	}
 	for _, result := range page.Messages {
 		message := result.Summary
 		writeFormat(

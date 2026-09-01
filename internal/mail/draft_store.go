@@ -50,6 +50,32 @@ func (s *Service) GetDraft(ref string) (Draft, error) {
 	return readDraftFile(root, ref)
 }
 
+func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
+	draft, err := s.GetDraft(ref)
+	if err != nil {
+		return Draft{}, err
+	}
+	if err := rejectClaimedDraft(draft); err != nil {
+		return Draft{}, err
+	}
+	if draft.Kind != DraftKindNew {
+		return Draft{}, validationError("visible compose handoff supports new drafts only; reply and forward threading cannot be preserved")
+	}
+	if draft.From != "" {
+		return Draft{}, validationError("visible compose handoff cannot guarantee an explicit from identity; remove from and select it in Mail.app")
+	}
+	if len(draft.CC) > 0 || len(draft.BCC) > 0 {
+		return Draft{}, validationError("visible compose handoff cannot preserve CC or BCC roles; add them in Mail.app")
+	}
+	if len(draft.To) == 0 {
+		return Draft{}, validationError("visible compose handoff requires at least one recipient")
+	}
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+		return Draft{}, err
+	}
+	return draft, nil
+}
+
 func (s *Service) ListDrafts() ([]Draft, error) {
 	root, err := s.resolveDraftRoot()
 	if err != nil {
@@ -620,6 +646,10 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	if err := validateDraftAddresses(request.Input); err != nil {
 		return Draft{}, err
 	}
+	content, err := prepareDraftContent(request.Input.BodyFormat, request.Input.Body)
+	if err != nil {
+		return Draft{}, err
+	}
 	attachments, err := fingerprintAttachments(request.Input.Attachments)
 	if err != nil {
 		return Draft{}, err
@@ -634,7 +664,8 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 		ReplyAll: request.ReplyAll, From: request.Input.From,
 		To: nonNilRecipients(request.Input.To), CC: nonNilRecipients(request.Input.CC),
 		BCC: nonNilRecipients(request.Input.BCC), Subject: request.Input.Subject,
-		Body: request.Input.Body, Attachments: attachments,
+		Body: content.Plain, BodyFormat: content.Format,
+		BodySource: content.Source, BodyHTML: content.HTML, Attachments: attachments,
 		CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
@@ -646,8 +677,9 @@ func validateDraftLimits(input DraftInput) error {
 }
 
 func validateStoredDraftLimits(draft Draft) error {
+	bodyBytes := max(len(draft.Body), len(draft.BodySource), len(draft.BodyHTML))
 	return validateDraftResourceLimits(
-		len(draft.Subject), len(draft.Body), len(draft.To)+len(draft.CC)+len(draft.BCC), len(draft.Attachments),
+		len(draft.Subject), bodyBytes, len(draft.To)+len(draft.CC)+len(draft.BCC), len(draft.Attachments),
 	)
 }
 
@@ -1364,6 +1396,12 @@ func readDraftFile(root string, ref string) (Draft, error) {
 	}
 	if draft.Ref != ref {
 		return Draft{}, fmt.Errorf("draft reference does not match its file")
+	}
+	if draft.BodyFormat == "" {
+		draft.BodyFormat = DraftBodyPlain
+	}
+	if err := validateStoredDraftContent(draft); err != nil {
+		return Draft{}, fmt.Errorf("validate draft content: %w", err)
 	}
 	draft.SendAttempt = nil
 	attempt, err := readSendAttempt(root, ref)

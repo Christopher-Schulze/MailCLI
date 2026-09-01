@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.0.5"
+	version       = "1.1.0"
 	schemaVersion = 1
 )
 
@@ -27,29 +27,32 @@ type envelope struct {
 }
 
 type responseData struct {
-	Name            string                `json:"name,omitempty"`
-	Version         string                `json:"version,omitempty"`
-	Capabilities    *capabilityManifest   `json:"capabilities,omitempty"`
-	Checks          []mail.Check          `json:"checks,omitempty"`
-	Accounts        *[]mail.Account       `json:"accounts,omitempty"`
-	Mailboxes       *[]mail.Mailbox       `json:"mailboxes,omitempty"`
-	Mailbox         *mail.Mailbox         `json:"mailbox,omitempty"`
-	Page            *responsePage         `json:"page,omitempty"`
-	Message         *mail.Message         `json:"message,omitempty"`
-	MessageState    *mail.MessageSummary  `json:"message_state,omitempty"`
-	RawSource       *string               `json:"raw_source,omitempty"`
-	Attachments     *[]mail.Attachment    `json:"attachments,omitempty"`
-	ContentSource   string                `json:"content_source,omitempty"`
-	ContentComplete *bool                 `json:"content_complete,omitempty"`
-	MissingParts    *[]string             `json:"missing_parts,omitempty"`
-	SavedAttachment *mail.SavedAttachment `json:"saved_attachment,omitempty"`
-	Draft           *mail.Draft           `json:"draft,omitempty"`
-	Drafts          *[]mail.Draft         `json:"drafts,omitempty"`
-	SavedDraft      *mail.SavedDraft      `json:"saved_draft,omitempty"`
-	SendResult      *mail.SendResult      `json:"send_result,omitempty"`
-	DeleteResult    *mail.DeleteResult    `json:"delete_result,omitempty"`
-	SyncResult      *mail.SyncResult      `json:"sync_result,omitempty"`
-	UpdateResult    *updateResult         `json:"update_result,omitempty"`
+	Name            string                  `json:"name,omitempty"`
+	Version         string                  `json:"version,omitempty"`
+	Capabilities    *capabilityManifest     `json:"capabilities,omitempty"`
+	Checks          []mail.Check            `json:"checks,omitempty"`
+	Timings         []mail.DiagnosticTiming `json:"timings,omitempty"`
+	Accounts        *[]mail.Account         `json:"accounts,omitempty"`
+	Mailboxes       *[]mail.Mailbox         `json:"mailboxes,omitempty"`
+	Mailbox         *mail.Mailbox           `json:"mailbox,omitempty"`
+	Page            *responsePage           `json:"page,omitempty"`
+	Message         *mail.Message           `json:"message,omitempty"`
+	MessageState    *mail.MessageSummary    `json:"message_state,omitempty"`
+	RawSource       *string                 `json:"raw_source,omitempty"`
+	Attachments     *[]mail.Attachment      `json:"attachments,omitempty"`
+	ContentSource   string                  `json:"content_source,omitempty"`
+	ContentComplete *bool                   `json:"content_complete,omitempty"`
+	MissingParts    *[]string               `json:"missing_parts,omitempty"`
+	SavedAttachment *mail.SavedAttachment   `json:"saved_attachment,omitempty"`
+	Draft           *mail.Draft             `json:"draft,omitempty"`
+	DraftPreview    *draftPreview           `json:"draft_preview,omitempty"`
+	DraftHandoff    *draftHandoffResult     `json:"draft_handoff,omitempty"`
+	Drafts          *[]mail.Draft           `json:"drafts,omitempty"`
+	SavedDraft      *mail.SavedDraft        `json:"saved_draft,omitempty"`
+	SendResult      *mail.SendResult        `json:"send_result,omitempty"`
+	DeleteResult    *mail.DeleteResult      `json:"delete_result,omitempty"`
+	SyncResult      *mail.SyncResult        `json:"sync_result,omitempty"`
+	UpdateResult    *updateResult           `json:"update_result,omitempty"`
 }
 
 type responsePage struct {
@@ -128,7 +131,7 @@ func RequiresMailService(args []string) bool {
 			return false
 		}
 		switch args[1] {
-		case "create", "list", "inspect", "update", "save", "send", "discard":
+		case "create", "list", "inspect", "preview", "edit", "handoff", "update", "save", "send", "discard":
 			return false
 		case "open", "reconcile":
 			return true
@@ -164,7 +167,13 @@ func RequiresMailService(args []string) bool {
 
 func RequiresSignalContext(args []string) bool {
 	args, _ = normalizeGlobalJSON(args)
-	return RequiresMailService(args) || len(args) > 0 && args[0] == "update"
+	return RequiresMailService(args) || len(args) > 0 && args[0] == "update" ||
+		len(args) > 1 && args[0] == "drafts" && (args[1] == "edit" || args[1] == "handoff")
+}
+
+func RequiresMainThread(args []string) bool {
+	args, _ = normalizeGlobalJSON(args)
+	return len(args) > 1 && args[0] == "drafts" && args[1] == "handoff"
 }
 
 func runJSONCommand(
@@ -338,10 +347,10 @@ func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpOnly(args) {
-		writeLine(stdout, "Usage:\n  mailcli doctor [--json] [--live]")
+		writeLine(stdout, "Usage:\n  mailcli doctor [--json] [--live] [--diagnostics]")
 		return 0
 	}
-	flags, err := parseBooleanFlags(args, "--json", "--live")
+	flags, err := parseBooleanFlags(args, "--json", "--live", "--diagnostics")
 	if err != nil {
 		writeLine(stderr, err)
 		return 2
@@ -349,14 +358,20 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 
 	operationCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	report := service.Probe(operationCtx, flags["--live"])
+	var report mail.DiagnosticReport
+	var timings []mail.DiagnosticTiming
+	if flags["--diagnostics"] {
+		report, timings = service.ProbeWithDiagnostics(operationCtx, flags["--live"])
+	} else {
+		report = service.Probe(operationCtx, flags["--live"])
+	}
 	healthy := mail.IsHealthy(report)
 	if flags["--json"] {
 		response := envelope{
 			SchemaVersion: schemaVersion,
 			OK:            healthy,
 			Command:       "doctor",
-			Data:          responseData{Checks: report.Checks},
+			Data:          responseData{Checks: report.Checks, Timings: timings},
 		}
 		if !healthy {
 			code := "environment_unhealthy"
@@ -377,6 +392,9 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 	} else {
 		for _, check := range report.Checks {
 			writeFormat(stdout, "%-28s %-7s %s\n", check.Name, check.Status, check.Detail)
+		}
+		for _, timing := range timings {
+			writeFormat(stdout, "%-28s %7.2f ms\n", timing.Phase, timing.Milliseconds)
 		}
 	}
 
@@ -477,7 +495,7 @@ Commands:
   mailboxes     List and resolve exact mailbox paths
   messages      List, search, read, reply, forward, and organize messages
   attachments   List and save received attachments
-  drafts        Create and review local drafts; inspect Mail drafts
+  drafts        Create, preview, edit, and hand off visible drafts
   sync          Ask Mail.app to check for new mail
   update        Check GitHub and install the latest verified release
   doctor        Verify the local MailCLI environment
@@ -485,7 +503,7 @@ Commands:
   version       Print the installed version
   help          Show this command overview
 
-Mail 16 native compose, save, and send are disabled; see 'mailcli capabilities'.
+Mail 16 scripted save and send remain disabled; visible handoff never sends.
 Run 'mailcli <command> --help' for focused usage and flags.
 `)
 }

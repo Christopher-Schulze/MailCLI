@@ -53,26 +53,32 @@ func (s *Store) GetMessage(ctx context.Context, ref string) (result mail.Message
 }
 
 func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, resultErr error) {
+	var output strings.Builder
+	if err := s.WriteRawSource(ctx, ref, &output); err != nil {
+		return "", err
+	}
+	return output.String(), nil
+}
+
+func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer) (resultErr error) {
 	_, source, err := s.openMessageSource(ctx, ref)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer joinCloseError(&resultErr, source, "raw message source")
 	if source.partial {
-		return "", operationError(
+		return operationError(
 			"raw_source_partial",
 			"the local EMLX source is partial; exact raw source requires a targeted Mail.app fallback",
 		)
 	}
 	if source.length < 0 || source.length > mail.MaximumRawSourceBytes {
-		return "", operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
+		return operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
 	}
-	var output strings.Builder
-	output.Grow(int(source.length))
-	if _, err := io.CopyN(&output, source.Reader(), source.length); err != nil {
-		return "", fmt.Errorf("read RFC message source: %w", err)
+	if _, err := io.CopyN(writer, source.Reader(), source.length); err != nil {
+		return fmt.Errorf("stream RFC message source: %w", err)
 	}
-	return output.String(), nil
+	return nil
 }
 
 func sourceKind(partial bool) string {

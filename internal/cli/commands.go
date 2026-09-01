@@ -43,6 +43,13 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 	if *jsonOutput {
 		return writeSuccess(stdout, "accounts.list", responseData{Accounts: &accounts})
 	}
+	rows := make([][]string, 0, len(accounts))
+	for _, account := range accounts {
+		rows = append(rows, []string{account.Ref, account.Name, strings.Join(account.EmailAddresses, ",")})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES"}, rows) {
+		return 0
+	}
 	for _, account := range accounts {
 		writeFormat(stdout, "%s\t%s\t%s\n", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
 	}
@@ -76,6 +83,13 @@ func runMailboxes(ctx context.Context, service *mail.Service, args []string, std
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "mailboxes.list", responseData{Mailboxes: &mailboxes})
+	}
+	rows := make([][]string, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		rows = append(rows, []string{mailbox.Ref, strings.Join(mailbox.Path, "/"), fmt.Sprint(mailbox.UnreadCount)})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "MAILBOX", "UNREAD"}, rows) {
+		return 0
 	}
 	for _, mailbox := range mailboxes {
 		writeFormat(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
@@ -214,14 +228,16 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	raw, err := service.GetRawSource(operationCtx, *ref)
-	if err != nil {
-		return failCommand("messages.raw", *jsonOutput, err, stdout, stderr)
-	}
 	if *jsonOutput {
+		raw, err := service.GetRawSource(operationCtx, *ref)
+		if err != nil {
+			return failCommand("messages.raw", true, err, stdout, stderr)
+		}
 		return writeSuccess(stdout, "messages.raw", responseData{RawSource: &raw})
 	}
-	writeRaw(stdout, raw)
+	if err := service.WriteRawSource(operationCtx, *ref, stdout); err != nil {
+		return failCommand("messages.raw", false, err, stdout, stderr)
+	}
 	return 0
 }
 
@@ -376,6 +392,16 @@ func writeSuccess(stdout io.Writer, command string, data responseData) int {
 func writeMessagePage(stdout io.Writer, command string, page mail.MessagePage, jsonOutput bool) int {
 	if jsonOutput {
 		return writeSuccess(stdout, command, responseData{Page: messageResponsePage(&page)})
+	}
+	rows := make([][]string, 0, len(page.Messages))
+	for _, message := range page.Messages {
+		rows = append(rows, []string{message.Ref, message.DateReceived, message.Sender, message.Subject})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "RECEIVED", "FROM", "SUBJECT"}, rows) {
+		if page.NextCursor != "" {
+			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
+		}
+		return 0
 	}
 	for _, message := range page.Messages {
 		writeFormat(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))

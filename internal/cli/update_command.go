@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"debug/macho"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,12 +28,15 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"mailcli/internal/releaseauth"
 )
 
 const (
 	latestReleaseURL          = "https://api.github.com/repos/Christopher-Schulze/MailCLI/releases/latest"
 	maximumReleaseMetadata    = 2 * 1024 * 1024
 	maximumChecksumFile       = 1024 * 1024
+	maximumSignatureFile      = 4 * 1024
 	maximumReleaseArchive     = 64 * 1024 * 1024
 	maximumExtractedPackage   = 192 * 1024 * 1024
 	maximumExtractedFileCount = 256
@@ -69,6 +74,7 @@ type updateEnvironment struct {
 	installPackage     func(context.Context, string, string, string) error
 	verifyInstallation func(context.Context, string, string) error
 	allowInsecureURLs  bool
+	releasePublicKey   ed25519.PublicKey
 }
 
 type updateError struct {
@@ -113,6 +119,10 @@ func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 }
 
 func defaultUpdateEnvironment() (updateEnvironment, error) {
+	publicKey, err := parseReleasePublicKey(releaseauth.PublicKeyBase64)
+	if err != nil {
+		return updateEnvironment{}, updateFailure("update_signature_invalid", "decode pinned release key: %v", err)
+	}
 	executablePath, err := os.Executable()
 	if err != nil {
 		return updateEnvironment{}, updateFailure("update_install_failed", "resolve installed MailCLI binary: %v", err)
@@ -134,6 +144,7 @@ func defaultUpdateEnvironment() (updateEnvironment, error) {
 		operatingSystem: runtime.GOOS, architecture: runtime.GOARCH,
 		verifyPackage: verifyReleaseBinary, installPackage: runReleaseInstaller,
 		verifyInstallation: verifyInstalledBinary,
+		releasePublicKey:   publicKey,
 	}, nil
 }
 
@@ -259,7 +270,7 @@ func downloadAndInstallUpdate(
 	latestVersion string,
 ) error {
 	archiveName := fmt.Sprintf("mailcli_%s_darwin_arm64.tar.gz", latestVersion)
-	archiveURL, checksumURL, err := releaseAssetURLs(release.Assets, archiveName)
+	archiveURL, checksumURL, signatureURL, err := releaseAssetURLs(release.Assets, archiveName)
 	if err != nil {
 		return err
 	}
@@ -268,6 +279,22 @@ func downloadAndInstallUpdate(
 	}
 	if err := validateUpdateURL(checksumURL, environment.allowInsecureURLs); err != nil {
 		return updateFailure("update_package_invalid", "invalid release checksum URL: %v", err)
+	}
+	if err := validateUpdateURL(signatureURL, environment.allowInsecureURLs); err != nil {
+		return updateFailure("update_package_invalid", "invalid release signature URL: %v", err)
+	}
+	checksums, err := downloadUpdateResource(ctx, environment.client, checksumURL, maximumChecksumFile)
+	if err != nil {
+		return updateFailure("update_download_failed", "download release checksums: %v", err)
+	}
+	signature, err := downloadUpdateResource(ctx, environment.client, signatureURL, maximumSignatureFile)
+	if err != nil {
+		return updateFailure("update_download_failed", "download release signature: %v", err)
+	}
+	if err := reporter.step("Verifying release signature", func() error {
+		return verifyReleaseSignature(checksums, signature, environment.releasePublicKey)
+	}); err != nil {
+		return err
 	}
 	var archive []byte
 	if err := reporter.step("Downloading mailcli "+latestVersion, func() error {
@@ -278,10 +305,6 @@ func downloadAndInstallUpdate(
 		return downloadErr
 	}); err != nil {
 		return updateFailure("update_download_failed", "download release archive: %v", err)
-	}
-	checksums, err := downloadUpdateResource(ctx, environment.client, checksumURL, maximumChecksumFile)
-	if err != nil {
-		return updateFailure("update_download_failed", "download release checksums: %v", err)
 	}
 	if err := reporter.step("Verifying release checksum", func() error {
 		return verifyReleaseChecksum(archiveName, archive, checksums)
@@ -361,29 +384,35 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (func() error,
 	}
 }
 
-func releaseAssetURLs(assets []updateAsset, archiveName string) (string, string, error) {
+func releaseAssetURLs(assets []updateAsset, archiveName string) (string, string, string, error) {
 	var archiveURL string
 	var checksumURL string
+	var signatureURL string
 	for _, asset := range assets {
 		switch asset.Name {
 		case archiveName:
 			if archiveURL != "" {
-				return "", "", updateFailure("update_package_invalid", "release contains duplicate %s assets", archiveName)
+				return "", "", "", updateFailure("update_package_invalid", "release contains duplicate %s assets", archiveName)
 			}
 			archiveURL = asset.DownloadURL
 		case "SHA256SUMS":
 			if checksumURL != "" {
-				return "", "", updateFailure("update_package_invalid", "release contains duplicate SHA256SUMS assets")
+				return "", "", "", updateFailure("update_package_invalid", "release contains duplicate SHA256SUMS assets")
 			}
 			checksumURL = asset.DownloadURL
+		case "SHA256SUMS.sig":
+			if signatureURL != "" {
+				return "", "", "", updateFailure("update_package_invalid", "release contains duplicate SHA256SUMS.sig assets")
+			}
+			signatureURL = asset.DownloadURL
 		}
 	}
-	if archiveURL == "" || checksumURL == "" {
-		return "", "", updateFailure(
-			"update_package_missing", "latest release is missing %s or SHA256SUMS", archiveName,
+	if archiveURL == "" || checksumURL == "" || signatureURL == "" {
+		return "", "", "", updateFailure(
+			"update_package_missing", "latest release is missing %s, SHA256SUMS, or SHA256SUMS.sig", archiveName,
 		)
 	}
-	return archiveURL, checksumURL, nil
+	return archiveURL, checksumURL, signatureURL, nil
 }
 
 func downloadUpdateResource(
@@ -431,6 +460,28 @@ func verifyReleaseChecksum(archiveName string, archive []byte, checksums []byte)
 		return updateFailure("update_checksum_mismatch", "release archive checksum does not match SHA256SUMS")
 	}
 	return nil
+}
+
+func verifyReleaseSignature(checksums []byte, encodedSignature []byte, publicKey ed25519.PublicKey) error {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return updateFailure("update_signature_invalid", "pinned Ed25519 release key is invalid")
+	}
+	signature, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(encodedSignature)))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return updateFailure("update_signature_invalid", "release signature is not valid base64 Ed25519 data")
+	}
+	if !ed25519.Verify(publicKey, checksums, signature) {
+		return updateFailure("update_signature_invalid", "SHA256SUMS signature does not match the pinned release key")
+	}
+	return nil
+}
+
+func parseReleasePublicKey(encoded string) (ed25519.PublicKey, error) {
+	decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("expected a base64 Ed25519 public key")
+	}
+	return ed25519.PublicKey(decoded), nil
 }
 
 func checksumForArchive(archiveName string, checksums string) ([]byte, error) {
@@ -747,7 +798,7 @@ func animateUpdateStatus(
 }
 
 func writerIsTerminal(writer io.Writer) bool {
-	fileDescriptor, ok := updateWriterFileDescriptor(writer)
+	fileDescriptor, ok := writerFileDescriptor(writer)
 	if !ok {
 		return false
 	}
@@ -755,14 +806,14 @@ func writerIsTerminal(writer io.Writer) bool {
 	return err == nil
 }
 
-func updateWriterFileDescriptor(writer io.Writer) (uintptr, bool) {
+func writerFileDescriptor(writer io.Writer) (uintptr, bool) {
 	switch value := writer.(type) {
 	case interface{ Fd() uintptr }:
 		return value.Fd(), true
 	case *errorTrackingWriter:
-		return updateWriterFileDescriptor(value.writer)
+		return writerFileDescriptor(value.writer)
 	case *countingWriter:
-		return updateWriterFileDescriptor(value.writer)
+		return writerFileDescriptor(value.writer)
 	default:
 		return 0, false
 	}

@@ -35,6 +35,8 @@ type capabilityLimits struct {
 	RawMIMESend                 bool   `json:"raw_mime_send"`
 	ComposeWrite                bool   `json:"compose_write"`
 	ComposeAttachmentWrite      bool   `json:"compose_attachment_write"`
+	VisibleComposeHandoff       bool   `json:"visible_compose_handoff"`
+	VisibleAttachmentHandoff    bool   `json:"visible_attachment_handoff"`
 	SendTransport               string `json:"send_transport"`
 	MaximumPageSize             int    `json:"maximum_page_size"`
 	MaximumDraftInputBytes      int    `json:"maximum_draft_input_bytes"`
@@ -82,6 +84,9 @@ func capabilities() capabilityManifest {
 			write("drafts.create", "local-write", "none", "draft-store", "none", "created"),
 			read("drafts.list", "draft-store", "none", "complete"),
 			read("drafts.inspect", "draft-store", "none", "complete"),
+			read("drafts.preview", "draft-store", "none", "complete"),
+			write("drafts.edit", "local-write", "none", "draft-store", "none", "updated"),
+			write("drafts.handoff", "visible-compose", "none", "draft-store", "system-compose-service", "opened"),
 			write("drafts.update", "local-write", "none", "draft-store", "none", "updated"),
 			write("drafts.save", "unsupported", "none", "draft-store", "none", "compose_automation_unsupported"),
 			read("drafts.open", "mail-store", "fallback-automation", "complete"),
@@ -101,6 +106,8 @@ func capabilities() capabilityManifest {
 			OwnsMailIndex: false, BackgroundProcess: false,
 			RawMIMERead: true, RawMIMESend: false, ComposeWrite: false,
 			ComposeAttachmentWrite:      false,
+			VisibleComposeHandoff:       true,
+			VisibleAttachmentHandoff:    true,
 			SendTransport:               "none",
 			MaximumPageSize:             mail.MaximumPageLimit,
 			MaximumDraftInputBytes:      maximumDraftInputBytes,

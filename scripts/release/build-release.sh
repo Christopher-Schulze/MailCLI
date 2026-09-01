@@ -2,11 +2,13 @@
 set -euo pipefail
 
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="${1:-1.0.5}"
+VERSION="${1:-1.1.0}"
 RELEASE_DIRECTORY="${MAILCLI_RELEASE_DIRECTORY:-${MAILCLI_ROOT}/dist}"
 ARCHIVE_ROOT="mailcli_${VERSION}_darwin_arm64"
 ARCHIVE_PATH="${RELEASE_DIRECTORY}/${ARCHIVE_ROOT}.tar.gz"
 CHECKSUM_PATH="${RELEASE_DIRECTORY}/SHA256SUMS"
+SIGNATURE_PATH="${RELEASE_DIRECTORY}/SHA256SUMS.sig"
+SIGNING_KEY="${MAILCLI_RELEASE_SIGNING_KEY:-${HOME}/Library/Application Support/MailCLI/release-signing-key}"
 
 if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Release version must use MAJOR.MINOR.PATCH: %s\n' "${VERSION}" >&2
@@ -16,7 +18,7 @@ if [[ "${RELEASE_DIRECTORY}" != /* ]]; then
   printf 'Release directory must be absolute: %s\n' "${RELEASE_DIRECTORY}" >&2
   exit 1
 fi
-if [[ -e "${ARCHIVE_PATH}" || -e "${CHECKSUM_PATH}" ]]; then
+if [[ -e "${ARCHIVE_PATH}" || -e "${CHECKSUM_PATH}" || -e "${SIGNATURE_PATH}" ]]; then
   printf 'Refusing to overwrite existing release assets in %s\n' "${RELEASE_DIRECTORY}" >&2
   exit 1
 fi
@@ -62,6 +64,27 @@ COPYFILE_DISABLE=1 tar -czf "${ARCHIVE_PATH}" -C "${STAGING_PARENT}" "${ARCHIVE_
   cd "${RELEASE_DIRECTORY}"
   shasum -a 256 "$(basename "${ARCHIVE_PATH}")" >"$(basename "${CHECKSUM_PATH}")"
 )
+SIGN_ARGUMENTS=(
+  sign
+  --private "${SIGNING_KEY}"
+  --input "${CHECKSUM_PATH}"
+  --output "${SIGNATURE_PATH}"
+)
+if [[ -n "${MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY:-}" ]]; then
+  SIGN_ARGUMENTS+=(--expected-public "${MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY}")
+fi
+go run -mod=readonly "${MAILCLI_ROOT}/cmd/mailcli-release-sign" "${SIGN_ARGUMENTS[@]}"
+
+VERIFY_ARGUMENTS=(
+  verify
+  --input "${CHECKSUM_PATH}"
+  --signature "${SIGNATURE_PATH}"
+)
+if [[ -n "${MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY:-}" ]]; then
+  VERIFY_ARGUMENTS+=(--public "${MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY}")
+fi
+go run -mod=readonly "${MAILCLI_ROOT}/cmd/mailcli-release-sign" "${VERIFY_ARGUMENTS[@]}"
 
 printf 'Built %s\n' "${ARCHIVE_PATH}"
 printf 'Built %s\n' "${CHECKSUM_PATH}"
+printf 'Built %s\n' "${SIGNATURE_PATH}"
