@@ -59,7 +59,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
-		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard",
+		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync",
 	}
@@ -101,6 +101,66 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		command := manifest.Commands[slices.Index(got, id)]
 		if command.StoreDependency != "draft-store" || command.MailAppDependency != "none" {
 			t.Fatalf("%s capability = %+v", id, command)
+		}
+	}
+}
+
+// TestCapabilityMailAppDependencies pins every declared Mail.app dependency to an
+// audited value so label drift cannot reintroduce undeclared automation surfaces.
+// Evidence for each value lives in docs/tasks/done/027-correct-stale-mail-app-capability-labels.md.
+func TestCapabilityMailAppDependencies(t *testing.T) {
+	want := map[string]string{
+		"capabilities":      "none",
+		"version":           "none",
+		"update":            "none",
+		"doctor":            "optional-automation",
+		"accounts.list":     "fallback-automation",
+		"mailboxes.list":    "none",
+		"mailboxes.resolve": "none",
+		"messages.list":     "fallback-automation",
+		"messages.filter":   "none",
+		"messages.search":   "none",
+		"messages.get":      "none",
+		"messages.raw":      "none",
+		"attachments.list":  "none",
+		"attachments.save":  "none",
+		"drafts.create":     "none",
+		"drafts.list":       "none",
+		"drafts.inspect":    "none",
+		"drafts.preview":    "none",
+		"drafts.edit":       "none",
+		"drafts.handoff":    "system-compose-service",
+		"drafts.update":     "none",
+		"drafts.save":       "none",
+		"drafts.open":       "fallback-automation",
+		"drafts.send":       "none",
+		"send.setup":        "none",
+		"drafts.reconcile":  "none",
+		"drafts.discard":    "none",
+		"drafts.prune":      "none",
+		"messages.reply":    "none",
+		"messages.forward":  "none",
+		"messages.mark":     "none",
+		"messages.move":     "none",
+		"messages.copy":     "none",
+		"messages.delete":   "none",
+		"sync":              "optional",
+	}
+	manifest := capabilities()
+	seen := make(map[string]struct{}, len(manifest.Commands))
+	for _, command := range manifest.Commands {
+		seen[command.ID] = struct{}{}
+		expected, audited := want[command.ID]
+		if !audited {
+			t.Fatalf("command %q has no audited mail_app_dependency expectation", command.ID)
+		}
+		if command.MailAppDependency != expected {
+			t.Fatalf("%s mail_app_dependency = %q, want %q", command.ID, command.MailAppDependency, expected)
+		}
+	}
+	for id := range want {
+		if _, declared := seen[id]; !declared {
+			t.Fatalf("audited command %q is missing from the manifest", id)
 		}
 	}
 }
