@@ -6,7 +6,7 @@ Local Apple Mail access for the shell and coding agents.
 [![Platform](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations through the running Mail app, and sends reviewed drafts autonomously over SMTP/IMAP. Reads and mutations never ask for Gmail, iCloud, IMAP, SMTP, OAuth, or account credentials; sending uses one app-specific password that the user stores in the macOS Keychain via `mailcli send setup`.
+MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations over IMAP, and sends reviewed drafts autonomously over SMTP. MailCLI uses SMTP and IMAP under the hood with credentials stored in the macOS Keychain via `mailcli send setup`; it never asks for account passwords, OAuth tokens, or other credentials in chat.
 
 ```bash
 mailcli messages search --sender example.com --after 2026-01-01 --json
@@ -40,7 +40,7 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard` | Manages plain, Markdown, or safe HTML drafts and opens a reviewed new draft visibly; scripted `save` remains blocked |
 | Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required |
-| Synchronization | `sync` | Checks all mail or synchronizes one selected account |
+| Synchronization | `sync` | `--check` reports server-vs-local deltas over IMAP; without `--check` asks Mail.app to synchronize |
 | Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 
 Run `mailcli help` for the compact command overview. Focused command help accepts
@@ -59,15 +59,20 @@ flowchart LR
     CLI -->|"list, filter, search, get, raw"| Store["Read-only Mail store adapter"]
     Store --> Index["Envelope Index"]
     Store --> EMLX[".emlx message sources"]
-    CLI -->|"mutate, sync"| Gate["Cross-process access gate"]
-    CLI -->|"one missing body or attachment"| Gate
+    CLI -->|"mark, move, copy, delete"| IMAPMut["IMAP mutations"]
+    CLI -->|"one missing body or attachment"| IMAPHydrate["IMAP FETCH hydration"]
+    CLI -->|"sync --check"| IMAPStatus["IMAP STATUS"]
+    IMAPMut --> Server["IMAP server"]
+    IMAPHydrate --> Server
+    IMAPStatus --> Server
+    CLI -->|"sync without --check"| Gate["Cross-process access gate"]
     Gate --> Bridge["Targeted Apple Events bridge"]
     Bridge --> Mail["Already-running Mail.app"]
     CLI -->|"drafts send --confirm"| Transport["SMTP submit + IMAP Sent mirror"]
     CLI -->|"send setup"| Keychain["macOS Keychain credential"]
 ```
 
-Mail.app remains the source of truth for reads and mailbox mutations; sent messages are mirrored into the account's Sent mailbox over IMAP. MailCLI has no daemon, background process, watcher, copied corpus, owned search index, or persistent cache of its own.
+Mail.app remains the source of truth for reads; mailbox mutations execute over IMAP and sent messages are mirrored into the account's Sent mailbox over IMAP. MailCLI has no daemon, background process, watcher, copied corpus, owned search index, or persistent cache of its own.
 
 The store adapter opens Mail's Envelope Index with SQLite `mode=ro`, `query_only=1`, WAL participation, and a private connection cache. Before reading, it validates the store version, framework version, UUID, required schema, account catalog, mailbox mapping, and filesystem containment. Message, mailbox-cache, and external-attachment files are opened relative to one held Mail-store directory descriptor with macOS `O_NOFOLLOW_ANY`; selection, hashing, and copying remain bound to the same regular-file identity. An unknown profile fails with `unsupported_mail_store_schema` before any message query runs.
 
@@ -135,8 +140,8 @@ MailCLI uses the permissions of the process that launches it. Grant permissions 
 | Permission | Required for |
 |---|---|
 | Full Disk Access | Accounts, mailboxes, messages, searches, raw source, and downloaded attachments |
-| Automation access to Mail | Live diagnostics, missing-content fallback, message mutations, and sync |
-| None | Sending (`send setup`, `drafts send`); it needs no TCC permission, though the first keychain read may show one consent prompt |
+| Automation access to Mail | Live diagnostics, `drafts open`, `sync` without `--check`, and fallback listing when the store open fails |
+| None | Sending (`send setup`, `drafts send`), message mutations (`mark`, `move`, `copy`, `delete`), and `sync --check`; they use IMAP/SMTP with Keychain credentials and need no Automation permission, though the first keychain read may show one consent prompt |
 
 Accessibility and Screen Recording are not required.
 
@@ -264,7 +269,7 @@ mailcli sync --account ACCOUNT_REF --json
 
 Reply and forward commands require a store-bound source reference and create local review drafts. They do not open, save, or send a Mail compose object. Forward inputs still require an explicit destination.
 
-Mark, move, and delete reject messages identified as drafts. To intentionally mutate a draft, first close every editor for it and repeat with `--allow-draft`; deletion still also requires `--confirm`. This prevents Mail from recreating a deleted or moved draft when an open editor later saves.
+Mark, move, and delete reject messages identified as drafts. To intentionally mutate a draft, first close every editor for it and repeat with `--allow-draft`; deletion still also requires `--confirm`. This prevents an open Mail editor from re-saving the draft while IMAP moves or deletes it.
 
 ## JSON contract
 
@@ -304,12 +309,12 @@ The link command refuses if a skill already exists at that destination. It does 
 | No provider credentials in chat, argv, or logs | Reads reuse Mail.app's Keychain-backed authentication; sending stores one app-specific password in the macOS Keychain via `send setup`, never displayed or logged |
 | No Mail database writes | Opens the Envelope Index read-only and rejects journal or schema mutations |
 | No owned mail index | Searches current local sources on demand and persists no corpus |
-| No broad Apple Events reads | Uses the store for enumeration and search, with fallback for one resolved incomplete message only |
+| No broad Apple Events reads | Uses the store for enumeration and search, with bounded IMAP FETCH for one resolved incomplete message only |
 | No corrupted or phantom scripted compose data | Blocks scripted draft export; sending composes locally and delivers over SMTP, and visible handoff uses Apple's sharing service, retains the reviewed local draft, and never sends |
 | No Mail.app lifecycle control | Requires the exact running Mail PID and never launches, activates, quits, kills, or restarts Mail.app |
 | No residual bridge process | Waits for the owned `osascript` leader, terminates residual group members, and verifies process-group absence before command completion |
 | No residual installer or editor process | Gracefully cancels each private process group, force-cleans resistant descendants after a bounded grace period, and verifies group absence |
-| No Apple Events backlog after uncertainty | Durably pre-arms the exact affected Mail PID before mutation and rejects every later live operation after an incomplete caller until that process has been replaced |
+| No Apple Events backlog after uncertainty | Durably pre-arms the exact affected Mail PID before compose or sync and rejects every later live operation after an incomplete caller until that process has been replaced |
 | No accidental overwrite or path substitution | Attachment export accepts only an absolute destination that does not exist; Mail-store sources reject symlinks and file-identity replacement |
 | No silent incomplete search | Reports source completeness and scan bounds on every search page |
 
@@ -321,7 +326,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 - Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts capture intent but cannot guarantee Mail-native threading, quoted content, or original forwarded attachments until completed in Mail's UI.
 - `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it.
-- Messages that are not fully downloaded may need one targeted Apple Events fallback. The result reports remaining missing parts instead of claiming completeness.
+- Messages that are not fully downloaded may need one targeted IMAP FETCH. The result reports remaining missing parts instead of claiming completeness.
 - Body search is bounded work over current `.emlx` sources, not an instant persistent index. Narrow account, mailbox, sender, date, or subject scope for large stores.
 
 ## Development
@@ -329,7 +334,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.3.0
+./scripts/release/build-release.sh 1.2.0
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
