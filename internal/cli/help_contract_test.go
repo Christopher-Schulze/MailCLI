@@ -112,16 +112,22 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 
 func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 	tests := []struct {
-		args []string
-		want []string
+		args    []string
+		want    []string
+		notWant []string
 	}{
 		{
 			args: []string{"messages", "search", "help"},
 			want: []string{"Options:", "--mailbox <ref>", "--attachment <true|false>", "--max-bytes <bytes>", "(default: 4 GiB)", "-h, --help"},
 		},
 		{
-			args: []string{"messages", "copy", "help"},
-			want: []string{"--allow-draft", "Allow copying a source message that is a draft"},
+			args:    []string{"messages", "copy", "help"},
+			want:    []string{"Options:", "--ref <ref>", "--mailbox <ref>"},
+			notWant: []string{"--allow-draft"},
+		},
+		{
+			args: []string{"messages", "move", "help"},
+			want: []string{"--allow-draft", "Allow moving a source message that is a draft"},
 		},
 	}
 	for _, test := range tests {
@@ -134,6 +140,11 @@ func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 		for _, wanted := range test.want {
 			if !strings.Contains(stdout.String(), wanted) {
 				t.Fatalf("args = %q, stdout = %q, want %q", test.args, stdout.String(), wanted)
+			}
+		}
+		for _, unwanted := range test.notWant {
+			if strings.Contains(stdout.String(), unwanted) {
+				t.Fatalf("args = %q, stdout = %q, must not contain %q", test.args, stdout.String(), unwanted)
 			}
 		}
 	}

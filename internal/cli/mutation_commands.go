@@ -57,21 +57,25 @@ func runMessageTransfer(
 	flags := newFlagSet(strings.ReplaceAll(command, ".", " "), stderr)
 	ref := flags.String("ref", "", "message ref")
 	mailboxRef := flags.String("mailbox", "", "destination mailbox ref")
-	allowDraftDescription := "allow moving a source message that is a draft"
-	if copyMessage {
-		allowDraftDescription = "allow copying a source message that is a draft"
+	// Copy never alters the source draft, so the draft-mutation guard (and its flag)
+	// applies to move only.
+	var allowDraft *bool
+	if !copyMessage {
+		allowDraft = flags.Bool("allow-draft", false, "allow moving a source message that is a draft")
 	}
-	allowDraft := flags.Bool("allow-draft", false, allowDraftDescription)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	request := mail.TransferMessageRequest{
+		Ref: *ref, DestinationMailbox: *mailboxRef, Copy: copyMessage,
+	}
+	if allowDraft != nil {
+		request.AllowDraftMutation = *allowDraft
+	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	message, err := service.TransferMessage(operationCtx, mail.TransferMessageRequest{
-		Ref: *ref, DestinationMailbox: *mailboxRef, Copy: copyMessage,
-		AllowDraftMutation: *allowDraft,
-	})
+	message, err := service.TransferMessage(operationCtx, request)
 	if err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
