@@ -431,9 +431,16 @@ func parseBooleanFlags(args []string, allowed ...string) (map[string]bool, error
 }
 
 func writeJSON(writer io.Writer, value envelope) int {
-	encoder := json.NewEncoder(writer)
+	// Marshal to a buffer first so a partial JSON envelope is never written
+	// to the output. If marshalling fails, the caller can still emit a
+	// fallback error envelope.
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
+		return 1
+	}
+	if _, err := writer.Write(buf.Bytes()); err != nil {
 		return 1
 	}
 	return 0

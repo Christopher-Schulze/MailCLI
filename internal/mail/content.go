@@ -7,10 +7,15 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	"golang.org/x/net/html"
 )
+
+// markdown is a package-level goldmark instance to avoid re-allocating the
+// parser/renderer on every draft body conversion.
+var markdown = goldmark.New()
 
 type preparedDraftContent struct {
 	Format DraftBodyFormat
@@ -63,7 +68,7 @@ func validateStoredDraftContent(draft Draft) error {
 
 func renderMarkdownContent(source string) (preparedDraftContent, error) {
 	var rendered bytes.Buffer
-	if err := goldmark.New().Convert([]byte(source), &rendered); err != nil {
+	if err := markdown.Convert([]byte(source), &rendered); err != nil {
 		return preparedDraftContent{}, fmt.Errorf("render Markdown body: %w", err)
 	}
 	return canonicalRichContent(DraftBodyMarkdown, source, rendered.Bytes())
@@ -204,6 +209,7 @@ func htmlDraftText(reader io.Reader) (string, error) {
 		return "", err
 	}
 	var output bytes.Buffer
+	output.Grow(4096)
 	writeHTMLText(&output, root)
 	return normalizeDraftText(output.String()), nil
 }
@@ -256,7 +262,11 @@ func ensureLineBreak(output *bytes.Buffer) {
 }
 
 func normalizeDraftText(value string) string {
-	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	normalized := value
+	if strings.Contains(value, "\r\n") {
+		normalized = strings.ReplaceAll(value, "\r\n", "\n")
+	}
+	lines := strings.Split(normalized, "\n")
 	for index, line := range lines {
 		lines[index] = strings.TrimRightFunc(collapseHorizontalSpace(line), unicode.IsSpace)
 	}
@@ -271,17 +281,42 @@ func normalizeDraftText(value string) string {
 
 func collapseHorizontalSpace(value string) string {
 	var output strings.Builder
+	output.Grow(len(value))
 	space := false
-	for _, current := range value {
-		if !unicode.IsSpace(current) {
+	for i := 0; i < len(value); {
+		c := value[i]
+		if c < utf8.RuneSelf {
+			// ASCII fast path
+			if isASCIIWhitespace(c) {
+				space = true
+				i++
+				continue
+			}
 			if space && output.Len() > 0 {
 				output.WriteByte(' ')
 			}
 			space = false
-			output.WriteRune(current)
+			output.WriteByte(c)
+			i++
 			continue
 		}
-		space = true
+		// Multi-byte UTF-8
+		r, size := utf8.DecodeRuneInString(value[i:])
+		if unicode.IsSpace(r) {
+			space = true
+		} else {
+			if space && output.Len() > 0 {
+				output.WriteByte(' ')
+			}
+			space = false
+			output.WriteRune(r)
+		}
+		i += size
 	}
 	return output.String()
+}
+
+// isASCIIWhitespace returns true for ASCII whitespace bytes (0x00-0x20).
+func isASCIIWhitespace(c byte) bool {
+	return c <= ' '
 }

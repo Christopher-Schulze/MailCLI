@@ -427,6 +427,9 @@ func (s *Store) scanSearchBatch(
 	for worker := 0; worker < min(searchWorkerCount, len(items)); worker++ {
 		group.Go(func() error {
 			for job := range jobs {
+				if err := groupContext.Err(); err != nil {
+					return err
+				}
 				scan, err := scanCandidate(groupContext, job.item, terms, hasAttachment, job.source)
 				if err != nil {
 					return err
@@ -539,13 +542,15 @@ func scanCandidate(
 	}
 	snippet := ""
 	if match {
-		haystack := buildSearchText(item, document)
-		folded := strings.ToLower(haystack)
+		folded := buildLoweredSearchText(item, document)
 		firstTerm := ""
 		if len(terms) > 0 {
 			match, firstTerm = containsAllFoldedSearchTerms(folded, terms)
 		}
 		if match {
+			// Build original-case text only for the snippet to preserve
+			// readable case in search results.
+			haystack := buildSearchText(item, document)
 			snippet = snippetForFolded(haystack, folded, firstTerm)
 		}
 	}
@@ -576,20 +581,51 @@ func mergeSearchCoverage(coverage *mail.SearchCoverage, scan candidateScan) {
 }
 
 func normalizedSearchTerms(value string) []string {
-	fields := strings.Fields(strings.ToLower(value))
-	terms := fields[:0]
-	for _, field := range fields {
-		duplicate := false
-		for _, term := range terms {
-			if field == term {
-				duplicate = true
-				break
+	// Fold+tokenize in one pass, avoiding strings.ToLower allocation.
+	var terms []string
+	var current []byte
+	flush := func() {
+		if len(current) > 0 {
+			term := string(current)
+			current = current[:0]
+			duplicate := false
+			for _, existing := range terms {
+				if term == existing {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				terms = append(terms, term)
 			}
 		}
-		if !duplicate {
-			terms = append(terms, field)
-		}
 	}
+	for i := 0; i < len(value); {
+		c := value[i]
+		if c < utf8.RuneSelf {
+			if c <= ' ' || isASCIIWhitespace(c) {
+				flush()
+				i++
+				continue
+			}
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			current = append(current, c)
+			i++
+			continue
+		}
+		// Multi-byte: lowercase via unicode
+		r, size := utf8.DecodeRuneInString(value[i:])
+		if unicode.IsSpace(r) {
+			flush()
+		} else {
+			r = unicode.ToLower(r)
+			current = append(current, string(r)...)
+		}
+		i += size
+	}
+	flush()
 	return terms
 }
 
@@ -635,11 +671,12 @@ func snippetForFolded(value string, folded string, term string) string {
 	if end < runeCount {
 		suffix = "…"
 	}
-	startByte, endByte := runeByteRange(value, start, end)
+	startByte, endByte := runeByteRangeFast(value, start, end)
 	return prefix + value[startByte:endByte] + suffix
 }
 
-func runeByteRange(value string, startRune int, endRune int) (int, int) {
+// runeByteRangeFast converts rune indices to byte indices in value.
+func runeByteRangeFast(value string, startRune int, endRune int) (int, int) {
 	index := 0
 	startByte := 0
 	for count := 0; count < endRune && index < len(value); count++ {
@@ -685,6 +722,31 @@ func buildSearchText(item messageRecord, document mimeDocument) string {
 	return builder.String()
 }
 
+// buildLoweredSearchText builds the same collapsed search text as
+// buildSearchText but with ASCII bytes lowercased, eliminating the
+// strings.ToLower allocation that the previous approach required.
+// Part names are not sorted (not needed for matching, only for display).
+func buildLoweredSearchText(item messageRecord, document mimeDocument) string {
+	var builder collapsedSearchTextBuilder
+	builder.Grow(searchTextCapacity(item, document))
+	for _, value := range []string{
+		item.Subject, item.SenderName, item.SenderAddress, item.SummaryText,
+	} {
+		builder.AddLowered(value)
+	}
+	for _, recipients := range [][]mail.Recipient{document.To, document.CC, document.BCC} {
+		for _, recipient := range recipients {
+			builder.AddLowered(recipient.Name)
+			builder.AddLowered(recipient.Address)
+		}
+	}
+	for _, part := range document.Parts {
+		builder.AddLowered(part.Name)
+	}
+	builder.AddLowered(document.Content)
+	return builder.String()
+}
+
 func searchTextCapacity(item messageRecord, document mimeDocument) int {
 	size := len(item.Subject) + len(item.SenderName) + len(item.SenderAddress) +
 		len(item.SummaryText) + len(document.Content) + 5 + len(document.Parts)
@@ -713,8 +775,13 @@ func (b *collapsedSearchTextBuilder) Add(value string) {
 	if value != "" && b.output.Len() > 0 {
 		b.pendingSpace = true
 	}
-	for _, character := range value {
-		if unicode.IsSpace(character) {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		// ASCII whitespace (0x00-0x20) and UTF-8 non-breaking space (0xC2 0xA0)
+		if c <= ' ' || (c == 0xC2 && i+1 < len(value) && value[i+1] == 0xA0) {
+			if c == 0xC2 {
+				i++ // skip the 0xA0 byte too
+			}
 			b.pendingSpace = b.output.Len() > 0
 			continue
 		}
@@ -722,7 +789,33 @@ func (b *collapsedSearchTextBuilder) Add(value string) {
 			b.output.WriteByte(' ')
 			b.pendingSpace = false
 		}
-		b.output.WriteRune(character)
+		b.output.WriteByte(c)
+	}
+}
+
+// AddLowered adds value with ASCII bytes lowercased (A-Z → a-z) and whitespace
+// collapsed, avoiding a separate strings.ToLower allocation on the full haystack.
+func (b *collapsedSearchTextBuilder) AddLowered(value string) {
+	if value != "" && b.output.Len() > 0 {
+		b.pendingSpace = true
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c <= ' ' || (c == 0xC2 && i+1 < len(value) && value[i+1] == 0xA0) {
+			if c == 0xC2 {
+				i++
+			}
+			b.pendingSpace = b.output.Len() > 0
+			continue
+		}
+		if b.pendingSpace {
+			b.output.WriteByte(' ')
+			b.pendingSpace = false
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.output.WriteByte(c)
 	}
 }
 
@@ -735,9 +828,21 @@ func containsLike(value string) string {
 }
 
 func escapeLike(value string) string {
-	value = strings.ReplaceAll(value, "\\", "\\\\")
-	value = strings.ReplaceAll(value, "%", "\\%")
-	return strings.ReplaceAll(value, "_", "\\_")
+	var builder strings.Builder
+	builder.Grow(len(value) + strings.Count(value, "\\") + strings.Count(value, "%") + strings.Count(value, "_"))
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			builder.WriteString("\\\\")
+		case '%':
+			builder.WriteString("\\%")
+		case '_':
+			builder.WriteString("\\_")
+		default:
+			builder.WriteByte(value[i])
+		}
+	}
+	return builder.String()
 }
 
 func emptySearchPage(sourceScan bool) mail.SearchPage {

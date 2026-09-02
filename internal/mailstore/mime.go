@@ -189,7 +189,9 @@ func parseMIMEMultipart(
 		if err != nil && !message.IsUnknownCharset(err) && !message.IsUnknownEncoding(err) {
 			return combineMIMEText(mediaType, children), err
 		}
-		childPath := append(append([]int(nil), path...), index)
+		childPath := make([]int, len(path)+1)
+		copy(childPath, path)
+		childPath[len(path)] = index
 		representation, childErr := parseMIMEEntity(
 			child, childPath, err, partial, hashAttachments, document,
 		)
@@ -211,17 +213,22 @@ func combineMIMEText(mediaType string, children []mimeTextRepresentation) mimeTe
 		}
 		return selected
 	}
-	var parts []string
+	var builder strings.Builder
 	rank := mimeTextNone
+	first := true
 	for _, child := range children {
 		if child.Text != "" {
-			parts = append(parts, child.Text)
+			if !first {
+				builder.WriteString("\n\n")
+			}
+			builder.WriteString(child.Text)
+			first = false
 		}
 		if child.Rank > rank {
 			rank = child.Rank
 		}
 	}
-	return mimeTextRepresentation{Text: strings.Join(parts, "\n\n"), Rank: rank}
+	return mimeTextRepresentation{Text: builder.String(), Rank: rank}
 }
 
 func consumeMIMEAttachment(reader io.Reader, withHash bool) (int64, string, error) {
@@ -237,10 +244,11 @@ func consumeMIMEAttachment(reader io.Reader, withHash bool) (int64, string, erro
 func readRawHeaders(reader io.Reader) (string, error) {
 	buffered := bufio.NewReaderSize(io.LimitReader(reader, int64(maximumHeaderBytes)+1), 64*1024)
 	var output strings.Builder
+	output.Grow(maximumHeaderBytes)
 	for output.Len() <= maximumHeaderBytes {
-		line, err := buffered.ReadString('\n')
-		output.WriteString(line)
-		if line == "\n" || line == "\r\n" {
+		line, err := buffered.ReadBytes('\n')
+		output.Write(line)
+		if len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
 			return output.String(), nil
 		}
 		if err != nil {
@@ -255,19 +263,23 @@ func readRawHeaders(reader io.Reader) (string, error) {
 
 func readBoundedPart(reader io.Reader, maximum int64) ([]byte, bool, error) {
 	limited := io.LimitReader(reader, maximum+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		return body, false, err
+	// Use io.Copy with a reasonable initial buffer instead of pre-allocating
+	// maximum+1 bytes (which can be 16 MiB per text part). io.Copy uses a
+	// 32 KiB buffer internally; the bytes.Buffer will grow as needed.
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, limited); err != nil {
+		return buf.Bytes(), false, err
 	}
+	body := buf.Bytes()
 	truncated := int64(len(body)) > maximum
 	if truncated {
 		body = body[:maximum]
 	}
 	_, drainErr := io.Copy(io.Discard, reader)
-	if err == nil {
-		err = drainErr
+	if drainErr != nil {
+		return body, truncated, drainErr
 	}
-	return body, truncated, err
+	return body, truncated, nil
 }
 
 func missingAppleContent(value string, available int64, partial bool) bool {
@@ -282,11 +294,14 @@ func mimePartID(path []int) string {
 	if len(path) == 0 {
 		return "1"
 	}
-	values := make([]string, len(path))
+	var buf []byte
 	for index, component := range path {
-		values[index] = strconv.Itoa(component + 1)
+		if index > 0 {
+			buf = append(buf, '.')
+		}
+		buf = strconv.AppendInt(buf, int64(component+1), 10)
 	}
-	return strings.Join(values, ".")
+	return string(buf)
 }
 
 func documentRecipients(document *mimeDocument, header *messageMail.Header, key string) []mail.Recipient {
@@ -327,6 +342,7 @@ func firstFormattedAddress(header *messageMail.Header, key string) (string, bool
 func htmlToText(source []byte) string {
 	tokenizer := html.NewTokenizer(bytes.NewReader(source))
 	var output strings.Builder
+	output.Grow(len(source) / 2)
 	skipDepth := 0
 	breakPending := false
 	for {
@@ -369,12 +385,20 @@ func htmlToText(source []byte) string {
 }
 
 func hasVisibleText(value []byte) bool {
-	for len(value) > 0 {
-		character, size := utf8.DecodeRune(value)
+	for i := 0; i < len(value); {
+		c := value[i]
+		if c < utf8.RuneSelf {
+			if !isASCIIWhitespace(c) {
+				return true
+			}
+			i++
+			continue
+		}
+		character, size := utf8.DecodeRune(value[i:])
 		if !unicode.IsSpace(character) {
 			return true
 		}
-		value = value[size:]
+		i += size
 	}
 	return false
 }
@@ -429,19 +453,47 @@ func normalizeTextLayout(value string) string {
 	pendingBreaks := 0
 	pendingSpace := false
 	for index := 0; index < len(value); {
-		character, size := utf8.DecodeRuneInString(value[index:])
-		if character == '\r' && index+size < len(value) && value[index+size] == '\n' {
-			character = '\n'
-			size++
-		}
-		index += size
-		if character == '\n' {
-			pendingSpace = false
-			if output.Len() > 0 && pendingBreaks < 2 {
-				pendingBreaks++
+		c := value[index]
+		if c < utf8.RuneSelf {
+			// ASCII fast path
+			if c == '\r' && index+1 < len(value) && value[index+1] == '\n' {
+				pendingSpace = false
+				if output.Len() > 0 && pendingBreaks < 2 {
+					pendingBreaks++
+				}
+				index += 2
+				continue
 			}
+			if c == '\n' {
+				pendingSpace = false
+				if output.Len() > 0 && pendingBreaks < 2 {
+					pendingBreaks++
+				}
+				index++
+				continue
+			}
+			if isASCIIWhitespace(c) {
+				if output.Len() > 0 && pendingBreaks == 0 {
+					pendingSpace = true
+				}
+				index++
+				continue
+			}
+			for pendingBreaks > 0 {
+				output.WriteByte('\n')
+				pendingBreaks--
+			}
+			if pendingSpace {
+				output.WriteByte(' ')
+				pendingSpace = false
+			}
+			output.WriteByte(c)
+			index++
 			continue
 		}
+		// Multi-byte UTF-8
+		character, size := utf8.DecodeRuneInString(value[index:])
+		index += size
 		if unicode.IsSpace(character) {
 			if output.Len() > 0 && pendingBreaks == 0 {
 				pendingSpace = true
@@ -465,16 +517,33 @@ func collapseSearchText(value string) string {
 	var output strings.Builder
 	output.Grow(len(value))
 	pendingSpace := false
-	for _, character := range value {
-		if unicode.IsSpace(character) {
-			pendingSpace = output.Len() > 0
+	for i := 0; i < len(value); {
+		c := value[i]
+		if c < utf8.RuneSelf {
+			if isASCIIWhitespace(c) {
+				pendingSpace = output.Len() > 0
+				i++
+				continue
+			}
+			if pendingSpace {
+				output.WriteByte(' ')
+				pendingSpace = false
+			}
+			output.WriteByte(c)
+			i++
 			continue
 		}
-		if pendingSpace {
-			output.WriteByte(' ')
-			pendingSpace = false
+		character, size := utf8.DecodeRuneInString(value[i:])
+		if unicode.IsSpace(character) {
+			pendingSpace = output.Len() > 0
+		} else {
+			if pendingSpace {
+				output.WriteByte(' ')
+				pendingSpace = false
+			}
+			output.WriteRune(character)
 		}
-		output.WriteRune(character)
+		i += size
 	}
 	return output.String()
 }

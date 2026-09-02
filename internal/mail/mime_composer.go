@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
 	"mime/quotedprintable"
@@ -334,9 +335,10 @@ func loadSingleAttachment(attachment DraftAttachment) ([]composerAttachment, err
 // loadAttachmentsParallel reads multiple attachment files concurrently.
 // For the typical 1-2 attachment case the goroutine overhead is negligible
 // compared to file I/O; for larger attachment sets it provides real speedup.
+// All attachment errors are aggregated so the caller sees every failure,
+// not just the first one encountered.
 func loadAttachmentsParallel(attachments []DraftAttachment) ([]composerAttachment, error) {
 	type result struct {
-		index  int
 		loaded composerAttachment
 		err    error
 	}
@@ -347,16 +349,21 @@ func loadAttachmentsParallel(attachments []DraftAttachment) ([]composerAttachmen
 		go func(idx int, att DraftAttachment) {
 			defer wg.Done()
 			loaded, err := readAttachmentData(att)
-			results[idx] = result{index: idx, loaded: loaded, err: err}
+			results[idx] = result{loaded: loaded, err: err}
 		}(i, attachment)
 	}
 	wg.Wait()
 	loaded := make([]composerAttachment, len(attachments))
+	var errs []error
 	for i, r := range results {
 		if r.err != nil {
-			return nil, r.err
+			errs = append(errs, r.err)
+			continue
 		}
 		loaded[i] = r.loaded
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 	return loaded, nil
 }
