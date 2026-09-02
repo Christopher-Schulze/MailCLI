@@ -200,15 +200,6 @@ func TestClientRejectsScriptedComposeAttachmentsBeforeMailApp(t *testing.T) {
 		run  func(*Client) error
 	}{
 		{
-			name: "send",
-			run: func(client *Client) error {
-				_, err := client.SendDraft(context.Background(), mail.Draft{
-					Attachments: []mail.DraftAttachment{{Path: "/reviewed/file.txt"}},
-				})
-				return err
-			},
-		},
-		{
 			name: "save",
 			run: func(client *Client) error {
 				_, err := client.SaveDraft(context.Background(), mail.Draft{
@@ -236,10 +227,10 @@ func TestClientRejectsScriptedComposeAttachmentsBeforeMailApp(t *testing.T) {
 func TestProductionClientBlocksUnsafeMail16ComposeBeforeMailApp(t *testing.T) {
 	runner := &runnerStub{}
 	client := &Client{runner: runner, blockComposeAutomation: true}
-	_, err := client.SendDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
+	_, err := client.SaveDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
 	var operationError *OperationError
 	if !errors.As(err, &operationError) || operationError.Code != "compose_automation_unsupported" {
-		t.Fatalf("SendDraft() error = %v", err)
+		t.Fatalf("SaveDraft() error = %v", err)
 	}
 	if runner.request != "" {
 		t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
@@ -471,7 +462,7 @@ func TestClientLatchesOnlyIncompleteMutations(t *testing.T) {
 		{name: "message mutation", operation: "messages.delete", err: errors.New("transport failed"), want: true},
 		{name: "sync", operation: "mail.sync", err: context.DeadlineExceeded},
 		{name: "read", operation: "messages.raw", err: context.DeadlineExceeded},
-		{name: "automation denial", operation: "drafts.send", err: errors.New("not authorized to send Apple events (-1743)")},
+		{name: "automation denial", operation: "drafts.save", err: errors.New("not authorized to send Apple events (-1743)")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -620,79 +611,6 @@ func TestClientReturnsTypedInvalidReference(t *testing.T) {
 	}
 	if operationError.ErrorCode() != "invalid_reference" {
 		t.Fatalf("error code = %q", operationError.ErrorCode())
-	}
-}
-
-func TestClientEncodesReplyDraftForConfirmedSend(t *testing.T) {
-	messageRef, err := encodeMessageReference(messageReference{
-		AccountID: "account-id", MailboxPath: []string{"Inbox"},
-		LibraryID: "42", ExpectedMessageID: "message-id",
-	})
-	if err != nil {
-		t.Fatalf("encodeMessageReference() error = %v", err)
-	}
-	runner := &runnerStub{response: `{"ok":true,"error":null,"accepted":true}`}
-	client := &Client{runner: runner}
-	evidence, err := client.SendDraft(context.Background(), mail.Draft{
-		Kind: mail.DraftKindReply, SourceRef: messageRef, ReplyAll: true,
-		Body: "Reply body", CC: []mail.Recipient{{Address: "copy@example.com"}},
-	})
-	if err != nil || !evidence.AcceptedByMail || !evidence.InvocationStarted {
-		t.Fatalf("SendDraft() evidence = %+v, error = %v", evidence, err)
-	}
-	for _, expected := range []string{
-		`"operation":"drafts.send"`, `"kind":"reply"`,
-		`"account_id":"account-id"`, `"library_id":"42"`, `"reply_all":true`,
-	} {
-		if !strings.Contains(runner.request, expected) {
-			t.Fatalf("bridge request = %q, missing %q", runner.request, expected)
-		}
-	}
-}
-
-func TestClientClassifiesSendStartBoundary(t *testing.T) {
-	tests := []struct {
-		name         string
-		response     string
-		gate         accessGate
-		wantStarted  bool
-		wantAccepted bool
-		wantError    bool
-	}{
-		{
-			name: "access gate rejected before runner", response: `{"ok":true,"accepted":true}`,
-			gate: blockedAccessGate{}, wantError: true,
-		},
-		{
-			name: "bridge failed before send", response: `{"ok":false,"send_attempted":false,"error":{"code":"invalid_request","message":"invalid"}}`,
-			wantError: true,
-		},
-		{
-			name: "bridge failed after send call began", response: `{"ok":false,"send_attempted":true,"error":{"code":"mail_error","message":"failed"}}`,
-			wantStarted: true, wantError: true,
-		},
-		{
-			name: "bridge accepted", response: `{"ok":true,"send_attempted":true,"accepted":true,"error":null}`,
-			wantStarted: true, wantAccepted: true,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			client := &Client{runner: &runnerStub{response: test.response}, gate: test.gate}
-			evidence, err := client.SendDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
-			if evidence.InvocationStarted != test.wantStarted || evidence.AcceptedByMail != test.wantAccepted ||
-				(err != nil) != test.wantError {
-				t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
-			}
-		})
-	}
-}
-
-func TestClientTreatsUndecodableSendResponseAsUncertain(t *testing.T) {
-	client := &Client{runner: &runnerStub{response: `{not-json`}}
-	evidence, err := client.SendDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
-	if err == nil || !evidence.InvocationStarted || evidence.AcceptedByMail {
-		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
 	}
 }
 

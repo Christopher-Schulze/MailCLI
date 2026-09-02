@@ -6,7 +6,7 @@ Local Apple Mail access for the shell and coding agents.
 [![Platform](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs writes through the running Mail app, and never asks for Gmail, iCloud, IMAP, SMTP, OAuth, or app-specific credentials.
+MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations through the running Mail app, and sends reviewed drafts autonomously over SMTP/IMAP. Reads and mutations never ask for Gmail, iCloud, IMAP, SMTP, OAuth, or account credentials; sending uses one app-specific password that the user stores in the macOS Keychain via `mailcli send setup`.
 
 ```bash
 mailcli messages search --sender example.com --after 2026-01-01 --json
@@ -21,10 +21,10 @@ Apple Mail's scripting interface can perform targeted mailbox mutations but perf
 - Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events. A targeted incomplete-content fallback accepts only Mail's raw RFC 5322 source as body or MIME-part evidence.
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. MailCLI creates no second mail index.
 - Mark, move, copy, delete, sync, and targeted incomplete-content fallback use serialized Apple Events against the exact running Mail process.
-- Local new, reply, reply-all, and forward drafts remain fully reviewable. A new draft can be handed to Apple's visible Compose Email sharing service without sending; unreliable scripted save/send remains blocked before contacting Mail.
+- Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
 
-Reads of locally available content on the supported store profile add no work to the Mail process. Requesting content that Mail has not downloaded may use one targeted Apple Event. Explicit writes still require Mail.app to do the requested work. MailCLI bounds and serializes those calls so multiple agents cannot build an Apple Events queue behind the application.
+Reads of locally available content on the supported store profile add no work to the Mail process. Requesting content that Mail has not downloaded may use one targeted Apple Event. Explicit mailbox writes still require Mail.app to do the requested work; sending does not. MailCLI bounds and serializes those calls so multiple agents cannot build an Apple Events queue behind the application.
 
 ## Capabilities
 
@@ -36,9 +36,9 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 | Mailboxes | `mailboxes list`, `mailboxes resolve` | Handles Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested labels |
 | Messages | `messages list`, `filter`, `search`, `get`, `raw` | Pages metadata, applies typed filters, scans bodies, and returns normalized or RFC 5322 content |
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |
-| Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard` | Manages plain, Markdown, or safe HTML drafts and opens a reviewed new draft visibly; `save` and `send` remain blocked |
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
-| Organization | `messages mark`, `move`, `copy`, `delete` | Revalidates message identity before each mutation and reads back the result |
+| Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard` | Manages plain, Markdown, or safe HTML drafts and opens a reviewed new draft visibly; scripted `save` remains blocked |
+| Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required |
 | Synchronization | `sync` | Checks all mail or synchronizes one selected account |
 | Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 
@@ -46,8 +46,7 @@ Run `mailcli help` for the compact command overview. Focused command help accept
 `help`, `-h`, or `--help` and renders aligned long options with semantic value
 names and readable defaults.
 
-Capability discovery, local draft management, local reply/forward creation, and
-the explicitly unsupported native save/send preflight bypass the Mail store and
+Capability discovery, local draft management, local reply/forward creation, sending, credential setup, and the unsupported native save preflight bypass the Mail store and
 Mail.app entirely. Missing or unknown command/subcommand routes do the same.
 They therefore avoid SQLite, `plutil`, and Apple Events startup work.
 
@@ -63,9 +62,11 @@ flowchart LR
     CLI -->|"one missing body or attachment"| Gate
     Gate --> Bridge["Targeted Apple Events bridge"]
     Bridge --> Mail["Already-running Mail.app"]
+    CLI -->|"drafts send --confirm"| Transport["SMTP submit + IMAP Sent mirror"]
+    CLI -->|"send setup"| Keychain["macOS Keychain credential"]
 ```
 
-Mail.app remains the source of truth. MailCLI has no daemon, background process, watcher, copied corpus, owned search index, or persistent cache of its own.
+Mail.app remains the source of truth for reads and mailbox mutations; sent messages are mirrored into the account's Sent mailbox over IMAP. MailCLI has no daemon, background process, watcher, copied corpus, owned search index, or persistent cache of its own.
 
 The store adapter opens Mail's Envelope Index with SQLite `mode=ro`, `query_only=1`, WAL participation, and a private connection cache. Before reading, it validates the store version, framework version, UUID, required schema, account catalog, mailbox mapping, and filesystem containment. Message, mailbox-cache, and external-attachment files are opened relative to one held Mail-store directory descriptor with macOS `O_NOFOLLOW_ANY`; selection, hashing, and copying remain bound to the same regular-file identity. An unknown profile fails with `unsupported_mail_store_schema` before any message query runs.
 
@@ -89,10 +90,10 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The `v1.1.0` release archive installs both the native CLI and its companion agent skill:
+The `v1.2.0` release archive installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.1.0
+VERSION=1.2.0
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS.sig"
@@ -134,6 +135,7 @@ MailCLI uses the permissions of the process that launches it. Grant permissions 
 |---|---|
 | Full Disk Access | Accounts, mailboxes, messages, searches, raw source, and downloaded attachments |
 | Automation access to Mail | Live diagnostics, missing-content fallback, message mutations, and sync |
+| None | Sending (`send setup`, `drafts send`); it needs no TCC permission, though the first keychain read may show one consent prompt |
 
 Accessibility and Screen Recording are not required.
 
@@ -230,7 +232,18 @@ Markdown is rendered with Goldmark. HTML uses a strict allowlist, removes active
 
 Every draft JSON object must contain an explicit `body` field; an intentionally empty string is valid. Duplicate addresses across To, CC, and BCC are rejected. Hard limits are 64 KiB of subject text, 4 MiB of reviewed body text, 200 total recipients, 100 attachments, and 512 MiB of attachment bytes. MailCLI records attachment size and SHA-256 when it creates or updates a local draft.
 
-On the verified Mail 16 build, `drafts save` and `drafts send` return `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore keeps scripted `compose_write:false`, `compose_attachment_write:false`, and `send_transport:"none"`, while separately advertising visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
+On the verified Mail 16 build, `drafts save` returns `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore keeps scripted `compose_write:false` and `compose_attachment_write:false`, advertises `send_transport:"smtp"` with `raw_mime_send:true`, and separately advertises visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
+
+### Send a reviewed draft
+
+Sending bypasses Mail.app entirely: MailCLI resolves the SMTP and IMAP endpoints from the draft's From address, loads the app-specific password from the macOS Keychain, submits the composed RFC 5322 message over SMTP with STARTTLS, and appends it to the account's Sent mailbox over IMAP.
+
+```bash
+mailcli send setup --from me@example.com
+mailcli drafts send --ref DRAFT_REF --confirm --json
+```
+
+`send setup` prompts for the app-specific password once per account with no echo and stores it in the Keychain; MailCLI never displays, logs, or returns it, and `--remove` deletes the stored credential. A confirmed send reports outcome `sent` with the server's final SMTP response and the Message-ID as evidence. If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending`: the message was delivered, MailCLI never resends it, and the retained claim stays reconcilable with `drafts reconcile`. Missing credentials fail with `smtp_credentials_missing` and remediation naming `mailcli send setup`.
 
 ### Reply, forward, and organize
 
@@ -287,11 +300,11 @@ The link command refuses if a skill already exists at that destination. It does 
 
 | Guarantee | Mechanism |
 |---|---|
-| No provider credentials | Reuses accounts and Keychain-backed authentication already configured in Mail.app |
+| No provider credentials in chat, argv, or logs | Reads reuse Mail.app's Keychain-backed authentication; sending stores one app-specific password in the macOS Keychain via `send setup`, never displayed or logged |
 | No Mail database writes | Opens the Envelope Index read-only and rejects journal or schema mutations |
 | No owned mail index | Searches current local sources on demand and persists no corpus |
 | No broad Apple Events reads | Uses the store for enumeration and search, with fallback for one resolved incomplete message only |
-| No corrupted or phantom scripted compose data | Blocks scripted draft export and send; visible handoff uses Apple's sharing service, retains the reviewed local draft, and never sends |
+| No corrupted or phantom scripted compose data | Blocks scripted draft export; sending composes locally and delivers over SMTP, and visible handoff uses Apple's sharing service, retains the reviewed local draft, and never sends |
 | No Mail.app lifecycle control | Requires the exact running Mail PID and never launches, activates, quits, kills, or restarts Mail.app |
 | No residual bridge process | Waits for the owned `osascript` leader, terminates residual group members, and verifies process-group absence before command completion |
 | No residual installer or editor process | Gracefully cancels each private process group, force-cleans resistant descendants after a bounded grace period, and verifies group absence |
@@ -299,11 +312,11 @@ The link command refuses if a skill already exists at that destination. It does 
 | No accidental overwrite or path substitution | Attachment export accepts only an absolute destination that does not exist; Mail-store sources reject symlinks and file-identity replacement |
 | No silent incomplete search | Reports source completeness and scan bounds on every search page |
 
-MailCLI stores only local review drafts, historical send/save claims, and access/update lock state under `~/Library/Application Support/MailCLI`. State directories use mode `0700`; state files use mode `0600`.
+MailCLI stores only local review drafts, historical send/save claims, and access/update lock state under `~/Library/Application Support/MailCLI`. SMTP credentials live in the macOS Keychain under the `mailcli-smtp` service, never in files. State directories use mode `0700`; state files use mode `0600`.
 
 ## Limitations
 
-- Mail 16 scripted save/send remains disabled. Visible handoff supports new drafts only and requires Mail.app as the default email application.
+- Mail 16 scripted save remains disabled. Sending supports providers with known SMTP/IMAP endpoints (Gmail, Google Mail, iCloud); visible handoff supports new drafts only and requires Mail.app as the default email application.
 - Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts capture intent but cannot guarantee Mail-native threading, quoted content, or original forwarded attachments until completed in Mail's UI.
 - `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it.
@@ -315,12 +328,12 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.1.0
+./scripts/release/build-release.sh 1.2.0
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```
 
-The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. It defaults to `GOMAXPROCS=4` and two concurrent Go packages so verification cannot consume every logical CPU or fan out unbounded package builds; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` provide explicit positive-integer overrides. The release builder refuses to overwrite assets and writes the archive, `SHA256SUMS`, and `SHA256SUMS.sig` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Release binaries use `-trimpath -ldflags='-s -w'`; the release test rejects DWARF sections and binaries above 10 MiB. The verified v1.1.0 executable is 10,460,690 bytes, preserving the budget after adding process-group cleanup and cell-accurate terminal tables without linking another Unicode-width database. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded read-only live probes, requires the exact same Mail process identity and compose-object count, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
+The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, architecture regression checks, and isolated release installation tests. It defaults to `GOMAXPROCS=4` and two concurrent Go packages so verification cannot consume every logical CPU or fan out unbounded package builds; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` provide explicit positive-integer overrides. The release builder refuses to overwrite assets and writes the archive, `SHA256SUMS`, and `SHA256SUMS.sig` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Release binaries use `-trimpath -ldflags='-s -w'`; the release test rejects DWARF sections and binaries above the enforced 11 MiB size budget. The stripped v1.2.0 executable is 10,578,770 bytes, 955,566 bytes below the enforced 11 MiB size budget after adding direct SMTP/IMAP send transport, RFC 5322 MIME composition, and macOS Keychain credentials without linking another Unicode-width database. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded read-only live probes, requires the exact same Mail process identity and compose-object count, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
 
 ## License
 

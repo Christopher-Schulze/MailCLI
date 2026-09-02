@@ -1,0 +1,23 @@
+From: sender@example.com
+To: <alice@example.com>
+Subject: Styled update
+Date: <DATE>
+Message-ID: <MESSAGE-ID>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello Alice,
+
+Here is the update.
+
+--<BOUNDARY>
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>Hello Alice,</p><p>Here is the <strong>update</strong>.</p>
+--<BOUNDARY>--

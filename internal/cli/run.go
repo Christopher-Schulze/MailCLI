@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.1.0"
+	version       = "1.2.0"
 	schemaVersion = 1
 )
 
@@ -50,6 +50,7 @@ type responseData struct {
 	Drafts          *[]mail.Draft           `json:"drafts,omitempty"`
 	SavedDraft      *mail.SavedDraft        `json:"saved_draft,omitempty"`
 	SendResult      *mail.SendResult        `json:"send_result,omitempty"`
+	SendSetup       *sendSetupResult        `json:"send_setup,omitempty"`
 	DeleteResult    *mail.DeleteResult      `json:"delete_result,omitempty"`
 	SyncResult      *mail.SyncResult        `json:"sync_result,omitempty"`
 	UpdateResult    *updateResult           `json:"update_result,omitempty"`
@@ -138,6 +139,8 @@ func RequiresMailService(args []string) bool {
 		default:
 			return false
 		}
+	case "send":
+		return false
 	case "accounts":
 		return len(args) >= 2 && args[1] == "list" && !helpOnly(args[2:])
 	case "mailboxes":
@@ -293,6 +296,8 @@ func runCommand(
 		return runAttachments(ctx, mailService, args[1:], stdout, stderr)
 	case "drafts":
 		return runDrafts(ctx, mailService, args[1:], stdout, stderr)
+	case "send":
+		return runSend(args[1:], stdout, stderr)
 	case "sync":
 		return runSync(ctx, mailService, args[1:], stdout, stderr)
 	default:
@@ -449,7 +454,7 @@ func attemptedCommand(args []string) string {
 	command := strings.TrimLeft(args[0], "-")
 	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
 		switch command {
-		case "accounts", "attachments", "drafts", "mailboxes", "messages":
+		case "accounts", "attachments", "drafts", "mailboxes", "messages", "send":
 			return command + "." + args[1]
 		}
 	}
@@ -496,6 +501,7 @@ Commands:
   messages      List, search, read, reply, forward, and organize messages
   attachments   List and save received attachments
   drafts        Create, preview, edit, and hand off visible drafts
+  send          Store or remove app-specific SMTP send credentials
   sync          Ask Mail.app to check for new mail
   update        Check GitHub and install the latest verified release
   doctor        Verify the local MailCLI environment
@@ -503,7 +509,8 @@ Commands:
   version       Print the installed version
   help          Show this command overview
 
-Mail 16 scripted save and send remain disabled; visible handoff never sends.
+Mail 16 scripted draft save remains disabled; visible handoff never sends.
+Direct SMTP send works without Mail.app: run 'mailcli send setup' once.
 Run 'mailcli <command> --help' for focused usage and flags.
 `)
 }

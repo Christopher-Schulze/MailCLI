@@ -614,59 +614,6 @@ function closeOwnedCompose(outgoing) {
     return false;
 }
 
-function sendDraft(mail, request, resolution) {
-    if (!request.draft) {
-        bridgeError("invalid_request", "draft is required");
-    }
-    if (request.draft.kind === "new" && !request.draft.from) {
-        bridgeError("invalid_request", "sending a new draft requires an explicit sender");
-    }
-    abortIfCancelled();
-    ensureComposeAvailable(mail);
-    const source = request.draft.kind === "new"
-        ? null : resolveDraftSource(mail, request.draft.source, resolution);
-    let outgoing = null;
-    let sendAttempted = false;
-    try {
-        outgoing = outgoingForDraft(mail, request.draft, resolution, source);
-        const native = waitForStableCompose(outgoing, request.draft.expected_native_attachment_count);
-        applyOutgoingFields(mail, outgoing, request.draft);
-        const finalSnapshot = waitForPreparedCompose(outgoing, request.draft, native);
-        abortIfCancelled();
-        sendAttempted = true;
-        const accepted = Boolean(outgoing.send());
-        if (!accepted) {
-            if (!closeOwnedCompose(outgoing)) {
-                throwComposeCleanupFailure("Mail.app rejected send and the unsent compose object could not be closed");
-            }
-        }
-        return {
-            accepted: accepted,
-            send_attempted: true,
-            materialized: sendMaterialization(finalSnapshot)
-        };
-    } catch (error) {
-        error.sendAttempted = sendAttempted;
-        if (outgoing === null) {
-            error.recoveryRequired = true;
-            if (!error.bridgeCode) {
-                error.bridgeCode = "compose_creation_failed";
-                error.message = "Mail.app compose creation failed with an unknown backend state";
-            }
-        } else if (!sendAttempted) {
-            if (!closeOwnedCompose(outgoing)) {
-                const preparationMessage = String(error.message || error);
-                error.bridgeCode = "compose_cleanup_failed";
-                error.recoveryRequired = true;
-                error.message = "Mail.app rejected send preparation and the unsent compose object could not be closed: " + preparationMessage;
-            }
-        } else {
-            error.recoveryRequired = true;
-        }
-        throw error;
-    }
-}
-
 function saveDraft(mail, request, resolution) {
     if (!request.draft || !request.draft.from) {
         bridgeError("invalid_request", "draft with an explicit sender is required");
@@ -891,8 +838,6 @@ function dispatch(mail, request) {
     }
     case "attachments.save":
         return saveAttachment(mail, request, resolution);
-    case "drafts.send":
-        return sendDraft(mail, request, resolution);
     case "drafts.save":
         return saveDraft(mail, request, resolution);
     case "messages.mark":
@@ -924,12 +869,10 @@ function bridgeFailure(error) {
     }
     return {
         ok: false,
-        send_attempted: Boolean(error.sendAttempted),
         recovery_required: Boolean(error.recoveryRequired),
         error: {code: errorCode, message: errorMessage}
     };
 }
-
 function run(argv) {
     try {
         if (argv.length !== 2) {

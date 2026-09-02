@@ -112,6 +112,8 @@ type Draft struct {
 	Kind                          DraftKind                `json:"kind"`
 	SourceRef                     string                   `json:"source_ref,omitempty"`
 	ReplyAll                      bool                     `json:"reply_all,omitempty"`
+	SourceMessageID               string                   `json:"source_message_id,omitempty"`
+	SourceReferences              string                   `json:"source_references,omitempty"`
 	From                          string                   `json:"from,omitempty"`
 	To                            []Recipient              `json:"to"`
 	CC                            []Recipient              `json:"cc"`
@@ -153,9 +155,11 @@ type UpdateDraftRequest struct {
 type SendOutcome string
 
 const (
-	SendOutcomeObserved SendOutcome = "sent_store_observed"
-	SendOutcomeAccepted SendOutcome = "accepted_by_mail"
-	SendOutcomeUnknown  SendOutcome = "outcome_unknown"
+	SendOutcomeObserved      SendOutcome = "sent_store_observed"
+	SendOutcomeAccepted      SendOutcome = "accepted_by_mail"
+	SendOutcomeSent          SendOutcome = "sent"
+	SendOutcomeMirrorPending SendOutcome = "sent_mirror_pending"
+	SendOutcomeUnknown       SendOutcome = "outcome_unknown"
 )
 
 type SendObservationBaseline struct {
@@ -176,6 +180,19 @@ type SendAttempt struct {
 	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
 	ObservationBaseline *SendObservationBaseline `json:"observation_baseline,omitempty"`
 	Materialized        *SendMaterialization     `json:"materialized,omitempty"`
+	Transport           *TransportEvidence       `json:"transport,omitempty"`
+}
+
+// TransportEvidence records the deterministic proof of a direct SMTP
+// submission and its Sent-mailbox mirror. ServerResponse is the final SMTP
+// response line, MessageID the submitted Message-ID, MirrorMailbox the Sent
+// mailbox holding the message, and MirrorAppended false when the provider had
+// already filed the message itself.
+type TransportEvidence struct {
+	ServerResponse string `json:"server_response,omitempty"`
+	MessageID      string `json:"message_id,omitempty"`
+	MirrorMailbox  string `json:"mirror_mailbox,omitempty"`
+	MirrorAppended bool   `json:"mirror_appended,omitempty"`
 }
 
 type SendMaterialization struct {
@@ -315,7 +332,6 @@ type Gateway interface {
 	GetRawSource(ctx context.Context, ref string) (string, error)
 	SaveAttachmentTo(ctx context.Context, messageRef string, attachmentID string, outputPath string) error
 	SaveDraft(ctx context.Context, draft Draft) (MessageSummary, error)
-	SendDraft(ctx context.Context, draft Draft) (SendEvidence, error)
 	MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error)
 	TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error)
 	DeleteMessage(ctx context.Context, request DeleteMessageRequest) error

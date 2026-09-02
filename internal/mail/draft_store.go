@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 const (
@@ -168,113 +169,107 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := validateStoredDraftLimits(draft); err != nil {
 		return SendResult{}, err
 	}
-	if err := composeWriteSupportError(s.gateway); err != nil {
-		return SendResult{}, err
-	}
 	if draft.SendAttempt != nil {
 		return replaySendAttempt(root, ref, *draft.SendAttempt)
 	}
 	if draft.Kind == DraftKindNew && strings.TrimSpace(draft.From) == "" {
-		return SendResult{}, validationError("sending a new draft requires an explicit configured from address")
+		return SendResult{}, validationError("sending a new draft requires an explicit from address")
 	}
 	if draft.Kind == DraftKindForward && len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
 		return SendResult{}, validationError("sending a forward draft requires at least one explicit recipient")
 	}
-	if err := s.validateDraftSender(ctx, draft.From); err != nil {
-		return SendResult{}, err
-	}
 	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return SendResult{}, err
 	}
-	var preparedBaseline *SendObservationBaseline
-	if preparer, ok := s.gateway.(SendPreparer); ok {
-		baseline, prepareErr := preparer.PrepareSend(ctx, draft)
-		if prepareErr != nil {
-			return SendResult{}, prepareErr
-		}
-		preparedBaseline = cloneSendObservationBaseline(&baseline)
-		if !validObservationBaseline(preparedBaseline) {
-			return SendResult{}, &OperationError{
-				Code: "send_prepare_failed", Message: "Mail backend returned an invalid send observation baseline",
-			}
-		}
-		draft.PreparedSendBaseline = cloneSendObservationBaseline(preparedBaseline)
+	if err := s.send.available(); err != nil {
+		return SendResult{}, err
 	}
-	attempt, err := beginSendAttemptWithBaseline(root, ref, preparedBaseline)
+	sender, err := sendSender(draft.From)
 	if err != nil {
 		return SendResult{}, err
 	}
-	evidence, sendErr := s.gateway.SendDraft(ctx, draft)
-	if !evidence.InvocationStarted {
+	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	if err != nil {
+		return SendResult{}, err
+	}
+	password, err := s.send.Credentials.Load(sender)
+	if err != nil || password == "" {
+		return SendResult{}, missingCredentialsError(sender)
+	}
+	messageID, err := newMessageID(sender)
+	if err != nil {
+		return SendResult{}, err
+	}
+	message, err := BuildMessage(draft, messageID)
+	if err != nil {
+		return SendResult{}, err
+	}
+	attempt, err := beginSendAttempt(root, ref)
+	if err != nil {
+		return SendResult{}, err
+	}
+	submitEvidence, err := s.send.Submitter.Submit(
+		ctx,
+		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
+		sender, draftEnvelopeRecipients(draft), message,
+	)
+	if err != nil {
+		// The server never accepted the message, so the claim can be
+		// released and a later send may retry the submission.
 		if cleanupErr := removeSendAttempt(root, ref); cleanupErr != nil {
-			result := resultForAttempt(ref, attempt, true)
+			result = resultForAttempt(ref, attempt, true)
 			return result, &OperationError{
 				Code:    "send_state_cleanup_failed",
-				Message: fmt.Sprintf("send did not start, but its local claim could not be cleared: %v", cleanupErr),
+				Message: fmt.Sprintf("send was rejected, but its local claim could not be cleared: %v", cleanupErr),
 			}
 		}
-		if sendErr == nil {
-			sendErr = &OperationError{
-				Code:    "send_not_started",
-				Message: "Mail.app send did not start",
-			}
-		}
-		return SendResult{}, sendErr
+		return SendResult{}, err
 	}
 	attempt.InvocationStarted = true
-	attempt.AcceptedByMail = evidence.AcceptedByMail
-	attempt.SentStoreObserved = evidence.SentStoreObserved
-	attempt.ObservedMessageRef = evidence.ObservedMessageRef
-	attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
-	if attempt.ObservationBaseline == nil {
-		attempt.ObservationBaseline = cloneSendObservationBaseline(evidence.ObservationBaseline)
+	attempt.AcceptedByMail = true
+	attempt.Transport = &TransportEvidence{
+		ServerResponse: submitEvidence.ServerResponse,
+		MessageID:      submitEvidence.MessageID,
 	}
+	attempt.Outcome = SendOutcomeMirrorPending
 	attempt.UpdatedAt = time.Now().UTC()
-	if evidence.SentStoreObserved {
-		attempt.Outcome = SendOutcomeObserved
-	} else if evidence.AcceptedByMail {
-		attempt.Outcome = SendOutcomeAccepted
-	} else {
-		attempt.Outcome = SendOutcomeUnknown
-	}
 	result = resultForAttempt(ref, attempt, true)
 	if err := replaceSendAttempt(root, ref, attempt); err != nil {
 		return result, &OperationError{
 			Code:    "send_outcome_unknown",
-			Message: fmt.Sprintf("send started, but its outcome state could not be recorded safely: %v", err),
+			Message: fmt.Sprintf("the server accepted the message, but its local send state could not be recorded safely: %v", err),
 		}
 	}
-	if evidence.SentStoreObserved {
-		if err := discardDraftFiles(root, ref); err != nil {
-			return result, &OperationError{
-				Code:    "send_cleanup_failed",
-				Message: fmt.Sprintf("sent message was observed, but local draft cleanup failed: %v", err),
-			}
-		}
-		result.DraftRetained = false
-		if sendErr != nil {
-			return result, &OperationError{
-				Code:    "send_postflight_failed",
-				Message: fmt.Sprintf("sent message was observed, but private postflight cleanup failed: %v", sendErr),
-			}
-		}
-		return result, nil
+	appendEvidence, err := s.send.Mirror.AppendToSent(
+		ctx,
+		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		message, attempt.Transport.MessageID,
+	)
+	if err != nil {
+		// The submission was accepted, so the send itself is never retried;
+		// the claim stays reconcilable and only the mirror may be retried.
+		return result, mirrorPendingError(err)
 	}
-	if !evidence.AcceptedByMail {
-		message := "Mail.app send outcome is unknown; the draft is retained and retries are blocked"
-		if sendErr != nil {
-			message += ": " + sendErr.Error()
+	attempt.SentStoreObserved = true
+	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
+	attempt.Transport.MirrorAppended = appendEvidence.Appended
+	attempt.Outcome = SendOutcomeSent
+	attempt.UpdatedAt = time.Now().UTC()
+	result = resultForAttempt(ref, attempt, true)
+	if err := replaceSendAttempt(root, ref, attempt); err != nil {
+		return result, &OperationError{
+			Code:    "send_outcome_unknown",
+			Message: fmt.Sprintf("the message was sent and mirrored, but its local send state could not be recorded safely: %v", err),
 		}
-		return result, &OperationError{Code: "send_outcome_unknown", Message: message}
 	}
-	return result, &OperationError{
-		Code:    "send_not_observed",
-		Message: "Mail.app accepted the send, but Sent does not yet prove the exact body, recipients, subject, and attachments; the draft is retained and retries are blocked",
+	if err := discardDraftFiles(root, ref); err != nil {
+		return result, &OperationError{
+			Code:    "send_cleanup_failed",
+			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
+		}
 	}
-}
-
-type SendPreparer interface {
-	PrepareSend(ctx context.Context, draft Draft) (SendObservationBaseline, error)
+	result.DraftRetained = false
+	return result, nil
 }
 
 type ComposeWriteGate interface {
@@ -285,7 +280,7 @@ func composeWriteSupportError(gateway Gateway) error {
 	if gateway == nil {
 		return &OperationError{
 			Code:    "compose_automation_unsupported",
-			Message: "Mail 16 compose scripting is disabled because it cannot preserve reviewed content reliably; use Mail's UI for send and native draft save",
+			Message: "Mail 16 compose scripting is disabled because it cannot preserve reviewed content reliably; use 'drafts send --confirm' for sending and Mail's UI for native draft save",
 		}
 	}
 	capability, ok := gateway.(ComposeWriteGate)
@@ -317,10 +312,13 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return SendResult{}, &OperationError{Code: "send_reconcile_unavailable", Message: "draft has no send attempt to reconcile"}
 	}
 	attempt := *draft.SendAttempt
-	if attempt.Outcome == SendOutcomeObserved {
+	if attempt.Outcome == SendOutcomeObserved || attempt.Outcome == SendOutcomeSent {
 		result, err := replaySendAttempt(root, ref, attempt)
 		result.Reconciled = true
 		return result, err
+	}
+	if attempt.Outcome == SendOutcomeMirrorPending {
+		return s.reconcileMirrorPending(ctx, root, ref, draft, attempt)
 	}
 	if attempt.ObservationBaseline == nil {
 		return resultForReconcile(ref, attempt), &OperationError{
@@ -387,6 +385,196 @@ func resultForReconcile(ref string, attempt SendAttempt) SendResult {
 	result := resultForAttempt(ref, attempt, true)
 	result.Reconciled = true
 	return result
+}
+
+// reconcileMirrorPending finishes a direct send whose SMTP submission was
+// accepted but whose Sent-mailbox mirror did not complete. It retries only
+// the idempotent IMAP mirror; the SMTP submission is never sent again.
+func (s *Service) reconcileMirrorPending(
+	ctx context.Context,
+	root string,
+	ref string,
+	draft Draft,
+	attempt SendAttempt,
+) (SendResult, error) {
+	result := resultForReconcile(ref, attempt)
+	if attempt.Transport == nil || strings.TrimSpace(attempt.Transport.MessageID) == "" {
+		return result, &OperationError{
+			Code:    "send_reconcile_unavailable",
+			Message: "the send attempt carries no Message-ID; the Sent mirror cannot be completed safely",
+		}
+	}
+	if s.send.Mirror == nil || s.send.Credentials == nil {
+		return result, &OperationError{
+			Code:    "send_transport_unavailable",
+			Message: "direct SMTP send is unavailable because no send transport is configured",
+		}
+	}
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+		return result, err
+	}
+	sender, err := sendSender(draft.From)
+	if err != nil {
+		return result, err
+	}
+	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	if err != nil {
+		return result, err
+	}
+	password, err := s.send.Credentials.Load(sender)
+	if err != nil || password == "" {
+		return result, missingCredentialsError(sender)
+	}
+	message, err := BuildMessage(draft, attempt.Transport.MessageID)
+	if err != nil {
+		return result, err
+	}
+	appendEvidence, err := s.send.Mirror.AppendToSent(
+		ctx,
+		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		message, attempt.Transport.MessageID,
+	)
+	if err != nil {
+		return result, mirrorPendingError(err)
+	}
+	attempt.SentStoreObserved = true
+	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
+	attempt.Transport.MirrorAppended = appendEvidence.Appended
+	attempt.Outcome = SendOutcomeSent
+	attempt.UpdatedAt = time.Now().UTC()
+	result = resultForReconcile(ref, attempt)
+	if err := replaceSendAttempt(root, ref, attempt); err != nil {
+		return result, &OperationError{
+			Code:    "send_reconcile_state_failed",
+			Message: fmt.Sprintf("the sent message was mirrored, but the reconciled state could not be recorded: %v", err),
+		}
+	}
+	if err := discardDraftFiles(root, ref); err != nil {
+		return result, &OperationError{
+			Code:    "send_cleanup_failed",
+			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
+		}
+	}
+	result.DraftRetained = false
+	return result, nil
+}
+
+// available rejects sends when the Service was created without a full
+// SendTransport instead of panicking on a nil dependency.
+func (t SendTransport) available() error {
+	if t.Submitter == nil || t.Mirror == nil || t.Credentials == nil {
+		return &OperationError{
+			Code:    "send_transport_unavailable",
+			Message: "direct SMTP send is unavailable because no send transport is configured",
+		}
+	}
+	return nil
+}
+
+func sendSender(from string) (string, error) {
+	parsed, err := stdmail.ParseAddress(strings.TrimSpace(from))
+	if err != nil || parsed.Address == "" {
+		return "", validationError("invalid from address")
+	}
+	return parsed.Address, nil
+}
+
+func missingCredentialsError(sender string) error {
+	return &OperationError{
+		Code: "smtp_credentials_missing",
+		Message: "no app-specific password is stored for " + sender +
+			"; run 'mailcli send setup --from " + sender + "' to store one",
+	}
+}
+
+func mirrorPendingError(err error) error {
+	message := "the message was accepted by the SMTP server, but mirroring it into the Sent mailbox failed; " +
+		"the draft is retained and the send itself will not be retried"
+	code := transport.ErrorCode(err)
+	if code == "" {
+		code = "send_mirror_pending"
+	}
+	return &OperationError{Code: code, Message: message + ": " + err.Error()}
+}
+
+func newMessageID(sender string) (string, error) {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("generate message id: %w", err)
+	}
+	domain := sender[strings.LastIndex(sender, "@")+1:]
+	return "<" + hex.EncodeToString(value[:]) + "@" + domain + ">", nil
+}
+
+func draftEnvelopeRecipients(draft Draft) []string {
+	recipients := make([]Recipient, 0, len(draft.To)+len(draft.CC)+len(draft.BCC))
+	recipients = append(recipients, draft.To...)
+	recipients = append(recipients, draft.CC...)
+	recipients = append(recipients, draft.BCC...)
+	addresses := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		if parsed, err := stdmail.ParseAddress(recipient.Address); err == nil && parsed.Address != "" {
+			addresses = append(addresses, parsed.Address)
+		}
+	}
+	return addresses
+}
+
+// DeliverViaTransport submits a draft over direct SMTP and mirrors it into
+// the account's Sent mailbox without any local claim handling. It never
+// resubmits after an accepted submission, even when the mirror fails; the
+// partial evidence is returned alongside the mirror error. Callers own
+// at-most-once semantics.
+func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (TransportEvidence, error) {
+	if send.Submitter == nil || send.Mirror == nil || send.Credentials == nil {
+		return TransportEvidence{}, &OperationError{
+			Code:    "send_transport_unavailable",
+			Message: "direct SMTP send is unavailable because no send transport is configured",
+		}
+	}
+	sender, err := sendSender(draft.From)
+	if err != nil {
+		return TransportEvidence{}, err
+	}
+	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	if err != nil {
+		return TransportEvidence{}, err
+	}
+	password, err := send.Credentials.Load(sender)
+	if err != nil || password == "" {
+		return TransportEvidence{}, missingCredentialsError(sender)
+	}
+	messageID, err := newMessageID(sender)
+	if err != nil {
+		return TransportEvidence{}, err
+	}
+	message, err := BuildMessage(draft, messageID)
+	if err != nil {
+		return TransportEvidence{}, err
+	}
+	submitEvidence, err := send.Submitter.Submit(
+		ctx,
+		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
+		sender, draftEnvelopeRecipients(draft), message,
+	)
+	if err != nil {
+		return TransportEvidence{}, err
+	}
+	evidence := TransportEvidence{
+		ServerResponse: submitEvidence.ServerResponse,
+		MessageID:      submitEvidence.MessageID,
+	}
+	appendEvidence, err := send.Mirror.AppendToSent(
+		ctx,
+		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		message, submitEvidence.MessageID,
+	)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.MirrorMailbox = appendEvidence.Mailbox
+	evidence.MirrorAppended = appendEvidence.Appended
+	return evidence, nil
 }
 
 func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservationBaseline {
@@ -1034,9 +1222,19 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 		return attempt.InvocationStarted && attempt.AcceptedByMail && !attempt.SentStoreObserved
 	case SendOutcomeObserved:
 		return attempt.InvocationStarted && attempt.SentStoreObserved
+	case SendOutcomeSent:
+		return attempt.InvocationStarted && attempt.AcceptedByMail && attempt.SentStoreObserved &&
+			validTransportEvidence(attempt.Transport)
+	case SendOutcomeMirrorPending:
+		return attempt.InvocationStarted && attempt.AcceptedByMail && !attempt.SentStoreObserved &&
+			validTransportEvidence(attempt.Transport)
 	default:
 		return false
 	}
+}
+
+func validTransportEvidence(value *TransportEvidence) bool {
+	return value != nil && strings.TrimSpace(value.MessageID) != ""
 }
 
 func validSendMaterialization(value *SendMaterialization) bool {
@@ -1269,7 +1467,7 @@ func replaySendAttempt(root string, ref string, attempt SendAttempt) (SendResult
 	result := resultForAttempt(ref, attempt, true)
 	result.Replayed = true
 	switch attempt.Outcome {
-	case SendOutcomeObserved:
+	case SendOutcomeObserved, SendOutcomeSent:
 		if err := discardDraftFiles(root, ref); err != nil {
 			return result, &OperationError{
 				Code: "send_cleanup_failed",
@@ -1280,6 +1478,12 @@ func replaySendAttempt(root string, ref string, attempt SendAttempt) (SendResult
 		}
 		result.DraftRetained = false
 		return result, nil
+	case SendOutcomeMirrorPending:
+		return result, &OperationError{
+			Code: "send_mirror_pending",
+			Message: "the message was accepted by SMTP but the Sent mirror is incomplete; " +
+				"run 'mailcli drafts reconcile --ref " + ref + "' to finish mirroring; the send itself will not be retried",
+		}
 	case SendOutcomeAccepted:
 		return result, &OperationError{
 			Code:    "send_not_observed",

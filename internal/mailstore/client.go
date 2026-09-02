@@ -18,6 +18,7 @@ type Client struct {
 	store             *Store
 	storeErr          error
 	fallback          mail.Gateway
+	send              mail.SendTransport
 	storeOpenDuration time.Duration
 }
 
@@ -35,10 +36,13 @@ type draftSaveInvocationMaterializer interface {
 	) (mail.MessageSummary, *mail.SendMaterialization, bool, bool, error)
 }
 
-func NewClient(ctx context.Context, fallback mail.Gateway, config Config) *Client {
+func NewClient(ctx context.Context, fallback mail.Gateway, config Config, send mail.SendTransport) *Client {
 	started := time.Now()
 	store, err := Open(ctx, config)
-	return &Client{store: store, storeErr: err, fallback: fallback, storeOpenDuration: time.Since(started)}
+	return &Client{
+		store: store, storeErr: err, fallback: fallback, send: send,
+		storeOpenDuration: time.Since(started),
+	}
 }
 
 func (c *Client) ComposeWriteSupportError() error {
@@ -484,45 +488,13 @@ func cloneSaveMaterialization(value *mail.SendMaterialization) *mail.SendMateria
 	return &clone
 }
 
-func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvidence, error) {
-	if draft.Kind == mail.DraftKindForward {
-		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
-		if err != nil {
-			return mail.SendEvidence{}, err
-		}
-		draft.ExpectedNativeAttachmentCount = len(native)
-	}
-	automationDraft, err := c.automationDraft(ctx, draft)
-	if err != nil {
-		return mail.SendEvidence{}, err
-	}
-	if c.fallback == nil {
-		return mail.SendEvidence{}, c.writeUnavailableError()
-	}
-	baseline, err := c.sendBaseline(draft.PreparedSendBaseline)
-	if err != nil {
-		return mail.SendEvidence{}, err
-	}
-	evidence, sendErr := c.fallback.SendDraft(ctx, automationDraft)
-	evidence.ObservationBaseline = c.store.exportSendBaseline(baseline)
-	if !evidence.InvocationStarted {
-		return evidence, sendErr
-	}
-	observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, evidence.Materialized)
-	observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
-	defer cancel()
-	var observed mail.MessageSummary
-	found := false
-	var observationErr error
-	if materializationErr == nil {
-		observed, found, observationErr = c.store.observeSent(observationCtx, baseline, observationDraft)
-	}
-	if observationErr == nil && found {
-		evidence.SentStoreObserved = true
-		evidence.ObservedMessageRef = observed.Ref
-		return evidence, automationPostflightError(sendErr)
-	}
-	return evidence, errors.Join(sendErr, materializationErr, observationErr)
+// SendDraft submits the draft over direct SMTP and mirrors it into the
+// account's Sent mailbox without touching Mail.app automation. It performs
+// no local claim handling and never resubmits after an accepted submission,
+// even when the mirror fails; the partial transport evidence is returned
+// alongside the mirror error.
+func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.TransportEvidence, error) {
+	return mail.DeliverViaTransport(ctx, c.send, draft)
 }
 
 func (c *Client) PrepareSend(ctx context.Context, _ mail.Draft) (mail.SendObservationBaseline, error) {
@@ -662,18 +634,6 @@ func (c *Client) sourceAttachmentFingerprints(
 		})
 	}
 	return attachments, nil
-}
-
-func (c *Client) sendBaseline(prepared *mail.SendObservationBaseline) (sendBaseline, error) {
-	if c.store == nil {
-		return sendBaseline{}, c.safeWriteUnavailableError()
-	}
-	if prepared == nil {
-		return sendBaseline{}, operationError(
-			"send_prepare_required", "send requires a durably persisted store observation baseline",
-		)
-	}
-	return c.store.importSendBaseline(prepared)
 }
 
 func (c *Client) MarkMessage(

@@ -27,7 +27,7 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if manifest.SchemaVersion != capabilitySchemaVersion || manifest.Name != name || manifest.Version != version {
 		t.Fatalf("manifest identity = %+v", manifest)
 	}
-	if manifest.Limits.RawMIMESend || !manifest.Limits.RawMIMERead || manifest.Limits.OwnsMailIndex || manifest.Limits.BackgroundProcess {
+	if !manifest.Limits.RawMIMESend || !manifest.Limits.RawMIMERead || manifest.Limits.OwnsMailIndex || manifest.Limits.BackgroundProcess {
 		t.Fatalf("manifest limits = %+v", manifest.Limits)
 	}
 	if manifest.Limits.ComposeAttachmentWrite {
@@ -39,8 +39,8 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if !manifest.Limits.VisibleComposeHandoff || !manifest.Limits.VisibleAttachmentHandoff {
 		t.Fatal("visible system compose handoff must be advertised")
 	}
-	if manifest.Limits.SendTransport != "none" {
-		t.Fatalf("send transport = %q, want none", manifest.Limits.SendTransport)
+	if manifest.Limits.SendTransport != "smtp" {
+		t.Fatalf("send transport = %q, want smtp", manifest.Limits.SendTransport)
 	}
 	if manifest.Limits.MaximumPageSize != 25 || manifest.Limits.MaximumDraftInputBytes != 16*1024*1024 {
 		t.Fatalf("manifest bounds = %+v", manifest.Limits)
@@ -59,7 +59,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
-		"drafts.send", "drafts.reconcile", "drafts.discard",
+		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync",
 	}
@@ -81,10 +81,16 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		t.Fatalf("command IDs = %q, want %q", got, want)
 	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]
-	if send.EffectClass != "unsupported" || send.Confirmation != "required-flag" ||
+	if send.EffectClass != "smtp-send" || send.Confirmation != "required-flag" ||
 		send.StoreDependency != "draft-store" || send.MailAppDependency != "none" ||
-		!slices.Equal(send.ResultStates, []string{"compose_automation_unsupported"}) {
+		!slices.Equal(send.ResultStates, []string{"sent", "sent_mirror_pending"}) {
 		t.Fatalf("drafts.send capability = %+v", send)
+	}
+	setup := manifest.Commands[slices.Index(got, "send.setup")]
+	if setup.EffectClass != "keychain-write" || setup.Confirmation != "none" ||
+		setup.StoreDependency != "none" || setup.MailAppDependency != "none" ||
+		!slices.Equal(setup.ResultStates, []string{"stored", "removed"}) {
+		t.Fatalf("send.setup capability = %+v", setup)
 	}
 	save := manifest.Commands[slices.Index(got, "drafts.save")]
 	if save.EffectClass != "unsupported" || save.StoreDependency != "draft-store" || save.MailAppDependency != "none" ||

@@ -1,0 +1,307 @@
+package mail
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"mime"
+	"mime/quotedprintable"
+	"net/mail"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	composerLineLength   = 76 // base64 lines per RFC 2045
+	composerHeaderLength = 78 // recommended header line limit per RFC 5322
+	composerCRLF         = "\r\n"
+)
+
+// ComposerError is the typed error for RFC 5322 message composition failures.
+type ComposerError struct {
+	Message string
+	Err     error
+}
+
+func (e *ComposerError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+	}
+	return e.Message
+}
+
+func (e *ComposerError) Unwrap() error { return e.Err }
+
+// BuildMessage renders a draft into exact RFC 5322 bytes ready for SMTP
+// submission. messageID is used verbatim as the Message-ID header. BCC
+// recipients are deliberately omitted from the output. Reply drafts carry
+// In-Reply-To and References threading headers; forwards carry none. Subject
+// prefixes (Re:/Fwd:) are applied at draft creation and are never added here.
+func BuildMessage(draft Draft, messageID string) ([]byte, error) {
+	if messageID == "" {
+		return nil, &ComposerError{Message: "message id is required"}
+	}
+	attachments, err := loadComposerAttachments(draft.Attachments)
+	if err != nil {
+		return nil, err
+	}
+	alternativeBoundary, err := randomBoundary()
+	if err != nil {
+		return nil, err
+	}
+	mixedBoundary := ""
+	if len(attachments) > 0 {
+		mixedBoundary, err = randomBoundary()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	contentType := "multipart/alternative; boundary=\"" + alternativeBoundary + "\""
+	if len(attachments) > 0 {
+		contentType = "multipart/mixed; boundary=\"" + mixedBoundary + "\""
+	}
+
+	buffer := &bytes.Buffer{}
+	writeComposerHeaders(buffer, draft, messageID, contentType)
+	buffer.WriteString(composerCRLF)
+
+	parts, err := alternativeParts(draft)
+	if err != nil {
+		return nil, err
+	}
+	if len(attachments) == 0 {
+		writeMultipart(buffer, alternativeBoundary, parts)
+		buffer.WriteString(composerCRLF)
+		return buffer.Bytes(), nil
+	}
+
+	altBuf := &bytes.Buffer{}
+	writeMultipart(altBuf, alternativeBoundary, parts)
+	mixedParts := []messagePart{{
+		headers: []string{"Content-Type: multipart/alternative; boundary=\"" + alternativeBoundary + "\""},
+		body:    altBuf.String(),
+	}}
+	for _, attachment := range attachments {
+		mixedParts = append(mixedParts, messagePart{
+			headers: attachment.headers(),
+			body:    attachment.base64Body(),
+		})
+	}
+	writeMultipart(buffer, mixedBoundary, mixedParts)
+	buffer.WriteString(composerCRLF)
+	return buffer.Bytes(), nil
+}
+
+type messagePart struct {
+	headers []string
+	body    string
+}
+
+func alternativeParts(draft Draft) ([]messagePart, error) {
+	plain, err := quotedPrintableBody(draft.Body)
+	if err != nil {
+		return nil, err
+	}
+	parts := []messagePart{{
+		headers: []string{
+			"Content-Type: text/plain; charset=utf-8",
+			"Content-Transfer-Encoding: quoted-printable",
+		},
+		body: plain,
+	}}
+	if draft.BodyHTML == "" {
+		return parts, nil
+	}
+	html, err := quotedPrintableBody(draft.BodyHTML)
+	if err != nil {
+		return nil, err
+	}
+	return append(parts, messagePart{
+		headers: []string{
+			"Content-Type: text/html; charset=utf-8",
+			"Content-Transfer-Encoding: quoted-printable",
+		},
+		body: html,
+	}), nil
+}
+
+func quotedPrintableBody(body string) (string, error) {
+	encoded := &bytes.Buffer{}
+	writer := quotedprintable.NewWriter(encoded)
+	if _, err := writer.Write([]byte(body)); err != nil {
+		return "", fmt.Errorf("quote-printable encode body: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("quote-printable finish body: %w", err)
+	}
+	return encoded.String(), nil
+}
+
+func writeMultipart(buffer *bytes.Buffer, boundary string, parts []messagePart) {
+	for _, part := range parts {
+		buffer.WriteString("--")
+		buffer.WriteString(boundary)
+		buffer.WriteString(composerCRLF)
+		for _, header := range part.headers {
+			buffer.WriteString(header)
+			buffer.WriteString(composerCRLF)
+		}
+		buffer.WriteString(composerCRLF)
+		buffer.WriteString(part.body)
+		buffer.WriteString(composerCRLF)
+	}
+	buffer.WriteString("--")
+	buffer.WriteString(boundary)
+	buffer.WriteString("--")
+}
+
+func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentType string) {
+	writeHeader(buffer, "From", draft.From)
+	writeHeader(buffer, "To", formatAddressList(draft.To))
+	if len(draft.CC) > 0 {
+		writeHeader(buffer, "Cc", formatAddressList(draft.CC))
+	}
+	writeHeader(buffer, "Subject", encodeHeaderValue(draft.Subject))
+	writeHeader(buffer, "Date", time.Now().Format(time.RFC1123Z))
+	writeHeader(buffer, "Message-ID", messageID)
+	writeHeader(buffer, "MIME-Version", "1.0")
+	if draft.Kind == DraftKindReply && draft.SourceMessageID != "" {
+		writeHeader(buffer, "In-Reply-To", draft.SourceMessageID)
+		writeHeader(buffer, "References", threadReferences(draft.SourceReferences, draft.SourceMessageID))
+	}
+	writeHeader(buffer, "Content-Type", contentType)
+}
+
+func writeHeader(buffer *bytes.Buffer, name, value string) {
+	if value == "" {
+		buffer.WriteString(name)
+		buffer.WriteString(":")
+		buffer.WriteString(composerCRLF)
+		return
+	}
+	if len(name)+2+len(value) <= composerHeaderLength {
+		buffer.WriteString(name)
+		buffer.WriteString(": ")
+		buffer.WriteString(value)
+		buffer.WriteString(composerCRLF)
+		return
+	}
+	limit := composerHeaderLength - len(name) - 2
+	buffer.WriteString(name)
+	buffer.WriteString(": ")
+	buffer.WriteString(strings.Join(foldAt(value, limit), composerCRLF+" "))
+	buffer.WriteString(composerCRLF)
+}
+
+// foldAt splits value into lines of at most limit bytes, breaking at spaces so
+// continuation lines can carry single-space folding whitespace.
+func foldAt(value string, limit int) []string {
+	if limit < 1 {
+		limit = 1
+	}
+	var lines []string
+	for len(value) > limit {
+		cut := strings.LastIndex(value[:limit+1], " ")
+		if cut < 0 {
+			cut = strings.Index(value, " ")
+			if cut < 0 {
+				break
+			}
+		}
+		lines = append(lines, value[:cut])
+		value = value[cut+1:]
+	}
+	if len(value) > 0 || len(lines) == 0 {
+		lines = append(lines, value)
+	}
+	return lines
+}
+
+func formatAddressList(recipients []Recipient) string {
+	addresses := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		addresses = append(addresses, (&mail.Address{Name: recipient.Name, Address: recipient.Address}).String())
+	}
+	return strings.Join(addresses, ", ")
+}
+
+func encodeHeaderValue(value string) string {
+	return mime.QEncoding.Encode("UTF-8", value)
+}
+
+// threadReferences appends the replied-to message to the prior References chain.
+func threadReferences(references, sourceMessageID string) string {
+	prior := strings.TrimSpace(references)
+	if prior == "" {
+		return sourceMessageID
+	}
+	return prior + " " + sourceMessageID
+}
+
+type composerAttachment struct {
+	filename    string
+	contentType string
+	data        []byte
+}
+
+func loadComposerAttachments(attachments []DraftAttachment) ([]composerAttachment, error) {
+	loaded := make([]composerAttachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		data, err := os.ReadFile(attachment.Path)
+		if err != nil {
+			return nil, &ComposerError{
+				Message: "read draft attachment " + filepath.Base(attachment.Path),
+				Err:     err,
+			}
+		}
+		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(attachment.Path)))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		loaded = append(loaded, composerAttachment{
+			filename:    filepath.Base(attachment.Path),
+			contentType: contentType,
+			data:        data,
+		})
+	}
+	return loaded, nil
+}
+
+func (a composerAttachment) headers() []string {
+	return []string{
+		"Content-Type: " + a.contentType,
+		"Content-Transfer-Encoding: base64",
+		"Content-Disposition: " + mime.FormatMediaType("attachment", map[string]string{"filename": a.filename}),
+	}
+}
+
+func (a composerAttachment) base64Body() string {
+	encoded := base64.StdEncoding.EncodeToString(a.data)
+	var body strings.Builder
+	for len(encoded) > 0 {
+		cut := composerLineLength
+		if cut > len(encoded) {
+			cut = len(encoded)
+		}
+		body.WriteString(encoded[:cut])
+		encoded = encoded[cut:]
+		if len(encoded) > 0 {
+			body.WriteString(composerCRLF)
+		}
+	}
+	return body.String()
+}
+
+// randomBoundary returns a cryptographically random boundary unique per message.
+func randomBoundary() (string, error) {
+	entropy := make([]byte, 16)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", &ComposerError{Message: "generate multipart boundary", Err: err}
+	}
+	return "=_" + hex.EncodeToString(entropy), nil
+}

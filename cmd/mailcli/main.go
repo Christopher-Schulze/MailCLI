@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"mailcli/internal/cli"
+	"mailcli/internal/keychain"
 	"mailcli/internal/mail"
 	"mailcli/internal/mailapp"
 	"mailcli/internal/mailstore"
+	"mailcli/internal/transport/imapclient"
+	"mailcli/internal/transport/smtpclient"
 )
 
 func main() {
@@ -31,7 +34,7 @@ func run() int {
 	}
 	defer stopSignals()
 	if !cli.RequiresMailService(args) {
-		return cli.Run(ctx, mail.NewService(nil), args, os.Stdout, os.Stderr)
+		return cli.Run(ctx, mail.NewServiceWithTransport(nil, "", sendTransport()), args, os.Stdout, os.Stderr)
 	}
 	config, err := mailstore.DefaultConfig()
 	if err != nil {
@@ -40,13 +43,23 @@ func run() int {
 	}
 	bridge := mailapp.NewClient()
 	storeCtx, cancelStoreOpen := context.WithTimeout(ctx, 15*time.Second)
-	client := mailstore.NewClient(storeCtx, bridge, config)
+	client := mailstore.NewClient(storeCtx, bridge, config, sendTransport())
 	cancelStoreOpen()
-	mailService := mail.NewService(client)
+	mailService := mail.NewServiceWithTransport(client, "", sendTransport())
 	code := cli.Run(ctx, mailService, args, os.Stdout, os.Stderr)
 	if err := client.Close(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, "close Mail store:", err)
 		code = 1
 	}
 	return code
+}
+
+// sendTransport builds the direct SMTP/IMAP send transport with keychain
+// credentials. It performs no I/O until a send actually runs.
+func sendTransport() mail.SendTransport {
+	return mail.SendTransport{
+		Submitter:   smtpclient.New(),
+		Mirror:      imapclient.New(),
+		Credentials: keychain.New(),
+	}
 }

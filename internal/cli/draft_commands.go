@@ -212,7 +212,7 @@ func runDraftUpdate(service *mail.Service, args []string, stdout io.Writer, stde
 func runDraftSend(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts send", stderr)
 	ref := flags.String("ref", "", "draft ref")
-	confirm := flags.Bool("confirm", false, "confirm sending through Mail.app")
+	confirm := flags.Bool("confirm", false, "confirm sending the draft via direct SMTP")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code

@@ -1,0 +1,19 @@
+From: sender@example.com
+To: <original@example.com>
+Subject: Re: Original subject
+Date: <DATE>
+Message-ID: <MESSAGE-ID>
+MIME-Version: 1.0
+In-Reply-To: <original-123@example.com>
+References: <first-1@example.com> <second-2@example.com>
+ <original-123@example.com>
+Content-Type: multipart/alternative;
+ boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Thanks, understood.
+
+--<BOUNDARY>--

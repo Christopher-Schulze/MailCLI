@@ -1,0 +1,31 @@
+From: sender@example.com
+To: "Alice" <alice@example.com>
+Subject: Documents attached
+Date: <DATE>
+Message-ID: <MESSAGE-ID>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: multipart/alternative; boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Both documents are attached.
+
+--<BOUNDARY>--
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename=notes.txt
+
+bWVldGluZyBub3RlcwpsaW5lIHR3bwo=
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename*=utf-8''r%C3%A9sum%C3%A9%20final.txt
+
+Y3VycmljdWx1bSB2aXRhZSB3aXRoIMO8bsOvY29kZQo=
+--<BOUNDARY>--

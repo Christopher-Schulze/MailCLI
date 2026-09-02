@@ -6,11 +6,24 @@ import (
 	"io"
 	"slices"
 	"time"
+
+	"mailcli/internal/transport"
 )
+
+// SendTransport bundles the direct-send dependencies: an SMTP submitter, an
+// IMAP Sent-mailbox mirror, and the credential store for app-specific
+// passwords. A Service created without them rejects sends with
+// send_transport_unavailable instead of panicking.
+type SendTransport struct {
+	Submitter   transport.Submitter
+	Mirror      transport.SentMirror
+	Credentials transport.CredentialStore
+}
 
 type Service struct {
 	gateway   Gateway
 	draftRoot string
+	send      SendTransport
 }
 
 type ValidationError struct {
@@ -28,6 +41,10 @@ func NewService(gateway Gateway) *Service {
 
 func NewServiceWithDraftRoot(gateway Gateway, draftRoot string) *Service {
 	return &Service{gateway: gateway, draftRoot: draftRoot}
+}
+
+func NewServiceWithTransport(gateway Gateway, draftRoot string, send SendTransport) *Service {
+	return &Service{gateway: gateway, draftRoot: draftRoot, send: send}
 }
 
 func (e *ValidationError) Error() string {

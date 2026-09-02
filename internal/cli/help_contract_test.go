@@ -54,6 +54,8 @@ func TestHelpContractTable(t *testing.T) {
 		{name: "drafts save", args: []string{"drafts", "save", "--help"}, want: "mailcli drafts save [options]"},
 		{name: "drafts open", args: []string{"drafts", "open", "--help"}, want: "mailcli drafts open [options]"},
 		{name: "drafts send", args: []string{"drafts", "send", "--help"}, want: "mailcli drafts send [options]"},
+		{name: "send", args: []string{"send", "--help"}, want: "mailcli send setup"},
+		{name: "send setup", args: []string{"send", "setup", "--help"}, want: "mailcli send setup [options]"},
 		{name: "drafts reconcile", args: []string{"drafts", "reconcile", "--help"}, want: "mailcli drafts reconcile [options]"},
 		{name: "drafts discard", args: []string{"drafts", "discard", "--help"}, want: "mailcli drafts discard [options]"},
 		{name: "sync", args: []string{"sync", "--help"}, want: "mailcli sync [options]"},
@@ -100,8 +102,11 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 			t.Fatalf("help does not contain %q: %s", command, stdout.String())
 		}
 	}
-	if !strings.Contains(stdout.String(), "Mail 16 scripted save and send remain disabled") {
+	if !strings.Contains(stdout.String(), "Mail 16 scripted draft save remains disabled") {
 		t.Fatalf("help omits the Mail 16 compose limitation: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "send ") {
+		t.Fatalf("help omits the send command: %s", stdout.String())
 	}
 }
 

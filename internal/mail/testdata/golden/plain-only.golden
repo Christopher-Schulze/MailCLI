@@ -1,0 +1,21 @@
+From: sender@example.com
+To: <alice@example.com>
+Subject:
+Date: <DATE>
+Message-ID: <MESSAGE-ID>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello Alice,
+
+Here is the update.
+
+Best,
+Sender
+
+--<BOUNDARY>--

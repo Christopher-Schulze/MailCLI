@@ -106,35 +106,6 @@ func (c *Client) SaveAttachmentTo(
 	return err
 }
 
-func (c *Client) SendDraft(ctx context.Context, draft mail.Draft) (mail.SendEvidence, error) {
-	if err := c.validateComposeDraft(draft); err != nil {
-		return mail.SendEvidence{}, err
-	}
-	bridge, err := encodeBridgeDraft(draft)
-	if err != nil {
-		return mail.SendEvidence{}, err
-	}
-	bridge, cleanup, err := snapshotBridgeAttachments(bridge)
-	if err != nil {
-		return mail.SendEvidence{}, err
-	}
-	response, started, invokeErr := c.invokeWithState(ctx, bridgeRequest{Operation: "drafts.send", Draft: &bridge})
-	cleanupErr := attachmentSnapshotCleanupError(cleanup())
-	if invokeErr != nil {
-		attempted := started
-		if response.Error != nil {
-			attempted = response.SendAttempted
-		}
-		return mail.SendEvidence{InvocationStarted: attempted}, errors.Join(invokeErr, cleanupErr)
-	}
-	evidence := mail.SendEvidence{
-		InvocationStarted: true,
-		AcceptedByMail:    response.Accepted,
-		Materialized:      mapSendMaterialization(response.Materialized),
-	}
-	return evidence, cleanupErr
-}
-
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
 	summary, _, _, _, err := c.SaveDraftWithInvocationState(ctx, draft)
 	return summary, err
@@ -220,7 +191,7 @@ func (c *Client) ComposeWriteSupportError() error {
 	}
 	return &OperationError{
 		Code:    "compose_automation_unsupported",
-		Message: "Mail 16 compose scripting discards reviewed content or creates phantom drafts; use Mail's UI for send and native draft save",
+		Message: "Mail 16 compose scripting discards reviewed content or creates phantom drafts; use 'drafts send --confirm' for sending and Mail's UI for native draft save",
 	}
 }
 
@@ -445,7 +416,6 @@ type bridgeResponse struct {
 	NextOffset       *int                `json:"next_offset"`
 	NextPreviousID   *string             `json:"next_previous_id"`
 	Accepted         bool                `json:"accepted"`
-	SendAttempted    bool                `json:"send_attempted"`
 	RecoveryRequired bool                `json:"recovery_required"`
 	Materialized     *bridgeMaterialized `json:"materialized"`
 }
@@ -891,7 +861,7 @@ func (c *Client) invokeWithState(
 
 func operationCanLeaveUncertainMailState(operation string) bool {
 	switch operation {
-	case "drafts.send", "drafts.save", "messages.mark", "messages.transfer", "messages.delete":
+	case "drafts.save", "messages.mark", "messages.transfer", "messages.delete":
 		return true
 	default:
 		return false

@@ -249,70 +249,6 @@ function run(_) {
 	}
 }
 
-func TestBridgeMarksOnlyActualSendInvocationAsAttempted(t *testing.T) {
-	tests := []struct {
-		name          string
-		applyFunction string
-		sendFunction  string
-		want          string
-	}{
-		{
-			name:          "field preparation failed",
-			applyFunction: `function applyOutgoingFields() { throw new Error("prepare"); }`,
-			sendFunction:  `() => true`, want: `{"attempted":false,"recovery_required":false,"closed":true}`,
-		},
-		{
-			name:          "send invocation failed",
-			applyFunction: `function applyOutgoingFields() {}`,
-			sendFunction:  `() => { throw new Error("send"); }`, want: `{"attempted":true,"recovery_required":true,"closed":false}`,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			testScript := bridgeScript + `
-let closed = false;
-let composeExists = true;
-function outgoingForDraft() { return {
-    send: ` + test.sendFunction + `,
-    close: () => { closed = true; composeExists = false; },
-    exists: () => composeExists
-}; }
-` + test.applyFunction + `
-function waitForStableCompose() { return {attachment_paths: []}; }
-function waitForPreparedCompose() {
-    return {from: "sender@example.com", to: [{address: "to@example.com"}], cc: [], bcc: [], subject: "", body: "", attachment_paths: []};
-}
-function composeSnapshot() {
-    return {from: "sender@example.com", to: [{address: "to@example.com"}], cc: [], bcc: [], subject: "", body: "", attachment_paths: []};
-}
-function run(_) {
-    try {
-		sendDraft({outgoingMessages: () => []}, {draft: {
-			kind: "new", from: "sender@example.com", to: [{address: "to@example.com"}],
-			cc: [], bcc: [], subject: "", body: "", attachments: []
-		}});
-        return JSON.stringify({attempted: true, recovery_required: false, closed: closed});
-    } catch (error) {
-        return JSON.stringify({
-            attempted: Boolean(error.sendAttempted),
-            recovery_required: Boolean(error.recoveryRequired),
-            closed: closed
-        });
-    }
-}`
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
-			if err != nil {
-				t.Fatalf("osaScriptRunner.Run() error = %v", err)
-			}
-			if strings.TrimSpace(string(output)) != test.want {
-				t.Fatalf("output = %q, want %s", output, test.want)
-			}
-		})
-	}
-}
-
 func TestBridgeDeduplicatesNativeReplyRecipients(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
@@ -531,7 +467,7 @@ function run(_) {
     outgoingForDraft = () => outgoing;
     waitForStableCompose = () => { throw new Error("prepare failed"); };
     try {
-        sendDraft({outgoingMessages: () => []}, {draft: {
+        saveDraft({outgoingMessages: () => []}, {draft: {
             kind: "new", from: "sender@example.com"
         }});
         return JSON.stringify({code: "none", close_calls: closeCalls});
@@ -887,13 +823,13 @@ function run(_) {
 	}
 }
 
-func TestBridgeRejectsSendWhileAnotherComposeExists(t *testing.T) {
+func TestBridgeRejectsSaveWhileAnotherComposeExists(t *testing.T) {
 	testScript := bridgeScript + `
 function run(_) {
     let created = false;
     outgoingForDraft = () => { created = true; return {}; };
     try {
-        sendDraft({outgoingMessages: () => [{visible: () => true}]}, {draft: {
+        saveDraft({outgoingMessages: () => [{visible: () => true}]}, {draft: {
             kind: "new", from: "sender@example.com"
         }});
         return JSON.stringify({code: "none", created: created});
@@ -1029,56 +965,16 @@ function run(_) {
 		t.Fatalf("integrity result = %q", output)
 	}
 }
-
-func TestBridgeClosesComposeWhenMailRejectsSend(t *testing.T) {
-	testScript := bridgeScript + `
-let closed = false;
-const snapshot = {
-    from: "sender@example.com", to: [{address: "to@example.com"}], cc: [], bcc: [],
-    subject: "Subject", body: "Body", attachment_paths: []
-};
-const native = {
-    from: "sender@example.com", to: [], cc: [], bcc: [],
-    subject: "Subject", body: "Body", attachment_paths: []
-};
-let composeExists = true;
-function outgoingForDraft() { return {
-    send: () => false,
-    close: () => { closed = true; composeExists = false; },
-    exists: () => composeExists
-}; }
-function applyOutgoingFields() {}
-function waitForStableCompose() { return native; }
-function waitForPreparedCompose() { return snapshot; }
-function composeSnapshot() { return snapshot; }
-function run(_) {
-    const result = sendDraft({outgoingMessages: () => []}, {draft: {
-        kind: "new", from: "sender@example.com", to: [{address: "to@example.com"}],
-        subject: "Subject", body: "Body", attachments: []
-    }});
-    return JSON.stringify({accepted: result.accepted, closed: closed});
-}`
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	output, _, err := (osaScriptRunner{}).Run(ctx, testScript, `{}`)
-	if err != nil {
-		t.Fatalf("osaScriptRunner.Run() error = %v", err)
-	}
-	if strings.TrimSpace(string(output)) != `{"accepted":false,"closed":true}` {
-		t.Fatalf("send rejection result = %q", output)
-	}
-}
-
-func TestBridgeRejectsNewSendWithoutSenderBeforeComposeCreation(t *testing.T) {
+func TestBridgeRejectsNewSaveWithoutSenderBeforeComposeCreation(t *testing.T) {
 	testScript := bridgeScript + `
 let composeCreated = false;
 function outgoingForDraft() {
     composeCreated = true;
-    return {send: () => true};
+    return {close: () => {}};
 }
 function run(_) {
     try {
-        sendDraft({}, {draft: {kind: "new"}});
+        saveDraft({}, {draft: {kind: "new"}});
         return JSON.stringify({code: "none", compose_created: composeCreated});
     } catch (error) {
         return JSON.stringify({code: error.bridgeCode, compose_created: composeCreated});

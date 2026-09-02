@@ -9,6 +9,7 @@ import (
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 type fallbackSpy struct {
@@ -244,31 +245,6 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	}
 }
 
-func TestStoreAccountIdentityValidatesNewDraftSend(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	insertSentMessageFixture(t, store, 104)
-	spy := &fallbackSpy{}
-	spy.sendHook = func() { insertSentMessageFixture(t, store, 105) }
-	client := &Client{store: store, fallback: spy}
-	service := mail.NewServiceWithDraftRoot(client, filepath.Join(t.TempDir(), "drafts"))
-	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
-		From: "Alice <alice@example.com>", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed send", Body: "Body",
-	}})
-	if err != nil {
-		t.Fatalf("CreateDraft() error = %v", err)
-	}
-	result, err := service.SendDraft(context.Background(), draft.Ref)
-	if err != nil || !result.SentStoreObserved {
-		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
-	}
-	if spy.accountCalls != 0 {
-		t.Fatalf("fallback ListAccounts() calls = %d, want 0", spy.accountCalls)
-	}
-}
-
 func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -328,188 +304,139 @@ func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	}
 }
 
-func TestClientPromotesAcceptedSendToSentStoreObserved(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	spy := &fallbackSpy{}
-	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: spy}
-	draft := mail.Draft{
-		From:    "alice@example.com",
-		To:      []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed send", Body: "Body",
-	}
-	baseline, err := client.PrepareSend(context.Background(), draft)
-	if err != nil {
-		t.Fatalf("PrepareSend() error = %v", err)
-	}
-	draft.PreparedSendBaseline = &baseline
-	evidence, err := client.SendDraft(context.Background(), draft)
-	if err != nil || !evidence.AcceptedByMail || !evidence.SentStoreObserved ||
-		evidence.ObservedMessageRef == "" || evidence.ObservationBaseline == nil {
-		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
-	}
+type stubSendSubmitter struct {
+	calls    int
+	lastFrom string
+	lastTo   []string
+	err      error
 }
 
-func TestClientRefusesSentObservationWithoutExactNativeBody(t *testing.T) {
-	tests := []struct {
-		name         string
-		materialized *mail.SendMaterialization
-		wantCode     string
-	}{
-		{name: "missing materialization", wantCode: "send_materialization_missing"},
-		{
-			name: "missing body",
-			materialized: &mail.SendMaterialization{
-				From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-				Subject: "Observed send",
-			},
-			wantCode: "send_materialization_invalid",
-		},
+func (s *stubSendSubmitter) Submit(
+	_ context.Context,
+	_ transport.SubmitConfig,
+	from string,
+	rcpts []string,
+	_ []byte,
+) (transport.SubmitEvidence, error) {
+	s.calls++
+	s.lastFrom, s.lastTo = from, rcpts
+	if s.err != nil {
+		return transport.SubmitEvidence{}, s.err
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store, _ := newSearchFixture(t)
-			closeTestResource(t, store, "test store")
-			installSentMailboxFixture(t, store)
-			spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
-				InvocationStarted: true, AcceptedByMail: true, Materialized: test.materialized,
-			}}
-			spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
-			client := &Client{store: store, fallback: spy}
-			draft := mail.Draft{
-				From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-				Subject: "Observed send", Body: "Body",
-			}
-			baseline, err := client.PrepareSend(context.Background(), draft)
-			if err != nil {
-				t.Fatalf("PrepareSend() error = %v", err)
-			}
-			draft.PreparedSendBaseline = &baseline
-			evidence, err := client.SendDraft(context.Background(), draft)
-			if evidence.SentStoreObserved || errorWithCode(err, test.wantCode) == nil {
-				t.Fatalf("SendDraft() = %+v, error = %v, want %s", evidence, err, test.wantCode)
-			}
-		})
-	}
+	return transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK", MessageID: "<abc123@example.com>"}, nil
 }
 
-func TestClientPropagatesPrivateCleanupFailureAfterObservedSend(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	spy := &fallbackSpy{sendErr: operationError(
-		"attachment_snapshot_cleanup_failed", "private attachment snapshot remained",
-	)}
-	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: spy}
-	draft := mail.Draft{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed send", Body: "Body",
-	}
-	baseline, err := client.PrepareSend(context.Background(), draft)
-	if err != nil {
-		t.Fatalf("PrepareSend() error = %v", err)
-	}
-	draft.PreparedSendBaseline = &baseline
-	evidence, err := client.SendDraft(context.Background(), draft)
-	if !evidence.SentStoreObserved || errorWithCode(err, "attachment_snapshot_cleanup_failed") == nil {
-		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
-	}
+type stubSendMirror struct {
+	calls int
+	err   error
 }
 
-func TestClientObservesBodyOnlyNativeReplyFromMaterializedHeaders(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
-		MailboxRef: inboxRef, Limit: 3,
-	})
-	if err != nil {
-		t.Fatalf("ListMessages() error = %v", err)
+func (s *stubSendMirror) AppendToSent(
+	_ context.Context,
+	_ transport.ImapConfig,
+	_ []byte,
+	_ string,
+) (transport.AppendEvidence, error) {
+	s.calls++
+	if s.err != nil {
+		return transport.AppendEvidence{}, s.err
 	}
-	materializedBody := "Body\n\n--\nMail signature"
-	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
-		InvocationStarted: true, AcceptedByMail: true,
-		Materialized: &mail.SendMaterialization{
-			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-			Subject: "Observed send", Body: &materializedBody, AttachmentCount: 0,
-		},
+	return transport.AppendEvidence{Mailbox: "Sent", Appended: true}, nil
+}
+
+type stubSendCredentials struct {
+	password string
+	loadErr  error
+}
+
+func (c *stubSendCredentials) Load(string) (string, error) {
+	if c.loadErr != nil {
+		return "", c.loadErr
+	}
+	return c.password, nil
+}
+
+func (c *stubSendCredentials) Store(string, string) error { return nil }
+
+func (c *stubSendCredentials) Delete(string) error { return nil }
+
+func TestClientSendDraftSubmitsAndMirrorsWithoutMailApp(t *testing.T) {
+	submitter := &stubSendSubmitter{}
+	mirror := &stubSendMirror{}
+	client := &Client{send: mail.SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubSendCredentials{password: "secret"},
 	}}
-	spy.sendHook = func() { insertSentMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: spy}
 	draft := mail.Draft{
-		Kind: mail.DraftKindReply, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
-		Body: "Body",
+		From: "alice@icloud.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Direct send", Body: "Body",
 	}
-	baseline, err := client.PrepareSend(context.Background(), draft)
-	if err != nil {
-		t.Fatalf("PrepareSend() error = %v", err)
-	}
-	draft.PreparedSendBaseline = &baseline
+
 	evidence, err := client.SendDraft(context.Background(), draft)
-	if err != nil || !evidence.SentStoreObserved || evidence.ObservedMessageRef == "" {
-		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
+	if err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if evidence.ServerResponse != "250 2.0.0 OK" || evidence.MessageID != "<abc123@example.com>" ||
+		evidence.MirrorMailbox != "Sent" || !evidence.MirrorAppended {
+		t.Fatalf("SendDraft() evidence = %+v", evidence)
+	}
+	if submitter.calls != 1 || submitter.lastFrom != "alice@icloud.com" ||
+		len(submitter.lastTo) != 1 || submitter.lastTo[0] != "christopher@example.com" {
+		t.Fatalf("submitter = %+v", submitter)
+	}
+	if mirror.calls != 1 {
+		t.Fatalf("mirror calls = %d", mirror.calls)
 	}
 }
 
-func TestClientObservesForwardWithOriginalAttachmentFingerprint(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
-		MailboxRef: inboxRef, Limit: 3,
-	})
-	if err != nil {
-		t.Fatalf("ListMessages() error = %v", err)
-	}
-	attachmentBytes := []byte("forwarded source bytes")
-	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", sentFixtureSource(101, sentMessageFixture{
-		Body: "Source body", Attachments: []fixtureAttachment{{Name: "invoice.pdf", Content: attachmentBytes}},
-	}))
-	materializedBody := "Body\n\n--\nMail signature"
-	spy := &fallbackSpy{sendEvidence: mail.SendEvidence{
-		InvocationStarted: true, AcceptedByMail: true,
-		Materialized: &mail.SendMaterialization{
-			From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-			Subject: "Observed send", Body: &materializedBody, AttachmentCount: 1,
-		},
+func TestClientSendDraftNeverResubmitsAfterMirrorFailure(t *testing.T) {
+	submitter := &stubSendSubmitter{}
+	mirror := &stubSendMirror{err: &transport.TransportError{
+		Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox",
 	}}
-	spy.sendHook = func() {
-		insertSentMessageFixtureWithDetails(t, store, 104, sentMessageFixture{
-			Body: "Body", RecipientTypes: []int{0},
-			Attachments: []fixtureAttachment{{Name: "invoice.pdf", Content: attachmentBytes}},
-		})
-	}
-	client := &Client{store: store, fallback: spy}
+	client := &Client{send: mail.SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubSendCredentials{password: "secret"},
+	}}
 	draft := mail.Draft{
-		Kind: mail.DraftKindForward, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
-		Body: "Body",
+		From: "alice@icloud.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
+		Subject: "Direct send", Body: "Body",
 	}
-	baseline, err := client.PrepareSend(context.Background(), draft)
-	if err != nil {
-		t.Fatalf("PrepareSend() error = %v", err)
-	}
-	draft.PreparedSendBaseline = &baseline
+
 	evidence, err := client.SendDraft(context.Background(), draft)
-	if err != nil || !evidence.SentStoreObserved {
-		t.Fatalf("SendDraft() = %+v, error = %v", evidence, err)
+	if errorCodeForTest(err) != "imap_append_failed" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if evidence.MessageID != "<abc123@example.com>" || evidence.ServerResponse != "250 2.0.0 OK" ||
+		evidence.MirrorMailbox != "" {
+		t.Fatalf("partial evidence = %+v", evidence)
+	}
+	if submitter.calls != 1 {
+		t.Fatalf("submitter calls = %d, want exactly one submission", submitter.calls)
 	}
 }
 
-func TestClientRefusesUnpreparedSendBeforeAutomation(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	spy := &fallbackSpy{}
-	client := &Client{store: store, fallback: spy}
+func TestClientSendDraftWithoutTransportIsRejected(t *testing.T) {
+	client := &Client{}
+	_, err := client.SendDraft(context.Background(), mail.Draft{From: "alice@icloud.com"})
+	if errorCodeForTest(err) != "send_transport_unavailable" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+}
+
+func TestClientSendDraftMissingCredentialsBlocksSubmission(t *testing.T) {
+	submitter := &stubSendSubmitter{}
+	mirror := &stubSendMirror{}
+	client := &Client{send: mail.SendTransport{
+		Submitter: submitter, Mirror: mirror,
+		Credentials: &stubSendCredentials{loadErr: os.ErrNotExist},
+	}}
 	_, err := client.SendDraft(context.Background(), mail.Draft{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Unprepared", Body: "Body",
+		From: "alice@icloud.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
 	})
-	if errorCodeForTest(err) != "send_prepare_required" || spy.sendCalls != 0 {
-		t.Fatalf("SendDraft() error = %v, automation calls = %d", err, spy.sendCalls)
+	if errorCodeForTest(err) != "smtp_credentials_missing" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("submitter calls = %d, mirror calls = %d", submitter.calls, mirror.calls)
 	}
 }
 

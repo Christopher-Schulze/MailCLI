@@ -12,7 +12,57 @@ import (
 	"testing"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
+
+type cliSubmitter struct{ calls int }
+
+func (s *cliSubmitter) Submit(
+	context.Context,
+	transport.SubmitConfig,
+	string,
+	[]string,
+	[]byte,
+) (transport.SubmitEvidence, error) {
+	s.calls++
+	return transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK", MessageID: "<abc123@icloud.com>"}, nil
+}
+
+type cliMirror struct {
+	calls int
+	err   error
+}
+
+func (m *cliMirror) AppendToSent(
+	context.Context,
+	transport.ImapConfig,
+	[]byte,
+	string,
+) (transport.AppendEvidence, error) {
+	m.calls++
+	if m.err != nil {
+		return transport.AppendEvidence{}, m.err
+	}
+	return transport.AppendEvidence{Mailbox: "Sent", Appended: true}, nil
+}
+
+type cliCredentials struct{}
+
+func (cliCredentials) Load(string) (string, error) { return "secret", nil }
+func (cliCredentials) Store(string, string) error  { return nil }
+func (cliCredentials) Delete(string) error         { return nil }
+
+func mirrorFailure() *cliMirror {
+	return &cliMirror{err: &transport.TransportError{
+		Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox",
+	}}
+}
+
+func newTransportTestService(root string, mirror *cliMirror) *mail.Service {
+	return mail.NewServiceWithTransport(nil, root, mail.SendTransport{
+		Submitter: &cliSubmitter{}, Mirror: mirror, Credentials: cliCredentials{},
+	})
+}
 
 type testGateway struct{}
 
@@ -22,15 +72,6 @@ type failingGateway struct {
 
 type busyProbeGateway struct {
 	testGateway
-}
-
-type unknownSendGateway struct {
-	testGateway
-}
-
-type reconciledSendGateway struct {
-	testGateway
-	sends int
 }
 
 type failingWriter struct{}
@@ -88,10 +129,6 @@ func (testGateway) SaveDraft(context.Context, mail.Draft) (mail.MessageSummary, 
 	return mail.MessageSummary{Ref: "msg_saved", Subject: "Saved"}, nil
 }
 
-func (testGateway) SendDraft(context.Context, mail.Draft) (mail.SendEvidence, error) {
-	return mail.SendEvidence{InvocationStarted: true, AcceptedByMail: true}, nil
-}
-
 func (testGateway) MarkMessage(_ context.Context, request mail.MarkMessageRequest) (mail.MessageSummary, error) {
 	return mail.MessageSummary{Ref: request.Ref, Read: request.Read != nil && *request.Read}, nil
 }
@@ -132,32 +169,6 @@ func (busyProbeGateway) Probe(context.Context, bool) mail.DiagnosticReport {
 	}}}
 }
 
-func (unknownSendGateway) SendDraft(context.Context, mail.Draft) (mail.SendEvidence, error) {
-	return mail.SendEvidence{InvocationStarted: true}, context.DeadlineExceeded
-}
-
-func (g *reconciledSendGateway) PrepareSend(context.Context, mail.Draft) (mail.SendObservationBaseline, error) {
-	return mail.SendObservationBaseline{
-		StoreUUID: "test-store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{2},
-	}, nil
-}
-
-func (g *reconciledSendGateway) SendDraft(context.Context, mail.Draft) (mail.SendEvidence, error) {
-	g.sends++
-	return mail.SendEvidence{InvocationStarted: true}, context.DeadlineExceeded
-}
-
-func (g *reconciledSendGateway) ReconcileSend(
-	context.Context,
-	mail.Draft,
-	mail.SendAttempt,
-) (mail.SendEvidence, error) {
-	return mail.SendEvidence{
-		InvocationStarted: true, AcceptedByMail: true, SentStoreObserved: true,
-		ObservedMessageRef: "msg_reconciled",
-	}, nil
-}
-
 func TestRunTable(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -167,7 +178,7 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.1.0"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.2.0"},
 		{name: "update help", args: []string{"update", "--help"}, wantCode: 0, wantStdout: "mailcli update [options]"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
@@ -411,12 +422,11 @@ func TestDraftSaveAndOpenCommands(t *testing.T) {
 	}
 }
 
-func TestDraftSendUnknownJSONPreservesOutcomeEvidence(t *testing.T) {
-	service := mail.NewServiceWithDraftRoot(unknownSendGateway{}, filepath.Join(t.TempDir(), "drafts"))
+func TestDraftSendWithoutTransportIsJSONFailure(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
-		From:    "mail@example.com",
-		To:      []mail.Recipient{{Address: "recipient@example.com"}},
-		Subject: "Unknown", Body: "Body",
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Send", Body: "Body",
 	}})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
@@ -429,18 +439,16 @@ func TestDraftSendUnknownJSONPreservesOutcomeEvidence(t *testing.T) {
 	)
 	if code != 1 || stderr.Len() != 0 ||
 		!strings.Contains(stdout.String(), `"ok":false`) ||
-		!strings.Contains(stdout.String(), `"code":"send_outcome_unknown"`) ||
-		!strings.Contains(stdout.String(), `"outcome":"outcome_unknown"`) ||
-		!strings.Contains(stdout.String(), `"draft_retained":true`) {
+		!strings.Contains(stdout.String(), `"code":"send_transport_unavailable"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 
-func TestDraftSendAcceptedWithoutObservationIsJSONFailure(t *testing.T) {
-	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+func TestDraftSendMirrorPendingJSONPreservesOutcomeEvidence(t *testing.T) {
+	service := newTransportTestService(filepath.Join(t.TempDir(), "drafts"), mirrorFailure())
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
-		From: "mail@example.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
-		Subject: "Accepted", Body: "Body",
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Mirror pending", Body: "Body",
 	}})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
@@ -453,25 +461,25 @@ func TestDraftSendAcceptedWithoutObservationIsJSONFailure(t *testing.T) {
 	)
 	if code != 1 || stderr.Len() != 0 ||
 		!strings.Contains(stdout.String(), `"ok":false`) ||
-		!strings.Contains(stdout.String(), `"code":"send_not_observed"`) ||
-		!strings.Contains(stdout.String(), `"outcome":"accepted_by_mail"`) ||
-		!strings.Contains(stdout.String(), `"draft_retained":true`) {
+		!strings.Contains(stdout.String(), `"code":"imap_append_failed"`) ||
+		!strings.Contains(stdout.String(), `"outcome":"sent_mirror_pending"`) ||
+		!strings.Contains(stdout.String(), `"draft_retained":true`) ||
+		!strings.Contains(stdout.String(), `"attempt_id":"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 
-func TestDraftReconcileJSONNeverSendsAgain(t *testing.T) {
-	gateway := &reconciledSendGateway{}
-	service := mail.NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+func TestDraftReconcileJSONReplaysWithoutSendingAgain(t *testing.T) {
+	service := newTransportTestService(filepath.Join(t.TempDir(), "drafts"), mirrorFailure())
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
-		From: "mail@example.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
 		Subject: "Reconcile", Body: "Body",
 	}})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
 	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil {
-		t.Fatal("SendDraft() error = nil, want unknown outcome")
+		t.Fatal("SendDraft() error = nil, want mirror pending")
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -479,11 +487,11 @@ func TestDraftReconcileJSONNeverSendsAgain(t *testing.T) {
 		context.Background(), service,
 		[]string{"drafts", "reconcile", "--ref", draft.Ref, "--json"}, &stdout, &stderr,
 	)
-	if code != 0 || stderr.Len() != 0 || gateway.sends != 1 ||
+	if code != 1 ||
 		!strings.Contains(stdout.String(), `"command":"drafts.reconcile"`) ||
-		!strings.Contains(stdout.String(), `"outcome":"sent_store_observed"`) ||
+		!strings.Contains(stdout.String(), `"outcome":"sent_mirror_pending"`) ||
 		!strings.Contains(stdout.String(), `"reconciled":true`) {
-		t.Fatalf("code = %d, sends = %d, stdout = %q, stderr = %q", code, gateway.sends, stdout.String(), stderr.String())
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 

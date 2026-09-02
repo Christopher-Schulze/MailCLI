@@ -1,0 +1,16 @@
+From: sender@example.com
+To: <alice@example.com>
+Subject: Visible to To only
+Date: <DATE>
+Message-ID: <MESSAGE-ID>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="<BOUNDARY>"
+
+--<BOUNDARY>
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+The BCC recipient must never appear.
+
+--<BOUNDARY>--
