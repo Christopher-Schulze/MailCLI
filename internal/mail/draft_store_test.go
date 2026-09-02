@@ -460,3 +460,51 @@ func errorCode(err error) string {
 	}
 	return ""
 }
+
+func TestDiscardDraftRemovesLockFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	draft := createSendTestDraft(t, service)
+	if err := service.DiscardDraft(draft.Ref); err != nil {
+		t.Fatalf("DiscardDraft() error = %v", err)
+	}
+	assertNoDraftLockFiles(t, root)
+}
+
+func TestSendDraftRemovesLockFileOnSuccess(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	result, err := service.SendDraft(context.Background(), draft.Ref)
+	if err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if result.Outcome != SendOutcomeSent {
+		t.Fatalf("SendDraft() outcome = %s, want %s", result.Outcome, SendOutcomeSent)
+	}
+	assertNoDraftLockFiles(t, root)
+}
+
+func TestReconcileUnknownDraftLeavesNoLockFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	_, err := service.ReconcileDraft(context.Background(), "draft_000000000000000000000000")
+	if errorCode(err) != "not_found" {
+		t.Fatalf("ReconcileDraft() error = %v, want not_found", err)
+	}
+	assertNoDraftLockFiles(t, root)
+}
+
+func assertNoDraftLockFiles(t *testing.T, root string) {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".lock") {
+			t.Fatalf("orphan draft lock left behind: %s", entry.Name())
+		}
+	}
+}

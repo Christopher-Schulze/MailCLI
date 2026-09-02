@@ -115,7 +115,7 @@ func (s *Service) UpdateDraft(request UpdateDraftRequest) (result Draft, resultE
 		return Draft{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	current, err := readDraftFile(root, request.Ref)
+	current, err := readDraftForMutation(root, request.Ref)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -162,7 +162,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		return SendResult{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	draft, err := readDraftFile(root, ref)
+	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -304,7 +304,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return SendResult{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	draft, err := readDraftFile(root, ref)
+	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -617,7 +617,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 		return SavedDraft{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	draft, err := readDraftFile(root, ref)
+	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SavedDraft{}, err
 	}
@@ -1453,6 +1453,31 @@ func removeDraftSaveAttempt(root string, ref string) error {
 	return syncDirectory(root)
 }
 
+func removeDraftLockFile(root string, ref string) error {
+	path, err := draftLockPath(root, ref)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove draft lock: %w", err)
+	}
+	return nil
+}
+
+// readDraftForMutation reads a draft while the caller holds its exclusive lease.
+// On a missing draft the lock file created by acquireDraftLease is removed, so a
+// failed mutation leaves no orphan lock; the held flock makes the unlink race-free.
+func readDraftForMutation(root string, ref string) (Draft, error) {
+	draft, err := readDraftFile(root, ref)
+	if err != nil {
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.Code == "not_found" {
+			err = errors.Join(err, removeDraftLockFile(root, ref))
+		}
+	}
+	return draft, err
+}
+
 func resultForAttempt(ref string, attempt SendAttempt, draftRetained bool) SendResult {
 	return SendResult{
 		DraftRef: ref, AttemptID: attempt.ID, Outcome: attempt.Outcome,
@@ -1504,14 +1529,17 @@ func discardDraftFiles(root string, ref string) error {
 	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
-			return &OperationError{Code: "not_found", Message: "draft not found"}
+			return errors.Join(
+				&OperationError{Code: "not_found", Message: "draft not found"},
+				removeDraftLockFile(root, ref),
+			)
 		}
 		return fmt.Errorf("discard draft: %w", err)
 	}
 	if err := syncDirectory(root); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref))
+	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), removeDraftLockFile(root, ref))
 }
 
 func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) {
