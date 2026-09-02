@@ -64,8 +64,15 @@ func Handoff(ctx context.Context, request Request) (Result, error) {
 		return Result{}, fmt.Errorf("compose handoff returned no result")
 	}
 	defer C.free(unsafe.Pointer(output))
+	return parseHandoffResponse(C.GoString(output))
+}
+
+// parseHandoffResponse decodes the JSON response from the native compose
+// handoff into a typed Result or Error. It is extracted from Handoff so the
+// parsing logic is unit-testable without invoking AppKit.
+func parseHandoffResponse(raw string) (Result, error) {
 	var response nativeResponse
-	if err := json.Unmarshal([]byte(C.GoString(output)), &response); err != nil {
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
 		return Result{}, fmt.Errorf("decode compose handoff: %w", err)
 	}
 	if !response.OK {

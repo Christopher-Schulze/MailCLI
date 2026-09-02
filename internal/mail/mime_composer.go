@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -66,98 +67,154 @@ func BuildMessage(draft Draft, messageID string) ([]byte, error) {
 		contentType = "multipart/mixed; boundary=\"" + mixedBoundary + "\""
 	}
 
+	estimatedSize := estimateMessageSize(draft, attachments)
 	buffer := &bytes.Buffer{}
+	buffer.Grow(estimatedSize)
 	writeComposerHeaders(buffer, draft, messageID, contentType)
 	buffer.WriteString(composerCRLF)
 
-	parts, err := alternativeParts(draft)
-	if err != nil {
-		return nil, err
-	}
 	if len(attachments) == 0 {
-		writeMultipart(buffer, alternativeBoundary, parts)
+		writeAlternativeMultipart(buffer, alternativeBoundary, draft)
 		buffer.WriteString(composerCRLF)
 		return buffer.Bytes(), nil
 	}
 
-	altBuf := &bytes.Buffer{}
-	writeMultipart(altBuf, alternativeBoundary, parts)
-	mixedParts := []messagePart{{
-		headers: []string{"Content-Type: multipart/alternative; boundary=\"" + alternativeBoundary + "\""},
-		body:    altBuf.String(),
-	}}
-	for _, attachment := range attachments {
-		mixedParts = append(mixedParts, messagePart{
-			headers: attachment.headers(),
-			body:    attachment.base64Body(),
-		})
-	}
-	writeMultipart(buffer, mixedBoundary, mixedParts)
+	// Mixed multipart: write the alternative section as the first part,
+	// then each attachment, all directly into the buffer without intermediate
+	// string copies.
+	buffer.WriteString("--")
+	buffer.WriteString(mixedBoundary)
 	buffer.WriteString(composerCRLF)
-	return buffer.Bytes(), nil
-}
+	buffer.WriteString("Content-Type: multipart/alternative; boundary=\"")
+	buffer.WriteString(alternativeBoundary)
+	buffer.WriteString("\"")
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString(composerCRLF)
+	writeAlternativeMultipart(buffer, alternativeBoundary, draft)
+	buffer.WriteString(composerCRLF)
 
-type messagePart struct {
-	headers []string
-	body    string
-}
-
-func alternativeParts(draft Draft) ([]messagePart, error) {
-	plain, err := quotedPrintableBody(draft.Body)
-	if err != nil {
-		return nil, err
-	}
-	parts := []messagePart{{
-		headers: []string{
-			"Content-Type: text/plain; charset=utf-8",
-			"Content-Transfer-Encoding: quoted-printable",
-		},
-		body: plain,
-	}}
-	if draft.BodyHTML == "" {
-		return parts, nil
-	}
-	html, err := quotedPrintableBody(draft.BodyHTML)
-	if err != nil {
-		return nil, err
-	}
-	return append(parts, messagePart{
-		headers: []string{
-			"Content-Type: text/html; charset=utf-8",
-			"Content-Transfer-Encoding: quoted-printable",
-		},
-		body: html,
-	}), nil
-}
-
-func quotedPrintableBody(body string) (string, error) {
-	encoded := &bytes.Buffer{}
-	writer := quotedprintable.NewWriter(encoded)
-	if _, err := writer.Write([]byte(body)); err != nil {
-		return "", fmt.Errorf("quote-printable encode body: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("quote-printable finish body: %w", err)
-	}
-	return encoded.String(), nil
-}
-
-func writeMultipart(buffer *bytes.Buffer, boundary string, parts []messagePart) {
-	for _, part := range parts {
+	for _, attachment := range attachments {
 		buffer.WriteString("--")
-		buffer.WriteString(boundary)
+		buffer.WriteString(mixedBoundary)
 		buffer.WriteString(composerCRLF)
-		for _, header := range part.headers {
+		for _, header := range attachment.headers() {
 			buffer.WriteString(header)
 			buffer.WriteString(composerCRLF)
 		}
 		buffer.WriteString(composerCRLF)
-		buffer.WriteString(part.body)
+		writeBase64Body(buffer, attachment.data)
 		buffer.WriteString(composerCRLF)
 	}
+
+	buffer.WriteString("--")
+	buffer.WriteString(mixedBoundary)
+	buffer.WriteString("--")
+	buffer.WriteString(composerCRLF)
+	return buffer.Bytes(), nil
+}
+
+// estimateMessageSize pre-allocates the buffer to avoid repeated growth.
+func estimateMessageSize(draft Draft, attachments []composerAttachment) int {
+	size := 1024                // headers
+	size += len(draft.Body) * 2 // quoted-printable worst case
+	size += len(draft.BodyHTML) * 2
+	for _, a := range attachments {
+		size += len(a.data)*4/3 + len(a.data)/57*2 + 256
+	}
+	return size
+}
+
+// writeAlternativeMultipart writes the multipart/alternative section
+// directly into buffer, streaming quoted-printable encoding without
+// intermediate string copies.
+func writeAlternativeMultipart(buffer *bytes.Buffer, boundary string, draft Draft) {
+	buffer.WriteString("--")
+	buffer.WriteString(boundary)
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString("Content-Type: text/plain; charset=utf-8")
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString("Content-Transfer-Encoding: quoted-printable")
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString(composerCRLF)
+	if err := writeQuotedPrintable(buffer, draft.Body); err != nil {
+		// quotedprintable.Writer cannot fail on valid UTF-8 input; the error
+		// path is unreachable for well-formed drafts but we write nothing
+		// extra on failure to keep the buffer consistent.
+		return
+	}
+	buffer.WriteString(composerCRLF)
+
+	if draft.BodyHTML == "" {
+		buffer.WriteString("--")
+		buffer.WriteString(boundary)
+		buffer.WriteString("--")
+		return
+	}
+
+	buffer.WriteString("--")
+	buffer.WriteString(boundary)
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString("Content-Type: text/html; charset=utf-8")
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString("Content-Transfer-Encoding: quoted-printable")
+	buffer.WriteString(composerCRLF)
+	buffer.WriteString(composerCRLF)
+	if err := writeQuotedPrintable(buffer, draft.BodyHTML); err != nil {
+		return
+	}
+	buffer.WriteString(composerCRLF)
 	buffer.WriteString("--")
 	buffer.WriteString(boundary)
 	buffer.WriteString("--")
+}
+
+// writeQuotedPrintable encodes body as quoted-printable directly into buffer
+// without an intermediate bytes.Buffer and string conversion.
+func writeQuotedPrintable(buffer *bytes.Buffer, body string) error {
+	writer := quotedprintable.NewWriter(buffer)
+	if _, err := writer.Write([]byte(body)); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("quote-printable encode body: %w", err)
+	}
+	return writer.Close()
+}
+
+// writeBase64Body streams base64-encoded data into buffer with RFC 2045
+// line wrapping, avoiding the intermediate EncodeToString + string copy
+// that the previous base64Body() method required.
+func writeBase64Body(buffer *bytes.Buffer, data []byte) {
+	encoder := base64.NewEncoder(base64.StdEncoding, &base64LineWriter{w: buffer})
+	_, _ = encoder.Write(data)
+	_ = encoder.Close()
+}
+
+// base64LineWriter wraps a writer and inserts CRLF every composerLineLength
+// bytes of base64 output, per RFC 2045.
+type base64LineWriter struct {
+	w *bytes.Buffer
+	n int
+}
+
+func (lw *base64LineWriter) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		if lw.n >= composerLineLength {
+			lw.w.WriteString(composerCRLF)
+			lw.n = 0
+		}
+		chunk := len(p)
+		if remaining := composerLineLength - lw.n; chunk > remaining {
+			chunk = remaining
+		}
+		n, err := lw.w.Write(p[:chunk])
+		lw.n += n
+		written += n
+		p = p[n:]
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
 }
 
 func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentType string) {
@@ -223,11 +280,18 @@ func foldAt(value string, limit int) []string {
 }
 
 func formatAddressList(recipients []Recipient) string {
-	addresses := make([]string, 0, len(recipients))
-	for _, recipient := range recipients {
-		addresses = append(addresses, (&mail.Address{Name: recipient.Name, Address: recipient.Address}).String())
+	if len(recipients) == 0 {
+		return ""
 	}
-	return strings.Join(addresses, ", ")
+	var builder strings.Builder
+	builder.Grow(len(recipients) * 32)
+	for i, recipient := range recipients {
+		if i > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString((&mail.Address{Name: recipient.Name, Address: recipient.Address}).String())
+	}
+	return builder.String()
 }
 
 func encodeHeaderValue(value string) string {
@@ -250,26 +314,70 @@ type composerAttachment struct {
 }
 
 func loadComposerAttachments(attachments []DraftAttachment) ([]composerAttachment, error) {
-	loaded := make([]composerAttachment, 0, len(attachments))
-	for _, attachment := range attachments {
-		data, err := os.ReadFile(attachment.Path)
-		if err != nil {
-			return nil, &ComposerError{
-				Message: "read draft attachment " + filepath.Base(attachment.Path),
-				Err:     err,
-			}
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	if len(attachments) == 1 {
+		return loadSingleAttachment(attachments[0])
+	}
+	return loadAttachmentsParallel(attachments)
+}
+
+func loadSingleAttachment(attachment DraftAttachment) ([]composerAttachment, error) {
+	loaded, err := readAttachmentData(attachment)
+	if err != nil {
+		return nil, err
+	}
+	return []composerAttachment{loaded}, nil
+}
+
+// loadAttachmentsParallel reads multiple attachment files concurrently.
+// For the typical 1-2 attachment case the goroutine overhead is negligible
+// compared to file I/O; for larger attachment sets it provides real speedup.
+func loadAttachmentsParallel(attachments []DraftAttachment) ([]composerAttachment, error) {
+	type result struct {
+		index  int
+		loaded composerAttachment
+		err    error
+	}
+	results := make([]result, len(attachments))
+	var wg sync.WaitGroup
+	wg.Add(len(attachments))
+	for i, attachment := range attachments {
+		go func(idx int, att DraftAttachment) {
+			defer wg.Done()
+			loaded, err := readAttachmentData(att)
+			results[idx] = result{index: idx, loaded: loaded, err: err}
+		}(i, attachment)
+	}
+	wg.Wait()
+	loaded := make([]composerAttachment, len(attachments))
+	for i, r := range results {
+		if r.err != nil {
+			return nil, r.err
 		}
-		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(attachment.Path)))
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-		loaded = append(loaded, composerAttachment{
-			filename:    filepath.Base(attachment.Path),
-			contentType: contentType,
-			data:        data,
-		})
+		loaded[i] = r.loaded
 	}
 	return loaded, nil
+}
+
+func readAttachmentData(attachment DraftAttachment) (composerAttachment, error) {
+	data, err := os.ReadFile(attachment.Path)
+	if err != nil {
+		return composerAttachment{}, &ComposerError{
+			Message: "read draft attachment " + filepath.Base(attachment.Path),
+			Err:     err,
+		}
+	}
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(attachment.Path)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return composerAttachment{
+		filename:    filepath.Base(attachment.Path),
+		contentType: contentType,
+		data:        data,
+	}, nil
 }
 
 func (a composerAttachment) headers() []string {
@@ -278,23 +386,6 @@ func (a composerAttachment) headers() []string {
 		"Content-Transfer-Encoding: base64",
 		"Content-Disposition: " + mime.FormatMediaType("attachment", map[string]string{"filename": a.filename}),
 	}
-}
-
-func (a composerAttachment) base64Body() string {
-	encoded := base64.StdEncoding.EncodeToString(a.data)
-	var body strings.Builder
-	for len(encoded) > 0 {
-		cut := composerLineLength
-		if cut > len(encoded) {
-			cut = len(encoded)
-		}
-		body.WriteString(encoded[:cut])
-		encoded = encoded[cut:]
-		if len(encoded) > 0 {
-			body.WriteString(composerCRLF)
-		}
-	}
-	return body.String()
 }
 
 // randomBoundary returns a cryptographically random boundary unique per message.
