@@ -223,7 +223,9 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.get", responseData{Message: &message})
 	}
-	writeMessage(stdout, message)
+	if err := writeMessage(stdout, message); err != nil {
+		return 1
+	}
 	return 0
 }
 
@@ -439,22 +441,49 @@ func writeMessagePage(stdout io.Writer, command string, page mail.MessagePage, j
 	return 0
 }
 
-func writeMessage(stdout io.Writer, message mail.Message) {
-	writeFormat(stdout, "Ref: %s\n", message.Summary.Ref)
-	writeFormat(stdout, "From: %s\n", message.Summary.Sender)
-	writeFormat(stdout, "To: %s\n", formatRecipients(message.To))
-	writeFormat(stdout, "CC: %s\n", formatRecipients(message.CC))
-	writeFormat(stdout, "BCC: %s\n", formatRecipients(message.BCC))
-	writeFormat(stdout, "Subject: %s\n", message.Summary.Subject)
-	writeFormat(stdout, "Date received: %s\n", message.Summary.DateReceived)
-	writeFormat(stdout, "Attachments: %d\n", len(message.Attachments))
-	writeFormat(stdout, "Content source: %s\n", message.ContentSource)
-	writeFormat(stdout, "Content complete: %t\n", message.ContentComplete)
-	if len(message.MissingParts) > 0 {
-		writeFormat(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", "))
+func writeMessage(stdout io.Writer, message mail.Message) error {
+	if _, err := fmt.Fprintf(stdout, "Ref: %s\n", message.Summary.Ref); err != nil {
+		return err
 	}
-	writeLine(stdout)
-	writeRaw(stdout, message.Content)
+	if _, err := fmt.Fprintf(stdout, "From: %s\n", message.Summary.Sender); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "To: %s\n", formatRecipients(message.To)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "CC: %s\n", formatRecipients(message.CC)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "BCC: %s\n", formatRecipients(message.BCC)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Subject: %s\n", message.Summary.Subject); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Date received: %s\n", message.Summary.DateReceived); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Attachments: %d\n", len(message.Attachments)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Content source: %s\n", message.ContentSource); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stdout, "Content complete: %t\n", message.ContentComplete); err != nil {
+		return err
+	}
+	if len(message.MissingParts) > 0 {
+		if _, err := fmt.Fprintf(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", ")); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(stdout); err != nil {
+		return err
+	}
+	if _, err := stdout.Write([]byte(message.Content)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func formatRecipients(recipients []mail.Recipient) string {

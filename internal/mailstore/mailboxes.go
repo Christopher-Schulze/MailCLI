@@ -16,6 +16,7 @@ type mailboxRecord struct {
 	Location     mailboxLocation
 	MessageCount int
 	UnreadCount  int
+	pathKey      string // cached mailboxPathKey(Location.AccountID, Location.VisiblePath)
 }
 
 type mailboxCacheNode struct {
@@ -39,7 +40,7 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 		return nil, err
 	}
 	recordsByPath := make(map[string]mailboxRecord, len(records))
-	accountSchemes := make(map[string]string)
+	accountSchemes := make(map[string]string, len(s.activeAccountKeys))
 	for key := range s.activeAccountKeys {
 		location, err := parseAccountRoot(key + "/")
 		if err != nil {
@@ -53,7 +54,7 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 		if accountID != "" && record.Location.AccountID != accountID {
 			continue
 		}
-		recordsByPath[mailboxPathKey(record.Location.AccountID, record.Location.VisiblePath)] = record
+		recordsByPath[record.pathKey] = record
 		accountSchemes[record.Location.AccountID] = record.Location.Scheme
 	}
 	mailboxes := make([]mail.Mailbox, 0, len(records))
@@ -80,8 +81,7 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 		if accountID != "" && record.Location.AccountID != accountID {
 			continue
 		}
-		key := mailboxPathKey(record.Location.AccountID, record.Location.VisiblePath)
-		if _, exists := seen[key]; exists {
+		if _, exists := seen[record.pathKey]; exists {
 			continue
 		}
 		item, err := mapMailbox(record.Location, record.MessageCount, record.UnreadCount, true)
@@ -89,12 +89,16 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 			return nil, err
 		}
 		mailboxes = append(mailboxes, item)
-		seen[key] = struct{}{}
+		seen[record.pathKey] = struct{}{}
+	}
+	// Pre-compute sort keys to avoid O(n log n) string allocations inside
+	// the sort comparator.
+	sortKeys := make([]string, len(mailboxes))
+	for index, mailbox := range mailboxes {
+		sortKeys[index] = mailbox.AccountRef + "\x00" + strings.Join(mailbox.Path, "\x00")
 	}
 	sort.Slice(mailboxes, func(left int, right int) bool {
-		leftKey := mailboxes[left].AccountRef + "\x00" + strings.Join(mailboxes[left].Path, "\x00")
-		rightKey := mailboxes[right].AccountRef + "\x00" + strings.Join(mailboxes[right].Path, "\x00")
-		return leftKey < rightKey
+		return sortKeys[left] < sortKeys[right]
 	})
 	return mailboxes, nil
 }
@@ -125,6 +129,7 @@ func (s *Store) loadMailboxRecords(ctx context.Context) (result []mailboxRecord,
 			continue
 		}
 		record.Location = location
+		record.pathKey = mailboxPathKey(location.AccountID, location.VisiblePath)
 		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
@@ -241,7 +246,7 @@ func mailboxPathKey(accountID string, path []string) string {
 func findMailboxRecord(records []mailboxRecord, accountID string, path []string) (mailboxRecord, bool) {
 	wanted := mailboxPathKey(accountID, path)
 	for _, record := range records {
-		if mailboxPathKey(record.Location.AccountID, record.Location.VisiblePath) == wanted {
+		if record.pathKey == wanted {
 			return record, true
 		}
 	}

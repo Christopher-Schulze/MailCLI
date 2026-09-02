@@ -131,7 +131,9 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.open", responseData{Message: &message})
 	}
-	writeMessage(stdout, message)
+	if err := writeMessage(stdout, message); err != nil {
+		return 1
+	}
 	return 0
 }
 

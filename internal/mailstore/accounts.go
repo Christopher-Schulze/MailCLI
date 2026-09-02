@@ -26,7 +26,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 	}
 	recordsByPath := make(map[string]mailboxRecord, len(records))
 	for _, record := range records {
-		recordsByPath[mailboxPathKey(record.Location.AccountID, record.Location.VisiblePath)] = record
+		recordsByPath[record.pathKey] = record
 	}
 	accounts := make([]mail.Account, 0, len(s.activeAccounts))
 	for _, location := range s.activeAccounts {

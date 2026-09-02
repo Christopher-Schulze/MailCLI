@@ -482,9 +482,10 @@ func (s *Store) dispatchSearchJobs(
 			}
 			return true, nil
 		}
-		*reservedBytes += source.length
 		select {
 		case jobs <- searchJob{index: index, item: item, source: source}:
+			// Only count reserved bytes after the job was successfully sent.
+			*reservedBytes += source.length
 		case <-ctx.Done():
 			resultErr := ctx.Err()
 			joinCloseError(&resultErr, source, "cancelled search source")
