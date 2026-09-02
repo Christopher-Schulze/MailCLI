@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"mailcli/internal/releaseauth"
 )
 
 func TestDecodePublicKeyValid(t *testing.T) {
@@ -216,5 +220,190 @@ func TestRunUnknownCommand(t *testing.T) {
 	code := run([]string{"unknown"}, os.Stdout, os.Stderr)
 	if code != 2 {
 		t.Errorf("run(unknown) = %d, want 2", code)
+	}
+}
+
+func TestRunKeygenWritesPrivateKeyAndPrintsPublic(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "private.key")
+	var stdout bytes.Buffer
+	err := runKeygen([]string{"-private", privatePath}, &stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("runKeygen error = %v", err)
+	}
+	info, err := os.Lstat(privatePath)
+	if err != nil {
+		t.Fatalf("private key not written: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("private key mode = %o, want 0600", info.Mode().Perm())
+	}
+	publicEncoded := strings.TrimSpace(stdout.String())
+	if publicEncoded == "" {
+		t.Fatal("public key not printed to stdout")
+	}
+	public, err := decodePublicKey(publicEncoded)
+	if err != nil {
+		t.Fatalf("printed public key invalid: %v", err)
+	}
+	if len(public) != ed25519.PublicKeySize {
+		t.Errorf("public key length = %d, want %d", len(public), ed25519.PublicKeySize)
+	}
+}
+
+func TestRunKeygenRejectsRelativePath(t *testing.T) {
+	err := runKeygen([]string{"-private", "relative/path"}, os.Stdout, os.Stderr)
+	if err == nil {
+		t.Fatal("runKeygen error = nil, want relative path rejection")
+	}
+}
+
+func TestRunKeygenRejectsExtraArgs(t *testing.T) {
+	err := runKeygen([]string{"-private", "/tmp/key", "extra"}, os.Stdout, os.Stderr)
+	if err == nil {
+		t.Fatal("runKeygen error = nil, want extra args rejection")
+	}
+}
+
+func TestRunSignAndVerifyRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "private.key")
+	inputPath := filepath.Join(dir, "SHA256SUMS")
+	outputPath := filepath.Join(dir, "SHA256SUMS.sig")
+
+	var keygenStdout bytes.Buffer
+	if err := runKeygen([]string{"-private", privatePath}, &keygenStdout, os.Stderr); err != nil {
+		t.Fatalf("runKeygen error = %v", err)
+	}
+	publicEncoded := strings.TrimSpace(keygenStdout.String())
+
+	manifest := []byte("abc123 archive.tar.gz\n")
+	if err := os.WriteFile(inputPath, manifest, 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	if err := runSign([]string{
+		"-private", privatePath,
+		"-input", inputPath,
+		"-output", outputPath,
+		"-expected-public", publicEncoded,
+	}, os.Stderr); err != nil {
+		t.Fatalf("runSign error = %v", err)
+	}
+
+	if _, err := os.Lstat(outputPath); err != nil {
+		t.Fatalf("signature not written: %v", err)
+	}
+
+	if err := runVerify([]string{
+		"-public", publicEncoded,
+		"-input", inputPath,
+		"-signature", outputPath,
+	}, os.Stderr); err != nil {
+		t.Fatalf("runVerify error = %v", err)
+	}
+}
+
+func TestRunSignRejectsWrongPublicKey(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "private.key")
+	inputPath := filepath.Join(dir, "input.txt")
+	outputPath := filepath.Join(dir, "sig.txt")
+
+	var keygenStdout bytes.Buffer
+	if err := runKeygen([]string{"-private", privatePath}, &keygenStdout, os.Stderr); err != nil {
+		t.Fatalf("runKeygen error = %v", err)
+	}
+	correctPublic := strings.TrimSpace(keygenStdout.String())
+
+	otherPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error = %v", err)
+	}
+	wrongPublic := base64.StdEncoding.EncodeToString(otherPublic)
+
+	if err := os.WriteFile(inputPath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	err = runSign([]string{
+		"-private", privatePath,
+		"-input", inputPath,
+		"-output", outputPath,
+		"-expected-public", wrongPublic,
+	}, os.Stderr)
+	if err == nil {
+		t.Fatal("runSign error = nil, want public key mismatch")
+	}
+	_ = correctPublic
+}
+
+func TestRunVerifyRejectsTamperedManifest(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "private.key")
+	inputPath := filepath.Join(dir, "input.txt")
+	outputPath := filepath.Join(dir, "sig.txt")
+
+	var keygenStdout bytes.Buffer
+	if err := runKeygen([]string{"-private", privatePath}, &keygenStdout, os.Stderr); err != nil {
+		t.Fatalf("runKeygen error = %v", err)
+	}
+	publicEncoded := strings.TrimSpace(keygenStdout.String())
+
+	if err := os.WriteFile(inputPath, []byte("original content"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	if err := runSign([]string{
+		"-private", privatePath,
+		"-input", inputPath,
+		"-output", outputPath,
+		"-expected-public", publicEncoded,
+	}, os.Stderr); err != nil {
+		t.Fatalf("runSign error = %v", err)
+	}
+
+	if err := os.WriteFile(inputPath, []byte("tampered content"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+
+	if err := runVerify([]string{
+		"-public", publicEncoded,
+		"-input", inputPath,
+		"-signature", outputPath,
+	}, os.Stderr); err == nil {
+		t.Fatal("runVerify error = nil, want tamper detection")
+	}
+}
+
+func TestRunVerifyRejectsMissingInput(t *testing.T) {
+	dir := t.TempDir()
+	err := runVerify([]string{
+		"-public", releaseauth.PublicKeyBase64,
+		"-input", filepath.Join(dir, "nonexistent.txt"),
+		"-signature", filepath.Join(dir, "also-nonexistent.txt"),
+	}, os.Stderr)
+	if err == nil {
+		t.Fatal("runVerify error = nil, want missing file error")
+	}
+}
+
+func TestRunSignRejectsRelativePaths(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "private.key")
+	var keygenStdout bytes.Buffer
+	if err := runKeygen([]string{"-private", privatePath}, &keygenStdout, os.Stderr); err != nil {
+		t.Fatalf("runKeygen error = %v", err)
+	}
+	publicEncoded := strings.TrimSpace(keygenStdout.String())
+
+	err := runSign([]string{
+		"-private", "relative/key",
+		"-input", filepath.Join(dir, "input.txt"),
+		"-output", filepath.Join(dir, "sig.txt"),
+		"-expected-public", publicEncoded,
+	}, os.Stderr)
+	if err == nil {
+		t.Fatal("runSign error = nil, want relative path rejection")
 	}
 }

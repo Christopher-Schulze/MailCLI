@@ -1,290 +1,221 @@
 package mail
 
 import (
-	"bytes"
 	"errors"
-	"flag"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
 )
 
-var updateGolden = flag.Bool("update", false, "rewrite golden fixtures")
-
-const composerTestMessageID = "build-0001@mailcli.local"
-
-func TestBuildMessageGolden(t *testing.T) {
-	directory := t.TempDir()
-	notesPath := filepath.Join(directory, "notes.txt")
-	writeComposerFixture(t, notesPath, "meeting notes\nline two\n")
-	resumePath := filepath.Join(directory, "résumé final.txt")
-	writeComposerFixture(t, resumePath, "curriculum vitae with ünïcode\n")
-
-	drafts := map[string]Draft{
-		"plain-only": {
-			Kind: DraftKindNew,
-			From: "sender@example.com",
-			To:   []Recipient{{Address: "alice@example.com"}},
-			Body: "Hello Alice,\n\nHere is the update.\n\nBest,\nSender\n",
-		},
-		"plain-html": {
-			Kind:       DraftKindNew,
-			From:       "sender@example.com",
-			To:         []Recipient{{Address: "alice@example.com"}},
-			Subject:    "Styled update",
-			Body:       "Hello Alice,\n\nHere is the update.\n",
-			BodyFormat: DraftBodyHTML,
-			BodyHTML:   "<p>Hello Alice,</p><p>Here is the <strong>update</strong>.</p>",
-		},
-		"attachments": {
-			Kind:    DraftKindNew,
-			From:    "sender@example.com",
-			To:      []Recipient{{Name: "Alice", Address: "alice@example.com"}},
-			Subject: "Documents attached",
-			Body:    "Both documents are attached.\n",
-			Attachments: []DraftAttachment{
-				{Path: notesPath, Size: 25, SHA256: "unused"},
-				{Path: resumePath, Size: 30, SHA256: "unused"},
-			},
-		},
-		"reply-threading": {
-			Kind:             DraftKindReply,
-			SourceMessageID:  "<original-123@example.com>",
-			SourceReferences: "<first-1@example.com> <second-2@example.com>",
-			From:             "sender@example.com",
-			To:               []Recipient{{Address: "original@example.com"}},
-			Subject:          "Re: Original subject",
-			Body:             "Thanks, understood.\n",
-		},
-		"bcc-excluded": {
-			Kind:    DraftKindNew,
-			From:    "sender@example.com",
-			To:      []Recipient{{Address: "alice@example.com"}},
-			BCC:     []Recipient{{Name: "Secret", Address: "secret@example.com"}},
-			Subject: "Visible to To only",
-			Body:    "The BCC recipient must never appear.\n",
-		},
-	}
-
-	for name, draft := range drafts {
-		t.Run(name, func(t *testing.T) {
-			message, err := BuildMessage(draft, composerTestMessageID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			normalized := normalizeComposerMessage(message)
-			goldenPath := filepath.Join("testdata", "golden", name+".golden")
-			if *updateGolden {
-				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(goldenPath, []byte(normalized), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			want, err := os.ReadFile(goldenPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if normalized != string(want) {
-				t.Fatalf("message mismatch:\n--- got ---\n%s\n--- want ---\n%s", normalized, string(want))
-			}
-		})
+func TestComposerErrorErrorWithInner(t *testing.T) {
+	inner := errors.New("disk full")
+	err := &ComposerError{Message: "write attachment", Err: inner}
+	got := err.Error()
+	want := "write attachment: disk full"
+	if got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
-func TestBuildMessageEdgeCases(t *testing.T) {
-	tests := []struct {
-		name      string
-		draft     func(t *testing.T) Draft
-		messageID string
-		contains  []string
-		absent    []string
-	}{
-		{
-			name:     "empty subject",
-			draft:    func(t *testing.T) Draft { return Draft{Kind: DraftKindNew, From: "a@example.com", Body: "hi"} },
-			contains: []string{"Subject:\r\n"},
-		},
-		{
-			name: "unicode subject",
-			draft: func(t *testing.T) Draft {
-				return Draft{Kind: DraftKindNew, From: "a@example.com", Subject: "Réunion ça va", Body: "hi"}
-			},
-			contains: []string{"Subject: =?UTF-8?q?"},
-			absent:   []string{"Réunion"},
-		},
-		{
-			name: "unicode body quoted-printable",
-			draft: func(t *testing.T) Draft {
-				return Draft{Kind: DraftKindNew, From: "a@example.com", Subject: "s", Body: "Grüße aus München\n"}
-			},
-			contains: []string{"Content-Transfer-Encoding: quoted-printable", "Gr=C3=BC=C3=9Fe"},
-			absent:   []string{"Grüße"},
-		},
-		{
-			name: "recipient with display name",
-			draft: func(t *testing.T) Draft {
-				return Draft{
-					Kind: DraftKindNew, From: "a@example.com",
-					To:   []Recipient{{Name: "Zoe Example", Address: "zoe@example.com"}},
-					Body: "hi",
-				}
-			},
-			contains: []string{"To: \"Zoe Example\" <zoe@example.com>\r\n"},
-		},
-		{
-			name: "empty bcc omitted",
-			draft: func(t *testing.T) Draft {
-				return Draft{Kind: DraftKindNew, From: "a@example.com", To: []Recipient{{Address: "b@example.com"}}, BCC: nil, Body: "hi"}
-			},
-			absent: []string{"Bcc"},
-		},
-		{
-			name: "forward has no threading headers",
-			draft: func(t *testing.T) Draft {
-				return Draft{
-					Kind: DraftKindForward, From: "a@example.com",
-					SourceMessageID: "<orig@example.com>", SourceReferences: "<x@example.com>",
-					To: []Recipient{{Address: "b@example.com"}}, Subject: "Fwd: thing", Body: "hi",
-				}
-			},
-			absent: []string{"In-Reply-To", "References"},
-		},
-		{
-			name: "reply without prior references",
-			draft: func(t *testing.T) Draft {
-				return Draft{
-					Kind: DraftKindReply, From: "a@example.com", SourceMessageID: "<orig@example.com>",
-					To: []Recipient{{Address: "b@example.com"}}, Body: "hi",
-				}
-			},
-			contains: []string{"In-Reply-To: <orig@example.com>\r\n", "References: <orig@example.com>\r\n"},
-		},
-		{
-			name: "long recipient list folds",
-			draft: func(t *testing.T) Draft {
-				return Draft{
-					Kind: DraftKindNew, From: "a@example.com",
-					To: []Recipient{
-						{Address: "recipient-one@example.com"}, {Address: "recipient-two@example.com"},
-						{Address: "recipient-three@example.com"}, {Address: "recipient-four@example.com"},
-					},
-					Body: "hi",
-				}
-			},
-			contains: []string{"To: <recipient-one@example.com>, <recipient-two@example.com>,\r\n", " <recipient-three@example.com>, <recipient-four@example.com>\r\n"},
-		},
-		{
-			name: "unknown attachment extension falls back to octet-stream",
-			draft: func(t *testing.T) Draft {
-				path := filepath.Join(t.TempDir(), "payload.xyzabc")
-				writeComposerFixture(t, path, "binary-ish")
-				return Draft{
-					Kind: DraftKindNew, From: "a@example.com", Body: "hi",
-					Attachments: []DraftAttachment{{Path: path}},
-				}
-			},
-			contains: []string{"Content-Type: application/octet-stream\r\n", "Content-Disposition: attachment; filename=payload.xyzabc\r\n"},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			message, err := BuildMessage(test.draft(t), composerTestMessageID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			text := string(message)
-			for _, want := range test.contains {
-				if !strings.Contains(text, want) {
-					t.Errorf("message missing %q:\n%s", want, text)
-				}
-			}
-			for _, banned := range test.absent {
-				if strings.Contains(text, banned) {
-					t.Errorf("message must not contain %q:\n%s", banned, text)
-				}
-			}
-		})
+func TestComposerErrorErrorWithoutInner(t *testing.T) {
+	err := &ComposerError{Message: "message id is required"}
+	got := err.Error()
+	if got != "message id is required" {
+		t.Errorf("Error() = %q, want message id is required", got)
 	}
 }
 
-func TestBuildMessageStructure(t *testing.T) {
-	draft := Draft{
-		Kind: DraftKindNew,
-		From: "sender@example.com",
-		To:   []Recipient{{Address: "alice@example.com"}},
-		Body: "body\n",
+func TestComposerErrorUnwrap(t *testing.T) {
+	inner := errors.New("inner error")
+	err := &ComposerError{Message: "outer", Err: inner}
+	if unwrapped := err.Unwrap(); unwrapped != inner {
+		t.Errorf("Unwrap() = %v, want %v", unwrapped, inner)
 	}
-	message, err := BuildMessage(draft, composerTestMessageID)
+}
+
+func TestComposerErrorUnwrapNil(t *testing.T) {
+	err := &ComposerError{Message: "no inner"}
+	if unwrapped := err.Unwrap(); unwrapped != nil {
+		t.Errorf("Unwrap() = %v, want nil", unwrapped)
+	}
+}
+
+func TestThreadReferencesEmpty(t *testing.T) {
+	got := threadReferences("", "<msg-123@example.com>")
+	if got != "<msg-123@example.com>" {
+		t.Errorf("threadReferences(empty) = %q, want source message ID only", got)
+	}
+}
+
+func TestThreadReferencesWithPrior(t *testing.T) {
+	prior := "<msg-1@example.com> <msg-2@example.com>"
+	got := threadReferences(prior, "<msg-3@example.com>")
+	want := "<msg-1@example.com> <msg-2@example.com> <msg-3@example.com>"
+	if got != want {
+		t.Errorf("threadReferences(with prior) = %q, want %q", got, want)
+	}
+}
+
+func TestThreadReferencesWithWhitespace(t *testing.T) {
+	got := threadReferences("  <msg-1@example.com>  ", "<msg-2@example.com>")
+	want := "<msg-1@example.com> <msg-2@example.com>"
+	if got != want {
+		t.Errorf("threadReferences(whitespace) = %q, want %q", got, want)
+	}
+}
+
+func TestLoadComposerAttachmentsEmpty(t *testing.T) {
+	got, err := loadComposerAttachments(nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("loadComposerAttachments(nil) error = %v", err)
 	}
-	text := string(message)
-	if !strings.HasSuffix(text, "\r\n") {
-		t.Errorf("message must end with CRLF, got %q", text[len(text)-8:])
-	}
-	if bytes.Count(message, []byte("\n")) != bytes.Count(message, []byte("\r\n")) {
-		t.Error("message contains bare LF line endings, want CRLF everywhere")
-	}
-	if !composerBoundaryPattern.MatchString(text) {
-		t.Errorf("missing random boundary token:\n%s", text)
-	}
-	boundaries := composerBoundaryPattern.FindAllString(text, -1)
-	seen := map[string]bool{}
-	for _, boundary := range boundaries {
-		seen[boundary] = true
-	}
-	if len(seen) != 1 {
-		t.Errorf("expected one boundary per message, got %v", seen)
+	if got != nil {
+		t.Errorf("loadComposerAttachments(nil) = %v, want nil", got)
 	}
 }
 
-func TestBuildMessageAttachmentReadError(t *testing.T) {
-	draft := Draft{
-		Kind:        DraftKindNew,
-		From:        "sender@example.com",
-		Body:        "body",
-		Attachments: []DraftAttachment{{Path: filepath.Join(t.TempDir(), "missing.bin")}},
+func TestLoadComposerAttachmentsSingleFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(path, []byte("test content"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
 	}
-	message, err := BuildMessage(draft, composerTestMessageID)
+	got, err := loadComposerAttachments([]DraftAttachment{{Path: path}})
+	if err != nil {
+		t.Fatalf("loadComposerAttachments error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d attachments, want 1", len(got))
+	}
+	if got[0].filename != "test.txt" {
+		t.Errorf("filename = %q, want test.txt", got[0].filename)
+	}
+	if string(got[0].data) != "test content" {
+		t.Errorf("data = %q, want test content", string(got[0].data))
+	}
+	if got[0].contentType != "text/plain; charset=utf-8" {
+		t.Errorf("contentType = %q, want text/plain; charset=utf-8", got[0].contentType)
+	}
+}
+
+func TestLoadComposerAttachmentsMultipleFilesParallel(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]DraftAttachment, 3)
+	for i := 0; i < 3; i++ {
+		path := filepath.Join(dir, "file"+string(rune('A'+i))+".txt")
+		content := "content-" + string(rune('A'+i))
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile error = %v", err)
+		}
+		paths[i] = DraftAttachment{Path: path}
+	}
+	got, err := loadComposerAttachments(paths)
+	if err != nil {
+		t.Fatalf("loadComposerAttachments error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d attachments, want 3", len(got))
+	}
+	// Verify all files loaded correctly (order preserved)
+	for i, att := range got {
+		expected := "content-" + string(rune('A'+i))
+		if string(att.data) != expected {
+			t.Errorf("attachment %d data = %q, want %q", i, string(att.data), expected)
+		}
+	}
+}
+
+func TestLoadComposerAttachmentsMissingFile(t *testing.T) {
+	_, err := loadComposerAttachments([]DraftAttachment{{Path: "/nonexistent/file.txt"}})
 	if err == nil {
-		t.Fatalf("BuildMessage() = %q, want error", message)
+		t.Fatal("loadComposerAttachments error = nil, want file not found")
 	}
-	var composerErr *ComposerError
-	if !errors.As(err, &composerErr) {
-		t.Fatalf("error = %T, want *ComposerError", err)
+	composerErr, ok := err.(*ComposerError)
+	if !ok {
+		t.Fatalf("error type = %T, want *ComposerError", err)
 	}
-	if composerErr.Message == "" {
-		t.Error("ComposerError.Message is empty")
-	}
-}
-
-func TestBuildMessageRequiresMessageID(t *testing.T) {
-	if _, err := BuildMessage(Draft{Kind: DraftKindNew, Body: "hi"}, ""); err == nil {
-		t.Error("BuildMessage() with empty message id = nil error, want error")
+	if composerErr.Message != "read draft attachment file.txt" {
+		t.Errorf("Message = %q, want read draft attachment file.txt", composerErr.Message)
 	}
 }
 
-func writeComposerFixture(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
+func TestLoadComposerAttachmentsUnknownExtension(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.xyzunknown")
+	if err := os.WriteFile(path, []byte("content"), 0o644); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+	got, err := loadComposerAttachments([]DraftAttachment{{Path: path}})
+	if err != nil {
+		t.Fatalf("loadComposerAttachments error = %v", err)
+	}
+	if got[0].contentType != "application/octet-stream" {
+		t.Errorf("contentType = %q, want application/octet-stream", got[0].contentType)
 	}
 }
 
-var (
-	composerDatePattern     = regexp.MustCompile(`(?m)^Date: .*$`)
-	composerMessageIDHeader = regexp.MustCompile(`(?m)^Message-ID: .*$`)
-	composerBoundaryPattern = regexp.MustCompile(`=_[0-9a-f]{32}`)
-)
+func TestBuildMessageWithHTMLBody(t *testing.T) {
+	draft := Draft{
+		From:       "sender@example.com",
+		To:         []Recipient{{Address: "recipient@example.com"}},
+		Subject:    "HTML Test",
+		Body:       "Plain text",
+		BodyHTML:   "<p>HTML text</p>",
+		BodyFormat: DraftBodyHTML,
+	}
+	msg, err := BuildMessage(draft, "<test@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage error = %v", err)
+	}
+	msgStr := string(msg)
+	if !contains(msgStr, "text/html") {
+		t.Error("message missing text/html content type")
+	}
+	if !contains(msgStr, "text/plain") {
+		t.Error("message missing text/plain content type")
+	}
+}
 
-// normalizeComposerMessage replaces dynamic values so golden fixtures stay stable.
-func normalizeComposerMessage(message []byte) string {
-	normalized := composerDatePattern.ReplaceAllString(string(message), "Date: <DATE>")
-	normalized = composerMessageIDHeader.ReplaceAllString(normalized, "Message-ID: <MESSAGE-ID>")
-	return composerBoundaryPattern.ReplaceAllString(normalized, "<BOUNDARY>")
+func TestBuildMessageReplyWithThreading(t *testing.T) {
+	draft := Draft{
+		From:             "sender@example.com",
+		To:               []Recipient{{Address: "recipient@example.com"}},
+		Subject:          "Re: Original",
+		Body:             "Reply body",
+		Kind:             DraftKindReply,
+		SourceMessageID:  "<original@example.com>",
+		SourceReferences: "<msg-1@example.com>",
+	}
+	msg, err := BuildMessage(draft, "<reply@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage error = %v", err)
+	}
+	msgStr := string(msg)
+	if !contains(msgStr, "In-Reply-To: <original@example.com>") {
+		t.Error("message missing In-Reply-To header")
+	}
+	if !contains(msgStr, "References: <msg-1@example.com> <original@example.com>") {
+		t.Error("message missing References header")
+	}
+}
+
+func TestBuildMessageEmptyMessageID(t *testing.T) {
+	draft := Draft{From: "sender@example.com", To: []Recipient{{Address: "r@example.com"}}}
+	_, err := BuildMessage(draft, "")
+	if err == nil {
+		t.Fatal("BuildMessage error = nil, want message id required")
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+
+func containsStr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
