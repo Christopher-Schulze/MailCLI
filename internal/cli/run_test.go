@@ -178,7 +178,7 @@ func TestRunTable(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "Usage:"},
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.2.0"},
+		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "mailcli 1.3.0"},
 		{name: "update help", args: []string{"update", "--help"}, wantCode: 0, wantStdout: "mailcli update [options]"},
 		{name: "unknown command", args: []string{"missing"}, wantCode: 2, wantStderr: `unknown command "missing"`},
 		{name: "unknown flag", args: []string{"version", "--missing"}, wantCode: 2, wantStderr: `unknown flag "--missing"`},
@@ -533,5 +533,44 @@ func TestLimitValidationReturnsFailure(t *testing.T) {
 	)
 	if code != 1 || !strings.Contains(stdout.String(), `"code":"invalid_argument"`) || !strings.Contains(stdout.String(), "limit must be between") {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+type syncCheckGateway struct {
+	testGateway
+	result mail.SyncCheckResult
+	err    error
+}
+
+func (g syncCheckGateway) SyncCheck(context.Context, string) (mail.SyncCheckResult, error) {
+	return g.result, g.err
+}
+
+func TestSyncCheckJSON(t *testing.T) {
+	gw := syncCheckGateway{
+		result: mail.SyncCheckResult{
+			Mailboxes: []mail.MailboxDelta{
+				{
+					MailboxRef:     "mbx_1",
+					AccountRef:     "acct_1",
+					Name:           "INBOX",
+					Path:           []string{"INBOX"},
+					LocalMessages:  10,
+					ServerMessages: 15,
+					Delta:          5,
+					Unseen:         2,
+				},
+			},
+		},
+	}
+	service := mail.NewService(gw)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"sync", "--check", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"sync_check"`) || !strings.Contains(stdout.String(), `"delta":5`) {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
 	}
 }

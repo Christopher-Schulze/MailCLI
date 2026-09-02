@@ -118,12 +118,30 @@ func runMessageDelete(
 func runSync(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("sync", stderr)
 	accountRef := flags.String("account", "", "account ref; omit to check all mail")
+	checkOnly := flags.Bool("check", false, "check server vs local message counts over IMAP without launching Mail.app")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+
+	if *checkOnly {
+		checkResult, err := service.SyncCheck(operationCtx, *accountRef)
+		if err != nil {
+			return failCommand("sync", *jsonOutput, err, stdout, stderr)
+		}
+		if *jsonOutput {
+			return writeSuccess(stdout, "sync", responseData{SyncCheck: &checkResult})
+		}
+		writeLine(stdout, "account\tmailbox\tlocal\tserver\tdelta\tunseen")
+		for _, mbx := range checkResult.Mailboxes {
+			writeFormat(stdout, "%s\t%s\t%d\t%d\t%+d\t%d\n",
+				mbx.AccountRef, mbx.Name, mbx.LocalMessages, mbx.ServerMessages, mbx.Delta, mbx.Unseen)
+		}
+		return 0
+	}
+
 	result, err := service.Sync(operationCtx, *accountRef)
 	if err != nil {
 		return failCommand("sync", *jsonOutput, err, stdout, stderr)

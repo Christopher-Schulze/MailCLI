@@ -4,16 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"time"
 
-	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
-)
-
-const (
-	mutationObservationWindow       = 5 * time.Second
-	mutationObservationInitialDelay = 100 * time.Millisecond
-	mutationObservationMaximumDelay = 800 * time.Millisecond
 )
 
 type transferBaseline struct {
@@ -114,43 +106,6 @@ func (s *Store) captureTransferBaseline(
 	}, nil
 }
 
-func (s *Store) observeTransfer(
-	ctx context.Context,
-	baseline transferBaseline,
-	copyMessage bool,
-) (mail.MessageSummary, bool, error) {
-	return observeMutation(ctx, func() (mail.MessageSummary, bool, error) {
-		sourcePresent, err := s.messageHasMembership(
-			ctx, baseline.Source.Reference.LibraryID, baseline.SourceMailbox.RowID,
-		)
-		if err != nil {
-			return mail.MessageSummary{}, false, err
-		}
-		if (copyMessage && !sourcePresent) || (!copyMessage && sourcePresent) {
-			return mail.MessageSummary{}, false, nil
-		}
-		candidates, err := s.transferCandidates(ctx, baseline)
-		if err != nil {
-			return mail.MessageSummary{}, false, err
-		}
-		candidates = observedTransferCandidates(candidates, baseline, copyMessage)
-		if len(candidates) != 1 {
-			return mail.MessageSummary{}, false, err
-		}
-		destinationRef, err := mailref.EncodeMailbox(
-			baseline.Destination.AccountID, baseline.Destination.Path,
-		)
-		if err != nil {
-			return mail.MessageSummary{}, false, err
-		}
-		summary, err := mapMessageSummary(
-			candidates[0], destinationRef,
-			baseline.Destination.AccountID, baseline.Destination.Path, s.storeUUID,
-		)
-		return summary, err == nil, err
-	})
-}
-
 func observedTransferCandidates(
 	candidates []messageRecord,
 	baseline transferBaseline,
@@ -233,64 +188,6 @@ func (s *Store) transferCandidates(
 	return records, nil
 }
 
-func (s *Store) observeMarkedMessage(
-	ctx context.Context,
-	ref string,
-	request mail.MarkMessageRequest,
-) (mail.MessageSummary, bool, error) {
-	return observeMutation(ctx, func() (mail.MessageSummary, bool, error) {
-		resolved, err := s.resolveMessage(ctx, ref)
-		if err != nil {
-			return mail.MessageSummary{}, false, err
-		}
-		if !markStateMatches(resolved.Record, request) {
-			return mail.MessageSummary{}, false, nil
-		}
-		return s.summaryForReference(resolved.Record, resolved.Reference)
-	})
-}
-
-func markStateMatches(record messageRecord, request mail.MarkMessageRequest) bool {
-	if request.Read != nil && record.Read != *request.Read {
-		return false
-	}
-	if request.Flagged != nil && record.Flagged != *request.Flagged {
-		return false
-	}
-	return request.Junk == nil || record.Junk == *request.Junk
-}
-
-func (s *Store) summaryForReference(
-	record messageRecord,
-	ref mailref.Message,
-) (mail.MessageSummary, bool, error) {
-	mailboxRef, err := mailref.EncodeMailbox(ref.AccountID, ref.MailboxPath)
-	if err != nil {
-		return mail.MessageSummary{}, false, err
-	}
-	summary, err := mapMessageSummary(record, mailboxRef, ref.AccountID, ref.MailboxPath, s.storeUUID)
-	return summary, err == nil, err
-}
-
-func (s *Store) observeMessageRemovedFromMailbox(
-	ctx context.Context,
-	ref string,
-) (bool, error) {
-	decoded, err := mailref.DecodeMessage(ref)
-	if err != nil {
-		return false, operationError("invalid_reference", "invalid message ref: "+err.Error())
-	}
-	mailbox, err := s.mailboxRecordForRef(ctx, decoded.AccountID, decoded.MailboxPath)
-	if err != nil {
-		return false, err
-	}
-	_, observed, err := observeMutation(ctx, func() (struct{}, bool, error) {
-		present, err := s.messageHasMembership(ctx, decoded.LibraryID, mailbox.RowID)
-		return struct{}{}, !present, err
-	})
-	return observed, err
-}
-
 func (s *Store) mailboxRecordForRef(
 	ctx context.Context,
 	accountID string,
@@ -333,13 +230,4 @@ func (s *Store) messageHasMembership(
 		return false, fmt.Errorf("observe message mailbox membership: %w", err)
 	}
 	return present, nil
-}
-
-func observeMutation[T any](
-	ctx context.Context,
-	check func() (T, bool, error),
-) (T, bool, error) {
-	return observeWithBackoff(
-		ctx, mutationObservationInitialDelay, mutationObservationMaximumDelay, check,
-	)
 }

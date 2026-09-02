@@ -33,6 +33,43 @@ type AppendEvidence struct {
 	Appended bool   // false means the message was already present (provider auto-filed)
 }
 
+// MailboxInfo carries the parsed name and special-use flags for an IMAP mailbox.
+type MailboxInfo struct {
+	Name  string
+	Flags []string
+}
+
+// MutationEvidence records server proof for an IMAP message mutation.
+type MutationEvidence struct {
+	Command        string // STORE, COPY, MOVE, or DELETE
+	ServerResponse string // final server status line
+	Mailbox        string // source mailbox
+	TargetMailbox  string // destination mailbox (for COPY, MOVE, DELETE)
+	UID            uint32 // affected message UID
+}
+
+// MailboxStatus records server state from an IMAP STATUS command.
+type MailboxStatus struct {
+	Mailbox     string
+	Messages    int
+	UIDNext     uint32
+	UIDValidity uint32
+	Unseen      int
+}
+
+// ImapOperator combines sent mirroring, message mutations, hydration, and status checking.
+type ImapOperator interface {
+	SentMirror
+	ListMailboxes(ctx context.Context, cfg ImapConfig) ([]MailboxInfo, error)
+	SearchUID(ctx context.Context, cfg ImapConfig, mailbox string, messageID string) (uid uint32, uidvalidity uint32, err error)
+	SetFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (MutationEvidence, error)
+	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (MutationEvidence, error)
+	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (MutationEvidence, error)
+	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32) (MutationEvidence, error)
+	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32) ([]byte, error)
+	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
+}
+
 // Submitter submits a fully composed RFC 5322 message.
 type Submitter interface {
 	Submit(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, msg []byte) (SubmitEvidence, error)

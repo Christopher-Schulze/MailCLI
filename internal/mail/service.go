@@ -18,6 +18,17 @@ type SendTransport struct {
 	Submitter   transport.Submitter
 	Mirror      transport.SentMirror
 	Credentials transport.CredentialStore
+	Imap        transport.ImapOperator
+}
+
+func (t SendTransport) ImapClient() transport.ImapOperator {
+	if t.Imap != nil {
+		return t.Imap
+	}
+	if op, ok := t.Mirror.(transport.ImapOperator); ok {
+		return op
+	}
+	return nil
 }
 
 type Service struct {
@@ -192,6 +203,16 @@ func (s *Service) Sync(ctx context.Context, accountRef string) (SyncResult, erro
 	return SyncResult{AccountRef: accountRef, Triggered: true}, nil
 }
 
+type SyncChecker interface {
+	SyncCheck(ctx context.Context, accountRef string) (SyncCheckResult, error)
+}
+
+func (s *Service) SyncCheck(ctx context.Context, accountRef string) (SyncCheckResult, error) {
+	if checker, ok := s.gateway.(SyncChecker); ok {
+		return checker.SyncCheck(ctx, accountRef)
+	}
+	return SyncCheckResult{}, fmt.Errorf("sync --check is not supported by the active mail gateway")
+}
 func IsHealthy(report DiagnosticReport) bool {
 	for _, check := range report.Checks {
 		if check.Status == "fail" {

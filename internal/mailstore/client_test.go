@@ -128,6 +128,150 @@ func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessag
 }
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
+type stubImapOperator struct {
+	boxes        []transport.MailboxInfo
+	uid          uint32
+	uidvalidity  uint32
+	raw          []byte
+	lastCommand  string
+	lastUsername string
+	lastMailbox  string
+	status       transport.MailboxStatus
+	err          error
+}
+
+func (s *stubImapOperator) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg []byte, messageID string) (transport.AppendEvidence, error) {
+	return transport.AppendEvidence{Mailbox: "Sent", Appended: true}, nil
+}
+
+func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if len(s.boxes) > 0 {
+		return s.boxes, nil
+	}
+	return []transport.MailboxInfo{
+		{Name: "INBOX"},
+		{Name: "Sent", Flags: []string{"\\Sent"}},
+		{Name: "Trash", Flags: []string{"\\Trash"}},
+		{Name: "Archive", Flags: []string{"\\Archive"}},
+	}, nil
+}
+
+func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, error) {
+	if s.err != nil {
+		return 0, 0, s.err
+	}
+	uid := s.uid
+	if uid == 0 {
+		uid = 101
+	}
+	val := s.uidvalidity
+	if val == 0 {
+		val = 12345
+	}
+	return uid, val, nil
+}
+
+func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+	if s.err != nil {
+		return transport.MutationEvidence{}, s.err
+	}
+	s.lastCommand = "STORE"
+	s.lastUsername = cfg.Username
+	s.lastMailbox = mailbox
+	return transport.MutationEvidence{
+		Command:        "STORE",
+		ServerResponse: "OK STORE completed",
+		Mailbox:        mailbox,
+		UID:            uid,
+	}, nil
+}
+
+func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	if s.err != nil {
+		return transport.MutationEvidence{}, s.err
+	}
+	s.lastCommand = "COPY"
+	return transport.MutationEvidence{
+		Command:        "COPY",
+		ServerResponse: "OK COPY completed",
+		Mailbox:        srcMailbox,
+		TargetMailbox:  dstMailbox,
+		UID:            uid,
+	}, nil
+}
+
+func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	if s.err != nil {
+		return transport.MutationEvidence{}, s.err
+	}
+	s.lastCommand = "MOVE"
+	s.lastUsername = cfg.Username
+	s.lastMailbox = srcMailbox
+	return transport.MutationEvidence{
+		Command:        "MOVE",
+		ServerResponse: "OK MOVE completed",
+		Mailbox:        srcMailbox,
+		TargetMailbox:  dstMailbox,
+		UID:            uid,
+	}, nil
+}
+
+func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32) (transport.MutationEvidence, error) {
+	if s.err != nil {
+		return transport.MutationEvidence{}, s.err
+	}
+	s.lastCommand = "DELETE"
+	s.lastUsername = cfg.Username
+	s.lastMailbox = srcMailbox
+	return transport.MutationEvidence{
+		Command:        "DELETE",
+		ServerResponse: "OK DELETE completed",
+		Mailbox:        srcMailbox,
+		TargetMailbox:  "Trash",
+		UID:            uid,
+	}, nil
+}
+
+func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32) ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.raw, nil
+}
+
+func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
+	if s.err != nil {
+		return transport.MailboxStatus{}, s.err
+	}
+	return s.status, nil
+}
+
+type stubCredentials map[string]string
+
+func (s stubCredentials) Load(account string) (string, error) {
+	if pw, ok := s[account]; ok {
+		return pw, nil
+	}
+	return "test-password", nil
+}
+func (s stubCredentials) Store(account, password string) error { s[account] = password; return nil }
+func (s stubCredentials) Delete(account string) error          { delete(s, account); return nil }
+
+// strictCredentials returns "" for unknown accounts so tests can prove the
+// mutation path rejects an identity without a stored credential.
+type strictCredentials map[string]string
+
+func (s strictCredentials) Load(account string) (string, error) {
+	if pw, ok := s[account]; ok {
+		return pw, nil
+	}
+	return "", nil
+}
+func (s strictCredentials) Store(account, password string) error { s[account] = password; return nil }
+func (s strictCredentials) Delete(account string) error          { delete(s, account); return nil }
 func materializationForDraft(draft mail.Draft) *mail.SendMaterialization {
 	body := draft.Body
 	return &mail.SendMaterialization{
@@ -207,6 +351,7 @@ func TestClientNeverFallsBackToRecursiveMailboxScan(t *testing.T) {
 func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 3,
 	})
@@ -223,10 +368,20 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nComplete raw body\r\n" +
 		"--b\r\nContent-Disposition: attachment; filename=invoice.pdf\r\n" +
 		"Content-Transfer-Encoding: base64\r\n\r\naW52b2ljZS1ieXRlcw==\r\n--b--\r\n"
-	spy := &fallbackSpy{rawSource: raw}
-	client := &Client{store: store, fallback: spy}
+	fakeImap := &stubImapOperator{
+		raw:   []byte(raw),
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
 	message, err := client.GetMessage(context.Background(), messageRef)
-	if err != nil || !message.ContentComplete || message.ContentSource != "mail_app_raw" ||
+	if err != nil || !message.ContentComplete || message.ContentSource != "imap_raw" ||
 		message.Content != "Complete raw body" || len(message.Attachments) != 1 ||
 		message.Summary.AttachmentCount != 1 || message.Attachments[0].ID != "2" ||
 		!message.Attachments[0].SizeKnown {
@@ -240,40 +395,44 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	if err != nil || string(bytes) != "invoice-bytes" {
 		t.Fatalf("attachment bytes = %q, error = %v", bytes, err)
 	}
-	if spy.saveAttachmentCalls != 0 || spy.rawCalls != 2 {
-		t.Fatalf("fallback raw calls = %d, attachment-id calls = %d", spy.rawCalls, spy.saveAttachmentCalls)
-	}
 }
 
 func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})
 	if err != nil || len(page.Messages) != 1 {
 		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
 	}
-	spy := &fallbackSpy{}
-	spy.markHook = func() {
-		updateFixtureMessage(t, store, `UPDATE messages SET read = 1 WHERE ROWID = 101`)
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
 	}
-	client := &Client{store: store, fallback: spy}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
 	read := true
 	result, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
 		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
 	})
-	if err != nil || !result.Read {
+	if err != nil || !result.Read || result.ServerTruth == nil || result.ServerTruth.Command != "STORE" {
 		t.Fatalf("MarkMessage() = %+v, error = %v", result, err)
 	}
-	automationRef, err := mailref.DecodeMessage(spy.markRequest.Ref)
-	if err != nil {
-		t.Fatalf("DecodeMessage(automation ref) error = %v", err)
+	if fakeImap.lastCommand != "STORE" {
+		t.Fatalf("expected IMAP STORE command, got %s", fakeImap.lastCommand)
 	}
-	if automationRef.Version != mailref.FormatVersion || automationRef.IsStoreBound() || automationRef.LibraryID != "101" ||
-		automationRef.ExpectedMessageID != "101@example.com" ||
-		len(automationRef.MailboxPath) != 1 || automationRef.MailboxPath[0] != "All" {
-		t.Fatalf("automation ref = %+v", automationRef)
+	if fakeImap.lastUsername != "identity@gmail.com" {
+		t.Fatalf("IMAP username = %q, want the store-resolved identity identity@gmail.com", fakeImap.lastUsername)
+	}
+	if fakeImap.lastMailbox != "INBOX" {
+		t.Fatalf("IMAP mailbox = %q, want INBOX", fakeImap.lastMailbox)
 	}
 }
 
@@ -552,7 +711,7 @@ func TestClientObservesBodyOnlyNativeReplyDraftFromMaterializedHeaders(t *testin
 func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
+	installImapIdentityFixture(t, store, "identity@gmail.com")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 3,
 	})
@@ -564,20 +723,31 @@ func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spy := &fallbackSpy{}
-	spy.transferHook = func() {
-		updateFixtureMessage(t, store, `UPDATE messages SET mailbox = 4 WHERE ROWID = 102`)
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"},
+			{Name: "Sent", Flags: []string{"\\Sent"}},
+		},
+		uid: 102,
 	}
-	client := &Client{store: store, fallback: spy}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
 	result, err := client.TransferMessage(context.Background(), mail.TransferMessageRequest{
 		Ref: messageRef, DestinationMailbox: destinationRef,
 	})
-	if err != nil || result.MailboxRef != destinationRef || result.Subject != "Status Update" {
+	if err != nil || result.MailboxRef != destinationRef || result.Subject != "Status Update" || result.ServerTruth == nil || result.ServerTruth.Command != "MOVE" {
 		t.Fatalf("TransferMessage() = %+v, error = %v", result, err)
 	}
-	forwarded, err := mailref.DecodeMessage(spy.transferRequest.Ref)
-	if err != nil || forwarded.Version != mailref.FormatVersion || forwarded.IsStoreBound() {
-		t.Fatalf("forwarded transfer ref = %+v, error = %v", forwarded, err)
+	if fakeImap.lastCommand != "MOVE" {
+		t.Fatalf("expected IMAP MOVE command, got %s", fakeImap.lastCommand)
+	}
+	if fakeImap.lastUsername != "identity@gmail.com" {
+		t.Fatalf("IMAP username = %q, want the store-resolved identity identity@gmail.com", fakeImap.lastUsername)
 	}
 }
 
@@ -656,25 +826,49 @@ func TestCopyObservationRejectsPreexistingDestinationMembership(t *testing.T) {
 func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
 	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
 		MailboxRef: inboxRef, Limit: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	spy := &fallbackSpy{}
-	spy.deleteHook = func() {
-		updateFixtureMessage(t, store, `DELETE FROM labels WHERE message_id = 101 AND mailbox_id = 1`)
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"},
+			{Name: "Trash", Flags: []string{"\\Trash"}},
+		},
+		uid: 101,
 	}
-	client := &Client{store: store, fallback: spy}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
 	if err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
 		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
 	}); err != nil {
 		t.Fatalf("DeleteMessage() error = %v", err)
 	}
-	forwarded, err := mailref.DecodeMessage(spy.deleteRef)
-	if err != nil || forwarded.Version != mailref.FormatVersion || forwarded.IsStoreBound() {
-		t.Fatalf("forwarded delete ref = %+v, error = %v", forwarded, err)
+	if fakeImap.lastCommand != "DELETE" {
+		t.Fatalf("expected IMAP DELETE command, got %s", fakeImap.lastCommand)
+	}
+	if fakeImap.lastUsername != "identity@gmail.com" {
+		t.Fatalf("IMAP username = %q, want the store-resolved identity identity@gmail.com", fakeImap.lastUsername)
+	}
+	strictClient := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: strictCredentials{"other@gmail.com": "secret"},
+		},
+	}
+	if err := strictClient.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
+	}); err == nil {
+		t.Fatal("DeleteMessage() succeeded without a stored credential for the account identity")
 	}
 }
 

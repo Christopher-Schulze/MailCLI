@@ -1,6 +1,7 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -167,43 +168,26 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		if localErr == nil && local.ContentComplete {
 			return local, nil
 		}
-		if localErr == nil && c.fallback == nil {
+		if localErr == nil && c.send.ImapClient() == nil {
 			return local, nil
 		}
 		if localErr != nil && !safeTargetedFallback(localErr) {
 			return mail.Message{}, localErr
 		}
 	}
-	if c.fallback == nil {
-		if localErr != nil {
-			return mail.Message{}, localErr
+	if c.send.ImapClient() != nil {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
+		if rawErr == nil && len(rawBytes) > 0 {
+			return messageFromRawFallback(local, string(rawBytes))
 		}
-		return mail.Message{}, c.readUnavailableError()
 	}
-	automationRef, err := c.automationMessageRef(ctx, ref)
-	if err != nil {
-		return mail.Message{}, err
+	if hasLocal {
+		return local, nil
 	}
-	raw, rawErr := c.fallback.GetRawSource(ctx, automationRef)
-	if rawErr != nil {
-		if hasLocal {
-			return local, nil
-		}
-		return mail.Message{}, rawErr
+	if localErr != nil {
+		return mail.Message{}, localErr
 	}
-	if !hasLocal {
-		var metadata mail.Message
-		if openDraft {
-			metadata, err = c.fallback.OpenDraft(ctx, automationRef)
-		} else {
-			metadata, err = c.fallback.GetMessage(ctx, automationRef)
-		}
-		if err != nil {
-			return mail.Message{}, err
-		}
-		local = metadata
-	}
-	return messageFromRawFallback(local, raw)
+	return mail.Message{}, c.readUnavailableError()
 }
 
 func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error) {
@@ -241,7 +225,7 @@ func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error)
 	base.BCC = document.BCC
 	base.Headers = headers
 	base.Content = document.Content
-	base.ContentSource = "mail_app_raw"
+	base.ContentSource = "imap_raw"
 	base.ContentComplete = document.Complete
 	base.MissingParts = append([]string(nil), document.MissingParts...)
 	base.Attachments = attachments
@@ -260,17 +244,16 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		}
 		localErr = err
 	}
-	if c.fallback == nil {
-		if localErr != nil {
-			return "", localErr
+	if c.send.ImapClient() != nil {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
+		if rawErr == nil && len(rawBytes) > 0 {
+			return string(rawBytes), nil
 		}
-		return "", c.readUnavailableError()
 	}
-	automationRef, err := c.automationMessageRef(ctx, ref)
-	if err != nil {
-		return "", err
+	if localErr != nil {
+		return "", localErr
 	}
-	return c.fallback.GetRawSource(ctx, automationRef)
+	return "", c.readUnavailableError()
 }
 
 func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
@@ -285,24 +268,17 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 		}
 		localErr = err
 	}
-	if c.fallback == nil {
-		if localErr != nil {
-			return localErr
+	if c.send.ImapClient() != nil {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
+		if rawErr == nil && len(rawBytes) > 0 {
+			_, werr := writer.Write(rawBytes)
+			return werr
 		}
-		return c.readUnavailableError()
 	}
-	automationRef, err := c.automationMessageRef(ctx, ref)
-	if err != nil {
-		return err
+	if localErr != nil {
+		return localErr
 	}
-	raw, err := c.fallback.GetRawSource(ctx, automationRef)
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(writer, raw); err != nil {
-		return fmt.Errorf("write Mail.app RFC source fallback: %w", err)
-	}
-	return nil
+	return c.readUnavailableError()
 }
 
 func (c *Client) SaveAttachmentTo(
@@ -322,24 +298,16 @@ func (c *Client) SaveAttachmentTo(
 		}
 		localErr = err
 	}
-	if c.fallback == nil {
-		if localErr != nil {
-			return localErr
+	if c.send.ImapClient() != nil {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef)
+		if rawErr == nil && len(rawBytes) > 0 {
+			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)
 		}
-		return c.readUnavailableError()
 	}
-	automationRef, err := c.automationMessageRef(ctx, messageRef)
-	if err != nil {
-		return err
+	if localErr != nil {
+		return localErr
 	}
-	if c.store == nil {
-		return c.fallback.SaveAttachmentTo(ctx, automationRef, attachmentID, outputPath)
-	}
-	raw, err := c.fallback.GetRawSource(ctx, automationRef)
-	if err != nil {
-		return err
-	}
-	return extractMIMEAttachment(strings.NewReader(raw), attachmentID, outputPath)
+	return c.readUnavailableError()
 }
 
 func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
@@ -636,116 +604,6 @@ func (c *Client) sourceAttachmentFingerprints(
 	return attachments, nil
 }
 
-func (c *Client) MarkMessage(
-	ctx context.Context,
-	request mail.MarkMessageRequest,
-) (mail.MessageSummary, error) {
-	if c.store == nil {
-		return mail.MessageSummary{}, c.safeWriteUnavailableError()
-	}
-	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
-		return mail.MessageSummary{}, err
-	}
-	storeRequest := request
-	automationRef, err := c.automationWriteRef(ctx, request.Ref)
-	if err != nil {
-		return mail.MessageSummary{}, err
-	}
-	if c.fallback == nil {
-		return mail.MessageSummary{}, c.writeUnavailableError()
-	}
-	request.Ref = automationRef
-	_, mutationErr := c.fallback.MarkMessage(ctx, request)
-	observationCtx, cancel := context.WithTimeout(context.Background(), mutationObservationWindow)
-	defer cancel()
-	observed, found, observationErr := c.store.observeMarkedMessage(
-		observationCtx, storeRequest.Ref, storeRequest,
-	)
-	if observationErr == nil && found {
-		return observed, nil
-	}
-	if mutationErr != nil {
-		return mail.MessageSummary{}, mutationErr
-	}
-	return mail.MessageSummary{}, operationError(
-		"mutation_not_observed", "Mail.app accepted the state change, but the local Mail store did not observe it",
-	)
-}
-
-func (c *Client) TransferMessage(
-	ctx context.Context,
-	request mail.TransferMessageRequest,
-) (mail.MessageSummary, error) {
-	if c.store == nil {
-		return mail.MessageSummary{}, c.safeWriteUnavailableError()
-	}
-	if !request.Copy {
-		if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
-			return mail.MessageSummary{}, err
-		}
-	}
-	baseline, err := c.store.captureTransferBaseline(
-		ctx, request.Ref, request.DestinationMailbox,
-	)
-	if err != nil {
-		return mail.MessageSummary{}, err
-	}
-	automationRef, err := c.automationWriteRef(ctx, request.Ref)
-	if err != nil {
-		return mail.MessageSummary{}, err
-	}
-	if c.fallback == nil {
-		return mail.MessageSummary{}, c.writeUnavailableError()
-	}
-	request.Ref = automationRef
-	_, mutationErr := c.fallback.TransferMessage(ctx, request)
-	observationCtx, cancel := context.WithTimeout(context.Background(), mutationObservationWindow)
-	defer cancel()
-	observed, found, observationErr := c.store.observeTransfer(
-		observationCtx, baseline, request.Copy,
-	)
-	if observationErr == nil && found {
-		return observed, nil
-	}
-	if mutationErr != nil {
-		return mail.MessageSummary{}, mutationErr
-	}
-	return mail.MessageSummary{}, operationError(
-		"mutation_not_observed", "Mail.app accepted the transfer, but the local Mail store did not observe it",
-	)
-}
-
-func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) error {
-	if c.store == nil {
-		return c.safeWriteUnavailableError()
-	}
-	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
-		return err
-	}
-	automationRef, err := c.automationWriteRef(ctx, request.Ref)
-	if err != nil {
-		return err
-	}
-	if c.fallback == nil {
-		return c.writeUnavailableError()
-	}
-	automationRequest := request
-	automationRequest.Ref = automationRef
-	mutationErr := c.fallback.DeleteMessage(ctx, automationRequest)
-	observationCtx, cancel := context.WithTimeout(context.Background(), mutationObservationWindow)
-	defer cancel()
-	observed, observationErr := c.store.observeMessageRemovedFromMailbox(observationCtx, request.Ref)
-	if observationErr == nil && observed {
-		return nil
-	}
-	if mutationErr != nil {
-		return mutationErr
-	}
-	return operationError(
-		"mutation_not_observed", "Mail.app accepted deletion, but the message remained in its original mailbox",
-	)
-}
-
 func (c *Client) rejectUnconfirmedDraftMutation(ctx context.Context, ref string, allowed bool) error {
 	if allowed {
 		return nil
@@ -810,34 +668,6 @@ func (c *Client) automationMessageRef(ctx context.Context, value string) (string
 		ExpectedMessageID: expectedMessageID,
 		ExpectedSubject:   resolved.Record.Subject,
 	})
-}
-
-func (c *Client) automationWriteRef(ctx context.Context, value string) (string, error) {
-	ref, err := mailref.DecodeMessage(value)
-	if err != nil {
-		return "", operationError("invalid_reference", "invalid message ref: "+err.Error())
-	}
-	if c.store != nil && !ref.IsStoreBound() {
-		return "", operationError(
-			"invalid_reference",
-			"message write requires a store-bound ref; list or search the message again",
-		)
-	}
-	automationRef, err := c.automationMessageRef(ctx, value)
-	if err != nil {
-		return "", err
-	}
-	decoded, err := mailref.DecodeMessage(automationRef)
-	if err != nil {
-		return "", operationError("invalid_reference", "invalid automation message ref: "+err.Error())
-	}
-	if decoded.ExpectedMessageID == "" {
-		return "", operationError(
-			"message_identity_unavailable",
-			"message mutation requires a locally verified RFC Message-ID; no Apple Events mutation was attempted",
-		)
-	}
-	return automationRef, nil
 }
 
 func (c *Client) localMessageID(resolved resolvedMessage) (result string, resultErr error) {

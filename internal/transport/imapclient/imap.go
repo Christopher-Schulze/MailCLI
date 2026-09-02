@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -594,4 +595,554 @@ func isTimeout(err error) bool {
 		return netErr.Timeout()
 	}
 	return false
+}
+
+type session struct {
+	conn    net.Conn
+	br      *bufio.Reader
+	bw      *bufio.Writer
+	nextTag func() string
+	close   func()
+}
+
+func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*session, error) {
+	if cfg.Host == "" {
+		return nil, &transport.TransportError{
+			Code:    transport.CodeIMAPConnectFailed,
+			Message: "IMAP host is empty",
+		}
+	}
+	conn, err := c.dial(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
+	br := bufio.NewReader(conn)
+	bw := bufio.NewWriter(conn)
+	prefix := makeTagPrefix()
+	var cmdNum int
+	nextTag := func() string {
+		cmdNum++
+		return fmt.Sprintf("%s%04d", prefix, cmdNum)
+	}
+	sess := &session{
+		conn:    conn,
+		br:      br,
+		bw:      bw,
+		nextTag: nextTag,
+		close: func() {
+			cancel()
+			_ = conn.Close()
+		},
+	}
+	if err := c.doLogin(ctx, conn, br, bw, nextTag(), cfg); err != nil {
+		sess.close()
+		return nil, err
+	}
+	return sess, nil
+}
+
+type selectInfo struct {
+	uidvalidity uint32
+	exists      int
+}
+
+func (c *Client) doSelectInfo(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, mbox string) (selectInfo, error) {
+	var info selectInfo
+	if err := c.setDeadline(ctx, conn); err != nil {
+		return info, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
+	}
+	if err := c.writeLine(bw, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
+		return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT write")
+	}
+	for {
+		line, err := c.readLine(br)
+		if err != nil {
+			return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT read")
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			status := parseStatus(line, tag)
+			if status == "OK" {
+				return info, nil
+			}
+			return info, &transport.TransportError{
+				Code:    transport.CodeIMAPMailboxNotFound,
+				Message: "IMAP SELECT failed: " + status,
+			}
+		}
+		if strings.HasPrefix(line, "* ") {
+			if strings.Contains(line, "UIDVALIDITY ") {
+				info.uidvalidity = parseUIDValidity(line)
+			}
+			if strings.HasSuffix(line, " EXISTS") {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					if n, err := strconv.Atoi(fields[1]); err == nil {
+						info.exists = n
+					}
+				}
+			}
+		}
+	}
+}
+
+func parseUIDValidity(line string) uint32 {
+	idx := strings.Index(line, "UIDVALIDITY ")
+	if idx == -1 {
+		return 0
+	}
+	rest := line[idx+len("UIDVALIDITY "):]
+	end := strings.IndexAny(rest, " ]")
+	if end != -1 {
+		rest = rest[:end]
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(v)
+}
+
+// ListMailboxes returns all mailboxes on the IMAP server with their flags.
+func (c *Client) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer sess.close()
+
+	mboxes, err := c.doList(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+	if err != nil {
+		return nil, err
+	}
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+
+	infos := make([]transport.MailboxInfo, len(mboxes))
+	for i, m := range mboxes {
+		infos[i] = transport.MailboxInfo{Name: m.name, Flags: m.flags}
+	}
+	return infos, nil
+}
+
+// SearchUID resolves a Message-ID to its IMAP UID in the specified mailbox.
+func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, error) {
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer sess.close()
+
+	info, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	uids, err := c.doUIDSearch(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), messageID)
+	if err != nil {
+		return 0, 0, err
+	}
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+
+	if len(uids) == 0 {
+		return 0, info.uidvalidity, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageNotFound,
+			Message: fmt.Sprintf("message %s not found in mailbox %s", messageID, mailbox),
+		}
+	}
+	return uids[len(uids)-1], info.uidvalidity, nil
+}
+
+func (c *Client) doUIDSearch(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, messageID string) ([]uint32, error) {
+	if err := c.setDeadline(ctx, conn); err != nil {
+		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
+	}
+	searchID := messageID
+	if !strings.HasPrefix(searchID, "<") && !strings.HasSuffix(searchID, ">") {
+		searchID = "<" + searchID + ">"
+	}
+	if err := c.writeLine(bw, tag+" UID SEARCH HEADER Message-ID "+quoteIMAP(searchID)); err != nil {
+		return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH write")
+	}
+
+	var uids []uint32
+	for {
+		line, err := c.readLine(br)
+		if err != nil {
+			return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH read")
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			status := parseStatus(line, tag)
+			if status == "OK" {
+				return uids, nil
+			}
+			return nil, &transport.TransportError{
+				Code:    transport.CodeIMAPMutationFailed,
+				Message: "IMAP UID SEARCH failed: " + status,
+			}
+		}
+		if strings.HasPrefix(line, "* SEARCH") {
+			fields := strings.Fields(line)
+			for _, f := range fields[2:] {
+				if uid, err := strconv.ParseUint(f, 10, 32); err == nil {
+					uids = append(uids, uint32(uid))
+				}
+			}
+		}
+	}
+}
+
+// SetFlags adds and removes IMAP flags on a message.
+func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+	var ev transport.MutationEvidence
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return ev, err
+	}
+	defer sess.close()
+
+	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox); err != nil {
+		return ev, err
+	}
+
+	var lastStatus string
+	if len(addFlags) > 0 {
+		cmd := fmt.Sprintf("%s UID STORE %d +FLAGS (%s)", sess.nextTag(), uid, strings.Join(addFlags, " "))
+		status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+		if err != nil {
+			return ev, err
+		}
+		lastStatus = status
+	}
+
+	if len(removeFlags) > 0 {
+		cmd := fmt.Sprintf("%s UID STORE %d -FLAGS (%s)", sess.nextTag(), uid, strings.Join(removeFlags, " "))
+		status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+		if err != nil {
+			return ev, err
+		}
+		lastStatus = status
+	}
+
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+	return transport.MutationEvidence{
+		Command:        "STORE",
+		ServerResponse: lastStatus,
+		Mailbox:        mailbox,
+		UID:            uid,
+	}, nil
+}
+
+func (c *Client) doCommand(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, cmd string) (string, error) {
+	tag := cmd[:strings.Index(cmd, " ")]
+	if err := c.setDeadline(ctx, conn); err != nil {
+		return "", wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP command deadline")
+	}
+	if err := c.writeLine(bw, cmd); err != nil {
+		return "", wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP command write")
+	}
+	status, text, err := c.readFinal(ctx, br, tag)
+	if err != nil {
+		return "", err
+	}
+	if status == "OK" {
+		if text != "" {
+			return status + " " + text, nil
+		}
+		return status, nil
+	}
+	return "", &transport.TransportError{
+		Code:    transport.CodeIMAPMutationFailed,
+		Message: "IMAP command failed: " + status + " " + text,
+	}
+}
+
+// CopyMessage copies a message by UID to dstMailbox.
+func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	var ev transport.MutationEvidence
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return ev, err
+	}
+	defer sess.close()
+
+	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), srcMailbox); err != nil {
+		return ev, err
+	}
+
+	cmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
+	status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+	if err != nil {
+		return ev, err
+	}
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+
+	return transport.MutationEvidence{
+		Command:        "COPY",
+		ServerResponse: status,
+		Mailbox:        srcMailbox,
+		TargetMailbox:  dstMailbox,
+		UID:            uid,
+	}, nil
+}
+
+// MoveMessage moves a message by UID to dstMailbox using native UID MOVE with COPY+EXPUNGE fallback.
+func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	var ev transport.MutationEvidence
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return ev, err
+	}
+	defer sess.close()
+
+	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), srcMailbox); err != nil {
+		return ev, err
+	}
+
+	tag := sess.nextTag()
+	cmd := fmt.Sprintf("%s UID MOVE %d %s", tag, uid, quoteIMAP(dstMailbox))
+	if err := c.setDeadline(ctx, sess.conn); err != nil {
+		return ev, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP MOVE deadline")
+	}
+	if err := c.writeLine(sess.bw, cmd); err != nil {
+		return ev, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP MOVE write")
+	}
+	status, text, err := c.readFinal(ctx, sess.br, tag)
+	if err == nil && status == "OK" {
+		_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+		resp := status
+		if text != "" {
+			resp += " " + text
+		}
+		return transport.MutationEvidence{
+			Command:        "MOVE",
+			ServerResponse: resp,
+			Mailbox:        srcMailbox,
+			TargetMailbox:  dstMailbox,
+			UID:            uid,
+		}, nil
+	}
+
+	// Fallback for servers without UID MOVE: COPY + STORE \Deleted + EXPUNGE
+	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
+	copyStatus, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, copyCmd)
+	if err != nil {
+		return ev, err
+	}
+
+	storeCmd := fmt.Sprintf("%s UID STORE %d +FLAGS (\\Deleted)", sess.nextTag(), uid)
+	if _, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, storeCmd); err != nil {
+		return ev, err
+	}
+
+	expungeCmd := fmt.Sprintf("%s EXPUNGE", sess.nextTag())
+	if _, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, expungeCmd); err != nil {
+		return ev, err
+	}
+
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+	return transport.MutationEvidence{
+		Command:        "MOVE",
+		ServerResponse: copyStatus + " (fallback COPY+EXPUNGE)",
+		Mailbox:        srcMailbox,
+		TargetMailbox:  dstMailbox,
+		UID:            uid,
+	}, nil
+}
+
+// DeleteMessage moves a message by UID to the Trash mailbox discovered via special-use flags.
+func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32) (transport.MutationEvidence, error) {
+	var ev transport.MutationEvidence
+	mboxes, err := c.ListMailboxes(ctx, cfg)
+	if err != nil {
+		return ev, err
+	}
+
+	trashBox := pickTrash(mboxes)
+	if trashBox == "" {
+		return ev, &transport.TransportError{
+			Code:    transport.CodeIMAPMailboxNotFound,
+			Message: "no Trash mailbox found on IMAP server",
+		}
+	}
+
+	ev, err = c.MoveMessage(ctx, cfg, srcMailbox, uid, trashBox)
+	if err != nil {
+		return ev, err
+	}
+	ev.Command = "DELETE"
+	return ev, nil
+}
+
+func pickTrash(mboxes []transport.MailboxInfo) string {
+	for _, m := range mboxes {
+		for _, f := range m.Flags {
+			if strings.EqualFold(f, "\\Trash") {
+				return m.Name
+			}
+		}
+	}
+	candidates := []string{
+		"Trash",
+		"Deleted Messages",
+		"[Gmail]/Trash",
+		"[Gmail]/Papierkorb",
+		"Papierkorb",
+		"INBOX.Trash",
+	}
+	for _, cand := range candidates {
+		for _, m := range mboxes {
+			if strings.EqualFold(m.Name, cand) {
+				return m.Name
+			}
+		}
+	}
+	return ""
+}
+
+// FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
+func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32) ([]byte, error) {
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer sess.close()
+
+	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox); err != nil {
+		return nil, err
+	}
+
+	tag := sess.nextTag()
+	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[])", tag, uid)
+	if err := c.setDeadline(ctx, sess.conn); err != nil {
+		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
+	}
+	if err := c.writeLine(sess.bw, cmd); err != nil {
+		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
+	}
+
+	payload, err := c.readFetchLiteral(ctx, sess.br, tag)
+	if err != nil {
+		return nil, err
+	}
+	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+	return payload, nil
+}
+
+func (c *Client) readFetchLiteral(ctx context.Context, br *bufio.Reader, tag string) ([]byte, error) {
+	var payload []byte
+	found := false
+	for {
+		line, err := c.readLine(br)
+		if err != nil {
+			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			status := parseStatus(line, tag)
+			if status == "OK" {
+				if !found {
+					return nil, &transport.TransportError{
+						Code:    transport.CodeIMAPMessageNotFound,
+						Message: "message not returned by IMAP FETCH",
+					}
+				}
+				return payload, nil
+			}
+			return nil, &transport.TransportError{
+				Code:    transport.CodeIMAPFetchFailed,
+				Message: "IMAP FETCH failed: " + status,
+			}
+		}
+		if strings.HasPrefix(line, "* ") && strings.Contains(line, "FETCH ") {
+			idx := strings.LastIndex(line, "{")
+			if idx != -1 && strings.HasSuffix(line, "}") {
+				lenStr := line[idx+1 : len(line)-1]
+				length, perr := strconv.Atoi(lenStr)
+				if perr == nil && length >= 0 {
+					buf := make([]byte, length)
+					if _, rerr := io.ReadFull(br, buf); rerr != nil {
+						return nil, wrapIOError(ctx, rerr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
+					}
+					payload = buf
+					found = true
+				}
+			}
+		}
+	}
+}
+
+// CheckStatus queries server message counts, unseen count, and UIDs via IMAP STATUS.
+func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
+	var status transport.MailboxStatus
+	status.Mailbox = mailbox
+
+	sess, err := c.connect(ctx, cfg)
+	if err != nil {
+		return status, err
+	}
+	defer sess.close()
+
+	tag := sess.nextTag()
+	cmd := fmt.Sprintf("%s STATUS %s (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", tag, quoteIMAP(mailbox))
+	if err := c.setDeadline(ctx, sess.conn); err != nil {
+		return status, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP STATUS deadline")
+	}
+	if err := c.writeLine(sess.bw, cmd); err != nil {
+		return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS write")
+	}
+
+	for {
+		line, err := c.readLine(sess.br)
+		if err != nil {
+			return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS read")
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			st := parseStatus(line, tag)
+			if st == "OK" {
+				_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+				return status, nil
+			}
+			return status, &transport.TransportError{
+				Code:    transport.CodeIMAPMailboxNotFound,
+				Message: "IMAP STATUS failed: " + st,
+			}
+		}
+		if strings.HasPrefix(line, "* STATUS ") {
+			parseStatusLine(line, &status)
+		}
+	}
+}
+
+func parseStatusLine(line string, st *transport.MailboxStatus) {
+	idx := strings.Index(line, "(")
+	end := strings.LastIndex(line, ")")
+	if idx == -1 || end == -1 || end <= idx {
+		return
+	}
+	fields := strings.Fields(line[idx+1 : end])
+	for i := 0; i+1 < len(fields); i += 2 {
+		key := strings.ToUpper(fields[i])
+		val := fields[i+1]
+		switch key {
+		case "MESSAGES":
+			if n, err := strconv.Atoi(val); err == nil {
+				st.Messages = n
+			}
+		case "UNSEEN":
+			if n, err := strconv.Atoi(val); err == nil {
+				st.Unseen = n
+			}
+		case "UIDNEXT":
+			if n, err := strconv.ParseUint(val, 10, 32); err == nil {
+				st.UIDNext = uint32(n)
+			}
+		case "UIDVALIDITY":
+			if n, err := strconv.ParseUint(val, 10, 32); err == nil {
+				st.UIDValidity = uint32(n)
+			}
+		}
+	}
 }

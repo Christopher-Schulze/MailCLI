@@ -57,9 +57,11 @@ func run() int {
 // sendTransport builds the direct SMTP/IMAP send transport with keychain
 // credentials. It performs no I/O until a send actually runs.
 func sendTransport() mail.SendTransport {
+	imap := imapclient.New()
 	return mail.SendTransport{
 		Submitter:   smtpclient.New(),
-		Mirror:      imapclient.New(),
+		Mirror:      imap,
 		Credentials: keychain.New(),
+		Imap:        imap,
 	}
 }

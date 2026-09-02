@@ -18,13 +18,14 @@ mailcli attachments save --message MESSAGE_REF --attachment ATTACHMENT_ID --outp
 
 Apple Mail's scripting interface can perform targeted mailbox mutations but performs poorly for large reads and is unsafe for composition on the verified Mail 16 host. MailCLI separates those workloads and fails closed where Mail cannot preserve reviewed content.
 
-- Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events. A targeted incomplete-content fallback accepts only Mail's raw RFC 5322 source as body or MIME-part evidence.
+- Lists, filters, metadata searches, message reads, raw source, and downloaded attachments use Mail's local store without Apple Events. Incomplete-content hydration uses bounded IMAP FETCH.
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. MailCLI creates no second mail index.
-- Mark, move, copy, delete, sync, and targeted incomplete-content fallback use serialized Apple Events against the exact running Mail process.
+- Mark, move, copy, and delete execute directly over IMAP using provisioned account credentials without launching Mail.app. Every mutation returns typed server-truth evidence.
+- Local-store staleness is documented and honest: IMAP mutations apply immediately on the server; the local read store updates on Mail.app's next background sync. `mailcli sync --check` inspects server vs local message counts over IMAP without launching Mail.app.
 - Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
 
-Reads of locally available content on the supported store profile add no work to the Mail process. Requesting content that Mail has not downloaded may use one targeted Apple Event. Explicit mailbox writes still require Mail.app to do the requested work; sending does not. MailCLI bounds and serializes those calls so multiple agents cannot build an Apple Events queue behind the application.
+Reads and mutations add zero work to the Mail.app process. Sending, marking, moving, copying, and deleting operate autonomously over standard SMTP and IMAP transports. Mail.app is retained solely as the local sync engine feeding the SQLite read store and for optional visible compose handoff.
 
 ## Capabilities
 
@@ -328,7 +329,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 ```bash
 ./scripts/tests/test.sh
 ./scripts/build/build.sh
-./scripts/release/build-release.sh 1.2.0
+./scripts/release/build-release.sh 1.3.0
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ./scripts/tests/test-live-responsiveness.sh
 ```

@@ -43,4 +43,9 @@ const (
 	CodeIMAPSentMailboxNotFound = "imap_sent_mailbox_not_found"
 	CodeIMAPAppendFailed        = "imap_append_failed"
 	CodeIMAPTimeout             = "imap_timeout"
+	CodeIMAPMailboxNotFound     = "imap_mailbox_not_found"
+	CodeIMAPMessageNotFound     = "imap_message_not_found"
+	CodeIMAPMutationFailed      = "imap_mutation_failed"
+	CodeIMAPFetchFailed         = "imap_fetch_failed"
+	CodeLocalOnlyMailbox        = "local_only_mailbox"
 )

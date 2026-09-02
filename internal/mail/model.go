@@ -247,22 +247,31 @@ type SendResult struct {
 	Reconciled         bool        `json:"reconciled"`
 }
 
-type MessageSummary struct {
-	Ref             string `json:"ref"`
-	MailboxRef      string `json:"mailbox_ref"`
-	MessageID       string `json:"message_id"`
-	Subject         string `json:"subject"`
-	Sender          string `json:"sender"`
-	DateReceived    string `json:"date_received,omitempty"`
-	DateSent        string `json:"date_sent,omitempty"`
-	Read            bool   `json:"read"`
-	Flagged         bool   `json:"flagged"`
-	Junk            bool   `json:"junk"`
-	Deleted         bool   `json:"deleted"`
-	Size            int64  `json:"size"`
-	AttachmentCount int    `json:"attachment_count"`
+type ServerMutationEvidence struct {
+	Command        string `json:"command"`
+	ServerResponse string `json:"server_response"`
+	Mailbox        string `json:"mailbox"`
+	TargetMailbox  string `json:"target_mailbox,omitempty"`
+	UID            uint32 `json:"uid"`
 }
 
+type MessageSummary struct {
+	Ref             string                  `json:"ref"`
+	MailboxRef      string                  `json:"mailbox_ref"`
+	MessageID       string                  `json:"message_id"`
+	Subject         string                  `json:"subject"`
+	Sender          string                  `json:"sender"`
+	DateReceived    string                  `json:"date_received,omitempty"`
+	DateSent        string                  `json:"date_sent,omitempty"`
+	Read            bool                    `json:"read"`
+	Flagged         bool                    `json:"flagged"`
+	Junk            bool                    `json:"junk"`
+	Deleted         bool                    `json:"deleted"`
+	Size            int64                   `json:"size"`
+	AttachmentCount int                     `json:"attachment_count"`
+	ServerTruth     *ServerMutationEvidence `json:"server_truth,omitempty"`
+	StalenessNote   string                  `json:"staleness_note,omitempty"`
+}
 type MarkMessageRequest struct {
 	Ref                string
 	Read               *bool
@@ -284,8 +293,9 @@ type DeleteMessageRequest struct {
 }
 
 type DeleteResult struct {
-	MessageRef string `json:"message_ref"`
-	Deleted    bool   `json:"deleted"`
+	MessageRef  string                  `json:"message_ref"`
+	Deleted     bool                    `json:"deleted"`
+	ServerTruth *ServerMutationEvidence `json:"server_truth,omitempty"`
 }
 
 type SyncResult struct {
@@ -293,6 +303,21 @@ type SyncResult struct {
 	Triggered  bool   `json:"triggered"`
 }
 
+type MailboxDelta struct {
+	MailboxRef     string   `json:"mailbox_ref"`
+	AccountRef     string   `json:"account_ref"`
+	Name           string   `json:"name"`
+	Path           []string `json:"path"`
+	LocalMessages  int      `json:"local_messages"`
+	ServerMessages int      `json:"server_messages"`
+	Delta          int      `json:"delta"`
+	Unseen         int      `json:"unseen"`
+}
+
+type SyncCheckResult struct {
+	AccountRef string         `json:"account_ref,omitempty"`
+	Mailboxes  []MailboxDelta `json:"mailboxes"`
+}
 type Message struct {
 	Summary         MessageSummary `json:"summary"`
 	ReplyTo         string         `json:"reply_to"`

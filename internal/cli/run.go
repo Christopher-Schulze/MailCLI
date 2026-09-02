@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.2.0"
+	version       = "1.3.0"
 	schemaVersion = 1
 )
 
@@ -53,6 +53,7 @@ type responseData struct {
 	SendSetup       *sendSetupResult        `json:"send_setup,omitempty"`
 	DeleteResult    *mail.DeleteResult      `json:"delete_result,omitempty"`
 	SyncResult      *mail.SyncResult        `json:"sync_result,omitempty"`
+	SyncCheck       *mail.SyncCheckResult   `json:"sync_check,omitempty"`
 	UpdateResult    *updateResult           `json:"update_result,omitempty"`
 }
 
@@ -502,7 +503,7 @@ Commands:
   attachments   List and save received attachments
   drafts        Create, preview, edit, and hand off visible drafts
   send          Store or remove app-specific SMTP send credentials
-  sync          Ask Mail.app to check for new mail
+  sync          Synchronize with Mail.app or check server status over IMAP (--check)
   update        Check GitHub and install the latest verified release
   doctor        Verify the local MailCLI environment
   capabilities  Print the machine-readable command contract
@@ -510,7 +511,7 @@ Commands:
   help          Show this command overview
 
 Mail 16 scripted draft save remains disabled; visible handoff never sends.
-Direct SMTP send works without Mail.app: run 'mailcli send setup' once.
+Direct SMTP send and IMAP mutations work without Mail.app: run 'mailcli send setup' once.
 Run 'mailcli <command> --help' for focused usage and flags.
 `)
 }

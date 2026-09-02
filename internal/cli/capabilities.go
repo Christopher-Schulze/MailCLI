@@ -38,6 +38,7 @@ type capabilityLimits struct {
 	VisibleComposeHandoff       bool   `json:"visible_compose_handoff"`
 	VisibleAttachmentHandoff    bool   `json:"visible_attachment_handoff"`
 	SendTransport               string `json:"send_transport"`
+	MutationTransport           string `json:"mutation_transport"`
 	MaximumPageSize             int    `json:"maximum_page_size"`
 	MaximumDraftInputBytes      int    `json:"maximum_draft_input_bytes"`
 	MaximumDraftSubjectBytes    int    `json:"maximum_draft_subject_bytes"`
@@ -96,11 +97,11 @@ func capabilities() capabilityManifest {
 			write("drafts.discard", "local-write", "required-flag", "draft-store", "none", "discarded"),
 			write("messages.reply", "local-write", "none", "draft-store", "none", "created"),
 			write("messages.forward", "local-write", "none", "draft-store", "none", "created"),
-			write("messages.mark", "mail-write", "draft-flag", "mail-store", "automation", "updated"),
-			write("messages.move", "mail-write", "draft-flag", "mail-store", "automation", "moved"),
-			write("messages.copy", "mail-write", "none", "mail-store", "automation", "copied"),
-			write("messages.delete", "mail-write", "required-and-draft-flags", "mail-store", "automation", "deleted"),
-			write("sync", "mail-write", "none", "mail-store", "automation", "triggered"),
+			write("messages.mark", "imap-write", "draft-flag", "mail-store", "none", "updated"),
+			write("messages.move", "imap-write", "draft-flag", "mail-store", "none", "moved"),
+			write("messages.copy", "imap-write", "none", "mail-store", "none", "copied"),
+			write("messages.delete", "imap-write", "required-and-draft-flags", "mail-store", "none", "deleted"),
+			write("sync", "mail-write", "none", "mail-store", "optional", "triggered", "checked"),
 		},
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
@@ -110,6 +111,7 @@ func capabilities() capabilityManifest {
 			VisibleComposeHandoff:       true,
 			VisibleAttachmentHandoff:    true,
 			SendTransport:               "smtp",
+			MutationTransport:           "imap",
 			MaximumPageSize:             mail.MaximumPageLimit,
 			MaximumDraftInputBytes:      maximumDraftInputBytes,
 			MaximumDraftSubjectBytes:    mail.MaximumDraftSubjectBytes,

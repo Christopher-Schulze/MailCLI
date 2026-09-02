@@ -22,10 +22,14 @@ import (
 type fakeServerConfig struct {
 	authOK        bool
 	sentMboxes    []string
+	trashMboxes   []string
 	otherMboxes   []string
 	searchMatchID string
+	searchUID     uint32
 	appendOK      bool
 	searchDelay   time.Duration
+	moveSupported bool
+	fetchPayload  []byte
 }
 
 type fakeServer struct {
@@ -34,11 +38,21 @@ type fakeServer struct {
 	cert     tls.Certificate
 	config   fakeServerConfig
 
-	mu           sync.Mutex
-	appendCalled bool
-	appendMbox   string
-	appendFlags  []string
-	appendData   []byte
+	mu            sync.Mutex
+	appendCalled  bool
+	appendMbox    string
+	appendFlags   []string
+	appendData    []byte
+	storeCalled   bool
+	storeUID      uint32
+	storeFlags    string
+	copyCalled    bool
+	copyUID       uint32
+	copyDst       string
+	moveCalled    bool
+	moveUID       uint32
+	moveDst       string
+	expungeCalled bool
 }
 
 func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
@@ -112,12 +126,16 @@ func (s *fakeServer) handle(conn net.Conn) {
 			for _, name := range s.config.sentMboxes {
 				s.writeLine(bw, fmt.Sprintf(`* LIST (\Sent) "/" %s`, quoteIMAP(name)))
 			}
+			for _, name := range s.config.trashMboxes {
+				s.writeLine(bw, fmt.Sprintf(`* LIST (\Trash) "/" %s`, quoteIMAP(name)))
+			}
 			for _, name := range s.config.otherMboxes {
 				s.writeLine(bw, fmt.Sprintf(`* LIST (\HasNoChildren) "/" %s`, quoteIMAP(name)))
 			}
 			s.writeLine(bw, tag+" OK LIST completed")
 		case "SELECT", "EXAMINE":
 			s.writeLine(bw, "* FLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)")
+			s.writeLine(bw, "* OK [UIDVALIDITY 12345] UIDs valid")
 			s.writeLine(bw, "* 0 EXISTS")
 			s.writeLine(bw, "* 0 RECENT")
 			s.writeLine(bw, tag+" OK [READ-WRITE] SELECT completed")
@@ -177,6 +195,112 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.writeLine(bw, tag+" OK [APPENDUID 1 100] APPEND completed")
 			} else {
 				s.writeLine(bw, tag+" NO APPEND failed")
+			}
+		case "STATUS":
+			mbox := ""
+			if len(args) > 0 {
+				mbox = args[0]
+			}
+			s.writeLine(bw, fmt.Sprintf(`* STATUS %s (MESSAGES 42 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345)`, quoteIMAP(mbox)))
+			s.writeLine(bw, tag+" OK STATUS completed")
+		case "EXPUNGE":
+			s.mu.Lock()
+			s.expungeCalled = true
+			s.mu.Unlock()
+			s.writeLine(bw, "* 1 EXPUNGE")
+			s.writeLine(bw, tag+" OK EXPUNGE completed")
+		case "UID":
+			if len(args) == 0 {
+				s.writeLine(bw, tag+" BAD UID missing sub-command")
+				continue
+			}
+			subCmd := strings.ToUpper(args[0])
+			switch subCmd {
+			case "SEARCH":
+				match := false
+				if s.config.searchMatchID != "" && len(args) >= 4 {
+					if strings.EqualFold(args[1], "HEADER") && strings.EqualFold(args[2], "Message-ID") {
+						if args[3] == s.config.searchMatchID {
+							match = true
+						}
+					}
+				}
+				if match {
+					uid := s.config.searchUID
+					if uid == 0 {
+						uid = 42
+					}
+					s.writeLine(bw, fmt.Sprintf("* SEARCH %d", uid))
+				} else {
+					s.writeLine(bw, "* SEARCH")
+				}
+				s.writeLine(bw, tag+" OK SEARCH completed")
+			case "STORE":
+				uid := 0
+				if len(args) > 1 {
+					uid, _ = strconv.Atoi(args[1])
+				}
+				s.mu.Lock()
+				s.storeCalled = true
+				s.storeUID = uint32(uid)
+				if len(args) > 2 {
+					s.storeFlags = strings.Join(args[2:], " ")
+				}
+				s.mu.Unlock()
+				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d FLAGS (\\Seen))", uid))
+				s.writeLine(bw, tag+" OK STORE completed")
+			case "COPY":
+				uid := 0
+				dst := ""
+				if len(args) > 1 {
+					uid, _ = strconv.Atoi(args[1])
+				}
+				if len(args) > 2 {
+					dst = args[2]
+				}
+				s.mu.Lock()
+				s.copyCalled = true
+				s.copyUID = uint32(uid)
+				s.copyDst = dst
+				s.mu.Unlock()
+				s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 1 %d 100] COPY completed", uid))
+				s.writeLine(bw, tag+" OK COPY completed")
+			case "MOVE":
+				if !s.config.moveSupported {
+					s.writeLine(bw, tag+" BAD unrecognized command")
+					continue
+				}
+				uid := 0
+				dst := ""
+				if len(args) > 1 {
+					uid, _ = strconv.Atoi(args[1])
+				}
+				if len(args) > 2 {
+					dst = args[2]
+				}
+				s.mu.Lock()
+				s.moveCalled = true
+				s.moveUID = uint32(uid)
+				s.moveDst = dst
+				s.mu.Unlock()
+				s.writeLine(bw, tag+" OK MOVE completed")
+			case "FETCH":
+				uid := 0
+				if len(args) > 1 {
+					uid, _ = strconv.Atoi(args[1])
+				}
+				payload := s.config.fetchPayload
+				if len(payload) == 0 {
+					payload = []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody\r\n")
+				}
+				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", uid, len(payload)))
+				if _, err := bw.Write(payload); err != nil {
+					return
+				}
+				s.writeLine(bw, ")")
+				s.writeLine(bw, tag+" OK FETCH completed")
+			default:
+				s.writeLine(bw, tag+" BAD unsupported UID sub-command")
 			}
 		case "LOGOUT":
 			s.writeLine(bw, "* BYE")

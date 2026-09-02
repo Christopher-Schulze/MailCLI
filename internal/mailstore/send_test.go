@@ -362,6 +362,43 @@ func installSentMailboxFixture(t *testing.T, store *Store) {
 	}
 }
 
+// installImapIdentityFixture installs a provable IMAP sender identity for the
+// fixture account: a Sent mailbox (ROWID 4) plus one message from address in
+// that mailbox. loadSenderIdentities derives the account address from Sent
+// senders, so without this the account catalog stays unprovable. The message is
+// dated far in the past so it never displaces fixture messages 101-103 in
+// listing order.
+func installImapIdentityFixture(t *testing.T, store *Store, address string) {
+	t.Helper()
+	installSentMailboxFixture(t, store)
+	databasePath := filepath.Join(store.versionRoot, "MailData", envelopeIndexName)
+	writer := openTestWriter(t, databasePath)
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{query: `INSERT INTO addresses(ROWID,address,comment) VALUES (3,?,?)`, args: []any{address, "Identity"}},
+		{query: `INSERT INTO subjects(ROWID,subject) VALUES (1900,'Sent identity')`, args: nil},
+		{query: `INSERT INTO summaries(ROWID,summary) VALUES (2900,'sent identity')`, args: nil},
+		{
+			query: `INSERT INTO messages(
+				ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,
+				mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color
+			) VALUES (900,3900,4900,3,1900,2900,50,50,4,0,1,0,0,100,900,0,50,0)`,
+			args: nil,
+		},
+	}
+	for _, statement := range statements {
+		if _, err := writer.Exec(statement.query, statement.args...); err != nil {
+			closeTestResourceNow(t, writer, "identity fixture writer")
+			t.Fatalf("execute identity fixture statement: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close identity fixture writer: %v", err)
+	}
+}
+
 func insertSentMessageFixture(t *testing.T, store *Store, rowID int64) {
 	insertSentMessageFixtureWithDetails(t, store, rowID, sentMessageFixture{
 		Body: "Body", RecipientTypes: []int{0},

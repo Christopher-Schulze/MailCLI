@@ -21,9 +21,9 @@ fi
 MAILCLI_RELEASE_DIRECTORY="${RELEASE_DIRECTORY}" \
   MAILCLI_RELEASE_SIGNING_KEY="${TEST_SIGNING_KEY}" \
   MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
-  "${MAILCLI_ROOT}/scripts/release/build-release.sh" 1.2.0
+  "${MAILCLI_ROOT}/scripts/release/build-release.sh" 1.3.0
 
-ARCHIVE="${RELEASE_DIRECTORY}/mailcli_1.2.0_darwin_arm64.tar.gz"
+ARCHIVE="${RELEASE_DIRECTORY}/mailcli_1.3.0_darwin_arm64.tar.gz"
 CHECKSUMS="${RELEASE_DIRECTORY}/SHA256SUMS"
 SIGNATURE="${RELEASE_DIRECTORY}/SHA256SUMS.sig"
 [[ -f "${ARCHIVE}" && -f "${CHECKSUMS}" && -f "${SIGNATURE}" ]]
@@ -43,12 +43,12 @@ if grep -Eq '(^|/)(\.DS_Store|\._[^/]*)$' "${ARCHIVE_LIST}"; then
   exit 1
 fi
 for REQUIRED_PATH in \
-  mailcli_1.2.0_darwin_arm64/bin/mailcli \
-  mailcli_1.2.0_darwin_arm64/skills/mailcli/SKILL.md \
-  mailcli_1.2.0_darwin_arm64/skills/mailcli/agents/openai.yaml \
-  mailcli_1.2.0_darwin_arm64/install.sh \
-  mailcli_1.2.0_darwin_arm64/README.md \
-  mailcli_1.2.0_darwin_arm64/LICENSE; do
+  mailcli_1.3.0_darwin_arm64/bin/mailcli \
+  mailcli_1.3.0_darwin_arm64/skills/mailcli/SKILL.md \
+  mailcli_1.3.0_darwin_arm64/skills/mailcli/agents/openai.yaml \
+  mailcli_1.3.0_darwin_arm64/install.sh \
+  mailcli_1.3.0_darwin_arm64/README.md \
+  mailcli_1.3.0_darwin_arm64/LICENSE; do
   if ! grep -Fxq "${REQUIRED_PATH}" "${ARCHIVE_LIST}"; then
     printf 'Release archive is missing %s\n' "${REQUIRED_PATH}" >&2
     exit 1
@@ -56,7 +56,7 @@ for REQUIRED_PATH in \
 done
 
 tar -xzf "${ARCHIVE}" -C "${TEST_ROOT}"
-PACKAGE_ROOT="${TEST_ROOT}/mailcli_1.2.0_darwin_arm64"
+PACKAGE_ROOT="${TEST_ROOT}/mailcli_1.3.0_darwin_arm64"
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
 cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${MAILCLI_ROOT}/bin/mailcli"
 TEST_HOME="${TEST_ROOT}/home"
@@ -67,7 +67,7 @@ INSTALLED_BINARY="${TEST_HOME}/.local/bin/mailcli"
 INSTALLED_SKILL="${TEST_HOME}/.agents/skills/mailcli"
 cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${INSTALLED_BINARY}"
 diff -qr "${PACKAGE_ROOT}/skills/mailcli" "${INSTALLED_SKILL}" >/dev/null
-[[ "$("${INSTALLED_BINARY}" version)" == "mailcli 1.2.0" ]]
+[[ "$("${INSTALLED_BINARY}" version)" == "mailcli 1.3.0" ]]
 "${INSTALLED_BINARY}" capabilities --json | grep -q '"raw_mime_send":true'
 file "${INSTALLED_BINARY}" | grep -q 'Mach-O 64-bit executable arm64'
 if size -m "${INSTALLED_BINARY}" | grep -q 'Segment __DWARF:'; then

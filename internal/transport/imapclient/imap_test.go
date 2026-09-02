@@ -336,3 +336,242 @@ func TestAppendToSentMidCommandCancel(t *testing.T) {
 		t.Fatalf("mid-command cancel took too long: %v", elapsed)
 	}
 }
+
+func TestListMailboxes(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		sentMboxes:  []string{"Sent"},
+		trashMboxes: []string{"Trash"},
+		otherMboxes: []string{"INBOX", "Archive"},
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	mboxes, err := client.ListMailboxes(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ListMailboxes: %v", err)
+	}
+	if len(mboxes) != 4 {
+		t.Fatalf("expected 4 mailboxes, got %d", len(mboxes))
+	}
+	names := make(map[string]bool)
+	for _, m := range mboxes {
+		names[m.Name] = true
+	}
+	for _, expected := range []string{"Sent", "Trash", "INBOX", "Archive"} {
+		if !names[expected] {
+			t.Errorf("expected mailbox %s in list", expected)
+		}
+	}
+}
+
+func TestSearchUID(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		otherMboxes:   []string{"INBOX"},
+		searchMatchID: "<found@example.com>",
+		searchUID:     77,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	uid, uidval, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
+	if err != nil {
+		t.Fatalf("SearchUID: %v", err)
+	}
+	if uid != 77 {
+		t.Fatalf("expected UID 77, got %d", uid)
+	}
+	if uidval != 12345 {
+		t.Fatalf("expected UIDVALIDITY 12345, got %d", uidval)
+	}
+
+	_, _, err = client.SearchUID(context.Background(), cfg, "INBOX", "<absent@example.com>")
+	if err == nil {
+		t.Fatalf("expected error for absent message")
+	}
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPMessageNotFound {
+		t.Fatalf("expected code %s, got %s", transport.CodeIMAPMessageNotFound, code)
+	}
+}
+
+func TestSetFlags(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, []string{"\\Seen", "\\Flagged"}, []string{"\\Draft"})
+	if err != nil {
+		t.Fatalf("SetFlags: %v", err)
+	}
+	if ev.Command != "STORE" || ev.UID != 42 || ev.Mailbox != "INBOX" {
+		t.Fatalf("unexpected evidence: %+v", ev)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !srv.storeCalled || srv.storeUID != 42 {
+		t.Fatalf("store not recorded on server: called=%v, uid=%d", srv.storeCalled, srv.storeUID)
+	}
+}
+
+func TestCopyMessage(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX", "Archive"},
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.CopyMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	if err != nil {
+		t.Fatalf("CopyMessage: %v", err)
+	}
+	if ev.Command != "COPY" || ev.UID != 42 || ev.Mailbox != "INBOX" || ev.TargetMailbox != "Archive" {
+		t.Fatalf("unexpected evidence: %+v", ev)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !srv.copyCalled || srv.copyUID != 42 || srv.copyDst != "Archive" {
+		t.Fatalf("copy not recorded on server: called=%v, uid=%d, dst=%s", srv.copyCalled, srv.copyUID, srv.copyDst)
+	}
+}
+
+func TestMoveMessageNative(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		otherMboxes:   []string{"INBOX", "Archive"},
+		moveSupported: true,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	if err != nil {
+		t.Fatalf("MoveMessage native: %v", err)
+	}
+	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" {
+		t.Fatalf("unexpected evidence: %+v", ev)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !srv.moveCalled || srv.moveUID != 42 || srv.moveDst != "Archive" {
+		t.Fatalf("move not recorded on server: called=%v, uid=%d, dst=%s", srv.moveCalled, srv.moveUID, srv.moveDst)
+	}
+}
+
+func TestMoveMessageFallback(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		otherMboxes:   []string{"INBOX", "Archive"},
+		moveSupported: false, // forces fallback COPY + STORE \Deleted + EXPUNGE
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	if err != nil {
+		t.Fatalf("MoveMessage fallback: %v", err)
+	}
+	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" {
+		t.Fatalf("unexpected evidence: %+v", ev)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !srv.copyCalled || !srv.storeCalled || !srv.expungeCalled {
+		t.Fatalf("fallback chain incomplete: copy=%v, store=%v, expunge=%v", srv.copyCalled, srv.storeCalled, srv.expungeCalled)
+	}
+}
+
+func TestDeleteMessage(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		trashMboxes:   []string{"Trash"},
+		otherMboxes:   []string{"INBOX"},
+		moveSupported: true,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42)
+	if err != nil {
+		t.Fatalf("DeleteMessage: %v", err)
+	}
+	if ev.Command != "DELETE" || ev.TargetMailbox != "Trash" || ev.UID != 42 {
+		t.Fatalf("unexpected delete evidence: %+v", ev)
+	}
+}
+
+func TestFetchMessage(t *testing.T) {
+	expectedBody := []byte("From: me@test.com\r\nSubject: Hi\r\n\r\nHello body!\r\n")
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:       true,
+		otherMboxes:  []string{"INBOX"},
+		fetchPayload: expectedBody,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42)
+	if err != nil {
+		t.Fatalf("FetchMessage: %v", err)
+	}
+	if !bytes.Equal(payload, expectedBody) {
+		t.Fatalf("expected payload %q, got %q", expectedBody, payload)
+	}
+}
+
+func TestCheckStatus(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	st, err := client.CheckStatus(context.Background(), cfg, "INBOX")
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	if st.Messages != 42 || st.Unseen != 3 || st.UIDNext != 100 || st.UIDValidity != 12345 {
+		t.Fatalf("unexpected status: %+v", st)
+	}
+}
