@@ -47,7 +47,8 @@ type responseData struct {
 	Draft           *mail.Draft             `json:"draft,omitempty"`
 	DraftPreview    *draftPreview           `json:"draft_preview,omitempty"`
 	DraftHandoff    *draftHandoffResult     `json:"draft_handoff,omitempty"`
-	Drafts          *[]mail.Draft           `json:"drafts,omitempty"`
+	Drafts          *[]draftListEntry       `json:"drafts,omitempty"`
+	PruneResult     *mail.PruneDraftsResult `json:"prune,omitempty"`
 	SavedDraft      *mail.SavedDraft        `json:"saved_draft,omitempty"`
 	SendResult      *mail.SendResult        `json:"send_result,omitempty"`
 	SendSetup       *sendSetupResult        `json:"send_setup,omitempty"`
@@ -501,7 +502,7 @@ Commands:
   mailboxes     List and resolve exact mailbox paths
   messages      List, search, read, reply, forward, and organize messages
   attachments   List and save received attachments
-  drafts        Create, preview, edit, and hand off visible drafts
+  drafts        Create, preview, edit, hand off, and prune drafts
   send          Store or remove app-specific SMTP send credentials
   sync          Synchronize with Mail.app or check server status over IMAP (--check)
   update        Check GitHub and install the latest verified release

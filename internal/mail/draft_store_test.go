@@ -3,6 +3,7 @@ package mail
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -506,5 +507,94 @@ func assertNoDraftLockFiles(t *testing.T, root string) {
 		if strings.HasSuffix(entry.Name(), ".lock") {
 			t.Fatalf("orphan draft lock left behind: %s", entry.Name())
 		}
+	}
+}
+
+func ageDraftFile(t *testing.T, root string, ref string, days int) {
+	t.Helper()
+	path := filepath.Join(root, ref+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("Unmarshal draft error = %v", err)
+	}
+	stored["updated_at"] = time.Now().Add(-time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal draft error = %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("WriteFile draft error = %v", err)
+	}
+}
+
+func TestPruneDryRunListsOnlyStaleNeverSentDrafts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	stale := createSendTestDraft(t, service)
+	fresh := createSendTestDraft(t, service)
+	ageDraftFile(t, root, stale.Ref, 40)
+	result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("PruneDrafts() error = %v", err)
+	}
+	if !result.DryRun {
+		t.Fatal("PruneDrafts() without confirm must be a dry run")
+	}
+	if len(result.Candidates) != 1 || result.Candidates[0].Ref != stale.Ref || result.Candidates[0].AgeDays < 39 {
+		t.Fatalf("candidates = %+v, want only %s", result.Candidates, stale.Ref)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Ref == fresh.Ref {
+			t.Fatalf("fresh draft %s selected for prune", fresh.Ref)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, stale.Ref+".json")); err != nil {
+		t.Fatalf("dry run deleted the stale draft: %v", err)
+	}
+}
+
+func TestPruneConfirmRemovesStaleDraftsAndLockFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	stale := createSendTestDraft(t, service)
+	fresh := createSendTestDraft(t, service)
+	ageDraftFile(t, root, stale.Ref, 40)
+	result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
+	if err != nil {
+		t.Fatalf("PruneDrafts() error = %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != stale.Ref || len(result.Failed) != 0 {
+		t.Fatalf("result = %+v, want only %s removed", result, stale.Ref)
+	}
+	if _, err := os.Stat(filepath.Join(root, stale.Ref+".json")); !os.IsNotExist(err) {
+		t.Fatalf("stale draft still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, fresh.Ref+".json")); err != nil {
+		t.Fatalf("fresh draft was removed: %v", err)
+	}
+	assertNoDraftLockFiles(t, root)
+}
+
+func TestPruneSkipsDraftsWithSendAttempt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	draft := createSendTestDraft(t, service)
+	ageDraftFile(t, root, draft.Ref, 40)
+	if _, err := beginSendAttempt(root, draft.Ref); err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+	result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
+	if err != nil {
+		t.Fatalf("PruneDrafts() error = %v", err)
+	}
+	if len(result.Candidates) != 0 || len(result.Removed) != 0 {
+		t.Fatalf("claimed draft was selected: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, draft.Ref+".json")); err != nil {
+		t.Fatalf("claim-guarded draft was removed: %v", err)
 	}
 }

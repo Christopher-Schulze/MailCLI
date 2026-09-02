@@ -129,6 +129,10 @@ func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 			args: []string{"messages", "move", "help"},
 			want: []string{"--allow-draft", "Allow moving a source message that is a draft"},
 		},
+		{
+			args: []string{"drafts", "prune", "help"},
+			want: []string{"Options:", "--older-than <int>", "(default: 30)", "--confirm", "--json"},
+		},
 	}
 	for _, test := range tests {
 		var stdout bytes.Buffer

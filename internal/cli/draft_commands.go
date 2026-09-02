@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -25,12 +26,12 @@ func (e *commandError) ErrorCode() string {
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard> [options]")
+		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard|prune> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard> [options]")
+		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard|prune> [options]")
 		return 0
 	case "create":
 		return runDraftCreate(service, args[1:], stdout, stderr)
@@ -56,6 +57,8 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 		return runDraftReconcile(ctx, service, args[1:], stdout, stderr)
 	case "discard":
 		return runDraftDiscard(service, args[1:], stdout, stderr)
+	case "prune":
+		return runDraftPrune(service, args[1:], stdout, stderr)
 	default:
 		writeFormat(stderr, "unknown drafts command %q\n", args[0])
 		return 2
@@ -150,6 +153,12 @@ func runDraftCreate(service *mail.Service, args []string, stdout io.Writer, stde
 	return writeDraftResponse(stdout, "drafts.create", draft, *jsonOutput)
 }
 
+type draftListEntry struct {
+	mail.Draft
+	AgeDays  int  `json:"age_days"`
+	EverSent bool `json:"ever_sent"`
+}
+
 func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts list", stderr)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -160,18 +169,77 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 	if err != nil {
 		return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
 	}
-	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &drafts})
-	}
-	rows := make([][]string, 0, len(drafts))
+	entries := make([]draftListEntry, 0, len(drafts))
 	for _, draft := range drafts {
-		rows = append(rows, []string{draft.Ref, string(draft.Kind), draft.UpdatedAt.Format(time.RFC3339), draft.Subject})
+		entries = append(entries, draftListEntry{
+			Draft:    draft,
+			AgeDays:  int(time.Since(draft.UpdatedAt).Hours() / 24),
+			EverSent: draft.SendAttempt != nil,
+		})
 	}
-	if writeTerminalTable(stdout, []string{"REF", "TYPE", "UPDATED", "SUBJECT"}, rows) {
+	if *jsonOutput {
+		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &entries})
+	}
+	rows := make([][]string, 0, len(entries))
+	for _, entry := range entries {
+		sendMarker := "none"
+		if entry.EverSent {
+			sendMarker = "attempt"
+		}
+		rows = append(rows, []string{
+			entry.Ref, string(entry.Kind), entry.UpdatedAt.Format(time.RFC3339),
+			fmt.Sprintf("%dd", entry.AgeDays), sendMarker, oneLine(entry.Subject),
+		})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "TYPE", "UPDATED", "AGE", "SEND ATTEMPT", "SUBJECT"}, rows) {
 		return 0
 	}
-	for _, draft := range drafts {
-		writeFormat(stdout, "%s\t%s\t%s\t%s\n", draft.Ref, draft.Kind, draft.UpdatedAt.Format(time.RFC3339), oneLine(draft.Subject))
+	for _, entry := range entries {
+		sendMarker := "none"
+		if entry.EverSent {
+			sendMarker = "attempt"
+		}
+		writeFormat(stdout, "%s\t%s\t%s\t%dd\t%s\t%s\n",
+			entry.Ref, entry.Kind, entry.UpdatedAt.Format(time.RFC3339), entry.AgeDays, sendMarker, oneLine(entry.Subject))
+	}
+	return 0
+}
+
+func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := newFlagSet("drafts prune", stderr)
+	olderThan := flags.Int("older-than", 30, "age threshold in days for never-sent drafts")
+	confirm := flags.Bool("confirm", false, "delete the listed stale drafts")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
+	}
+	result, err := service.PruneDrafts(mail.PruneDraftsRequest{
+		OlderThan: time.Duration(*olderThan) * 24 * time.Hour,
+		Confirm:   *confirm,
+	})
+	if err != nil {
+		return failCommandWithData(
+			"drafts.prune", *jsonOutput, responseData{PruneResult: &result}, err, stdout, stderr,
+		)
+	}
+	if *jsonOutput {
+		return writeSuccess(stdout, "drafts.prune", responseData{PruneResult: &result})
+	}
+	if len(result.Candidates) == 0 {
+		writeLine(stdout, "no stale never-sent drafts")
+		return 0
+	}
+	if !*confirm {
+		for _, candidate := range result.Candidates {
+			writeFormat(stdout, "would remove\t%s\t%d days\t%s\n", candidate.Ref, candidate.AgeDays, oneLine(candidate.Subject))
+		}
+		return 0
+	}
+	for _, ref := range result.Removed {
+		writeFormat(stdout, "removed\t%s\n", ref)
+	}
+	for _, failure := range result.Failed {
+		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, failure.Error)
 	}
 	return 0
 }
