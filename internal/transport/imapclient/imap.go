@@ -29,6 +29,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mailcli/internal/transport"
@@ -66,14 +67,15 @@ func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg
 	if err != nil {
 		return empty, err
 	}
-	defer func() { _ = conn.Close() }()
-
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		closeConn()
 	}()
+	defer cancel()
 
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
@@ -617,9 +619,11 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		closeConn()
 	}()
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
@@ -636,7 +640,7 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 		nextTag: nextTag,
 		close: func() {
 			cancel()
-			_ = conn.Close()
+			closeConn()
 		},
 	}
 	if err := c.doLogin(ctx, conn, br, bw, nextTag(), cfg); err != nil {

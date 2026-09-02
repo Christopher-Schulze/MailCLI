@@ -13,6 +13,7 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strconv"
+	"sync"
 	"time"
 
 	"mailcli/internal/transport"
@@ -63,21 +64,25 @@ func (c *Client) Submit(ctx context.Context, cfg transport.SubmitConfig, from st
 	if err != nil {
 		return evidence, dialError(ctx, addr, err)
 	}
-	defer func() { _ = conn.Close() }()
 
-	// Abort blocked I/O promptly once ctx is done.
+	// Abort blocked I/O promptly once ctx is done. Use sync.Once to avoid
+	// double-close races between the context goroutine and client.Close().
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			closeConn()
 		case <-done:
 		}
 	}()
 
 	client, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
+		closeConn()
 		return evidence, dialError(ctx, addr, err)
 	}
 	defer func() { _ = client.Close() }()

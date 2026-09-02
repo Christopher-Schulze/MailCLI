@@ -531,7 +531,7 @@ func TestLimitValidationReturnsFailure(t *testing.T) {
 		[]string{"messages", "list", "--mailbox", "mbx_ref", "--limit", "101", "--json"},
 		&stdout, &stderr,
 	)
-	if code != 1 || !strings.Contains(stdout.String(), `"code":"invalid_argument"`) || !strings.Contains(stdout.String(), "limit must be between") {
+	if code != 2 || !strings.Contains(stdout.String(), `"code":"invalid_argument"`) || !strings.Contains(stdout.String(), "limit must be between") {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
@@ -572,5 +572,87 @@ func TestSyncCheckJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"sync_check"`) || !strings.Contains(stdout.String(), `"delta":5`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestRequiredFlagValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantErr  string
+	}{
+		{name: "messages get missing ref", args: []string{"messages", "get", "--json"}, wantCode: 2, wantErr: "missing required --ref"},
+		{name: "messages raw missing ref", args: []string{"messages", "raw", "--json"}, wantCode: 2, wantErr: "missing required --ref"},
+		{name: "mailboxes resolve missing account", args: []string{"mailboxes", "resolve", "--path", "INBOX", "--json"}, wantCode: 2, wantErr: "missing required --account"},
+		{name: "mailboxes resolve missing path", args: []string{"mailboxes", "resolve", "--account", "acct_1", "--json"}, wantCode: 2, wantErr: "missing required --path"},
+		{name: "drafts inspect missing ref", args: []string{"drafts", "inspect", "--json"}, wantCode: 2, wantErr: "missing required --ref"},
+		{name: "drafts update missing ref", args: []string{"drafts", "update", "--body", "x", "--json"}, wantCode: 2, wantErr: "missing required --ref"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(context.Background(), newTestService(), test.args, &stdout, &stderr)
+			if code != test.wantCode {
+				t.Fatalf("Run() code = %d, want %d, stdout = %s, stderr = %s",
+					code, test.wantCode, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), test.wantErr) {
+				t.Fatalf("stdout = %s; want error containing %q", stdout.String(), test.wantErr)
+			}
+		})
+	}
+}
+
+func TestEmptyStdinDetection(t *testing.T) {
+	root := t.TempDir()
+	service := newTransportTestService(root, &cliMirror{})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	// Pipe empty stdin by setting os.Stdin to /dev/null-like.
+	oldStdin := os.Stdin
+	defer func() { os.Stdin = oldStdin }()
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer func() { _ = devNull.Close() }()
+	os.Stdin = devNull
+	code := Run(context.Background(), service, []string{"drafts", "create", "--input", "-", "--json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2, stdout = %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no input received on stdin") {
+		t.Fatalf("stdout = %s; want error about empty stdin", stdout.String())
+	}
+}
+
+func TestInvalidBodyFormatValidation(t *testing.T) {
+	root := t.TempDir()
+	service := newTransportTestService(root, &cliMirror{})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service,
+		[]string{"drafts", "create", "--body", "x", "--format", "bogus", "--json"},
+		&stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("Run() code = %d, want 2, stdout = %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "invalid body format") {
+		t.Fatalf("stdout = %s; want error about invalid format", stdout.String())
+	}
+}
+
+func TestRuntimeErrorClassifiedAsOperationFailed(t *testing.T) {
+	service := mail.NewService(failingGateway{})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"accounts", "list", "--json"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("Run() code = %d, want 1, stdout = %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"code":"operation_failed"`) {
+		t.Fatalf("stdout = %s; want operation_failed error code", stdout.String())
 	}
 }

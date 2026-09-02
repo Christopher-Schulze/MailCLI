@@ -106,6 +106,12 @@ func runMailboxResolve(ctx context.Context, service *mail.Service, args []string
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	if *accountRef == "" {
+		return failCommand("mailboxes.resolve", *jsonOutput, invalidDraftInput("missing required --account"), stdout, stderr)
+	}
+	if len(path) == 0 {
+		return failCommand("mailboxes.resolve", *jsonOutput, invalidDraftInput("missing required --path"), stdout, stderr)
+	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	mailbox, err := service.ResolveMailbox(operationCtx, *accountRef, path)
@@ -204,6 +210,9 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	if *ref == "" {
+		return failCommand("messages.get", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
@@ -224,6 +233,9 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *ref == "" {
+		return failCommand("messages.raw", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -363,7 +375,7 @@ func failCommandWithData(
 ) int {
 	if !jsonOutput {
 		writeLine(stderr, err)
-		return 1
+		return commandExitCode(err)
 	}
 	code := "operation_failed"
 	var typed codedError
@@ -377,6 +389,21 @@ func failCommandWithData(
 		Data:          data,
 		Error:         &errorData{Code: code, Message: err.Error()},
 	})
+	return commandExitCode(err)
+}
+
+// commandExitCode maps error codes to exit codes:
+// usage errors (invalid_argument, invalid_input, missing_required,
+// unknown_command) return 2; all other errors return 1.
+func commandExitCode(err error) int {
+	var typed codedError
+	if errors.As(err, &typed) {
+		switch typed.ErrorCode() {
+		case "invalid_argument", "invalid_input", "missing_required",
+			"unknown_command":
+			return 2
+		}
+	}
 	return 1
 }
 

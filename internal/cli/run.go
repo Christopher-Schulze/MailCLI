@@ -201,7 +201,11 @@ func runJSONCommand(
 	if message == "" {
 		message = "command failed"
 	}
-	errorCode := "invalid_argument"
+	// Classify error by exit code: code 2 = usage error, code 1 = runtime error.
+	errorCode := "operation_failed"
+	if code == 2 {
+		errorCode = "invalid_argument"
+	}
 	if strings.Contains(message, "unknown command") ||
 		(strings.HasPrefix(message, "unknown ") && strings.Contains(message, " command ")) {
 		errorCode = "unknown_command"

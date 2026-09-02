@@ -93,7 +93,10 @@ func (s *Service) ListDrafts() ([]Draft, error) {
 		}
 		draft, err := readDraftFile(root, strings.TrimSuffix(entry.Name(), ".json"))
 		if err != nil {
-			return nil, err
+			// Skip unreadable/corrupt draft files rather than failing the
+			// entire listing. A partial write from a crashed process should
+			// not prevent listing all other valid drafts.
+			continue
 		}
 		drafts = append(drafts, draft)
 	}
@@ -1655,7 +1658,23 @@ func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) 
 		return validationError("draft state exceeds 20 MiB")
 	}
 	if exclusive {
-		return writePrivateFile(path, payload)
+		// Atomic create: write to temp file, then rename into place.
+		// This prevents a partial draft_*.json from appearing if the
+		// process crashes mid-write, which would break ListDrafts.
+		temporary, err := attachmentTemporaryPath(path)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			resultErr = errors.Join(resultErr, removeIfPresent(temporary))
+		}()
+		if err := writePrivateFile(temporary, payload); err != nil {
+			return fmt.Errorf("write draft create: %w", err)
+		}
+		if err := os.Rename(temporary, path); err != nil {
+			return fmt.Errorf("publish draft create: %w", err)
+		}
+		return syncDirectory(root)
 	}
 	temporary, err := attachmentTemporaryPath(path)
 	if err != nil {

@@ -39,7 +39,7 @@ Treat returned message references and cursors as opaque and short-lived. MailCLI
 
 Pass long bodies, recipients, and attachment lists as structured JSON through `--input -` or an input file, or use repeatable `--to`, `--cc`, `--bcc`, and `--attach` flags with `--body` or `--body-file`. Never mix JSON input and terminal-native flags. Always include the JSON `body` key, including when an empty body is intentional. Use `--format plain|markdown|html`; Markdown and HTML are stored with a canonical plain-text representation, and HTML is stripped to a non-active allowlist. Keep To, CC, and BCC distinct and never repeat one address across roles. Use an explicit configured `from` address when account choice matters. Draft attachment paths must be absolute. Respect the local-draft limits: 64 KiB subject, 4 MiB body, 200 total recipients, 100 attachments, and 512 MiB attachment bytes.
 
-Create a local review draft with `mailcli drafts create --to recipient@example.com --subject Subject --body 'Readable plain text.' --json` or structured JSON. Use `drafts preview --ref REF --format plain|source|html`, `drafts edit --ref REF`, or full-replacement `drafts update`. These operations never contact Mail.app and never send mail. A canceled external editor and all descendants owned by that invocation are terminated before the command returns, and the original draft remains unchanged.
+Create a local review draft with `mailcli drafts create --to recipient@example.com --subject Subject --body 'Readable plain text.' --json` or structured JSON. Use `drafts preview --ref REF --format plain|source|html`, `drafts edit --ref REF`, `drafts inspect --ref REF --json` (returns raw draft fields), or full-replacement `drafts update`. These operations never contact Mail.app and never send mail. A canceled external editor and all descendants owned by that invocation are terminated before the command returns, and the original draft remains unchanged.
 
 After draft workflows, check `drafts list --json` for leftovers: entries with `ever_sent:false` and a high `age_days` are stale never-sent drafts. Remove them with `mailcli drafts prune` (dry run by default; add `--confirm` to delete exactly the listed drafts, `--older-than <days>` to change the 30-day threshold). Prune never touches drafts with send or save attempts; reconcile or discard those explicitly instead.
 
@@ -68,3 +68,30 @@ The send flow resolves provider endpoints from the From address, loads the keych
 Keep message bodies and addresses out of logs and summaries unless the task requires them. Preserve exact raw output when the user asks for RFC 5322 source. For human-facing drafts, use `drafts preview` and the stored canonical representations. Visible handoff uses sanitized rich content when present; a successful handoff proves only that macOS accepted the visible compose request, never that the message was sent.
 
 Check `content_complete`, `missing_parts`, and search `coverage` before making completeness claims. Targeted fallback content hydrates over IMAP (`content_source: "imap_raw"`) without launching Mail.app or sending Apple Events. If the binary lacks a required command or returns an unsupported store profile, stop and report it. Do not bypass MailCLI with direct store access, raw AppleScript/JXA, or UI coordinates.
+
+## Error contract
+
+Every `--json` response is a single envelope:
+
+```json
+{"schema_version":1,"ok":true,"command":"accounts.list","data":{...},"error":null}
+```
+
+On failure:
+
+```json
+{"schema_version":1,"ok":false,"command":"accounts.list","data":{},"error":{"code":"operation_failed","message":"..."}}
+```
+
+Exit codes: `0` = success, `1` = runtime/operation error, `2` = usage/argument error. Always check `ok` and `error.code`, not just the exit code.
+
+Generic error codes and remediation:
+
+- `unknown_command` — the command ID is not recognized; run `mailcli capabilities --json` for the authoritative list.
+- `invalid_argument` — a flag or positional argument is wrong (exit 2); the message names the problem.
+- `invalid_input` — structured input (stdin/file JSON, body, format) is malformed; the message names the field and constraint.
+- `missing_required` — a required flag was omitted; the message names the flag (e.g., `missing required --ref`).
+- `confirmation_required` — the action needs `--confirm` after explicit user authorization.
+- `operation_failed` — a runtime failure (store, IMAP, SMTP, Mail.app); inspect `error.message` and any typed code in the message. Do not blindly retry; diagnose the cause first.
+
+Typed transport and store codes (`smtp_auth_failed`, `imap_connect_failed`, `mail_busy`, `mail_not_running`, `local_only_mailbox`, etc.) are documented in the relevant sections above and surface verbatim in `error.message` or `error.code`. When a typed code appears, follow its specific remediation rather than retrying with different flags.

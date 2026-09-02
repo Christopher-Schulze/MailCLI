@@ -141,8 +141,13 @@ func TestSendSetupRejectsInvalidInput(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			code, stdout, _ := runSendSetupWithStub(t, credentials, "\n", test.args)
-			if code != 1 || !strings.Contains(stdout.String(), `"code":"`+test.wantCode+`"`) {
-				t.Fatalf("code = %d, stdout = %q", code, stdout.String())
+			// Usage errors (invalid_argument) return exit 2; transport errors return 1.
+			wantExit := 1
+			if test.wantCode == "invalid_argument" {
+				wantExit = 2
+			}
+			if code != wantExit || !strings.Contains(stdout.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("code = %d (want %d), stdout = %q", code, wantExit, stdout.String())
 			}
 		})
 	}

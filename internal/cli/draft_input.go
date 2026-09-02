@@ -109,6 +109,12 @@ func (options *draftInputFlags) read() (mailmodel.DraftInput, error) {
 	if options.bodyFormat.set {
 		format = mailmodel.DraftBodyFormat(strings.ToLower(strings.TrimSpace(options.bodyFormat.value)))
 	}
+	switch format {
+	case mailmodel.DraftBodyPlain, mailmodel.DraftBodyMarkdown, mailmodel.DraftBodyHTML:
+	default:
+		return mailmodel.DraftInput{}, invalidDraftInput(
+			fmt.Sprintf("invalid body format %q; use plain, markdown, or html", options.bodyFormat.value))
+	}
 	return mailmodel.DraftInput{
 		From: options.from.value, To: to, CC: cc, BCC: bcc,
 		Subject: options.subject.value, Body: body, BodyFormat: format,
@@ -178,6 +184,10 @@ func decodeDraftInput(reader io.Reader) (mailmodel.DraftInput, error) {
 	payload, err := io.ReadAll(io.LimitReader(reader, maximumDraftInputBytes+1))
 	if err != nil {
 		return mailmodel.DraftInput{}, fmt.Errorf("read draft input: %w", err)
+	}
+	if len(payload) == 0 {
+		return mailmodel.DraftInput{}, invalidDraftInput(
+			"no input received on stdin; pipe JSON or use --input <path>")
 	}
 	if len(payload) > maximumDraftInputBytes {
 		return mailmodel.DraftInput{}, invalidDraftInput("draft input exceeds 16 MiB")

@@ -169,6 +169,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 			return local, nil
 		}
 		if localErr == nil && c.send.ImapClient() == nil {
+			// No IMAP fallback available; return what we have.
 			return local, nil
 		}
 		if localErr != nil && !safeTargetedFallback(localErr) {
@@ -180,8 +181,14 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		if rawErr == nil && len(rawBytes) > 0 {
 			return messageFromRawFallback(local, string(rawBytes))
 		}
+		// IMAP fallback failed. If we also have a local error, join both
+		// so the caller sees the full picture.
+		if rawErr != nil && localErr != nil {
+			return mail.Message{}, errors.Join(localErr, rawErr)
+		}
 	}
 	if hasLocal {
+		// Local content is incomplete and no IMAP fallback succeeded.
 		return local, nil
 	}
 	if localErr != nil {

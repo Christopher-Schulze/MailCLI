@@ -251,6 +251,9 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	if *ref == "" {
+		return failCommand("drafts.inspect", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+	}
 	draft, err := service.GetDraft(*ref)
 	if err != nil {
 		return failCommand("drafts.inspect", *jsonOutput, err, stdout, stderr)
@@ -265,6 +268,9 @@ func runDraftUpdate(service *mail.Service, args []string, stdout io.Writer, stde
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *ref == "" {
+		return failCommand("drafts.update", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 	input, err := inputFlags.read()
 	if err != nil {
