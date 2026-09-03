@@ -300,7 +300,7 @@ mkdir -p "${HOME}/.agents/skills"
 ln -s "$(pwd)/skills/mailcli" "${HOME}/.agents/skills/mailcli"
 ```
 
-The link command refuses if a skill already exists at that destination. It does not overwrite an installed skill. Start a new agent session after either installation method.
+The link command refuses if a skill already exists at that destination. It does not overwrite an installed skill. `scripts/tests/test.sh` fails if the installed copy drifts from `skills/mailcli`. Start a new agent session after either installation method.
 
 ## Safety model
 

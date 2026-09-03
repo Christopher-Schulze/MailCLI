@@ -44,6 +44,30 @@ for REQUIRED_STRING in "${REQUIRED_SKILL_STRINGS[@]}"; do
   fi
 done
 
+REPO_SKILL="${MAILCLI_ROOT}/skills/mailcli"
+INSTALLED_SKILL="${MAILCLI_SKILL_DESTINATION:-${HOME}/.agents/skills/mailcli}"
+if [[ ! -f "${REPO_SKILL}/SKILL.md" ]]; then
+  printf 'Repository skill is missing: %s\n' "${REPO_SKILL}/SKILL.md" >&2
+  exit 1
+fi
+SKILL_DRIFT_PROOF="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-skill-drift.XXXXXX")"
+cp -R "${REPO_SKILL}/." "${SKILL_DRIFT_PROOF}/"
+printf '\n' >>"${SKILL_DRIFT_PROOF}/SKILL.md"
+if diff -qr "${REPO_SKILL}" "${SKILL_DRIFT_PROOF}" >/dev/null; then
+  rm -rf "${SKILL_DRIFT_PROOF}"
+  printf 'Skill identity check cannot detect drift\n' >&2
+  exit 1
+fi
+rm -rf "${SKILL_DRIFT_PROOF}"
+if [[ ! -f "${INSTALLED_SKILL}/SKILL.md" ]]; then
+  printf 'Installed skill is missing: %s\n' "${INSTALLED_SKILL}/SKILL.md" >&2
+  exit 1
+fi
+if ! SKILL_DRIFT="$(diff -qr "${REPO_SKILL}" "${INSTALLED_SKILL}")"; then
+  printf 'Installed skill drifted from the repository copy:\n%s\n' "${SKILL_DRIFT}" >&2
+  exit 1
+fi
+
 while IFS= read -r -d '' SCRIPT_PATH; do
   if [[ ! -x "${SCRIPT_PATH}" ]]; then
     printf 'Shell script must be executable: %s\n' "${SCRIPT_PATH}" >&2

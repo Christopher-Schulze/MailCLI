@@ -42,6 +42,37 @@ func TestSkipModeKeepsTextSkipsAttachmentBodies(t *testing.T) {
 	if part.Size != -1 {
 		t.Errorf("Size = %d, want -1 (unverified in skip mode)", part.Size)
 	}
+	if part.SHA256 != "" {
+		t.Errorf("SHA256 = %q, want empty in skip mode", part.SHA256)
+	}
+}
+
+func TestSkipModeDoesNotHashWhenHashingRequested(t *testing.T) {
+	t.Parallel()
+
+	fixture := skipModeFixture()
+	skipped, err := parseMIMEDocument(bytes.NewReader(fixture), false, true, true)
+	if err != nil {
+		t.Fatalf("skip parse error = %v", err)
+	}
+	full, err := parseMIMEDocument(bytes.NewReader(fixture), false, true, false)
+	if err != nil {
+		t.Fatalf("full parse error = %v", err)
+	}
+	skippedPart, skippedExists := skipped.Parts["2"]
+	fullPart, fullExists := full.Parts["2"]
+	if !skippedExists || !fullExists {
+		t.Fatalf("Parts skip=%v full=%v, want attachment at 2", skipped.Parts, full.Parts)
+	}
+	if skippedPart.SHA256 != "" || skippedPart.Size != -1 {
+		t.Errorf("skip Part = %#v, want empty SHA256 and Size -1", skippedPart)
+	}
+	if fullPart.SHA256 == "" || fullPart.Size <= 0 {
+		t.Errorf("full Part = %#v, want hashed size", fullPart)
+	}
+	if skipped.Content != full.Content {
+		t.Errorf("skip Content = %q, full Content = %q", skipped.Content, full.Content)
+	}
 }
 
 func TestSkipModeMatchesFullParseOnTextAndNames(t *testing.T) {
