@@ -575,3 +575,32 @@ func TestCheckStatus(t *testing.T) {
 		t.Fatalf("unexpected status: %+v", st)
 	}
 }
+
+func TestAppendToSentNoDoubleCloseOnCancel(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:     true,
+		sentMboxes: []string{"Sent"},
+		appendOK:   true,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	// Cancel before the call; the sync.Once close guard must prevent
+	// a double-close panic when both the context goroutine and the
+	// deferred cleanup run.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = client.AppendToSent(ctx, cfg, []byte("message"), "<x@example.com>")
+	// A second call on a fresh context must also work without panic.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	_, _ = client.AppendToSent(ctx2, cfg, []byte("message"), "<y@example.com>")
+}

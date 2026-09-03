@@ -253,6 +253,18 @@ func TestRunFailsWhenCommandOutputCannotBeWritten(t *testing.T) {
 	}
 }
 
+func TestWriteMessageFailsOnWriteError(t *testing.T) {
+	// writeMessage must return an error when stdout fails, causing exit 1.
+	// Use messages get which calls writeMessage in human mode.
+	if code := Run(
+		context.Background(), newTestService(),
+		[]string{"messages", "get", "--ref", "msg_1"},
+		failingWriter{}, io.Discard,
+	); code != 1 {
+		t.Fatalf("Run() code = %d, want 1 for messages get with failing stdout", code)
+	}
+}
+
 func TestVersionJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -598,3 +598,60 @@ func TestPruneSkipsDraftsWithSendAttempt(t *testing.T) {
 		t.Fatalf("claim-guarded draft was removed: %v", err)
 	}
 }
+
+func TestListDraftsSkipsCorruptFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Kind: DraftKindNew, Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Valid", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	// Write a corrupt draft file alongside the valid one.
+	corruptPath := filepath.Join(root, "draft_corrupt.json")
+	if err := os.WriteFile(corruptPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("write corrupt draft: %v", err)
+	}
+	drafts, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Ref != draft.Ref {
+		t.Fatalf("ListDrafts() = %+v, want only the valid draft", drafts)
+	}
+}
+
+func TestCreateDraftIsAtomic(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(&draftGateway{}, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Kind: DraftKindNew, Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Atomic", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	// The final draft file must exist and be valid JSON.
+	path := filepath.Join(root, draft.Ref+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read draft file: %v", err)
+	}
+	var stored Draft
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("draft file is not valid JSON: %v", err)
+	}
+	if stored.Ref != draft.Ref {
+		t.Fatalf("stored ref = %q, want %q", stored.Ref, draft.Ref)
+	}
+	// No temp files should remain.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read draft dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tmp") || strings.Contains(entry.Name(), ".tmp") {
+			t.Fatalf("temp file left behind: %s", entry.Name())
+		}
+	}
+}

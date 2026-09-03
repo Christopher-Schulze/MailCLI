@@ -279,6 +279,55 @@ func TestNormalizedSearchTermsDeduplicates(t *testing.T) {
 	}
 }
 
+func TestNormalizedSearchTermsOnePassTokenization(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "ascii lowercase", input: "Hello WORLD", want: []string{"hello", "world"}},
+		{name: "unicode lowercase", input: "Café Ünïcode", want: []string{"café", "ünïcode"}},
+		{name: "tabs and newlines", input: "alpha\tbeta\ngamma", want: []string{"alpha", "beta", "gamma"}},
+		{name: "multiple whitespace", input: "  a   b  ", want: []string{"a", "b"}},
+		{name: "empty", input: "", want: []string{}},
+		{name: "only whitespace", input: "   \t\n  ", want: []string{}},
+		{name: "single token", input: "solo", want: []string{"solo"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizedSearchTerms(test.input)
+			if fmt.Sprint(got) != fmt.Sprint(test.want) {
+				t.Fatalf("normalizedSearchTerms(%q) = %v, want %v", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildLoweredSearchTextMatchesCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	item := messageRecord{
+		Subject: "Quarterly REPORT", SenderName: "Alice", SenderAddress: "ALICE@EXAMPLE.COM",
+	}
+	document := mimeDocument{
+		Content: "Body TEXT Here",
+	}
+	lowered := buildLoweredSearchText(item, document)
+	if !strings.Contains(lowered, "quarterly report") {
+		t.Fatalf("lowered text missing folded subject: %q", lowered)
+	}
+	if !strings.Contains(lowered, "alice@example.com") {
+		t.Fatalf("lowered text missing folded address: %q", lowered)
+	}
+	if !strings.Contains(lowered, "body text here") {
+		t.Fatalf("lowered text missing folded body: %q", lowered)
+	}
+	// Verify it's actually lowered, not original case.
+	if strings.Contains(lowered, "REPORT") || strings.Contains(lowered, "ALICE") {
+		t.Fatalf("lowered text still contains uppercase: %q", lowered)
+	}
+}
+
 func TestBodySearchDoesNotOpenCandidatesBeyondSmallResultWindow(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t, 12)

@@ -154,3 +154,18 @@ func TestSubmitContextDeadlineDuringGreeting(t *testing.T) {
 		t.Errorf("Submit took %v, want abort within ~150ms", elapsed)
 	}
 }
+
+func TestSubmitNoDoubleCloseOnCancel(t *testing.T) {
+	srv := newFakeSMTPServer(t)
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	// Cancel before the call; the sync.Once close guard must prevent
+	// a double-close panic when both the context goroutine and the
+	// deferred cleanup run.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = testClient().Submit(ctx, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	// A second call on a fresh cancelled context must also work without panic.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	_, _ = testClient().Submit(ctx2, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+}

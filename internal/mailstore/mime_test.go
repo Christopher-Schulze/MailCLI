@@ -297,3 +297,91 @@ func TestValidAttachmentID(t *testing.T) {
 		}
 	}
 }
+
+func TestHasVisibleText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input []byte
+		want  bool
+	}{
+		{name: "empty", input: []byte{}, want: false},
+		{name: "only spaces", input: []byte("   \t\n"), want: false},
+		{name: "only unicode whitespace", input: []byte("\u00a0\u2000\u2001"), want: false},
+		{name: "ascii text", input: []byte("hello"), want: true},
+		{name: "text after spaces", input: []byte("  hi  "), want: true},
+		{name: "unicode text", input: []byte("café"), want: true},
+		{name: "mixed whitespace and text", input: []byte(" \t hello \n "), want: true},
+		{name: "single non-space ascii", input: []byte("x"), want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasVisibleText(test.input); got != test.want {
+				t.Fatalf("hasVisibleText(%q) = %t, want %t", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestMimePartID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path []int
+		want string
+	}{
+		{name: "empty path", path: nil, want: "1"},
+		{name: "single", path: []int{0}, want: "1"},
+		{name: "nested", path: []int{0, 1, 2}, want: "1.2.3"},
+		{name: "deep", path: []int{2, 0, 4}, want: "3.1.5"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mimePartID(test.path); got != test.want {
+				t.Fatalf("mimePartID(%v) = %q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCombineMIMETextAlternative(t *testing.T) {
+	t.Parallel()
+	children := []mimeTextRepresentation{
+		{Text: "<p>html</p>", Rank: mimeTextHTML},
+		{Text: "plain text", Rank: mimeTextPlain},
+	}
+	result := combineMIMEText("multipart/alternative", children)
+	// multipart/alternative selects the highest-rank non-empty child.
+	if result.Text != "plain text" {
+		t.Fatalf("combineMIMEText alternative = %q, want %q (highest rank)", result.Text, "plain text")
+	}
+	if result.Rank != mimeTextPlain {
+		t.Fatalf("combineMIMEText alternative rank = %d, want %d", result.Rank, mimeTextPlain)
+	}
+}
+
+func TestCombineMIMETextMixed(t *testing.T) {
+	t.Parallel()
+	children := []mimeTextRepresentation{
+		{Text: "first", Rank: mimeTextPlain},
+		{Text: "second", Rank: mimeTextPlain},
+	}
+	result := combineMIMEText("multipart/mixed", children)
+	want := "first\n\nsecond"
+	if result.Text != want {
+		t.Fatalf("combineMIMEText mixed = %q, want %q", result.Text, want)
+	}
+}
+
+func TestCombineMIMETextSkipsEmptyChildren(t *testing.T) {
+	t.Parallel()
+	children := []mimeTextRepresentation{
+		{Text: "", Rank: mimeTextNone},
+		{Text: "only", Rank: mimeTextPlain},
+		{Text: "", Rank: mimeTextHTML},
+	}
+	result := combineMIMEText("multipart/mixed", children)
+	if result.Text != "only" {
+		t.Fatalf("combineMIMEText mixed with empties = %q, want %q", result.Text, "only")
+	}
+}

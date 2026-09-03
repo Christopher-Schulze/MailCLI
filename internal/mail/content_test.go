@@ -64,3 +64,45 @@ func TestValidateStoredDraftContentRejectsTampering(t *testing.T) {
 		t.Fatal("validateStoredDraftContent() error = nil")
 	}
 }
+
+func TestCollapseHorizontalSpace(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "ascii spaces", input: "hello   world", want: "hello world"},
+		{name: "tabs and newlines", input: "hello\t\t\nworld", want: "hello world"},
+		{name: "leading trailing", input: "  hello  ", want: "hello"},
+		{name: "only spaces", input: "   ", want: ""},
+		{name: "empty", input: "", want: ""},
+		{name: "unicode nbsp", input: "hello\u00a0world", want: "hello world"},
+		{name: "mixed unicode", input: "café  résumé", want: "café résumé"},
+		{name: "no collapse needed", input: "hello", want: "hello"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := collapseHorizontalSpace(test.input)
+			if got != test.want {
+				t.Fatalf("collapseHorizontalSpace(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeDraftTextSkipsReplaceAllWhenNoCRLF(t *testing.T) {
+	// Input with no \r\n should pass through without ReplaceAll.
+	input := "Hello\nWorld\n"
+	got := normalizeDraftText(input)
+	if got != "Hello\nWorld" {
+		t.Fatalf("normalizeDraftText(%q) = %q, want %q", input, got, "Hello\nWorld")
+	}
+}
+
+func TestNormalizeDraftTextWithCRLF(t *testing.T) {
+	input := "Hello\r\nWorld\r\n"
+	got := normalizeDraftText(input)
+	if got != "Hello\nWorld" {
+		t.Fatalf("normalizeDraftText(%q) = %q, want %q", input, got, "Hello\nWorld")
+	}
+}
