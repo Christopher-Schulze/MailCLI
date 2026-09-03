@@ -27,6 +27,22 @@ for FORBIDDEN_PATH in "${FORBIDDEN_PATHS[@]}"; do
     exit 1
   fi
 done
+REQUIRED_SKILL_STRINGS=(
+  '## Error contract'
+  'drafts inspect --ref REF --json'
+  'mailcli sync --check'
+  'without `--check`'
+  'never ask the user to paste account passwords'
+  'mailcli send setup'
+  'compose_automation_unsupported'
+  'data.page.coverage.complete'
+)
+for REQUIRED_STRING in "${REQUIRED_SKILL_STRINGS[@]}"; do
+  if ! grep -Fq "${REQUIRED_STRING}" "${MAILCLI_ROOT}/skills/mailcli/SKILL.md"; then
+    printf 'Agent skill is missing required contract text: %s\n' "${REQUIRED_STRING}" >&2
+    exit 1
+  fi
+done
 
 while IFS= read -r -d '' SCRIPT_PATH; do
   if [[ ! -x "${SCRIPT_PATH}" ]]; then
