@@ -107,7 +107,7 @@ func (s *Store) SaveAttachmentTo(
 			return s.copyExternalAttachment(external, outputPath)
 		}
 	}
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false)
+	document, err := parseMIMEDocument(source.Reader(), source.partial, false, false)
 	if err != nil {
 		return err
 	}

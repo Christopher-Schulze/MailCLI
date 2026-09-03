@@ -523,7 +523,7 @@ func scanCandidate(
 	if err := ctx.Err(); err != nil {
 		return candidateScan{}, err
 	}
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false)
+	document, err := parseMIMEDocument(source.Reader(), source.partial, false, true)
 	if err != nil {
 		knownAttachmentMatch := len(terms) == 0 && hasAttachment != nil &&
 			*hasAttachment && item.AttachmentCount > 0

@@ -465,7 +465,7 @@ func (s *Store) recordContentMatchesDraft(
 	if err != nil || !stable {
 		return false, err
 	}
-	document, err := parseMIMEDocument(source.Reader(), false, true)
+	document, err := parseMIMEDocument(source.Reader(), false, true, false)
 	if err != nil || !document.Complete || !bodyMatchesDraft(document.Content, draft) {
 		return false, candidateSourcePending(err)
 	}

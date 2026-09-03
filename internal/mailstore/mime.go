@@ -46,6 +46,10 @@ type mimeDocument struct {
 	Complete     bool
 	MissingParts []string
 	Parts        map[string]mimePart
+	// skipNonTextBodies avoids decoding/draining non-text part bodies.
+	// The multipart walker raw-skips them instead. Search-only: names and
+	// counts stay exact, sizes stay unknown.
+	skipNonTextBodies bool
 }
 
 type mimeTextRepresentation struct {
@@ -59,12 +63,12 @@ const (
 	mimeTextPlain
 )
 
-func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool) (mimeDocument, error) {
+func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, skipNonTextBodies bool) (mimeDocument, error) {
 	entity, readErr := message.Read(reader)
 	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
 		return mimeDocument{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC message: %v", readErr))
 	}
-	document := mimeDocument{Complete: readErr == nil && !partial}
+	document := mimeDocument{Complete: readErr == nil && !partial, skipNonTextBodies: skipNonTextBodies}
 	if readErr != nil {
 		document.MissingParts = append(document.MissingParts, "mime-decoding")
 	}
@@ -123,6 +127,21 @@ func parseMIMEEntity(
 	}
 	partID := mimePartID(path)
 	if strings.EqualFold(disposition, "attachment") || filename != "" {
+		if document.skipNonTextBodies {
+			// Search path: the walker raw-skips the body, so no decode
+			// cost is paid. Names and counts stay exact; sizes unverified.
+			if document.Parts == nil {
+				document.Parts = make(map[string]mimePart)
+			}
+			document.Parts[partID] = mimePart{
+				ID: partID, Name: filename, MIMEType: mediaType, Size: -1,
+				Complete: !partial,
+			}
+			if partial {
+				document.Complete = false
+			}
+			return mimeTextRepresentation{}, nil
+		}
 		size, digest, err := consumeMIMEAttachment(entity.Body, hashAttachments)
 		complete := err == nil && !missingAppleContent(
 			entity.Header.Get("X-Apple-Content-Length"), size, true,
@@ -137,6 +156,12 @@ func parseMIMEEntity(
 		return mimeTextRepresentation{}, nil
 	}
 	if mediaType != "text/plain" && mediaType != "text/html" {
+		if document.skipNonTextBodies {
+			if partial {
+				document.Complete = false
+			}
+			return mimeTextRepresentation{}, nil
+		}
 		_, err := io.Copy(io.Discard, entity.Body)
 		if err != nil {
 			document.Complete = false

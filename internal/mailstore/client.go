@@ -198,7 +198,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 }
 
 func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error) {
-	document, err := parseMIMEDocument(strings.NewReader(raw), false, false)
+	document, err := parseMIMEDocument(strings.NewReader(raw), false, false, false)
 	if err != nil {
 		return mail.Message{}, err
 	}
@@ -587,7 +587,7 @@ func (c *Client) sourceAttachmentFingerprints(
 			"forward_source_incomplete", "forward source is partial; original attachments cannot be proven",
 		)
 	}
-	document, err := parseMIMEDocument(source.Reader(), false, true)
+	document, err := parseMIMEDocument(source.Reader(), false, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -683,7 +683,7 @@ func (c *Client) localMessageID(resolved resolvedMessage) (result string, result
 		return "", err
 	}
 	defer joinCloseError(&resultErr, source, "message identity source")
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false)
+	document, err := parseMIMEDocument(source.Reader(), source.partial, false, false)
 	if err != nil {
 		return "", err
 	}
