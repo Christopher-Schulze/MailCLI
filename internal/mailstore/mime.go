@@ -143,20 +143,23 @@ func parseMIMEEntity(
 		}
 		return mimeTextRepresentation{}, err
 	}
-	body, truncated, err := readBoundedPart(entity.Body, maximumTextPartBytes)
+	appleLength, hasAppleLength := parseAppleContentLength(entity.Header.Get("X-Apple-Content-Length"))
+	body, truncated, err := readBoundedPart(entity.Body, maximumTextPartBytes, appleLength, hasAppleLength)
 	if err != nil || truncated {
 		document.Complete = false
 	}
-	if missingAppleContent(entity.Header.Get("X-Apple-Content-Length"), int64(len(body)), partial) {
+	if hasAppleLength && partial && appleLength > int64(len(body)) {
 		document.Complete = false
 		document.MissingParts = append(document.MissingParts, partID)
 		return mimeTextRepresentation{}, nil
 	}
-	text := strings.TrimSpace(string(body))
 	rank := mimeTextPlain
+	var text string
 	if mediaType == "text/html" {
 		text = strings.TrimSpace(htmlToText(body))
 		rank = mimeTextHTML
+	} else {
+		text = strings.TrimSpace(string(body))
 	}
 	if text == "" {
 		return mimeTextRepresentation{}, err
@@ -261,12 +264,15 @@ func readRawHeaders(reader io.Reader) (string, error) {
 	return "", operationError("invalid_message_source", "RFC message headers exceed the safety limit")
 }
 
-func readBoundedPart(reader io.Reader, maximum int64) ([]byte, bool, error) {
+func readBoundedPart(reader io.Reader, maximum int64, sizeHint int64, hasSizeHint bool) ([]byte, bool, error) {
 	limited := io.LimitReader(reader, maximum+1)
-	// Use io.Copy with a reasonable initial buffer instead of pre-allocating
+	// Pre-size from the decoded-length hint instead of pre-allocating
 	// maximum+1 bytes (which can be 16 MiB per text part). io.Copy uses a
-	// 32 KiB buffer internally; the bytes.Buffer will grow as needed.
+	// 32 KiB buffer internally; the bytes.Buffer grows only past the hint.
 	var buf bytes.Buffer
+	if hasSizeHint && sizeHint > 0 {
+		buf.Grow(int(min(sizeHint, maximum)))
+	}
 	if _, err := io.Copy(&buf, limited); err != nil {
 		return buf.Bytes(), false, err
 	}
@@ -282,12 +288,26 @@ func readBoundedPart(reader io.Reader, maximum int64) ([]byte, bool, error) {
 	return body, truncated, nil
 }
 
+// parseAppleContentLength reads the decoded-length hint from Mail's
+// X-Apple-Content-Length header for buffer pre-sizing.
+func parseAppleContentLength(value string) (int64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, false
+	}
+	length, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || length < 0 {
+		return 0, false
+	}
+	return length, true
+}
+
 func missingAppleContent(value string, available int64, partial bool) bool {
-	if !partial || strings.TrimSpace(value) == "" {
+	if !partial {
 		return false
 	}
-	expected, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-	return err == nil && expected > available
+	expected, ok := parseAppleContentLength(value)
+	return ok && expected > available
 }
 
 func mimePartID(path []int) string {

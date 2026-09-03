@@ -108,7 +108,9 @@ func strictSpecialMailboxIDs(
 			if err := validatePathSegment(component); err != nil {
 				return err
 			}
-			rawPath := append(append([]string(nil), parent...), component)
+			rawPath := make([]string, len(parent)+1)
+			copy(rawPath, parent)
+			rawPath[len(parent)] = component
 			if node.Attributes&attribute != 0 {
 				visiblePath := append([]string(nil), rawPath...)
 				if len(visiblePath) > 1 && visiblePath[0] == "[Gmail]" {
