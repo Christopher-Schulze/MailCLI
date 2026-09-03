@@ -46,9 +46,10 @@ type mimeDocument struct {
 	Complete     bool
 	MissingParts []string
 	Parts        map[string]mimePart
-	// skipNonTextBodies avoids decoding/draining non-text part bodies.
-	// The multipart walker raw-skips them instead. Search-only: names and
-	// counts stay exact, sizes stay unknown.
+	// skipNonTextBodies avoids decoding non-text part bodies (no base64/QP
+	// decode, no drain through the decoded stream). The walker still reads
+	// and discards the raw bytes, so I/O is unchanged. Search-only: names
+	// and counts stay exact, sizes stay unknown.
 	skipNonTextBodies bool
 }
 
@@ -128,8 +129,8 @@ func parseMIMEEntity(
 	partID := mimePartID(path)
 	if strings.EqualFold(disposition, "attachment") || filename != "" {
 		if document.skipNonTextBodies {
-			// Search path: the walker raw-skips the body, so no decode
-			// cost is paid. Names and counts stay exact; sizes unverified.
+			// Search path: skip the decode, not the I/O. The walker still
+			// reads and discards raw bytes. Names and counts stay exact.
 			if document.Parts == nil {
 				document.Parts = make(map[string]mimePart)
 			}
