@@ -1,8 +1,10 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"testing"
+	"time"
 )
 
 type gatewayStub struct {
@@ -158,5 +160,50 @@ func TestMutationValidationTable(t *testing.T) {
 				t.Fatal("error = nil")
 			}
 		})
+	}
+}
+
+func TestServicePassthroughAndHealth(t *testing.T) {
+	gateway := &gatewayStub{
+		accounts: []Account{{Ref: "acct", Name: "Inbox Account"}},
+	}
+	service := NewService(gateway)
+
+	accounts, err := service.ListAccounts(context.Background())
+	if err != nil || len(accounts) != 1 || accounts[0].Ref != "acct" {
+		t.Fatalf("ListAccounts() = %#v, error = %v", accounts, err)
+	}
+
+	report := service.Probe(context.Background(), false)
+	if !IsHealthy(report) {
+		t.Fatal("empty probe should be healthy")
+	}
+	if IsHealthy(DiagnosticReport{Checks: []Check{{Name: "store", Status: "fail"}}}) {
+		t.Fatal("failed check should not be healthy")
+	}
+
+	raw := &bytes.Buffer{}
+	if err := service.WriteRawSource(context.Background(), "msg", raw); err != nil {
+		t.Fatalf("WriteRawSource() error = %v", err)
+	}
+	if err := service.WriteRawSource(context.Background(), "", raw); err == nil {
+		t.Fatal("WriteRawSource() empty ref error = nil")
+	}
+
+	syncResult, err := service.Sync(context.Background(), "acct")
+	if err != nil || !syncResult.Triggered || syncResult.AccountRef != "acct" {
+		t.Fatalf("Sync() = %#v, error = %v", syncResult, err)
+	}
+
+	deleted, err := service.DeleteMessage(context.Background(), DeleteMessageRequest{Ref: "msg"})
+	if err != nil || !deleted.Deleted || deleted.MessageRef != "msg" {
+		t.Fatalf("DeleteMessage() = %#v, error = %v", deleted, err)
+	}
+
+	if (SendTransport{}).ImapClient() != nil {
+		t.Fatal("empty transport ImapClient() != nil")
+	}
+	if elapsedMilliseconds(time.Now()) < 0 {
+		t.Fatal("elapsedMilliseconds() < 0")
 	}
 }

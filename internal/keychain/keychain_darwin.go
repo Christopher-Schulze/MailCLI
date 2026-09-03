@@ -15,7 +15,6 @@ static void keychainDictSet(CFMutableDictionaryRef dict, CFStringRef key, CFType
 import "C"
 
 import (
-	"fmt"
 	"unsafe"
 )
 
@@ -53,14 +52,7 @@ func (osStore) add(account, password string) error {
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
 	C.keychainDictSet(query, C.kSecValueData, C.CFTypeRef(passwordData))
 
-	status := C.SecItemAdd(C.CFDictionaryRef(query), nil)
-	if status == C.errSecSuccess {
-		return nil
-	}
-	if status == C.errSecDuplicateItem {
-		return &KeychainError{Code: CodeDuplicate, Message: "item already exists", Err: fmt.Errorf("SecItemAdd status %d", int(status))}
-	}
-	return &KeychainError{Code: CodeStoreFailed, Message: fmt.Sprintf("SecItemAdd status %d", int(status))}
+	return mapAddStatus(int(C.SecItemAdd(C.CFDictionaryRef(query), nil)))
 }
 
 func (osStore) update(account, password string) error {
@@ -100,14 +92,7 @@ func (osStore) update(account, password string) error {
 
 	C.keychainDictSet(attrsToUpdate, C.kSecValueData, C.CFTypeRef(passwordData))
 
-	status := C.SecItemUpdate(C.CFDictionaryRef(query), C.CFDictionaryRef(attrsToUpdate))
-	if status == C.errSecSuccess {
-		return nil
-	}
-	if status == C.errSecItemNotFound {
-		return &KeychainError{Code: CodeNotFound, Message: "keychain item not found"}
-	}
-	return &KeychainError{Code: CodeStoreFailed, Message: fmt.Sprintf("SecItemUpdate status %d", int(status))}
+	return mapUpdateStatus(int(C.SecItemUpdate(C.CFDictionaryRef(query), C.CFDictionaryRef(attrsToUpdate))))
 }
 
 func (osStore) find(account string) (string, error) {
@@ -136,12 +121,8 @@ func (osStore) find(account string) (string, error) {
 	C.keychainDictSet(query, C.kSecReturnData, C.CFTypeRef(C.kCFBooleanTrue))
 
 	var result C.CFTypeRef
-	status := C.SecItemCopyMatching(C.CFDictionaryRef(query), &result)
-	if status == C.errSecItemNotFound {
-		return "", &KeychainError{Code: CodeNotFound, Message: "keychain item not found"}
-	}
-	if status != C.errSecSuccess {
-		return "", &KeychainError{Code: CodeLoadFailed, Message: fmt.Sprintf("SecItemCopyMatching status %d", int(status))}
+	if err := mapFindStatus(int(C.SecItemCopyMatching(C.CFDictionaryRef(query), &result))); err != nil {
+		return "", err
 	}
 	if result == 0 {
 		return "", &KeychainError{Code: CodeLoadFailed, Message: "SecItemCopyMatching returned no data"}
@@ -184,14 +165,7 @@ func (osStore) remove(account string) error {
 	C.keychainDictSet(query, C.kSecAttrService, C.CFTypeRef(serviceCF))
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
 
-	status := C.SecItemDelete(C.CFDictionaryRef(query))
-	if status == C.errSecItemNotFound {
-		return &KeychainError{Code: CodeNotFound, Message: "keychain item not found"}
-	}
-	if status != C.errSecSuccess {
-		return &KeychainError{Code: CodeDeleteFailed, Message: fmt.Sprintf("SecItemDelete status %d", int(status))}
-	}
-	return nil
+	return mapDeleteStatus(int(C.SecItemDelete(C.CFDictionaryRef(query))))
 }
 
 func cfString(s string) (C.CFStringRef, error) {
@@ -217,4 +191,12 @@ func cfData(s string) (C.CFDataRef, error) {
 		return 0, &KeychainError{Code: CodeStoreFailed, Message: "failed to create CFData"}
 	}
 	return data, nil
+}
+
+func releaseCFString(ref C.CFStringRef) {
+	C.CFRelease(C.CFTypeRef(ref))
+}
+
+func releaseCFData(ref C.CFDataRef) {
+	C.CFRelease(C.CFTypeRef(ref))
 }

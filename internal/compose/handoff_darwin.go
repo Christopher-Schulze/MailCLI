@@ -49,6 +49,19 @@ func (e *Error) ErrorCode() string {
 	return e.Code
 }
 
+var invokeNativeCompose = nativeComposeEmail
+
+func nativeComposeEmail(payload string) (string, error) {
+	input := C.CString(payload)
+	defer C.free(unsafe.Pointer(input))
+	output := C.mailcli_compose_email(input)
+	if output == nil {
+		return "", fmt.Errorf("compose handoff returned no result")
+	}
+	defer C.free(unsafe.Pointer(output))
+	return C.GoString(output), nil
+}
+
 func Handoff(ctx context.Context, request Request) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -57,14 +70,11 @@ func Handoff(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("encode compose handoff: %w", err)
 	}
-	input := C.CString(string(payload))
-	defer C.free(unsafe.Pointer(input))
-	output := C.mailcli_compose_email(input)
-	if output == nil {
-		return Result{}, fmt.Errorf("compose handoff returned no result")
+	raw, err := invokeNativeCompose(string(payload))
+	if err != nil {
+		return Result{}, err
 	}
-	defer C.free(unsafe.Pointer(output))
-	return parseHandoffResponse(C.GoString(output))
+	return parseHandoffResponse(raw)
 }
 
 // parseHandoffResponse decodes the JSON response from the native compose
