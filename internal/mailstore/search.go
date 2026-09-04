@@ -245,21 +245,222 @@ func (s *Store) searchMetadata(
 	return page, err
 }
 
+// candidateChunkSize bounds how many body-search candidate records are
+// resident at once. Memory becomes O(page + chunk) instead of
+// O(candidates); the keyset tuple (date_received, ROWID) avoids OFFSET
+// rescans while keeping the cursor ordering.
+const candidateChunkSize = 512
+
+// searchCandidateStream yields body-search candidates in chunks using
+// keyset pagination on (date_received, ROWID). The first chunk uses the
+// plan's own filters; later chunks add the strictly-below tuple predicate.
+type searchCandidateStream struct {
+	store    *Store
+	ctx      context.Context
+	plan     searchPlan
+	last     messageRecord
+	haveLast bool
+	done     bool
+}
+
+func (s *Store) newSearchCandidateStream(ctx context.Context, plan searchPlan) *searchCandidateStream {
+	return &searchCandidateStream{store: s, ctx: ctx, plan: plan}
+}
+
+// next returns the next chunk of candidates and whether the stream is
+// exhausted. total is returned on every call; it comes from the same
+// window count as the monolithic path.
+func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total int, resultErr error) {
+	if st.done {
+		return nil, 0, nil
+	}
+	query := `SELECT
+		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+		m.mailbox, mb.url,
+		subject.subject, sender.address, sender.comment,
+		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
+		COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
+		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
+		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
+		count(*) OVER ()
+	`
+	arguments := append([]any(nil), st.plan.arguments...)
+	if st.haveLast {
+		query += st.plan.fromWhereSQL +
+			" AND (m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))" +
+			" ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
+		arguments = append(arguments,
+			st.last.DateReceived, st.last.DateReceived, st.last.RowID, limit,
+		)
+	} else {
+		query += st.plan.fromWhereSQL + " ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
+		arguments = append(arguments, limit)
+	}
+	query = st.plan.prefixSQL + query
+	rows, err := st.store.database.QueryContext(st.ctx, query, arguments...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query Envelope Index search candidates: %w", err)
+	}
+	defer joinCloseError(&resultErr, rows, "search candidate rows")
+	var items []messageRecord
+	for rows.Next() {
+		var item messageRecord
+		if err := rows.Scan(
+			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+			&item.PhysicalURL,
+			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
+			&item.DateSent, &item.DateReceived, &item.Read, &item.Flagged, &item.Deleted,
+			&item.Junk, &item.Size, &item.AttachmentCount, &total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate Envelope Index search candidates: %w", err)
+	}
+	if len(items) == 0 {
+		st.done = true
+		return nil, total, nil
+	}
+	st.last = items[len(items)-1]
+	st.haveLast = true
+	if len(items) < limit {
+		st.done = true
+	}
+	return items, total, nil
+}
+
+// countSearchCandidates runs one count(*) over the same filters as the
+// candidate stream so coverage keeps the true candidate total.
+func (s *Store) countSearchCandidates(ctx context.Context, plan searchPlan) (int, error) {
+	query := "SELECT count(*) " + plan.fromWhereSQL
+	query = plan.prefixSQL + query
+	rows, err := s.database.QueryContext(ctx, query, plan.arguments...)
+	if err != nil {
+		return 0, fmt.Errorf("count Envelope Index search candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return 0, fmt.Errorf("count Envelope Index search candidates: no row")
+	}
+	var total int
+	if err := rows.Scan(&total); err != nil {
+		return 0, fmt.Errorf("scan Envelope Index candidate count: %w", err)
+	}
+	return total, rows.Err()
+}
+
 func (s *Store) searchBodies(
 	ctx context.Context,
 	prepared mail.PreparedQuery,
 	plan searchPlan,
 ) (mail.SearchPage, error) {
-	maximum := prepared.Query.MaxMessages
-	items, total, err := s.querySearchRecords(ctx, plan, maximum+1)
+	total, err := s.countSearchCandidates(ctx, plan)
 	if err != nil {
 		return mail.SearchPage{}, err
 	}
-	limitedByCount := len(items) > maximum
-	if limitedByCount {
-		items = items[:maximum]
+	maximum := prepared.Query.MaxMessages
+	stream := s.newSearchCandidateStream(ctx, plan)
+	return s.scanSearchRecordsChunked(ctx, prepared, plan.mailbox, stream, total, maximum)
+}
+
+// scanSearchRecordsChunked pulls body-search candidates in chunks and
+// keeps the previous per-window scan, budget, and coverage semantics.
+func (s *Store) scanSearchRecordsChunked(
+	ctx context.Context,
+	prepared mail.PreparedQuery,
+	mailbox *mailref.Mailbox,
+	stream *searchCandidateStream,
+	total int,
+	maximum int,
+) (mail.SearchPage, error) {
+	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: true}
+	terms := normalizedSearchTerms(prepared.Query.Text)
+	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
+	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
+	var reservedBytes int64
+	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
+	loaded := 0
+	for loaded < maximum && len(results) <= prepared.Query.Limit {
+		chunkWant := min(candidateChunkSize, maximum-loaded)
+		items, chunkTotal, err := stream.next(chunkWant)
+		if err != nil {
+			return mail.SearchPage{}, err
+		}
+		if chunkTotal > total {
+			total = chunkTotal
+		}
+		if len(items) == 0 {
+			break
+		}
+		loaded += len(items)
+		for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
+			matchesBefore := len(results)
+			end := min(start+batchSize, len(items))
+			scans, budgetLimited, err := s.scanSearchBatch(
+				ctx, items[start:end], terms, prepared.Query.HasAttachment,
+				prepared.Query.MaxBytes, &reservedBytes,
+			)
+			if err != nil {
+				return mail.SearchPage{}, err
+			}
+			if budgetLimited {
+				coverage.Complete = false
+			}
+			for index, scan := range scans {
+				mergeSearchCoverage(&coverage, scan)
+				if !scan.match {
+					continue
+				}
+				summary, err := s.searchSummary(items[start+index], mailbox)
+				if err != nil {
+					return mail.SearchPage{}, err
+				}
+				summary.AttachmentCount = scan.attachments
+				results = append(results, mail.SearchMessage{Summary: summary, Snippet: scan.snippet})
+				resultItems = append(resultItems, items[start+index])
+				if len(results) > prepared.Query.Limit {
+					break
+				}
+			}
+			start = end
+			remaining := prepared.Query.Limit + 1 - len(results)
+			if len(results) == matchesBefore {
+				batchSize = min(searchBatchSize, batchSize*2)
+			} else {
+				batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
+			}
+			if budgetLimited {
+				break
+			}
+		}
 	}
-	return s.scanSearchRecords(ctx, prepared, plan.mailbox, items, total, limitedByCount)
+	limitedByCount := loaded >= maximum && streamHasMore(stream)
+	coverage.Complete = coverage.Complete && !limitedByCount
+	hasMore := len(results) > prepared.Query.Limit
+	if hasMore {
+		results = results[:prepared.Query.Limit]
+		resultItems = resultItems[:prepared.Query.Limit]
+	}
+	if coverage.ScannedMessages+coverage.CatalogProvenMessages < coverage.CandidateMessages {
+		coverage.Complete = false
+	}
+	page := mail.SearchPage{Messages: results, Coverage: coverage}
+	if hasMore && len(results) > 0 {
+		var err error
+		page.NextCursor, err = searchCursorFor(
+			resultItems[len(resultItems)-1], prepared.Fingerprint, s.storeUUID,
+		)
+		return page, err
+	}
+	return page, nil
+}
+
+// streamHasMore reports whether the candidate stream can still yield
+// candidates beyond the loaded window.
+func streamHasMore(stream *searchCandidateStream) bool {
+	return !stream.done
 }
 
 func (s *Store) querySearchRecords(
@@ -341,79 +542,6 @@ func (s *Store) searchSummary(item messageRecord, mailbox *mailref.Mailbox) (mai
 		return mail.MessageSummary{}, err
 	}
 	return mapMessageSummary(item, mailboxRef, accountID, path, s.storeUUID)
-}
-
-func (s *Store) scanSearchRecords(
-	ctx context.Context,
-	prepared mail.PreparedQuery,
-	mailbox *mailref.Mailbox,
-	items []messageRecord,
-	total int,
-	limitedByCount bool,
-) (mail.SearchPage, error) {
-	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
-	terms := normalizedSearchTerms(prepared.Query.Text)
-	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
-	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
-	var reservedBytes int64
-	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
-	for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
-		matchesBefore := len(results)
-		end := min(start+batchSize, len(items))
-		scans, budgetLimited, err := s.scanSearchBatch(
-			ctx, items[start:end], terms, prepared.Query.HasAttachment,
-			prepared.Query.MaxBytes, &reservedBytes,
-		)
-		if err != nil {
-			return mail.SearchPage{}, err
-		}
-		if budgetLimited {
-			coverage.Complete = false
-		}
-		for index, scan := range scans {
-			mergeSearchCoverage(&coverage, scan)
-			if !scan.match {
-				continue
-			}
-			summary, err := s.searchSummary(items[start+index], mailbox)
-			if err != nil {
-				return mail.SearchPage{}, err
-			}
-			summary.AttachmentCount = scan.attachments
-			results = append(results, mail.SearchMessage{Summary: summary, Snippet: scan.snippet})
-			resultItems = append(resultItems, items[start+index])
-			if len(results) > prepared.Query.Limit {
-				break
-			}
-		}
-		start = end
-		remaining := prepared.Query.Limit + 1 - len(results)
-		if len(results) == matchesBefore {
-			batchSize = min(searchBatchSize, batchSize*2)
-		} else {
-			batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
-		}
-		if budgetLimited {
-			break
-		}
-	}
-	hasMore := len(results) > prepared.Query.Limit
-	if hasMore {
-		results = results[:prepared.Query.Limit]
-		resultItems = resultItems[:prepared.Query.Limit]
-	}
-	if coverage.ScannedMessages+coverage.CatalogProvenMessages < coverage.CandidateMessages {
-		coverage.Complete = false
-	}
-	page := mail.SearchPage{Messages: results, Coverage: coverage}
-	if hasMore && len(results) > 0 {
-		var err error
-		page.NextCursor, err = searchCursorFor(
-			resultItems[len(resultItems)-1], prepared.Fingerprint, s.storeUUID,
-		)
-		return page, err
-	}
-	return page, nil
 }
 
 func (s *Store) scanSearchBatch(

@@ -327,6 +327,162 @@ func TestSearchCursorIsBoundToMailStore(t *testing.T) {
 	}
 }
 
+// Body-search candidate loading is chunked: resident records stay bounded
+// while results, cursors, and coverage stay identical to a monolithic load
+// of the same fixture. The baseline reproduces the pre-057 shape inside the
+// test: one full-candidate record query plus the original scan loop.
+func TestBodySearchChunkedCandidatesMatchMonolithic(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+
+	prepared, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Text: "needle", Limit: 25})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	chunkedPage, err := store.SearchMessages(context.Background(), prepared)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	baselinePage, err := monolithicBodySearch(context.Background(), store, prepared)
+	if err != nil {
+		t.Fatalf("monolithicBodySearch() error = %v", err)
+	}
+
+	if len(chunkedPage.Messages) != len(baselinePage.Messages) {
+		t.Fatalf("chunked = %d messages, monolithic = %d", len(chunkedPage.Messages), len(baselinePage.Messages))
+	}
+	for index := range chunkedPage.Messages {
+		if chunkedPage.Messages[index].Summary.Ref != baselinePage.Messages[index].Summary.Ref ||
+			chunkedPage.Messages[index].Snippet != baselinePage.Messages[index].Snippet ||
+			chunkedPage.Messages[index].Summary.AttachmentCount != baselinePage.Messages[index].Summary.AttachmentCount {
+			t.Fatalf("message %d differs: chunked %#v monolithic %#v",
+				index, chunkedPage.Messages[index], baselinePage.Messages[index])
+		}
+	}
+	if chunkedPage.Coverage != baselinePage.Coverage {
+		t.Fatalf("coverage differs: chunked %#v monolithic %#v",
+			chunkedPage.Coverage, baselinePage.Coverage)
+	}
+	if chunkedPage.NextCursor != baselinePage.NextCursor {
+		t.Fatalf("cursor differs: chunked %q monolithic %q",
+			chunkedPage.NextCursor, baselinePage.NextCursor)
+	}
+	if !chunkedPage.Coverage.Complete {
+		t.Fatalf("full-corpus chunked scan must stay complete: %#v", chunkedPage.Coverage)
+	}
+}
+
+// monolithicBodySearch reproduces the pre-057 single-load body-search
+// shape: one querySearchRecords call over the full candidate set plus the
+// original windowed scan loop, kept as the equality baseline for the
+// chunked path.
+func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.PreparedQuery) (mail.SearchPage, error) {
+	plan, empty, err := store.prepareSearchPlan(ctx, prepared)
+	if err != nil || empty {
+		return mail.SearchPage{}, err
+	}
+	maximum := prepared.Query.MaxMessages
+	items, total, err := store.querySearchRecords(ctx, plan, maximum+1)
+	if err != nil {
+		return mail.SearchPage{}, err
+	}
+	limitedByCount := len(items) > maximum
+	if limitedByCount {
+		items = items[:maximum]
+	}
+
+	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
+	terms := normalizedSearchTerms(prepared.Query.Text)
+	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
+	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
+	var reservedBytes int64
+	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
+	for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
+		matchesBefore := len(results)
+		end := min(start+batchSize, len(items))
+		scans, budgetLimited, err := store.scanSearchBatch(
+			ctx, items[start:end], terms, prepared.Query.HasAttachment,
+			prepared.Query.MaxBytes, &reservedBytes,
+		)
+		if err != nil {
+			return mail.SearchPage{}, err
+		}
+		if budgetLimited {
+			coverage.Complete = false
+		}
+		for index, scan := range scans {
+			mergeSearchCoverage(&coverage, scan)
+			if !scan.match {
+				continue
+			}
+			summary, err := store.searchSummary(items[start+index], plan.mailbox)
+			if err != nil {
+				return mail.SearchPage{}, err
+			}
+			summary.AttachmentCount = scan.attachments
+			results = append(results, mail.SearchMessage{Summary: summary, Snippet: scan.snippet})
+			resultItems = append(resultItems, items[start+index])
+			if len(results) > prepared.Query.Limit {
+				break
+			}
+		}
+		start = end
+		remaining := prepared.Query.Limit + 1 - len(results)
+		if len(results) == matchesBefore {
+			batchSize = min(searchBatchSize, batchSize*2)
+		} else {
+			batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
+		}
+		if budgetLimited {
+			break
+		}
+	}
+	hasMore := len(results) > prepared.Query.Limit
+	if hasMore {
+		results = results[:prepared.Query.Limit]
+		resultItems = resultItems[:prepared.Query.Limit]
+	}
+	if coverage.ScannedMessages+coverage.CatalogProvenMessages < coverage.CandidateMessages {
+		coverage.Complete = false
+	}
+	page := mail.SearchPage{Messages: results, Coverage: coverage}
+	if hasMore && len(results) > 0 {
+		page.NextCursor, err = searchCursorFor(
+			resultItems[len(resultItems)-1], prepared.Fingerprint, store.storeUUID,
+		)
+		return page, err
+	}
+	return page, nil
+}
+
+// The candidate stream yields strictly-descending (date_received, ROWID)
+// tuples: a max-messages bound that cuts mid-corpus keeps the covered
+// prefix and reports incomplete, and the next chunk continues without
+// re-serving rows.
+func TestBodySearchChunkRespectsMaxMessagesBound(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	query, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 25, MaxMessages: 2,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if page.Coverage.CandidateMessages < page.Coverage.ScannedMessages+page.Coverage.CatalogProvenMessages {
+		t.Fatalf("coverage counts exceed candidates: %#v", page.Coverage)
+	}
+	if page.Coverage.Complete {
+		t.Fatalf("bound of 2 over %d candidates must be incomplete: %#v",
+			page.Coverage.CandidateMessages, page.Coverage)
+	}
+}
+
 func TestSnippetForDoesNotSplitUTF8(t *testing.T) {
 	t.Parallel()
 	value := strings.Repeat("ä", maximumSnippetRunes+20)
