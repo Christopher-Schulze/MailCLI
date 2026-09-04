@@ -97,6 +97,28 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 	return document, nil
 }
 
+// messageIDFromSource reads only the header block of a raw RFC 5322 message
+// and resolves the Message-ID header. Full MIME parsing would stream and drain
+// every attachment body just to read this one header, so mutation targeting
+// uses this instead. A missing Message-ID header yields "" (same semantics as
+// the previous full-parse path).
+func messageIDFromSource(reader io.Reader) (string, error) {
+	headers, err := readRawHeaders(reader)
+	if err != nil {
+		return "", err
+	}
+	entity, readErr := message.Read(strings.NewReader(headers))
+	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
+		return "", operationError("invalid_message_source", fmt.Sprintf("parse RFC headers: %v", readErr))
+	}
+	header := messageMail.Header{Header: entity.Header}
+	messageID, err := header.MessageID()
+	if err != nil {
+		return "", nil
+	}
+	return messageID, nil
+}
+
 func parseMIMEEntity(
 	entity *message.Entity,
 	path []int,

@@ -684,11 +684,11 @@ func (c *Client) localMessageID(resolved resolvedMessage) (result string, result
 		return "", err
 	}
 	defer joinCloseError(&resultErr, source, "message identity source")
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false, false)
+	messageID, err := messageIDFromSource(source.Reader())
 	if err != nil {
 		return "", err
 	}
-	return document.MessageID, nil
+	return messageID, nil
 }
 
 func (c *Client) readUnavailableError() error {

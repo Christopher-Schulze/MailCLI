@@ -43,8 +43,8 @@ func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imap
 	target.messageID = resolved.Reference.ExpectedMessageID
 	if target.messageID == "" {
 		if _, source, err := c.store.openMessageSource(ctx, messageRef); err == nil {
-			if doc, err := parseMIMEDocument(source.Reader(), source.partial, false, false); err == nil {
-				target.messageID = doc.MessageID
+			if id, err := messageIDFromSource(source.Reader()); err == nil {
+				target.messageID = id
 			}
 			_ = source.Close()
 		}

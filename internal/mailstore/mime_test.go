@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -385,4 +386,55 @@ func TestCombineMIMETextSkipsEmptyChildren(t *testing.T) {
 	if result.Text != "only" {
 		t.Fatalf("combineMIMEText mixed with empties = %q, want %q", result.Text, "only")
 	}
+}
+
+func TestMessageIDFromSourceReadsHeadersOnly(t *testing.T) {
+	t.Parallel()
+	body := strings.Repeat("x", 1<<20)
+	raw := "From: Alice <alice@example.com>\r\n" +
+		"Subject: Header only\r\n" +
+		"Message-ID: <identity@example.com>\r\n" +
+		"Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Disposition: attachment; filename=big.bin\r\n\r\n" +
+		body + "\r\n--b--\r\n"
+	reader := &countingSourceReader{reader: strings.NewReader(raw)}
+	messageID, err := messageIDFromSource(reader)
+	if err != nil {
+		t.Fatalf("messageIDFromSource() error = %v", err)
+	}
+	document, err := parseMIMEDocument(strings.NewReader(raw), false, false, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	if messageID != document.MessageID || messageID == "" {
+		t.Fatalf("messageIDFromSource() = %q, full parse = %q; want identical non-empty", messageID, document.MessageID)
+	}
+	// Header-only reads must stop at the blank line, never reach the 1 MiB body.
+	if reader.count > int64(len(raw))/2 {
+		t.Fatalf("read %d bytes, want header block only (< %d)", reader.count, len(raw)/2)
+	}
+}
+
+func TestMessageIDFromSourceMissingHeader(t *testing.T) {
+	t.Parallel()
+	raw := "From: Alice <alice@example.com>\r\nSubject: No ID\r\n\r\nBody\r\n"
+	messageID, err := messageIDFromSource(strings.NewReader(raw))
+	if err != nil || messageID != "" {
+		t.Fatalf("messageIDFromSource() = %q, error = %v; want empty, nil", messageID, err)
+	}
+	document, err := parseMIMEDocument(strings.NewReader(raw), false, false, false)
+	if err != nil || document.MessageID != "" {
+		t.Fatalf("parseMIMEDocument() = %q, error = %v; want empty, nil", document.MessageID, err)
+	}
+}
+
+type countingSourceReader struct {
+	reader io.Reader
+	count  int64
+}
+
+func (r *countingSourceReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.count += int64(n)
+	return n, err
 }
