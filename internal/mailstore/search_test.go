@@ -509,12 +509,9 @@ func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t, 600)
 	closeTestResource(t, store, "test store")
-	// Remove the source of the first row of chunk 2 (600 extras occupy
-	// rowIDs 104..703 descending by date_received; chunk 1 holds the
-	// newest 512, chunk 2 starts at rowID 104+600-512 = 192... compute
-	// directly: candidates are date_received DESC, extras are 1000-index
-	// descending, so chunk 2 starts at the 513th-newest = extra index 600-512=88
-	// counting from oldest extras last. Row 616 is safely inside chunk 2.
+	// Remove a chunk-2 source: 600 extras occupy rowIDs 104..703, ordered
+	// date_received DESC (newest extra first). Chunk 1 holds the newest
+	// 512 (rows 104..615); chunk 2 starts at row 616.
 	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
 	if err != nil {
 		t.Fatalf("parseMailboxURL() error = %v", err)
