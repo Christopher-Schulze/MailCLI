@@ -420,12 +420,6 @@ func (s *Store) scanSearchRecords(
 	return page, nil
 }
 
-// dispatchSearchJobs pre-classifies attachment-only queries (no text
-// terms): candidates with a positive catalog count are decided without
-// opening the source. A named helper was rejected because dispatch
-// receives the parts separately and building a throwaway Query per
-// candidate would allocate on the hot path.
-
 func (s *Store) scanSearchBatch(
 	ctx context.Context,
 	items []messageRecord,
@@ -467,6 +461,10 @@ func (s *Store) scanSearchBatch(
 	return results, budgetLimited, nil
 }
 
+// dispatchSearchJobs feeds the scan workers. It first pre-classifies
+// attachment-only queries: a positive catalog count decides the candidate
+// without opening the source, while catalog-zero candidates dispatch as
+// normal because the catalog can lag.
 func (s *Store) dispatchSearchJobs(
 	ctx context.Context,
 	items []messageRecord,
