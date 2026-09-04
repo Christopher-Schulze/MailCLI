@@ -39,6 +39,26 @@ type MailboxInfo struct {
 	Flags []string
 }
 
+// PickSentMailbox returns the IMAP mailbox that holds sent mail: the first
+// mailbox flagged \Sent, else a well-known fallback name. Empty when none.
+func PickSentMailbox(mailboxes []MailboxInfo) string {
+	for _, mailbox := range mailboxes {
+		for _, flag := range mailbox.Flags {
+			if strings.EqualFold(flag, "\\Sent") {
+				return mailbox.Name
+			}
+		}
+	}
+	for _, want := range []string{"Sent Messages", "Gesendet", "[Gmail]/Sent Mail"} {
+		for _, mailbox := range mailboxes {
+			if strings.EqualFold(mailbox.Name, want) {
+				return mailbox.Name
+			}
+		}
+	}
+	return ""
+}
+
 // MutationEvidence records server proof for an IMAP message mutation.
 type MutationEvidence struct {
 	Command        string // STORE, COPY, MOVE, or DELETE

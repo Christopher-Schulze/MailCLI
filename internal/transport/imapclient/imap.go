@@ -36,7 +36,6 @@ import (
 )
 
 const (
-	flagSent = "\\Sent"
 	flagSeen = "\\Seen"
 )
 
@@ -615,28 +614,12 @@ func parseQuoted(s string) (string, string, error) {
 	return "", s, fmt.Errorf("unterminated quoted string")
 }
 
-var fallbackSentMailboxes = []string{
-	"Sent Messages",
-	"Gesendet",
-	"[Gmail]/Sent Mail",
-}
-
 func pickSent(mailboxes []mailbox) string {
-	for _, m := range mailboxes {
-		for _, f := range m.flags {
-			if strings.EqualFold(f, flagSent) {
-				return m.name
-			}
-		}
+	infos := make([]transport.MailboxInfo, len(mailboxes))
+	for index, candidate := range mailboxes {
+		infos[index] = transport.MailboxInfo{Name: candidate.name, Flags: candidate.flags}
 	}
-	for _, want := range fallbackSentMailboxes {
-		for _, m := range mailboxes {
-			if strings.EqualFold(m.name, want) {
-				return m.name
-			}
-		}
-	}
-	return ""
+	return transport.PickSentMailbox(infos)
 }
 
 func parseStatus(line, tag string) string {

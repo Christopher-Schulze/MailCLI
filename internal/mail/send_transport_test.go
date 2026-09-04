@@ -295,7 +295,7 @@ func TestReconcileDraftObservesGatewaySentStoreWithoutSendingAgain(t *testing.T)
 	baseline := SendObservationBaseline{
 		StoreUUID: "test-store", MaximumRowID: 10, CapturedUnix: 1, SentMailboxIDs: []int64{20},
 	}
-	attempt, err := beginSendAttemptWithBaseline(root, draft.Ref, &baseline)
+	attempt, err := beginSendAttemptWithBaseline(root, draft.Ref, &baseline, "", "")
 	if err != nil {
 		t.Fatalf("beginSendAttemptWithBaseline() error = %v", err)
 	}
@@ -324,7 +324,7 @@ func TestOrphanedSendClaimReplaysWithoutSubmitting(t *testing.T) {
 	submitter, mirror := sendTransportStubs()
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref); err != nil {
+	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 
@@ -351,4 +351,170 @@ func (g *reconcileOnlyGateway) ReconcileSend(
 		return SendEvidence{}, errors.New("missing observation baseline")
 	}
 	return g.reconcileEvidence, nil
+}
+
+type reconcileImapStub struct {
+	transport.ImapOperator
+	mailboxes   []transport.MailboxInfo
+	uid         uint32
+	searchErr   error
+	searchID    string
+	searchBox   string
+	searchCalls int
+}
+
+func (s *reconcileImapStub) ListMailboxes(context.Context, transport.ImapConfig) ([]transport.MailboxInfo, error) {
+	return s.mailboxes, nil
+}
+
+func (s *reconcileImapStub) SearchUID(
+	_ context.Context, _ transport.ImapConfig, mailbox string, messageID string,
+) (uint32, uint32, error) {
+	s.searchCalls++
+	s.searchBox, s.searchID = mailbox, messageID
+	return s.uid, 77, s.searchErr
+}
+
+func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) {
+	t.Helper()
+	fingerprint := envelopeFingerprint(draft, "<claim@example.com>")
+	if _, err := beginSendAttempt(root, draft.Ref, "<claim@example.com>", fingerprint); err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+	return "<claim@example.com>", fingerprint
+}
+
+func TestReconcileUnknownClaimFindsSentMessage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	beginUnknownClaim(t, root, draft)
+	imap := &reconcileImapStub{
+		mailboxes: []transport.MailboxInfo{{Name: "Sent Messages", Flags: []string{"\\Sent"}}},
+		uid:       42,
+	}
+	service.send.Imap = imap
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || !result.Reconciled || !result.DraftRetained {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
+	}
+	if imap.searchCalls != 1 || imap.searchBox != "Sent Messages" || imap.searchID != "<claim@example.com>" {
+		t.Fatalf("IMAP search = %q in %q after %d calls", imap.searchID, imap.searchBox, imap.searchCalls)
+	}
+	claim, err := readSendAttempt(root, draft.Ref)
+	if err != nil || claim.Outcome != SendOutcomeSent || claim.Transport == nil ||
+		claim.Transport.MessageID != "<claim@example.com>" || claim.Transport.MirrorMailbox != "Sent Messages" {
+		t.Fatalf("claim after reconcile = %+v, error = %v", claim, err)
+	}
+}
+
+func TestReconcileUnknownClaimNotFoundStaysUnknown(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	beginUnknownClaim(t, root, draft)
+	service.send.Imap = &reconcileImapStub{
+		mailboxes: []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+		searchErr: &transport.TransportError{Code: transport.CodeIMAPMessageNotFound, Message: "not found"},
+	}
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err == nil || errorCode(err) != "send_outcome_unverifiable" || result.Outcome != SendOutcomeUnknown {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
+	}
+	if !strings.Contains(err.Error(), "<claim@example.com>") ||
+		!strings.Contains(err.Error(), "discard the draft") {
+		t.Fatalf("unverifiable error lacks actionable context: %v", err)
+	}
+	retained, getErr := service.GetDraft(draft.Ref)
+	if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Outcome != SendOutcomeUnknown {
+		t.Fatalf("claim after not-found = %+v, error = %v", retained.SendAttempt, getErr)
+	}
+}
+
+func TestReconcileUnknownClaimRejectsFingerprintMismatch(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	if _, err := beginSendAttempt(root, draft.Ref, "<claim@example.com>", "stale-fingerprint"); err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+	service.send.Imap = &reconcileImapStub{}
+
+	if _, err := service.ReconcileDraft(context.Background(), draft.Ref); err == nil ||
+		errorCode(err) != "send_fingerprint_mismatch" {
+		t.Fatalf("fingerprint mismatch error = %v", err)
+	}
+}
+
+func TestReconcileLegacyUnknownClaimStaysBlocked(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+
+	_, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err == nil || errorCode(err) != "send_reconcile_unavailable" {
+		t.Fatalf("legacy claim error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "no Message-ID") {
+		t.Fatalf("blocked message lacks claim context: %v", err)
+	}
+}
+
+type submitClaimSpec struct {
+	ref         string
+	messageID   string
+	fingerprint string
+	outcome     SendOutcome
+}
+
+// claimReadingSubmitter wraps a successful submission and records the send
+// claim exactly as it exists when the submission starts (the crash window
+// that TASK 046 closes).
+type claimReadingSubmitter struct {
+	t      *testing.T
+	root   string
+	spec   *submitClaimSpec
+	result transport.SubmitEvidence
+}
+
+func (s *claimReadingSubmitter) Submit(
+	_ context.Context, _ transport.SubmitConfig, _ string, _ []string, _ []byte,
+) (transport.SubmitEvidence, error) {
+	claim, err := readSendAttempt(s.root, s.spec.ref)
+	if err != nil {
+		s.t.Fatalf("read claim during submit: %v", err)
+	}
+	s.spec.messageID, s.spec.fingerprint, s.spec.outcome =
+		claim.MessageID, claim.EnvelopeFingerprint, claim.Outcome
+	return s.result, nil
+}
+
+func TestSendDraftClaimCarriesMessageIDBeforeSubmit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	spec := &submitClaimSpec{}
+	service := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: &claimReadingSubmitter{
+			t: t, root: root, spec: spec,
+			result: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK", MessageID: "<abc123@icloud.com>"},
+		},
+		Mirror:      &stubMirror{evidence: transport.AppendEvidence{Mailbox: "Sent", Appended: true}},
+		Credentials: &stubCredentials{password: "secret"},
+	})
+	draft := createTransportDraft(t, service)
+	spec.ref = draft.Ref
+
+	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if spec.messageID == "" || spec.fingerprint == "" || spec.outcome != SendOutcomeUnknown {
+		t.Fatalf("claim at submit time = %+v", spec)
+	}
+	if spec.fingerprint != envelopeFingerprint(draft, spec.messageID) {
+		t.Fatalf("claim fingerprint %q does not match the draft envelope", spec.fingerprint)
+	}
 }

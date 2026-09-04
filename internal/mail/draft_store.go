@@ -304,7 +304,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	attempt, err := beginSendAttempt(root, ref)
+	attempt, err := beginSendAttempt(root, ref, messageID, envelopeFingerprint(draft, messageID))
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -421,10 +421,16 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return s.reconcileMirrorPending(ctx, root, ref, draft, attempt)
 	}
 	if attempt.ObservationBaseline == nil {
-		return resultForReconcile(ref, attempt), &OperationError{
-			Code:    "send_reconcile_unavailable",
-			Message: "send attempt predates durable store observation; it remains blocked and must not be retried",
+		if attempt.Outcome != SendOutcomeUnknown || attempt.MessageID == "" {
+			return resultForReconcile(ref, attempt), &OperationError{
+				Code: "send_reconcile_unavailable",
+				Message: fmt.Sprintf(
+					"send attempt from %s carries no Message-ID and predates durable store observation; it remains blocked and must not be retried",
+					attempt.StartedAt.Format(time.RFC3339),
+				),
+			}
 		}
+		return s.reconcileUnknownViaImap(ctx, root, ref, draft, attempt)
 	}
 	reconciler, ok := s.gateway.(SendReconciler)
 	if !ok {
@@ -479,6 +485,96 @@ func persistReconciledSend(
 	}
 	result.DraftRetained = false
 	return result, nil
+}
+
+// reconcileUnknownViaImap resolves a crash-stranded unknown claim: the claim
+// carries the Message-ID and envelope fingerprint written before submission,
+// so the Sent mailbox can be searched over IMAP without store observation.
+// Absence in Sent never proves non-delivery (APPEND may still crash), so the
+// claim stays unknown and automatic retries remain blocked.
+func (s *Service) reconcileUnknownViaImap(
+	ctx context.Context,
+	root string,
+	ref string,
+	draft Draft,
+	attempt SendAttempt,
+) (SendResult, error) {
+	if attempt.EnvelopeFingerprint != envelopeFingerprint(draft, attempt.MessageID) {
+		return resultForReconcile(ref, attempt), &OperationError{
+			Code:    "send_fingerprint_mismatch",
+			Message: "the draft no longer matches the claimed send envelope; reconciliation is blocked and retries remain forbidden",
+		}
+	}
+	if err := s.send.available(); err != nil {
+		return resultForReconcile(ref, attempt), err
+	}
+	imap := s.send.ImapClient()
+	if imap == nil {
+		return resultForReconcile(ref, attempt), &OperationError{
+			Code:    "send_transport_unavailable",
+			Message: "direct send transport has no IMAP operator; reconciliation over the Sent mailbox is unavailable",
+		}
+	}
+	sender, err := sendSender(draft.From)
+	if err != nil {
+		return resultForReconcile(ref, attempt), err
+	}
+	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	if err != nil {
+		return resultForReconcile(ref, attempt), err
+	}
+	password, err := s.send.Credentials.Load(sender)
+	if err != nil || password == "" {
+		return resultForReconcile(ref, attempt), missingCredentialsError(sender)
+	}
+	cfg := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password}
+	mailboxes, err := imap.ListMailboxes(ctx, cfg)
+	if err != nil {
+		return resultForReconcile(ref, attempt), err
+	}
+	sentBox := transport.PickSentMailbox(mailboxes)
+	if sentBox == "" {
+		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
+	}
+	uid, _, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
+	if err != nil {
+		var transportErr *transport.TransportError
+		if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
+			return resultForReconcile(ref, attempt), err
+		}
+	}
+	if uid != 0 {
+		attempt.InvocationStarted = true
+		attempt.AcceptedByMail = true
+		attempt.SentStoreObserved = true
+		attempt.Outcome = SendOutcomeSent
+		attempt.Transport = &TransportEvidence{MessageID: attempt.MessageID, MirrorMailbox: sentBox}
+		attempt.UpdatedAt = time.Now().UTC()
+		result := resultForReconcile(ref, attempt)
+		result.Reconciled = true
+		if err := replaceSendAttempt(root, ref, attempt); err != nil {
+			return result, &OperationError{
+				Code:    "send_reconcile_state_failed",
+				Message: fmt.Sprintf("the sent message was located over IMAP, but the reconciled state could not be recorded: %v", err),
+			}
+		}
+		return result, nil
+	}
+	return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "the Sent mailbox contains no message with the claimed Message-ID")
+}
+
+// unverifiableSendError turns an unreconcilable unknown claim into an
+// actionable typed error: Message-ID, attempt start, recipients, and manual
+// remediation, without ever unlocking automatic retries.
+func unverifiableSendError(attempt SendAttempt, draft Draft, finding string) error {
+	return &OperationError{
+		Code: "send_outcome_unverifiable",
+		Message: fmt.Sprintf(
+			"send outcome unknown: %s (Message-ID %s, started %s, recipients %s); verify the message in the Sent or spam folder manually, or discard the draft to stop reconciliation",
+			finding, attempt.MessageID, attempt.StartedAt.Format(time.RFC3339),
+			strings.Join(draftEnvelopeRecipients(draft), ", "),
+		),
+	}
 }
 
 func resultForReconcile(ref string, attempt SendAttempt) SendResult {
@@ -571,6 +667,28 @@ func (t SendTransport) available() error {
 	return nil
 }
 
+// envelopeFingerprint identifies the exact claimed envelope: Message-ID,
+// sender, recipients, subject, and body. Draft edits after the claim (or a
+// mismatched claim) are detected before reconciliation trusts the claim.
+func envelopeFingerprint(draft Draft, messageID string) string {
+	hash := sha256.New()
+	parts := []string{messageID, draft.From, draft.Subject}
+	for _, recipient := range draft.To {
+		parts = append(parts, recipient.Address)
+	}
+	for _, recipient := range draft.CC {
+		parts = append(parts, recipient.Address)
+	}
+	for _, recipient := range draft.BCC {
+		parts = append(parts, recipient.Address)
+	}
+	parts = append(parts, strings.ReplaceAll(draft.Body, "\r\n", "\n"))
+	for _, part := range parts {
+		hash.Write([]byte(part))
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
 func sendSender(from string) (string, error) {
 	parsed, err := stdmail.ParseAddress(strings.TrimSpace(from))
 	if err != nil || parsed.Address == "" {
@@ -1224,14 +1342,16 @@ func rejectClaimedDraft(draft Draft) error {
 	return nil
 }
 
-func beginSendAttempt(root string, ref string) (SendAttempt, error) {
-	return beginSendAttemptWithBaseline(root, ref, nil)
+func beginSendAttempt(root string, ref string, messageID, envelopeFingerprint string) (SendAttempt, error) {
+	return beginSendAttemptWithBaseline(root, ref, nil, messageID, envelopeFingerprint)
 }
 
 func beginSendAttemptWithBaseline(
 	root string,
 	ref string,
 	baseline *SendObservationBaseline,
+	messageID string,
+	envelopeFingerprint string,
 ) (SendAttempt, error) {
 	id, err := newSendAttemptID()
 	if err != nil {
@@ -1240,6 +1360,7 @@ func beginSendAttemptWithBaseline(
 	now := time.Now().UTC()
 	attempt := SendAttempt{
 		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
+		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint,
 		ObservationBaseline: cloneSendObservationBaseline(baseline),
 	}
 	path, err := sendClaimPath(root, ref)

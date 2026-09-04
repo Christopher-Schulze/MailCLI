@@ -358,7 +358,7 @@ func TestClaimedDraftBlocksMutationUntilExplicitDiscard(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref); err != nil {
+	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	_, updateErr := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, Input: DraftInput{
@@ -584,7 +584,7 @@ func TestPruneSkipsDraftsWithSendAttempt(t *testing.T) {
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
 	ageDraftFile(t, root, draft.Ref, 40)
-	if _, err := beginSendAttempt(root, draft.Ref); err != nil {
+	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
