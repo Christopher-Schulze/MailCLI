@@ -24,6 +24,7 @@ type fakeServerConfig struct {
 	sentMboxes        []string
 	trashMboxes       []string
 	otherMboxes       []string
+	listResponse      []byte
 	searchMatchID     string
 	searchUID         uint32
 	appendOK          bool
@@ -170,6 +171,16 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.writeLine(bw, tag+" NO Authentication failed")
 			}
 		case "LIST":
+			if len(s.config.listResponse) > 0 {
+				if _, err := bw.Write(s.config.listResponse); err != nil {
+					return
+				}
+				if err := bw.Flush(); err != nil {
+					return
+				}
+				s.writeLine(bw, tag+" OK LIST completed")
+				continue
+			}
 			for _, name := range s.config.sentMboxes {
 				s.writeLine(bw, fmt.Sprintf(`* LIST (\Sent) "/" %s`, quoteIMAP(name)))
 			}

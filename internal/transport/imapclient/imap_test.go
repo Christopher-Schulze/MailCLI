@@ -220,6 +220,7 @@ func TestQuoteIMAP(t *testing.T) {
 		{"Sent", `"Sent"`},
 		{`a"b`, `"a\"b"`},
 		{`a\b`, `"a\\b"`},
+		{`a{9}`, `"a{9}"`},
 	}
 	for _, c := range cases {
 		if got := quoteIMAP(c.in); got != c.want {
@@ -254,6 +255,23 @@ func TestParseListLine(t *testing.T) {
 				t.Fatalf("flags[%d]: got %q, want %q", i, flags[i], c.wantFlags[i])
 			}
 		}
+	}
+}
+
+func TestParseListLineLiteralValuesRemainRaw(t *testing.T) {
+	name, flags, err := parseListLine(
+		"* LIST (\\Sent) "+imapLiteralMarker+" "+imapLiteralMarker,
+		[]byte("."),
+		[]byte(`a"b\c`),
+	)
+	if err != nil {
+		t.Fatalf("parseListLine literal: %v", err)
+	}
+	if name != `a"b\c` {
+		t.Fatalf("literal name = %q, want raw quote and slash", name)
+	}
+	if len(flags) != 1 || flags[0] != "\\Sent" {
+		t.Fatalf("literal flags = %v, want [\\Sent]", flags)
 	}
 }
 
@@ -369,6 +387,106 @@ func TestListMailboxes(t *testing.T) {
 		if !names[expected] {
 			t.Errorf("expected mailbox %s in list", expected)
 		}
+	}
+}
+
+func TestListLiteralMailboxesAndMutations(t *testing.T) {
+	const sentName = "Entwürfe"
+	const trashName = "Papierkorb"
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		appendOK:      true,
+		moveSupported: true,
+		listResponse: []byte(
+			"* LIST (\\Sent) \".\" {9}\r\nEntw\xc3\xbcrfe\r\n" +
+				"* LIST (\\Trash) {1}\r\n.{10}\r\nPapierkorb\r\n",
+		),
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	defer func() { _ = client.Close() }()
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	appended, err := client.AppendToSent(context.Background(), cfg, []byte("message"), "<literal@example.com>")
+	if err != nil {
+		t.Fatalf("AppendToSent: %v", err)
+	}
+	if !appended.Appended || appended.Mailbox != sentName {
+		t.Fatalf("literal Sent append = %+v, want mailbox %q", appended, sentName)
+	}
+	called, appendMailbox, _, _ := srv.AppendRecord()
+	if !called || appendMailbox != sentName {
+		t.Fatalf("literal append record = called:%v mailbox:%q", called, appendMailbox)
+	}
+
+	mboxes, err := client.ListMailboxes(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ListMailboxes: %v", err)
+	}
+	flagsByName := make(map[string][]string, len(mboxes))
+	for _, mbox := range mboxes {
+		flagsByName[mbox.Name] = mbox.Flags
+	}
+	if !hasMailboxFlag(flagsByName[sentName], "\\Sent") || !hasMailboxFlag(flagsByName[trashName], "\\Trash") {
+		t.Fatalf("literal mailboxes = %+v, want Sent=%q and Trash=%q", flagsByName, sentName, trashName)
+	}
+
+	if _, err := client.SetFlags(context.Background(), cfg, sentName, 42, 12345, []string{"\\Seen"}, nil); err != nil {
+		t.Fatalf("SetFlags(%q): %v", sentName, err)
+	}
+	deletion, err := client.DeleteMessage(context.Background(), cfg, sentName, 42, 12345)
+	if err != nil {
+		t.Fatalf("DeleteMessage(%q): %v", sentName, err)
+	}
+	if deletion.TargetMailbox != trashName {
+		t.Fatalf("delete target = %q, want %q", deletion.TargetMailbox, trashName)
+	}
+	srv.mu.Lock()
+	storeCalled, moveCalled, moveDst := srv.storeCalled, srv.moveCalled, srv.moveDst
+	srv.mu.Unlock()
+	if !storeCalled || !moveCalled || moveDst != trashName {
+		t.Fatalf("literal mutations = store:%v move:%v target:%q", storeCalled, moveCalled, moveDst)
+	}
+}
+
+func hasMailboxFlag(flags []string, want string) bool {
+	for _, flag := range flags {
+		if strings.EqualFold(flag, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestListMalformedResponseFailsLoudly(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:       true,
+		listResponse: []byte("* LIST (\\Sent) \".\"\r\n"),
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	_, err = client.ListMailboxes(context.Background(), cfg)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != transport.CodeIMAPResponseMalformed {
+		t.Fatalf("ListMailboxes error = %v, want imap_response_malformed", err)
 	}
 }
 

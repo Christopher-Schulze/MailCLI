@@ -13,8 +13,8 @@
 //
 // Response parsing is intentionally minimal: untagged "* ..." lines,
 // continuation "+ ..." lines, and a final tagged "tag OK|NO|BAD ..." line.
-// Quoted strings are unescaped; IMAP literals sent by the server are not
-// supported because the providers targeted by this client send quoted names.
+// Quoted strings are unescaped. LIST literals are reconstructed before their
+// mailbox values are parsed; malformed LIST responses fail the operation.
 package imapclient
 
 import (
@@ -286,8 +286,13 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 
 	var mailboxes []mailbox
 	for {
-		line, err := c.readLine(sess)
+		line, literals, err := c.readLineWithLiteral(sess)
 		if err != nil {
+			var malformed *malformedResponseError
+			if errors.As(err, &malformed) {
+				sess.dirty = true
+				return nil, listResponseMalformed(malformed)
+			}
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP LIST read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
@@ -303,9 +308,10 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 		if !strings.HasPrefix(line, "* LIST ") {
 			continue
 		}
-		name, flags, perr := parseListLine(line)
+		name, flags, perr := parseListLine(line, literals...)
 		if perr != nil {
-			continue
+			sess.dirty = true
+			return nil, listResponseMalformed(perr)
 		}
 		mailboxes = append(mailboxes, mailbox{name: name, flags: flags})
 	}
@@ -452,6 +458,99 @@ func (c *Client) readLine(sess *session) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
+const imapLiteralMarker = "\x00"
+
+type malformedResponseError struct {
+	err error
+}
+
+func (e *malformedResponseError) Error() string { return "malformed IMAP response: " + e.err.Error() }
+
+func (e *malformedResponseError) Unwrap() error { return e.err }
+
+func listResponseMalformed(err error) *transport.TransportError {
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPResponseMalformed,
+		Message: "IMAP LIST response malformed",
+		Err:     err,
+	}
+}
+
+// readLineWithLiteral reconstructs one logical response line from its line
+// fragments and server-sent literals. Each literal is represented in the
+// returned text by imapLiteralMarker and kept separately so its bytes remain
+// raw when the value parser consumes it.
+func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
+	var reconstructed strings.Builder
+	var literals [][]byte
+	for {
+		line, err := c.readLine(sess)
+		if err != nil {
+			return "", nil, err
+		}
+		prefix, size, hasLiteral, err := parseLiteralSuffix(line)
+		if err != nil {
+			sess.dirty = true
+			return "", nil, &malformedResponseError{err: err}
+		}
+		if !hasLiteral {
+			reconstructed.WriteString(line)
+			return reconstructed.String(), literals, nil
+		}
+
+		reconstructed.WriteString(prefix)
+		reconstructed.WriteString(imapLiteralMarker)
+		literal := make([]byte, size)
+		if _, err := io.ReadFull(sess.br, literal); err != nil {
+			sess.dirty = true
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return "", nil, &malformedResponseError{err: err}
+			}
+			return "", nil, err
+		}
+		literals = append(literals, literal)
+	}
+}
+
+func parseLiteralSuffix(line string) (prefix string, size int, hasLiteral bool, err error) {
+	if !strings.HasSuffix(line, "}") {
+		return line, 0, false, nil
+	}
+	start := strings.LastIndexByte(line, '{')
+	if start == -1 || (start > 0 && !isSpace(line[start-1])) || quotedAt(line, start) {
+		return line, 0, false, nil
+	}
+	digits := line[start+1 : len(line)-1]
+	if digits == "" {
+		return "", 0, false, fmt.Errorf("empty IMAP literal length")
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", 0, false, fmt.Errorf("invalid IMAP literal length %q", digits)
+		}
+	}
+	size, err = strconv.Atoi(digits)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("invalid IMAP literal length %q: %w", digits, err)
+	}
+	return line[:start], size, true, nil
+}
+
+func quotedAt(s string, offset int) bool {
+	quoted := false
+	for i := 0; i < offset; i++ {
+		switch s[i] {
+		case '\\':
+			if quoted {
+				i++
+			}
+		case '"':
+			quoted = !quoted
+		}
+	}
+	return quoted
+}
+
 func (c *Client) readFinal(ctx context.Context, sess *session, tag string) (string, string, error) {
 	for {
 		line, err := c.readLine(sess)
@@ -502,7 +601,8 @@ func quoteIMAP(s string) string {
 	return b.String()
 }
 
-func parseListLine(line string) (string, []string, error) {
+func parseListLine(line string, literals ...[]byte) (string, []string, error) {
+	parser := imapValueParser{literals: literals}
 	const prefix = "* LIST "
 	if !strings.HasPrefix(line, prefix) {
 		return "", nil, fmt.Errorf("not a LIST response")
@@ -536,26 +636,40 @@ func parseListLine(line string) (string, []string, error) {
 	}
 
 	attrs := s[1 : end-1]
-	flags, err := parseValues(attrs)
+	flags, err := parser.parseValues(attrs)
 	if err != nil {
 		return "", nil, err
 	}
 
 	rest := strings.TrimSpace(s[end:])
-	_, rest, err = parseIMAPValue(rest)
+	_, rest, err = parser.parse(rest)
 	if err != nil {
 		return "", nil, err
 	}
 
-	name, _, err := parseIMAPValue(rest)
-	return name, flags, err
+	name, rest, err := parser.parse(rest)
+	if err != nil {
+		return "", nil, err
+	}
+	if strings.TrimSpace(rest) != "" {
+		return "", nil, fmt.Errorf("trailing LIST response data")
+	}
+	if parser.nextLiteral != len(literals) {
+		return "", nil, fmt.Errorf("unused IMAP response literal")
+	}
+	return name, flags, nil
 }
 
-func parseValues(s string) ([]string, error) {
+type imapValueParser struct {
+	literals    [][]byte
+	nextLiteral int
+}
+
+func (p *imapValueParser) parseValues(s string) ([]string, error) {
 	var values []string
 	s = strings.TrimSpace(s)
 	for s != "" {
-		v, rest, err := parseIMAPValue(s)
+		v, rest, err := p.parse(s)
 		if err != nil {
 			return nil, err
 		}
@@ -565,10 +679,28 @@ func parseValues(s string) ([]string, error) {
 	return values, nil
 }
 
+func parseValues(s string) ([]string, error) {
+	var parser imapValueParser
+	return parser.parseValues(s)
+}
+
 func parseIMAPValue(s string) (string, string, error) {
+	var parser imapValueParser
+	return parser.parse(s)
+}
+
+func (p *imapValueParser) parse(s string) (string, string, error) {
 	s = strings.TrimLeft(s, " \t")
 	if s == "" {
 		return "", "", fmt.Errorf("empty token")
+	}
+	if strings.HasPrefix(s, imapLiteralMarker) {
+		if p.nextLiteral >= len(p.literals) {
+			return "", s, fmt.Errorf("missing IMAP response literal")
+		}
+		value := string(p.literals[p.nextLiteral])
+		p.nextLiteral++
+		return value, s[len(imapLiteralMarker):], nil
 	}
 	if s[0] == '"' {
 		return parseQuoted(s)
@@ -579,6 +711,9 @@ func parseIMAPValue(s string) (string, string, error) {
 
 	i := 0
 	for i < len(s) && !isSpace(s[i]) {
+		if strings.HasPrefix(s[i:], imapLiteralMarker) {
+			return "", s, fmt.Errorf("embedded IMAP response literal")
+		}
 		i++
 	}
 	return s[:i], s[i:], nil
