@@ -454,6 +454,52 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 	return page, nil
 }
 
+// NULL date_received rows sort last in SQLite DESC order; the keyset
+// cursor must not skip them across a chunk boundary. Oracle: 600 extras
+// (chunk 1 = rows 104..615), rows 616..703 NULLed - "needle extra 512"
+// (row 616) lives in chunk 2 inside the NULL group. The pre-fix keyset
+// skipped all NULL rows, so the chunked path found nothing while the
+// monolithic path found the row.
+func TestBodySearchChunkHandlesNullDateCandidates(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	updateFixtureMessage(t, store, `UPDATE messages SET date_received = NULL WHERE ROWID BETWEEN 616 AND 703`)
+
+	prepared, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle extra 512", Limit: 25,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	chunkedPage, err := store.SearchMessages(context.Background(), prepared)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if len(chunkedPage.Messages) != 1 {
+		t.Fatalf("chunked found %d messages, want 1 (the NULL-dated row 616)", len(chunkedPage.Messages))
+	}
+	baselinePage, err := monolithicBodySearch(context.Background(), store, prepared)
+	if err != nil {
+		t.Fatalf("monolithicBodySearch() error = %v", err)
+	}
+	if len(chunkedPage.Messages) != len(baselinePage.Messages) {
+		t.Fatalf("chunked = %d messages, monolithic = %d", len(chunkedPage.Messages), len(baselinePage.Messages))
+	}
+	for index := range chunkedPage.Messages {
+		if chunkedPage.Messages[index] != baselinePage.Messages[index] {
+			t.Fatalf("message %d differs: chunked %#v monolithic %#v",
+				index, chunkedPage.Messages[index], baselinePage.Messages[index])
+		}
+	}
+	if chunkedPage.Coverage != baselinePage.Coverage {
+		t.Fatalf("coverage differs: chunked %#v monolithic %#v", chunkedPage.Coverage, baselinePage.Coverage)
+	}
+	if chunkedPage.NextCursor != baselinePage.NextCursor {
+		t.Fatalf("cursor differs: chunked %q monolithic %q", chunkedPage.NextCursor, baselinePage.NextCursor)
+	}
+}
+
 // The byte-budget stop must survive chunking: with more candidates than
 // one chunk (512), an exhausted budget stops the WHOLE scan. Oracle: the
 // first candidate alone exceeds MaxBytes=1, so the budget breaks in chunk

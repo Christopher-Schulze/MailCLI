@@ -259,6 +259,7 @@ type searchCandidateStream struct {
 	ctx      context.Context
 	plan     searchPlan
 	last     messageRecord
+	lastNull bool
 	haveLast bool
 	done     bool
 }
@@ -279,19 +280,30 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
-		COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
+		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
 		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
 		count(*) OVER ()
 	`
 	arguments := append([]any(nil), st.plan.arguments...)
 	if st.haveLast {
-		query += st.plan.fromWhereSQL +
-			" AND (m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))" +
-			" ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
-		arguments = append(arguments,
-			st.last.DateReceived, st.last.DateReceived, st.last.RowID, limit,
-		)
+		// Keyset on the RAW (m.date_received, m.ROWID) DESC order the query
+		// uses: NULL dates sort last in SQLite DESC, so a non-NULL cursor
+		// must also admit the trailing NULL rows, and a NULL cursor only
+		// continues inside the NULL group by ROWID.
+		if st.lastNull {
+			query += st.plan.fromWhereSQL +
+				" AND m.date_received IS NULL AND m.ROWID < ?" +
+				" ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
+			arguments = append(arguments, st.last.RowID, limit)
+		} else {
+			query += st.plan.fromWhereSQL +
+				" AND ((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)" +
+				" ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
+			arguments = append(arguments,
+				st.last.DateReceived, st.last.DateReceived, st.last.RowID, limit,
+			)
+		}
 	} else {
 		query += st.plan.fromWhereSQL + " ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
 		arguments = append(arguments, limit)
@@ -303,17 +315,23 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 	}
 	defer joinCloseError(&resultErr, rows, "search candidate rows")
 	var items []messageRecord
+	lastDateNull := false
 	for rows.Next() {
 		var item messageRecord
+		var dateNull int
 		if err := rows.Scan(
 			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-			&item.DateSent, &item.DateReceived, &item.Read, &item.Flagged, &item.Deleted,
+			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
 			&item.Junk, &item.Size, &item.AttachmentCount, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
+		// Only the chunk's last row seeds the next keyset cursor; track
+		// whether that row's raw date is NULL (messageRecord carries the
+		// COALESCEd value only).
+		lastDateNull = dateNull != 0
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -324,6 +342,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 		return nil, total, nil
 	}
 	st.last = items[len(items)-1]
+	st.lastNull = lastDateNull
 	st.haveLast = true
 	if len(items) < limit {
 		st.done = true
