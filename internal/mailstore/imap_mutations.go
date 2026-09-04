@@ -391,29 +391,38 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 }
 
 // DeleteMessage deletes a message over IMAP by moving it to the Trash mailbox.
-func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) error {
+func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) (mail.DeleteResult, error) {
 	if c.store == nil {
-		return c.safeWriteUnavailableError()
+		return mail.DeleteResult{}, c.safeWriteUnavailableError()
 	}
 	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
-		return err
+		return mail.DeleteResult{}, err
 	}
 
 	target, err := c.resolveImapTarget(ctx, request.Ref)
 	if err != nil {
-		return err
+		return mail.DeleteResult{}, err
 	}
 
 	imapOp := c.send.ImapClient()
 	if imapOp == nil {
-		return &transport.TransportError{
+		return mail.DeleteResult{}, &transport.TransportError{
 			Code:    transport.CodeIMAPMutationFailed,
 			Message: "IMAP operator is not configured",
 		}
 	}
 
-	_, err = imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid)
-	return err
+	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid)
+	if err != nil {
+		return mail.DeleteResult{}, err
+	}
+	return mail.DeleteResult{
+		MessageRef: request.Ref, Deleted: true,
+		ServerTruth: &mail.ServerMutationEvidence{
+			Command: ev.Command, ServerResponse: ev.ServerResponse,
+			Mailbox: ev.Mailbox, TargetMailbox: ev.TargetMailbox, UID: ev.UID,
+		},
+	}, nil
 }
 
 // hydrateMessage resolves the IMAP target and fetches the complete raw RFC

@@ -119,12 +119,12 @@ func (s *fallbackSpy) TransferMessage(
 	}
 	return mail.MessageSummary{}, nil
 }
-func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessageRequest) error {
+func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessageRequest) (mail.DeleteResult, error) {
 	s.deleteRef = request.Ref
 	if s.deleteHook != nil {
 		s.deleteHook()
 	}
-	return nil
+	return mail.DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
 }
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
@@ -902,10 +902,15 @@ func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 			Credentials: stubCredentials{"identity@gmail.com": "secret"},
 		},
 	}
-	if err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+	result, err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
 		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("DeleteMessage() error = %v", err)
+	}
+	if result.ServerTruth == nil || result.ServerTruth.Command != "DELETE" ||
+		result.ServerTruth.TargetMailbox != "Trash" || result.ServerTruth.UID == 0 {
+		t.Fatalf("delete server truth = %+v", result.ServerTruth)
 	}
 	if fakeImap.lastCommand != "DELETE" {
 		t.Fatalf("expected IMAP DELETE command, got %s", fakeImap.lastCommand)
@@ -920,7 +925,7 @@ func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 			Credentials: strictCredentials{"other@gmail.com": "secret"},
 		},
 	}
-	if err := strictClient.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+	if _, err := strictClient.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
 		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
 	}); err == nil {
 		t.Fatal("DeleteMessage() succeeded without a stored credential for the account identity")
@@ -975,7 +980,7 @@ func TestClientBlocksUnconfirmedDraftMutations(t *testing.T) {
 	_, moveErr := client.TransferMessage(context.Background(), mail.TransferMessageRequest{
 		Ref: ref, DestinationMailbox: inboxRef,
 	})
-	deleteErr := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{Ref: ref})
+	_, deleteErr := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{Ref: ref})
 	for name, mutationErr := range map[string]error{
 		"mark": markErr, "move": moveErr, "delete": deleteErr,
 	} {

@@ -363,6 +363,6 @@ type Gateway interface {
 	SaveDraft(ctx context.Context, draft Draft) (MessageSummary, error)
 	MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error)
 	TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error)
-	DeleteMessage(ctx context.Context, request DeleteMessageRequest) error
+	DeleteMessage(ctx context.Context, request DeleteMessageRequest) (DeleteResult, error)
 	Sync(ctx context.Context, accountRef string) error
 }

@@ -379,17 +379,19 @@ func (c *Client) TransferMessage(
 	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox}, nil
 }
 
-func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) error {
+func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) (mail.DeleteResult, error) {
 	ref, err := decodeMessageReference(request.Ref)
 	if err != nil {
-		return invalidReference("message ref", err)
+		return mail.DeleteResult{}, invalidReference("message ref", err)
 	}
-	_, err = c.invoke(ctx, bridgeRequest{
+	if _, err := c.invoke(ctx, bridgeRequest{
 		Operation: "messages.delete", AccountID: ref.AccountID,
 		MailboxPath: ref.MailboxPath, MessageID: ref.LibraryID,
 		ExpectedMessageID: ref.ExpectedMessageID, ExpectedSubject: ref.ExpectedSubject,
-	})
-	return err
+	}); err != nil {
+		return mail.DeleteResult{}, err
+	}
+	return mail.DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
 }
 
 func (c *Client) Sync(ctx context.Context, accountRef string) error {

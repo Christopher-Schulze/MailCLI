@@ -78,8 +78,8 @@ func (g *gatewayStub) TransferMessage(context.Context, TransferMessageRequest) (
 	return MessageSummary{}, nil
 }
 
-func (g *gatewayStub) DeleteMessage(context.Context, DeleteMessageRequest) error {
-	return nil
+func (g *gatewayStub) DeleteMessage(_ context.Context, request DeleteMessageRequest) (DeleteResult, error) {
+	return DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
 }
 
 func (g *gatewayStub) Sync(context.Context, string) error {

@@ -130,15 +130,18 @@ func (testGateway) SaveDraft(context.Context, mail.Draft) (mail.MessageSummary, 
 }
 
 func (testGateway) MarkMessage(_ context.Context, request mail.MarkMessageRequest) (mail.MessageSummary, error) {
-	return mail.MessageSummary{Ref: request.Ref, Read: request.Read != nil && *request.Read}, nil
+	return mail.MessageSummary{Ref: request.Ref, Read: request.Read != nil && *request.Read,
+		ServerTruth: &mail.ServerMutationEvidence{Command: "STORE", ServerResponse: "OK STORE completed", UID: 1}}, nil
 }
 
 func (testGateway) TransferMessage(_ context.Context, request mail.TransferMessageRequest) (mail.MessageSummary, error) {
-	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox}, nil
+	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox,
+		ServerTruth: &mail.ServerMutationEvidence{Command: "MOVE", ServerResponse: "OK MOVE completed", UID: 1}}, nil
 }
 
-func (testGateway) DeleteMessage(context.Context, mail.DeleteMessageRequest) error {
-	return nil
+func (testGateway) DeleteMessage(context.Context, mail.DeleteMessageRequest) (mail.DeleteResult, error) {
+	return mail.DeleteResult{Deleted: true,
+		ServerTruth: &mail.ServerMutationEvidence{Command: "DELETE", ServerResponse: "OK DELETE completed", UID: 1}}, nil
 }
 
 func (testGateway) Sync(context.Context, string) error {

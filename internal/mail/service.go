@@ -190,10 +190,8 @@ func (s *Service) DeleteMessage(ctx context.Context, request DeleteMessageReques
 	if request.Ref == "" {
 		return DeleteResult{}, validationError("message ref is required")
 	}
-	if err := s.gateway.DeleteMessage(ctx, request); err != nil {
-		return DeleteResult{}, err
-	}
-	return DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
+	result, err := s.gateway.DeleteMessage(ctx, request)
+	return result, err
 }
 
 func (s *Service) Sync(ctx context.Context, accountRef string) (SyncResult, error) {
