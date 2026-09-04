@@ -375,10 +375,10 @@ func (s *reconcileImapStub) ListMailboxes(context.Context, transport.ImapConfig)
 
 func (s *reconcileImapStub) SearchUID(
 	_ context.Context, _ transport.ImapConfig, mailbox string, messageID string,
-) (uint32, uint32, error) {
+) (uint32, uint32, int, error) {
 	s.searchCalls++
 	s.searchBox, s.searchID = mailbox, messageID
-	return s.uid, 77, s.searchErr
+	return s.uid, 77, 1, s.searchErr
 }
 
 func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) {

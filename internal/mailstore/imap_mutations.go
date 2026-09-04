@@ -15,14 +15,15 @@ import (
 const stalenessExplanation = "changes applied to IMAP server; local read store updates on next Mail.app sync"
 
 type imapTarget struct {
-	cfg          transport.ImapConfig
-	imapMailbox  string
-	trashMailbox string
-	uid          uint32
-	uidvalidity  uint32
-	messageID    string
-	accountID    string
-	summary      mail.MessageSummary
+	cfg              transport.ImapConfig
+	imapMailbox      string
+	trashMailbox     string
+	uid              uint32
+	uidvalidity      uint32
+	duplicateMatches int
+	messageID        string
+	accountID        string
+	summary          mail.MessageSummary
 }
 
 var (
@@ -140,12 +141,13 @@ func (c *Client) resolveImapTargetWithOptions(
 	}
 
 	if target.messageID != "" {
-		uid, uidval, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
+		uid, uidval, matchCount, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
 		if err != nil {
 			return target, err
 		}
 		target.uid = uid
 		target.uidvalidity = uidval
+		target.duplicateMatches = matchCount
 	}
 
 	// Build base summary
@@ -334,10 +336,12 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 			return mail.MessageSummary{}, retryErr
 		}
 		ev, err = imapOp.SetFlags(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, addFlags, removeFlags)
+		target.duplicateMatches = retried.duplicateMatches
 	}
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
+	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 
 	summary := target.summary
 	if request.Read != nil {
@@ -356,6 +360,7 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 		UID:                 ev.UID,
 		ExpectedUIDValidity: ev.ExpectedUIDValidity,
 		UIDValidity:         ev.UIDValidity,
+		DuplicateMatches:    ev.DuplicateMatches,
 	}
 	summary.StalenessNote = stalenessExplanation
 	return summary, nil
@@ -418,10 +423,12 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		} else {
 			ev, err = imapOp.MoveMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
 		}
+		target.duplicateMatches = retried.duplicateMatches
 	}
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
+	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 
 	summary := target.summary
 	if !request.Copy {
@@ -435,11 +442,19 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		UID:                 ev.UID,
 		ExpectedUIDValidity: ev.ExpectedUIDValidity,
 		UIDValidity:         ev.UIDValidity,
+		DuplicateMatches:    ev.DuplicateMatches,
 		ExpungeBranch:       ev.ExpungeBranch,
 		ForeignDeletedCount: ev.ForeignDeletedCount,
 	}
 	summary.StalenessNote = stalenessExplanation
 	return summary, nil
+}
+
+func duplicateMatchEvidence(matchCount int) int {
+	if matchCount <= 1 {
+		return 0
+	}
+	return matchCount
 }
 
 func rejectAlreadyTrashed(target imapTarget) error {
@@ -484,17 +499,20 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 			return mail.DeleteResult{}, retryErr
 		}
 		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity)
+		target.duplicateMatches = retried.duplicateMatches
 	}
 	if err != nil {
 		return mail.DeleteResult{}, err
 	}
+	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 	return mail.DeleteResult{
 		MessageRef: request.Ref, Deleted: true,
 		ServerTruth: &mail.ServerMutationEvidence{
 			Command: ev.Command, ServerResponse: ev.ServerResponse,
 			Mailbox: ev.Mailbox, TargetMailbox: ev.TargetMailbox, UID: ev.UID,
 			ExpectedUIDValidity: ev.ExpectedUIDValidity, UIDValidity: ev.UIDValidity,
-			ExpungeBranch: ev.ExpungeBranch, ForeignDeletedCount: ev.ForeignDeletedCount,
+			DuplicateMatches: ev.DuplicateMatches,
+			ExpungeBranch:    ev.ExpungeBranch, ForeignDeletedCount: ev.ForeignDeletedCount,
 		},
 	}, nil
 }

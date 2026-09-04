@@ -28,6 +28,7 @@ type fakeServerConfig struct {
 	listResponse        []byte
 	searchMatchID       string
 	searchUID           uint32
+	searchUIDs          []uint32
 	appendOK            bool
 	searchDelay         time.Duration
 	moveSupported       bool
@@ -332,11 +333,19 @@ func (s *fakeServer) handle(conn net.Conn) {
 					}
 				}
 				if match {
-					uid := s.config.searchUID
-					if uid == 0 {
-						uid = 42
+					uids := append([]uint32(nil), s.config.searchUIDs...)
+					if len(uids) == 0 {
+						uid := s.config.searchUID
+						if uid == 0 {
+							uid = 42
+						}
+						uids = []uint32{uid}
 					}
-					s.writeLine(bw, fmt.Sprintf("* SEARCH %d", uid))
+					values := make([]string, len(uids))
+					for index, uid := range uids {
+						values[index] = strconv.FormatUint(uint64(uid), 10)
+					}
+					s.writeLine(bw, "* SEARCH "+strings.Join(values, " "))
 				} else {
 					s.writeLine(bw, "* SEARCH")
 				}

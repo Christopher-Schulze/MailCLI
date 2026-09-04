@@ -36,7 +36,7 @@ func TestSessionReuseSingleConnection(t *testing.T) {
 	if _, err := client.ListMailboxes(ctx, cfg); err != nil {
 		t.Fatalf("ListMailboxes: %v", err)
 	}
-	if _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
+	if _, _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
 	if _, err := client.SetFlags(ctx, cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil); err != nil {
@@ -206,10 +206,10 @@ func TestEnsureSelectedSkipsSelect(t *testing.T) {
 	client := Client{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
 	ctx := context.Background()
 
-	if _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
+	if _, _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
-	if _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
+	if _, _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
 		t.Fatalf("SearchUID second call: %v", err)
 	}
 	_ = client.Close()

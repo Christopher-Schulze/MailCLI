@@ -504,7 +504,7 @@ func TestSearchUID(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	uid, uidval, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
+	uid, uidval, matchCount, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
 	if err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
@@ -514,13 +514,34 @@ func TestSearchUID(t *testing.T) {
 	if uidval != 12345 {
 		t.Fatalf("expected UIDVALIDITY 12345, got %d", uidval)
 	}
+	if matchCount != 1 {
+		t.Fatalf("expected one Message-ID match, got %d", matchCount)
+	}
 
-	_, _, err = client.SearchUID(context.Background(), cfg, "INBOX", "<absent@example.com>")
+	_, _, _, err = client.SearchUID(context.Background(), cfg, "INBOX", "<absent@example.com>")
 	if err == nil {
 		t.Fatalf("expected error for absent message")
 	}
 	if code := transport.ErrorCode(err); code != transport.CodeIMAPMessageNotFound {
 		t.Fatalf("expected code %s, got %s", transport.CodeIMAPMessageNotFound, code)
+	}
+}
+
+func TestSearchUIDReportsDuplicateMatches(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"},
+		searchMatchID: "<duplicate@example.com>", searchUIDs: []uint32{41, 77},
+	})
+	client, cfg := newFakeClient(t, srv)
+
+	uid, uidvalidity, matchCount, err := client.SearchUID(
+		context.Background(), cfg, "INBOX", "<duplicate@example.com>",
+	)
+	if err != nil {
+		t.Fatalf("SearchUID: %v", err)
+	}
+	if uid != 77 || uidvalidity != 12345 || matchCount != 2 {
+		t.Fatalf("SearchUID() = uid:%d uidvalidity:%d matches:%d, want 77/12345/2", uid, uidvalidity, matchCount)
 	}
 }
 
@@ -805,7 +826,7 @@ func TestMutationFailsClosedOnUIDValidityChange(t *testing.T) {
 	// fresh connection (session re-establishment mid-command, the
 	// defense-in-depth case from the 048 notes), observes 99999 on its own
 	// SELECT, and must fail BEFORE any STORE runs.
-	_, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
+	_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
 	if err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
@@ -868,7 +889,7 @@ func TestMutationReusesSelectedSessionWithoutExtraSelect(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	uid, validity, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
+	uid, validity, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
 	if err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}

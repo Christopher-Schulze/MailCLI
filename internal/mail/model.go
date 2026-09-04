@@ -285,6 +285,7 @@ type ServerMutationEvidence struct {
 	// with UIDValidity it forms the compared pair (048: fail closed on rebuild).
 	ExpectedUIDValidity uint32 `json:"expected_uidvalidity,omitempty"`
 	UIDValidity         uint32 `json:"uidvalidity,omitempty"`
+	DuplicateMatches    int    `json:"duplicate_matches,omitempty"`
 	ExpungeBranch       string `json:"expunge_branch,omitempty"`
 	ForeignDeletedCount int    `json:"foreign_deleted_count,omitempty"`
 }

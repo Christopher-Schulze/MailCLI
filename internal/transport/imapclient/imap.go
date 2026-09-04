@@ -947,31 +947,32 @@ func (c *Client) listMailboxes(ctx context.Context, ps *pooledSession) ([]transp
 	return infos, nil
 }
 
-// SearchUID resolves a Message-ID to its IMAP UID in the specified mailbox.
-func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, error) {
+// SearchUID resolves a Message-ID to its last IMAP UID in the specified
+// mailbox and returns the total number of matching UIDs.
+func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer release()
 
 	info, err := c.ensureSelected(ctx, ps, mailbox)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	uids, err := c.doUIDSearch(ctx, ps.sess, ps.sess.nextTag(), messageID)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	if len(uids) == 0 {
-		return 0, info.uidvalidity, &transport.TransportError{
+		return 0, info.uidvalidity, 0, &transport.TransportError{
 			Code:    transport.CodeIMAPMessageNotFound,
 			Message: fmt.Sprintf("message %s not found in mailbox %s", messageID, mailbox),
 		}
 	}
-	return uids[len(uids)-1], info.uidvalidity, nil
+	return uids[len(uids)-1], info.uidvalidity, len(uids), nil
 }
 
 // ensureSelected switches the pooled session to mailbox when needed and

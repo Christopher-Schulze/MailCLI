@@ -90,6 +90,9 @@ type MutationEvidence struct {
 	TargetMailbox  string // destination mailbox (for COPY, MOVE, DELETE)
 	UID            uint32 // affected message UID
 	UIDValidity    uint32 // SELECT-time UIDVALIDITY of the source mailbox
+	// DuplicateMatches counts all UIDs returned by the Message-ID search;
+	// zero means the search result was not available.
+	DuplicateMatches int
 	// ExpungeBranch identifies the MOVE fallback cleanup: uid_expunge,
 	// deferred, or plain_expunge. It is empty for native MOVE and other
 	// mutations.
@@ -115,7 +118,7 @@ type MailboxStatus struct {
 type ImapOperator interface {
 	SentMirror
 	ListMailboxes(ctx context.Context, cfg ImapConfig) ([]MailboxInfo, error)
-	SearchUID(ctx context.Context, cfg ImapConfig, mailbox string, messageID string) (uid uint32, uidvalidity uint32, err error)
+	SearchUID(ctx context.Context, cfg ImapConfig, mailbox string, messageID string) (uid uint32, uidvalidity uint32, matchCount int, err error)
 	SetFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (MutationEvidence, error)
 	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
 	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)

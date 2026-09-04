@@ -129,15 +129,16 @@ func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessag
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
 type stubImapOperator struct {
-	boxes        []transport.MailboxInfo
-	uid          uint32
-	uidvalidity  uint32
-	raw          []byte
-	lastCommand  string
-	lastUsername string
-	lastMailbox  string
-	status       transport.MailboxStatus
-	err          error
+	boxes         []transport.MailboxInfo
+	uid           uint32
+	uidvalidity   uint32
+	searchMatches int
+	raw           []byte
+	lastCommand   string
+	lastUsername  string
+	lastMailbox   string
+	status        transport.MailboxStatus
+	err           error
 	// mutationErrs scripts per-call mutation results: each mutation op
 	// consumes the head (nil head = success). mutationCalls counts every
 	// mutation invocation, so retry tests can assert exactly-once retry.
@@ -190,9 +191,9 @@ func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.Imap
 	}, nil
 }
 
-func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, error) {
+func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
 	if s.err != nil {
-		return 0, 0, s.err
+		return 0, 0, 0, s.err
 	}
 	uid := s.uid
 	if uid == 0 {
@@ -202,7 +203,11 @@ func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConf
 	if val == 0 {
 		val = 12345
 	}
-	return uid, val, nil
+	matches := s.searchMatches
+	if matches == 0 {
+		matches = 1
+	}
+	return uid, val, matches, nil
 }
 
 func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
@@ -573,6 +578,9 @@ func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	if err != nil || !result.Read || result.ServerTruth == nil || result.ServerTruth.Command != "STORE" {
 		t.Fatalf("MarkMessage() = %+v, error = %v", result, err)
 	}
+	if result.ServerTruth.DuplicateMatches != 0 {
+		t.Fatalf("single-match server truth duplicate_matches = %d, want omitted", result.ServerTruth.DuplicateMatches)
+	}
 	if fakeImap.lastCommand != "STORE" {
 		t.Fatalf("expected IMAP STORE command, got %s", fakeImap.lastCommand)
 	}
@@ -588,6 +596,37 @@ func uidValidityChangedErrorForTest() error {
 	return &transport.TransportError{
 		Code:    "mailbox_uidvalidity_changed",
 		Message: "mailbox was rebuilt between resolution and mutation (UIDVALIDITY 12345 -> 99999); message moved or mailbox rebuilt; rerun the command",
+	}
+}
+
+func TestMarkMessageReportsDuplicateMessageIDMatches(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "duplicate@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}}, uid: 101, searchMatches: 2,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap: fakeImap, Credentials: strictCredentials{"duplicate@gmail.com": "secret"},
+		},
+	}
+	read := true
+	result, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
+	})
+	if err != nil {
+		t.Fatalf("MarkMessage() error = %v", err)
+	}
+	if result.ServerTruth == nil || result.ServerTruth.DuplicateMatches != 2 || result.ServerTruth.UID != 101 {
+		t.Fatalf("duplicate server truth = %+v, want matches 2 and UID 101", result.ServerTruth)
 	}
 }
 

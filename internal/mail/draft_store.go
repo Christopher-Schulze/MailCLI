@@ -562,7 +562,7 @@ func (s *Service) reconcileUnknownViaImap(
 	if sentBox == "" {
 		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
 	}
-	uid, _, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
+	uid, _, _, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
 	if err != nil {
 		var transportErr *transport.TransportError
 		if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
