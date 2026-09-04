@@ -37,6 +37,9 @@ type candidateScan struct {
 	partial      bool
 	missing      bool
 	contentWhole bool
+	// catalogProven marks an attachment-only match decided by the
+	// AttachmentCount catalog without opening the source.
+	catalogProven bool
 }
 
 type searchJob struct {
@@ -348,6 +351,10 @@ func (s *Store) scanSearchRecords(
 	total int,
 	limitedByCount bool,
 ) (mail.SearchPage, error) {
+	// dispatchSearchJobs pre-classifies attachment-only queries: candidates
+	// with a catalog count > 0 are decided without opening the source
+	// (count == 0 keeps the existing bounded scan because the catalog can
+	// lag behind a newly delivered attachment).
 	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
@@ -399,7 +406,7 @@ func (s *Store) scanSearchRecords(
 		results = results[:prepared.Query.Limit]
 		resultItems = resultItems[:prepared.Query.Limit]
 	}
-	if coverage.ScannedMessages < coverage.CandidateMessages {
+	if coverage.ScannedMessages+coverage.CatalogProvenMessages < coverage.CandidateMessages {
 		coverage.Complete = false
 	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
@@ -411,6 +418,15 @@ func (s *Store) scanSearchRecords(
 		return page, err
 	}
 	return page, nil
+}
+
+// attachmentOnly reports whether the query is an attachment filter with no
+// text terms: the only source-dependent condition is the attachment count.
+// A catalog count > 0 decides both filter directions without a scan; a
+// count of 0 stays undecidable (the catalog can lag behind a newly
+// delivered attachment) and keeps the full MIME scan path.
+func attachmentOnly(query mail.Query) bool {
+	return strings.TrimSpace(query.Text) == "" && query.HasAttachment != nil
 }
 
 func (s *Store) scanSearchBatch(
@@ -465,6 +481,26 @@ func (s *Store) dispatchSearchJobs(
 	jobs chan<- searchJob,
 ) (bool, error) {
 	for index, item := range items {
+		// Attachment-only queries decidable from the catalog skip the source
+		// entirely: count > 0 proves a match for --attachment true and
+		// disproves it for --attachment false (max(catalog, parts) is
+		// monotone in catalog). No open, no scan, no byte budget.
+		if len(terms) == 0 && hasAttachment != nil {
+			if *hasAttachment && item.AttachmentCount > 0 {
+				results[index] = candidateScan{
+					match: true, attachments: item.AttachmentCount,
+					contentWhole: true, catalogProven: true,
+				}
+				continue
+			}
+			if !*hasAttachment && item.AttachmentCount > 0 {
+				results[index] = candidateScan{
+					match: false, attachments: item.AttachmentCount,
+					contentWhole: true, catalogProven: true,
+				}
+				continue
+			}
+		}
 		source, unavailable, err := s.openSearchCandidate(item)
 		if err != nil {
 			return false, err
@@ -565,6 +601,9 @@ func scanCandidate(
 func mergeSearchCoverage(coverage *mail.SearchCoverage, scan candidateScan) {
 	if scan.full || scan.partial || scan.missing {
 		coverage.ScannedMessages++
+	}
+	if scan.catalogProven {
+		coverage.CatalogProvenMessages++
 	}
 	coverage.ScannedBytes += scan.bytes
 	if scan.full {

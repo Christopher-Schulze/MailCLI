@@ -186,8 +186,110 @@ func TestAttachmentFilterUsesPositiveCatalogWhenSourceIsMissing(t *testing.T) {
 	if err != nil || len(page.Messages) != 1 ||
 		page.Messages[0].Summary.Subject != "Quarterly Report" ||
 		page.Messages[0].Summary.AttachmentCount != 1 ||
-		page.Coverage.MissingSources != 1 || page.Coverage.Complete {
+		page.Coverage.CatalogProvenMessages != 1 {
 		t.Fatalf("attachment=true missing-source page = %#v, error = %v", page, err)
+	}
+	// Only 101's source is gone; the two catalog-zero candidates (102/103)
+	// still scan normally: hybrid coverage, complete because every
+	// candidate was either catalog-proven or scanned.
+	if page.Coverage.ScannedMessages != 2 || page.Coverage.MissingSources != 0 {
+		t.Fatalf("coverage = %#v; the catalog-zero candidates must still be scanned", page.Coverage)
+	}
+	if !page.Coverage.Complete {
+		t.Fatalf("coverage = %#v; catalog-proven plus scanned is complete", page.Coverage)
+	}
+}
+
+// Catalog-proven candidates match attachment-only filters without opening
+// the source: positive catalog counts decide both directions, the scan
+// never runs, and no byte budget is consumed.
+func TestAttachmentOnlySearchSkipsCatalogProvenSources(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	// 101 keeps its catalog attachment row; its source stays on disk.
+	// Remove the other sources so a scan attempt would be visible via
+	// MissingSources.
+	for _, rowID := range []int64{102, 103} {
+		location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+		if err != nil {
+			t.Fatalf("parseMailboxURL() error = %v", err)
+		}
+		base, err := store.messageBasePath(location, rowID)
+		if err != nil {
+			t.Fatalf("messageBasePath() error = %v", err)
+		}
+		if err := os.Remove(base + ".emlx"); err != nil {
+			t.Fatalf("remove fixture source: %v", err)
+		}
+	}
+
+	hasAttachment := true
+	withQuery, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, HasAttachment: &hasAttachment, Limit: 10, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	withPage, err := store.SearchMessages(context.Background(), withQuery)
+	if err != nil || len(withPage.Messages) != 1 ||
+		withPage.Messages[0].Summary.AttachmentCount != 1 {
+		t.Fatalf("attachment=true page = %#v, error = %v", withPage, err)
+	}
+	if withPage.Coverage.CatalogProvenMessages != 1 {
+		t.Fatalf("catalog-proven = %d, want 1 (message 101 decided by catalog)", withPage.Coverage.CatalogProvenMessages)
+	}
+	// 102/103 have catalog zero, so the scan path still tries them; their
+	// sources are removed, making the attempt a missing scan and the
+	// coverage honestly incomplete - 101 itself was never opened.
+	if withPage.Coverage.MissingSources != 2 || withPage.Coverage.ScannedBytes != 0 {
+		t.Fatalf("coverage = %#v; the proven candidate must stay untouched, the zero-count candidates must be attempted",
+			withPage.Coverage)
+	}
+	if withPage.Coverage.Complete {
+		t.Fatalf("coverage = %#v; missing zero-count sources keep the search incomplete", withPage.Coverage)
+	}
+
+	hasAttachment = false
+	withoutQuery, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, HasAttachment: &hasAttachment, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(without attachment) error = %v", err)
+	}
+	withoutPage, err := store.SearchMessages(context.Background(), withoutQuery)
+	if err != nil {
+		t.Fatalf("attachment=false search error = %v", err)
+	}
+	for _, message := range withoutPage.Messages {
+		if message.Summary.AttachmentCount > 0 {
+			t.Fatalf("attachment=false matched a catalog-attachment message: %#v", message)
+		}
+	}
+	if withoutPage.Coverage.CatalogProvenMessages != 1 {
+		t.Fatalf("catalog-proven = %d, want 1 (negative direction decided by catalog too)", withoutPage.Coverage.CatalogProvenMessages)
+	}
+}
+
+// Text terms keep the full scan path: a catalog attachment row never
+// satisfies a text query.
+func TestAttachmentFilterWithTextStillScans(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	hasAttachment := true
+	query, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", HasAttachment: &hasAttachment, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if page.Coverage.CatalogProvenMessages != 0 || page.Coverage.ScannedMessages == 0 {
+		t.Fatalf("coverage = %#v; text terms must keep the scan path", page.Coverage)
 	}
 }
 

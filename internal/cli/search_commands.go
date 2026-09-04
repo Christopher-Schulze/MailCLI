@@ -120,7 +120,7 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 
 func normalizeSearchCoverage(page *mail.SearchPage) {
 	if page.Coverage.Backend == "emlx_stream" &&
-		page.Coverage.ScannedMessages < page.Coverage.CandidateMessages {
+		page.Coverage.ScannedMessages+page.Coverage.CatalogProvenMessages < page.Coverage.CandidateMessages {
 		page.Coverage.Complete = false
 	}
 }
