@@ -57,9 +57,14 @@ func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imap
 		}
 	}
 
-	// Resolve email address for this AccountID
+	// Resolve email address for this AccountID without consulting the
+	// Apple Events gateway. Mutations are IMAP-only.
 	email, err := c.resolveAccountEmail(ctx, resolved.Reference.AccountID)
 	if err != nil {
+		var catalogErr *Error
+		if errors.As(err, &catalogErr) && catalogErr.Code == "account_catalog_incomplete" {
+			return target, err
+		}
 		return target, &transport.TransportError{
 			Code:    transport.CodeLocalOnlyMailbox,
 			Message: err.Error(),
@@ -135,18 +140,15 @@ func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imap
 }
 
 // resolveAccountEmail returns the stored-credential-backed sender address for
-// an IMAP account. Account identities come from the store's own account
-// catalog; the fallback gateway is only consulted when the store cannot prove
-// the account (it must still exist there as an active IMAP account).
+// an IMAP account. Mutation identity resolution is local-store-only and never
+// invokes the Apple Events gateway.
 func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (string, error) {
-	accounts, err := c.ListAccounts(ctx)
+	accounts, err := c.store.ListAccounts(ctx)
 	if err != nil {
-		accounts = nil
-		if c.fallback != nil {
-			if fallbackAccounts, ferr := c.fallback.ListAccounts(ctx); ferr == nil {
-				accounts = fallbackAccounts
-			}
-		}
+		return "", operationError(
+			"account_catalog_incomplete",
+			fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
+		)
 	}
 	if c.send.Credentials == nil {
 		return "", fmt.Errorf("no credential store configured; run 'mailcli send setup --from ADDRESS' first")

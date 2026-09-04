@@ -17,8 +17,11 @@ import (
 )
 
 type Client struct {
-	store             *Store
-	storeErr          error
+	store    *Store
+	storeErr error
+	// fallback serves explicitly documented Apple Events operations such as
+	// live diagnostics, draft workflows, sync, and store-unavailable listing.
+	// IMAP mutation target resolution must never consult it.
 	fallback          mail.Gateway
 	send              mail.SendTransport
 	storeOpenDuration time.Duration

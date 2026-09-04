@@ -385,6 +385,53 @@ func TestClientListAccountsFallsBackOnlyWhenStoreUnavailable(t *testing.T) {
 	}
 }
 
+func TestMutationDoesNotUseFallbackWhenStoreCatalogFails(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	otherAccount, err := parseAccountRoot("imap://BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF/")
+	if err != nil {
+		t.Fatalf("parseAccountRoot() error = %v", err)
+	}
+	store.activeAccounts = append(store.activeAccounts, otherAccount)
+	accountRef, err := mailref.EncodeAccount(testAccountID)
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	fallback := &fallbackSpy{accounts: []mail.Account{{
+		Ref: accountRef, EmailAddresses: []string{"identity@gmail.com"},
+	}}}
+	fakeImap := &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}}, uid: 101}
+	client := &Client{
+		store: store, fallback: fallback,
+		send: mail.SendTransport{
+			Imap: fakeImap, Credentials: strictCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	read := true
+	_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
+	})
+	if errorCodeForTest(err) != "account_catalog_incomplete" {
+		t.Fatalf("MarkMessage() error = %v, want account_catalog_incomplete", err)
+	}
+	if !strings.Contains(err.Error(), "mailcli doctor") {
+		t.Fatalf("MarkMessage() error = %v, want doctor remediation", err)
+	}
+	if fallback.accountCalls != 0 {
+		t.Fatalf("fallback ListAccounts() calls = %d, want 0", fallback.accountCalls)
+	}
+	if fakeImap.mutationCalls != 0 {
+		t.Fatalf("IMAP mutation calls = %d, want 0", fakeImap.mutationCalls)
+	}
+}
+
 func TestClientNeverFallsBackToRecursiveMailboxScan(t *testing.T) {
 	spy := &fallbackSpy{}
 	client := &Client{storeErr: operationError("unsupported_mail_store_schema", "unsupported"), fallback: spy}
