@@ -351,10 +351,6 @@ func (s *Store) scanSearchRecords(
 	total int,
 	limitedByCount bool,
 ) (mail.SearchPage, error) {
-	// dispatchSearchJobs pre-classifies attachment-only queries: candidates
-	// with a catalog count > 0 are decided without opening the source
-	// (count == 0 keeps the existing bounded scan because the catalog can
-	// lag behind a newly delivered attachment).
 	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
