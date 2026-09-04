@@ -15,13 +15,14 @@ import (
 const stalenessExplanation = "changes applied to IMAP server; local read store updates on next Mail.app sync"
 
 type imapTarget struct {
-	cfg         transport.ImapConfig
-	imapMailbox string
-	uid         uint32
-	uidvalidity uint32
-	messageID   string
-	accountID   string
-	summary     mail.MessageSummary
+	cfg          transport.ImapConfig
+	imapMailbox  string
+	trashMailbox string
+	uid          uint32
+	uidvalidity  uint32
+	messageID    string
+	accountID    string
+	summary      mail.MessageSummary
 }
 
 var (
@@ -30,6 +31,18 @@ var (
 )
 
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false)
+}
+
+func (c *Client) resolveImapTargetForDelete(ctx context.Context, messageRef string) (imapTarget, error) {
+	return c.resolveImapTargetWithOptions(ctx, messageRef, true)
+}
+
+func (c *Client) resolveImapTargetWithOptions(
+	ctx context.Context,
+	messageRef string,
+	rejectTrash bool,
+) (imapTarget, error) {
 	var target imapTarget
 	if c.store == nil {
 		return target, c.safeWriteUnavailableError()
@@ -113,12 +126,18 @@ func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imap
 	if err != nil {
 		return target, err
 	}
+	target.trashMailbox = transport.PickTrashMailbox(boxes)
 
 	imapBox := mapPathToIMAP(boxes, resolved.Reference.MailboxPath)
 	if imapBox == "" {
 		imapBox = strings.Join(resolved.Reference.MailboxPath, "/")
 	}
 	target.imapMailbox = imapBox
+	if rejectTrash {
+		if err := rejectAlreadyTrashed(target); err != nil {
+			return target, err
+		}
+	}
 
 	if target.messageID != "" {
 		uid, uidval, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
@@ -423,6 +442,16 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	return summary, nil
 }
 
+func rejectAlreadyTrashed(target imapTarget) error {
+	if target.trashMailbox == "" || !strings.EqualFold(target.imapMailbox, target.trashMailbox) {
+		return nil
+	}
+	return &transport.TransportError{
+		Code:    transport.CodeMessageAlreadyTrashed,
+		Message: "message is already in trash; restore it in Mail or use Mail.app to empty the trash",
+	}
+}
+
 // DeleteMessage deletes a message over IMAP by moving it to the Trash mailbox.
 func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) (mail.DeleteResult, error) {
 	if c.store == nil {
@@ -432,7 +461,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		return mail.DeleteResult{}, err
 	}
 
-	target, err := c.resolveImapTarget(ctx, request.Ref)
+	target, err := c.resolveImapTargetForDelete(ctx, request.Ref)
 	if err != nil {
 		return mail.DeleteResult{}, err
 	}
@@ -447,8 +476,11 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 
 	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity)
 	if isUIDValidityChangedError(err) {
-		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		retried, retryErr := c.resolveImapTargetForDelete(ctx, request.Ref)
 		if retryErr != nil {
+			return mail.DeleteResult{}, retryErr
+		}
+		if retryErr := rejectAlreadyTrashed(retried); retryErr != nil {
 			return mail.DeleteResult{}, retryErr
 		}
 		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity)

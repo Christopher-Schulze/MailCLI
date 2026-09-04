@@ -12,19 +12,19 @@ import (
 func TestPickTrash(t *testing.T) {
 	t.Parallel()
 
-	if got := pickTrash([]transport.MailboxInfo{
+	if got := transport.PickTrashMailbox([]transport.MailboxInfo{
 		{Name: "INBOX"},
 		{Name: "Bin", Flags: []string{"\\Trash"}},
 	}); got != "Bin" {
 		t.Fatalf("flagged trash = %q, want Bin", got)
 	}
-	if got := pickTrash([]transport.MailboxInfo{
+	if got := transport.PickTrashMailbox([]transport.MailboxInfo{
 		{Name: "INBOX"},
 		{Name: "[Gmail]/Trash"},
 	}); got != "[Gmail]/Trash" {
 		t.Fatalf("named trash = %q", got)
 	}
-	if got := pickTrash([]transport.MailboxInfo{{Name: "INBOX"}}); got != "" {
+	if got := transport.PickTrashMailbox([]transport.MailboxInfo{{Name: "INBOX"}}); got != "" {
 		t.Fatalf("missing trash = %q", got)
 	}
 }

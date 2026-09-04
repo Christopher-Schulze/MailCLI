@@ -1669,6 +1669,74 @@ func TestCopyObservationRejectsPreexistingDestinationMembership(t *testing.T) {
 	}
 }
 
+func installTrashMessageFixture(t *testing.T, store *Store) string {
+	t.Helper()
+	updateFixtureMessage(t, store, `INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (5,'imap://`+testAccountID+`/Trash',1,0,0,1)`)
+	updateFixtureMessage(t, store, `UPDATE messages SET mailbox = 5 WHERE ROWID = 102`)
+	ref, err := mailref.EncodeMailbox(testAccountID, []string{"Trash"})
+	if err != nil {
+		t.Fatalf("EncodeMailbox() error = %v", err)
+	}
+	return ref
+}
+
+func TestDeleteMessageRejectsTrashTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity string
+		boxes    []transport.MailboxInfo
+	}{
+		{
+			name:     "special use",
+			identity: "trash-special@gmail.com",
+			boxes: []transport.MailboxInfo{
+				{Name: "INBOX"}, {Name: "Bin", Flags: []string{"\\Trash"}},
+			},
+		},
+		{
+			name:     "name match",
+			identity: "trash-name@gmail.com",
+			boxes: []transport.MailboxInfo{
+				{Name: "INBOX"}, {Name: "Trash"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, _ := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			installImapIdentityFixture(t, store, tt.identity)
+			trashRef := installTrashMessageFixture(t, store)
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+				MailboxRef: trashRef, Limit: 1,
+			})
+			if err != nil || len(page.Messages) != 1 {
+				t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+			}
+			fakeImap := &stubImapOperator{boxes: tt.boxes, uid: 102}
+			client := &Client{
+				store: store,
+				send: mail.SendTransport{
+					Imap: fakeImap, Credentials: strictCredentials{tt.identity: "secret"},
+				},
+			}
+			_, err = client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+				Ref: page.Messages[0].Ref, AllowDraftMutation: true,
+			})
+			if transport.ErrorCode(err) != transport.CodeMessageAlreadyTrashed {
+				t.Fatalf("DeleteMessage() error = %v, want %s", err, transport.CodeMessageAlreadyTrashed)
+			}
+			if !strings.Contains(err.Error(), "restore it in Mail") ||
+				!strings.Contains(err.Error(), "empty the trash") {
+				t.Fatalf("DeleteMessage() error = %v, want remediation", err)
+			}
+			if fakeImap.mutationCalls != 0 {
+				t.Fatalf("IMAP mutation calls = %d, want 0", fakeImap.mutationCalls)
+			}
+		})
+	}
+}
+
 func TestClientObservesDeletionFromLogicalLabelMailbox(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")

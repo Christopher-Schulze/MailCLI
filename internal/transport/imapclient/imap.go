@@ -1298,7 +1298,7 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 		return transport.MutationEvidence{}, err
 	}
 
-	trashBox := pickTrash(mboxes)
+	trashBox := transport.PickTrashMailbox(mboxes)
 	if trashBox == "" {
 		return transport.MutationEvidence{}, &transport.TransportError{
 			Code:    transport.CodeIMAPMailboxNotFound,
@@ -1312,32 +1312,6 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 	}
 	ev.Command = "DELETE"
 	return ev, nil
-}
-
-func pickTrash(mboxes []transport.MailboxInfo) string {
-	for _, m := range mboxes {
-		for _, f := range m.Flags {
-			if strings.EqualFold(f, "\\Trash") {
-				return m.Name
-			}
-		}
-	}
-	candidates := []string{
-		"Trash",
-		"Deleted Messages",
-		"[Gmail]/Trash",
-		"[Gmail]/Papierkorb",
-		"Papierkorb",
-		"INBOX.Trash",
-	}
-	for _, cand := range candidates {
-		for _, m := range mboxes {
-			if strings.EqualFold(m.Name, cand) {
-				return m.Name
-			}
-		}
-	}
-	return ""
 }
 
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].

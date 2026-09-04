@@ -59,6 +59,29 @@ func PickSentMailbox(mailboxes []MailboxInfo) string {
 	return ""
 }
 
+// PickTrashMailbox returns the IMAP mailbox used for deletion: the first
+// mailbox flagged \\Trash, else a well-known fallback name. Empty when none.
+func PickTrashMailbox(mailboxes []MailboxInfo) string {
+	for _, mailbox := range mailboxes {
+		for _, flag := range mailbox.Flags {
+			if strings.EqualFold(flag, "\\Trash") {
+				return mailbox.Name
+			}
+		}
+	}
+	for _, want := range []string{
+		"Trash", "Deleted Messages", "[Gmail]/Trash", "[Gmail]/Papierkorb",
+		"Papierkorb", "INBOX.Trash",
+	} {
+		for _, mailbox := range mailboxes {
+			if strings.EqualFold(mailbox.Name, want) {
+				return mailbox.Name
+			}
+		}
+	}
+	return ""
+}
+
 // MutationEvidence records server proof for an IMAP message mutation.
 type MutationEvidence struct {
 	Command        string // STORE, COPY, MOVE, or DELETE
