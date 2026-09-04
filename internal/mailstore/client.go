@@ -177,9 +177,9 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		}
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
+		rawBytes, summary, rawErr := c.hydrateMessage(ctx, ref)
 		if rawErr == nil && len(rawBytes) > 0 {
-			return messageFromRawFallback(local, string(rawBytes))
+			return messageFromRawFallback(local, summary, string(rawBytes))
 		}
 		// IMAP fallback failed. If we also have a local error, join both
 		// so the caller sees the full picture.
@@ -197,7 +197,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 	return mail.Message{}, c.readUnavailableError()
 }
 
-func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error) {
+func messageFromRawFallback(base mail.Message, summary mail.MessageSummary, raw string) (mail.Message, error) {
 	document, err := parseMIMEDocument(strings.NewReader(raw), false, false, false)
 	if err != nil {
 		return mail.Message{}, err
@@ -224,6 +224,7 @@ func messageFromRawFallback(base mail.Message, raw string) (mail.Message, error)
 		}
 		attachments = append(attachments, attachment)
 	}
+	base.Summary = summary
 	base.ReplyTo = document.ReplyTo
 	base.Summary.MessageID = document.MessageID
 	base.Summary.AttachmentCount = len(attachments)

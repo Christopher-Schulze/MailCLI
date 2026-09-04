@@ -387,6 +387,10 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 		!message.Attachments[0].SizeKnown {
 		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
 	}
+	if message.Summary.Ref == "" || message.Summary.Subject == "" ||
+		message.Summary.Sender == "" || message.Summary.DateReceived == "" {
+		t.Fatalf("hydrated message lost record summary: %+v", message.Summary)
+	}
 	output := filepath.Join(t.TempDir(), "invoice.pdf")
 	if err := client.SaveAttachmentTo(context.Background(), messageRef, "2", output); err != nil {
 		t.Fatalf("SaveAttachmentTo() error = %v", err)
@@ -394,6 +398,57 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	bytes, err := os.ReadFile(output)
 	if err != nil || string(bytes) != "invoice-bytes" {
 		t.Fatalf("attachment bytes = %q, error = %v", bytes, err)
+	}
+}
+
+// A missing local source hydrates over IMAP and the returned message keeps
+// the store record's summary (ref, subject, sender, dates) so follow-up
+// commands can still reference the message.
+func TestClientHydrationFallbackKeepsRecordSummary(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	// Remove the .emlx source that newSearchFixture created so GetMessage
+	// fails locally with message_source_missing and falls back to IMAP.
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove .emlx source: %v", err)
+	}
+	raw := "From: Alice <alice@example.com>\r\nSubject: Quarterly Report\r\n\r\nFull body\r\n"
+	fakeImap := &stubImapOperator{
+		raw:   []byte(raw),
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	message, err := client.GetMessage(context.Background(), messageRef)
+	if err != nil || message.ContentSource != "imap_raw" || message.Content != "Full body" {
+		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
+	}
+	if message.Summary.Ref == "" || message.Summary.Subject != "Quarterly Report" ||
+		message.Summary.Sender == "" || message.Summary.DateReceived == "" ||
+		message.Summary.MailboxRef == "" {
+		t.Fatalf("hydration fallback lost the record summary: %+v", message.Summary)
 	}
 }
 

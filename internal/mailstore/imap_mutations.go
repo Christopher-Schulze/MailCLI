@@ -416,22 +416,32 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 	return err
 }
 
-// HydrateMessageBytes fetches the complete raw RFC 5322 source of a message over IMAP.
-func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string) ([]byte, error) {
+// hydrateMessage resolves the IMAP target and fetches the complete raw RFC
+// 5322 source. It also returns the summary derived from the local store
+// record, so the hydration fallback can fill metadata the raw message alone
+// cannot provide (ref, subject, sender, dates, flags, mailbox).
+func (c *Client) hydrateMessage(ctx context.Context, messageRef string) ([]byte, mail.MessageSummary, error) {
 	target, err := c.resolveImapTarget(ctx, messageRef)
 	if err != nil {
-		return nil, err
+		return nil, mail.MessageSummary{}, err
 	}
 
 	imapOp := c.send.ImapClient()
 	if imapOp == nil {
-		return nil, &transport.TransportError{
+		return nil, mail.MessageSummary{}, &transport.TransportError{
 			Code:    transport.CodeIMAPFetchFailed,
 			Message: "IMAP operator is not configured",
 		}
 	}
 
-	return imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid)
+	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid)
+	return raw, target.summary, err
+}
+
+// HydrateMessageBytes fetches the complete raw RFC 5322 source of a message over IMAP.
+func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string) ([]byte, error) {
+	raw, _, err := c.hydrateMessage(ctx, messageRef)
+	return raw, err
 }
 
 // SyncCheck inspects server-vs-local message counts across mailboxes without launching Mail.app.
