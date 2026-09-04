@@ -38,14 +38,14 @@ func readMailboxCache(
 	defer joinCloseError(&resultErr, file, "mailbox cache")
 	opened, err := file.Stat()
 	if err != nil {
-		return mailboxCache{}, fmt.Errorf("inspect opened mailbox cache: %w", err)
+		return mailboxCache{}, operationError("invalid_mailbox_cache", fmt.Sprintf("inspect opened mailbox cache: %v", err))
 	}
 	if !os.SameFile(expected, opened) || expected.Size() != opened.Size() {
-		return mailboxCache{}, fmt.Errorf("mailbox cache changed while opening")
+		return mailboxCache{}, operationError("invalid_mailbox_cache", "mailbox cache changed while opening")
 	}
 	cache, err := parseMailboxCacheXML(io.LimitReader(file, maximumMailboxCacheBytes+1))
 	if err != nil {
-		return mailboxCache{}, err
+		return mailboxCache{}, operationError("invalid_mailbox_cache", err.Error())
 	}
 	if err := ctx.Err(); err != nil {
 		return mailboxCache{}, err

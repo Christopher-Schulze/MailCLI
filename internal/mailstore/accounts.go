@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	stdmail "net/mail"
 	"sort"
@@ -30,6 +31,8 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 	}
 	accounts := make([]mail.Account, 0, len(s.activeAccounts))
 	for _, location := range s.activeAccounts {
+		// Degraded accounts stay listed (state+reason on the Account); only
+		// hard SQL failures abort discovery for everyone.
 		account, err := s.loadAccount(ctx, location, recordsByPath)
 		if err != nil {
 			return nil, err
@@ -44,32 +47,45 @@ func (s *Store) loadAccount(
 	location mailboxLocation,
 	records map[string]mailboxRecord,
 ) (mail.Account, error) {
+	ref, err := mailref.EncodeAccount(location.AccountID)
+	if err != nil {
+		return mail.Account{}, err
+	}
+	degraded := func(reason string) (mail.Account, error) {
+		return mail.Account{
+			Ref: ref, Name: "On My Mac", EmailAddresses: []string{},
+			State: "degraded", DegradedReason: reason,
+		}, nil
+	}
+
+	// Unreadable mailbox cache: listed degraded, other accounts unaffected.
 	cached, err := s.loadMailboxCache(ctx, location.AccountID)
 	if err != nil {
-		return mail.Account{}, accountCatalogError(location.AccountID, err)
+		if isHardCatalogError(err) {
+			return mail.Account{}, accountCatalogError(location.AccountID, err)
+		}
+		return degraded("mailbox_cache_unreadable")
 	}
 	sentMailboxIDs, foundSent, err := strictSpecialMailboxIDs(
 		cached.Mailboxes, location, mailboxAttributeSent, records,
 	)
 	if err != nil {
-		return mail.Account{}, accountCatalogError(location.AccountID, err)
+		if isHardCatalogError(err) {
+			return mail.Account{}, accountCatalogError(location.AccountID, err)
+		}
+		return degraded("special_use_mailbox_unresolved")
 	}
 	identities := []senderIdentity(nil)
 	if foundSent {
 		identities, err = s.loadSenderIdentities(ctx, sentMailboxIDs)
 		if err != nil {
+			// SQL identity failures stay hard: identity correctness feeds
+			// mutation credential resolution.
 			return mail.Account{}, accountCatalogError(location.AccountID, err)
 		}
 	}
 	if location.Scheme == "imap" && (!foundSent || len(identities) == 0) {
-		return mail.Account{}, accountCatalogError(
-			location.AccountID,
-			fmt.Errorf("active IMAP account has no locally provable Sent sender identity"),
-		)
-	}
-	ref, err := mailref.EncodeAccount(location.AccountID)
-	if err != nil {
-		return mail.Account{}, err
+		return degraded("no_provably_sent_identity")
 	}
 	name := "On My Mac"
 	addresses := make([]string, len(identities))
@@ -82,7 +98,25 @@ func (s *Store) loadAccount(
 			name = identities[0].Address
 		}
 	}
-	return mail.Account{Ref: ref, Name: name, EmailAddresses: addresses}, nil
+	return mail.Account{Ref: ref, Name: name, EmailAddresses: addresses, State: "ok"}, nil
+}
+
+// isHardCatalogError reports whether a catalog failure must abort the whole
+// listing (SQL/store failures) instead of degrading one account. Degraded
+// causes: unreadable/poisoned mailbox cache, unsafe cache path segments,
+// and Envelope-Index lookups that the cache cannot prove.
+func isHardCatalogError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var typed *Error
+	if errors.As(err, &typed) {
+		return typed.Code != "invalid_mailbox_cache"
+	}
+	if unsafePathSegmentError(err) {
+		return false
+	}
+	return !strings.Contains(err.Error(), "is missing from the Envelope Index")
 }
 
 func strictSpecialMailboxIDs(

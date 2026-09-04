@@ -161,6 +161,12 @@ func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (str
 				return address, nil
 			}
 		}
+		if acct.State == "degraded" {
+			return "", fmt.Errorf(
+				"account %s is degraded (%s): send setup or a prior successful send must exist before mutations can resolve an identity",
+				accountID, acct.DegradedReason,
+			)
+		}
 		return "", fmt.Errorf(
 			"account %s has no address with stored credentials; run 'mailcli send setup --from ADDRESS' for one of %v",
 			accountID, acct.EmailAddresses,
@@ -538,6 +544,14 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 
 	credStore := c.send.Credentials
 	for _, acct := range targetAccounts {
+		if acct.State == "degraded" {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: acct.Ref,
+				Code:    "account_degraded",
+				Message: "account is degraded: " + acct.DegradedReason,
+			})
+			continue
+		}
 		if len(acct.EmailAddresses) == 0 {
 			result.Failures = append(result.Failures, mail.SyncCheckFailure{
 				Account: acct.Ref,

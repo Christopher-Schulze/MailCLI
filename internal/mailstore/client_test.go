@@ -985,6 +985,108 @@ func TestGetMessageHydrationFetchUncapped(t *testing.T) {
 	}
 }
 
+// A sent-empty IMAP account is listed degraded instead of aborting the whole
+// catalog, and a healthy sibling account stays intact.
+func TestListAccountsDegradesSentEmptyAccount(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	// installSentMailboxFixture without identity messages: Sent exists but
+	// holds no senders, so the IMAP account has no provable identity.
+	installSentMailboxFixture(t, store)
+	accounts, err := store.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if len(accounts) == 0 {
+		t.Fatal("no accounts listed")
+	}
+	degraded := 0
+	for _, account := range accounts {
+		if account.State != "degraded" {
+			continue
+		}
+		degraded++
+		if account.DegradedReason != "no_provably_sent_identity" {
+			t.Fatalf("degraded reason = %q, want no_provably_sent_identity", account.DegradedReason)
+		}
+		if len(account.EmailAddresses) != 0 {
+			t.Fatalf("degraded account carries identities: %+v", account)
+		}
+	}
+	if degraded == 0 {
+		t.Fatalf("sent-empty IMAP account not degraded: %+v", accounts)
+	}
+}
+
+// A corrupted mailbox cache for one account degrades only that account.
+func TestListAccountsDegradesUnreadableCache(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	installImapIdentityFixture(t, store, "healthy@gmail.com")
+	accountRoot := filepath.Join(store.versionRoot, testAccountID)
+	if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), []byte("not a plist"), 0o600); err != nil {
+		t.Fatalf("corrupt cache: %v", err)
+	}
+	accounts, err := store.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v (one bad cache must not abort)", err)
+	}
+	if len(accounts) == 0 {
+		t.Fatal("no accounts listed")
+	}
+	found := false
+	for _, account := range accounts {
+		if account.State == "degraded" && account.DegradedReason == "mailbox_cache_unreadable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no mailbox_cache_unreadable entry: %+v", accounts)
+	}
+}
+
+// A cache-declared special-use mailbox missing from the Envelope Index
+// degrades the account instead of failing the catalog.
+func TestListAccountsDegradesUnresolvedSpecialMailbox(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	installSentMailboxFixture(t, store)
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	if _, err := writer.Exec(`DELETE FROM mailboxes WHERE ROWID = 4`); err != nil {
+		closeTestResourceNow(t, writer, "sent row writer")
+		t.Fatalf("delete Sent row: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	accounts, err := store.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	found := false
+	for _, account := range accounts {
+		if account.State == "degraded" && account.DegradedReason == "special_use_mailbox_unresolved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no special_use_mailbox_unresolved entry: %+v", accounts)
+	}
+}
+
+// A healthy account reports state ok with no reason.
+func TestListAccountsHealthyStateOk(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	installImapIdentityFixture(t, store, "healthy@gmail.com")
+	accounts, err := store.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].State != "ok" || accounts[0].DegradedReason != "" {
+		t.Fatalf("accounts = %+v, want one ok account without reason", accounts)
+	}
+	if len(accounts[0].EmailAddresses) == 0 {
+		t.Fatalf("healthy account lost identities: %+v", accounts[0])
+	}
+}
+
 func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")

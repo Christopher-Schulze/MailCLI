@@ -45,13 +45,26 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 	}
 	rows := make([][]string, 0, len(accounts))
 	for _, account := range accounts {
-		rows = append(rows, []string{account.Ref, account.Name, strings.Join(account.EmailAddresses, ",")})
+		emailList := strings.Join(account.EmailAddresses, ",")
+		if account.State == "degraded" {
+			emailList = "degraded: " + account.DegradedReason
+		}
+		rows = append(rows, []string{account.Ref, account.Name, emailList})
 	}
 	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES"}, rows) {
+		for _, account := range accounts {
+			if account.State == "degraded" {
+				writeFormat(stdout, "warning: account %s is degraded: %s\n", account.Ref, account.DegradedReason)
+			}
+		}
 		return 0
 	}
 	for _, account := range accounts {
-		writeFormat(stdout, "%s\t%s\t%s\n", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
+		line := fmt.Sprintf("%s\t%s\t%s", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
+		if account.State == "degraded" {
+			line += "\tdegraded: " + account.DegradedReason
+		}
+		writeFormat(stdout, "%s\n", line)
 	}
 	return 0
 }

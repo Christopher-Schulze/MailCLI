@@ -96,6 +96,12 @@ func validatePathSegment(value string) error {
 	return nil
 }
 
+// unsafePathSegmentError marks a cache path component that escapes its
+// directory. Degrade the account instead of failing the whole listing.
+func unsafePathSegmentError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unsafe path segment")
+}
+
 func containsASCIIControl(value string) bool {
 	for index := 0; index < len(value); index++ {
 		if value[index] < 0x20 || value[index] == 0x7f {
