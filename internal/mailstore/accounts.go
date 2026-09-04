@@ -103,20 +103,22 @@ func (s *Store) loadAccount(
 
 // isHardCatalogError reports whether a catalog failure must abort the whole
 // listing (SQL/store failures) instead of degrading one account. Degraded
-// causes: unreadable/poisoned mailbox cache, unsafe cache path segments,
-// and Envelope-Index lookups that the cache cannot prove.
+// causes are typed codes: unreadable mailbox cache, unsafe cache path
+// segments, and cache-declared special-use mailboxes missing from the
+// Envelope Index.
 func isHardCatalogError(err error) bool {
 	if err == nil {
 		return false
 	}
 	var typed *Error
 	if errors.As(err, &typed) {
-		return typed.Code != "invalid_mailbox_cache"
+		switch typed.Code {
+		case "invalid_mailbox_cache", "invalid_path_segment", "special_use_mailbox_unresolved":
+			return false
+		}
+		return true
 	}
-	if unsafePathSegmentError(err) {
-		return false
-	}
-	return !strings.Contains(err.Error(), "is missing from the Envelope Index")
+	return true
 }
 
 func strictSpecialMailboxIDs(
@@ -152,9 +154,10 @@ func strictSpecialMailboxIDs(
 				}
 				record, found := records[mailboxPathKey(account.AccountID, visiblePath)]
 				if !found {
-					return fmt.Errorf(
-						"special-use mailbox %q is missing from the Envelope Index",
-						strings.Join(visiblePath, "/"),
+					return operationError(
+						"special_use_mailbox_unresolved",
+						fmt.Sprintf("special-use mailbox %q is missing from the Envelope Index",
+							strings.Join(visiblePath, "/")),
 					)
 				}
 				unique[record.RowID] = struct{}{}

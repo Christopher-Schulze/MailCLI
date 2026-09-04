@@ -86,20 +86,17 @@ func splitMailboxURL(value string) (mailboxLocation, string, error) {
 	return mailboxLocation{Scheme: scheme, AccountID: strings.ToUpper(authority)}, escapedPath, nil
 }
 
+// validatePathSegment rejects path segments that escape their directory.
+// The typed invalid_path_segment code doubles as the account-catalog
+// degrade cause for poisoned cache components.
 func validatePathSegment(value string) error {
 	if value == "" || value == "." || value == ".." {
-		return fmt.Errorf("mailbox URL contains an unsafe path segment")
+		return operationError("invalid_path_segment", "mailbox URL contains an unsafe path segment")
 	}
 	if strings.ContainsAny(value, "/\x00") || containsASCIIControl(value) {
-		return fmt.Errorf("mailbox URL segment escapes its directory")
+		return operationError("invalid_path_segment", "mailbox URL segment escapes its directory")
 	}
 	return nil
-}
-
-// unsafePathSegmentError marks a cache path component that escapes its
-// directory. Degrade the account instead of failing the whole listing.
-func unsafePathSegmentError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "unsafe path segment")
 }
 
 func containsASCIIControl(value string) bool {
