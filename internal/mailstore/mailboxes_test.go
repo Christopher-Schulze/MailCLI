@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,6 +117,84 @@ func TestParseMailboxCacheXML(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMailboxCacheDepthLimit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		depth int
+		want  string
+	}{
+		{name: "legitimate depth", depth: 10},
+		{name: "exceeds limit", depth: maxMailboxCacheDepth + 8, want: "mailbox_cache_malformed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cache, err := parseMailboxCacheXML(strings.NewReader(nestedMailboxCacheXML(test.depth)))
+			if test.want == "" {
+				if err != nil || len(cache.Mailboxes) != 1 {
+					t.Fatalf("parseMailboxCacheXML(depth=%d) = %+v, error = %v", test.depth, cache, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("parseMailboxCacheXML(depth=%d) = %+v, want typed error", test.depth, cache)
+			}
+			var typed *Error
+			if !errors.As(err, &typed) || typed.Code != test.want {
+				t.Fatalf("parseMailboxCacheXML(depth=%d) error = %v, want %s", test.depth, err, test.want)
+			}
+		})
+	}
+}
+
+func TestCollectMailboxIDsDepthLimit(t *testing.T) {
+	t.Parallel()
+	records := make(map[string]mailboxRecord)
+	output := make(map[int64]struct{})
+	if err := collectMailboxIDs(
+		nestedMailboxCacheNodes(10), nil, testAccountID, "imap", mailboxAttributeSent,
+		records, output, 1,
+	); err != nil {
+		t.Fatalf("collectMailboxIDs(depth=10) error = %v", err)
+	}
+	if err := collectMailboxIDs(
+		nestedMailboxCacheNodes(maxMailboxCacheDepth+8), nil, testAccountID, "imap", mailboxAttributeSent,
+		records, output, 1,
+	); err == nil {
+		t.Fatal("collectMailboxIDs() error = nil, want typed depth error")
+	} else {
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Code != "mailbox_cache_malformed" {
+			t.Fatalf("collectMailboxIDs() error = %v, want mailbox_cache_malformed", err)
+		}
+	}
+}
+
+func nestedMailboxCacheXML(depth int) string {
+	var source strings.Builder
+	source.WriteString(`<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>`)
+	for range depth {
+		source.WriteString(`<key>node</key><dict><key>MailboxPathComponent</key><string>node</string><key>IMAPMailboxChildren</key><dict>`)
+	}
+	for range depth {
+		source.WriteString(`</dict></dict>`)
+	}
+	source.WriteString(`</dict></dict></plist>`)
+	return source.String()
+}
+
+func nestedMailboxCacheNodes(depth int) map[string]mailboxCacheNode {
+	root := make(map[string]mailboxCacheNode)
+	current := root
+	for range depth {
+		children := make(map[string]mailboxCacheNode)
+		current["node"] = mailboxCacheNode{PathComponent: "node", Children: children}
+		current = children
+	}
+	return root
 }
 
 func BenchmarkParseMailboxCacheXML(b *testing.B) {

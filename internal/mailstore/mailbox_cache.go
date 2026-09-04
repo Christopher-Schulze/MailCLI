@@ -11,7 +11,10 @@ import (
 	"strings"
 )
 
-const maximumMailboxCacheBytes = 2 * 1024 * 1024
+const (
+	maximumMailboxCacheBytes = 2 * 1024 * 1024
+	maxMailboxCacheDepth     = 32
+)
 
 func (s *Store) loadMailboxCache(ctx context.Context, accountID string) (mailboxCache, error) {
 	if err := ctx.Err(); err != nil {
@@ -89,24 +92,27 @@ func parseMailboxCacheRoot(decoder *xml.Decoder) (mailboxCache, error) {
 		if value.Name.Local != "dict" || cache.Mailboxes != nil {
 			return mailboxCache{}, fmt.Errorf("mboxes must be one dictionary")
 		}
-		cache.Mailboxes, err = parseMailboxCacheNodes(decoder)
+		cache.Mailboxes, err = parseMailboxCacheNodes(decoder, 1)
 		if err != nil {
 			return mailboxCache{}, err
 		}
 	}
 }
 
-func parseMailboxCacheNodes(decoder *xml.Decoder) (map[string]mailboxCacheNode, error) {
+func parseMailboxCacheNodes(decoder *xml.Decoder, depth int) (map[string]mailboxCacheNode, error) {
 	nodes := make(map[string]mailboxCacheNode)
 	for {
 		key, value, done, err := nextPlistPair(decoder)
 		if err != nil || done {
 			return nodes, err
 		}
+		if depth > maxMailboxCacheDepth {
+			return nil, mailboxCacheDepthError()
+		}
 		if value.Name.Local != "dict" {
 			return nil, fmt.Errorf("mailbox %q must be a dictionary", key)
 		}
-		node, err := parseMailboxCacheNode(decoder)
+		node, err := parseMailboxCacheNode(decoder, depth)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +123,7 @@ func parseMailboxCacheNodes(decoder *xml.Decoder) (map[string]mailboxCacheNode, 
 	}
 }
 
-func parseMailboxCacheNode(decoder *xml.Decoder) (mailboxCacheNode, error) {
+func parseMailboxCacheNode(decoder *xml.Decoder, depth int) (mailboxCacheNode, error) {
 	var node mailboxCacheNode
 	for {
 		key, value, done, err := nextPlistPair(decoder)
@@ -135,7 +141,7 @@ func parseMailboxCacheNode(decoder *xml.Decoder) (mailboxCacheNode, error) {
 			if value.Name.Local != "dict" {
 				return mailboxCacheNode{}, fmt.Errorf("mailbox children must be a dictionary")
 			}
-			node.Children, err = parseMailboxCacheNodes(decoder)
+			node.Children, err = parseMailboxCacheNodes(decoder, depth+1)
 		default:
 			err = decoder.Skip()
 		}
@@ -143,6 +149,13 @@ func parseMailboxCacheNode(decoder *xml.Decoder) (mailboxCacheNode, error) {
 			return mailboxCacheNode{}, err
 		}
 	}
+}
+
+func mailboxCacheDepthError() error {
+	return operationError(
+		"mailbox_cache_malformed",
+		fmt.Sprintf("mailbox cache nesting exceeds %d levels", maxMailboxCacheDepth),
+	)
 }
 
 func nextPlistPair(decoder *xml.Decoder) (string, xml.StartElement, bool, error) {

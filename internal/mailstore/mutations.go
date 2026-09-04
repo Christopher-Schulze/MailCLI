@@ -46,10 +46,12 @@ func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, 
 		return false, fmt.Errorf("inspect Drafts mailbox identity: %w", err)
 	}
 	identifiers := make(map[int64]struct{})
-	collectMailboxIDs(
+	if err := collectMailboxIDs(
 		cached.Mailboxes, nil, resolved.Reference.AccountID, resolved.PhysicalLocation.Scheme,
-		attribute, byPath, identifiers,
-	)
+		attribute, byPath, identifiers, 1,
+	); err != nil {
+		return false, err
+	}
 	_, protected := identifiers[resolved.Record.StoreMailboxID]
 	if protected {
 		return true, nil

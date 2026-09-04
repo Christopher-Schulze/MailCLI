@@ -125,7 +125,9 @@ func (s *Store) mailboxIDsWithAttribute(ctx context.Context, attribute int) ([]i
 		if err != nil {
 			continue
 		}
-		collectMailboxIDs(cached.Mailboxes, nil, accountID, scheme, attribute, byPath, unique)
+		if err := collectMailboxIDs(cached.Mailboxes, nil, accountID, scheme, attribute, byPath, unique, 1); err != nil {
+			continue
+		}
 	}
 	identifiers := make([]int64, 0, len(unique))
 	for identifier := range unique {
@@ -145,8 +147,12 @@ func collectMailboxIDs(
 	attribute int,
 	records map[string]mailboxRecord,
 	output map[int64]struct{},
-) {
+	depth int,
+) error {
 	for key, node := range nodes {
+		if depth > maxMailboxCacheDepth {
+			return mailboxCacheDepthError()
+		}
 		component := node.PathComponent
 		if component == "" {
 			component = key
@@ -164,8 +170,11 @@ func collectMailboxIDs(
 				output[record.RowID] = struct{}{}
 			}
 		}
-		collectMailboxIDs(node.Children, rawPath, accountID, scheme, attribute, records, output)
+		if err := collectMailboxIDs(node.Children, rawPath, accountID, scheme, attribute, records, output, depth+1); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (s *Store) observeSent(
