@@ -20,16 +20,18 @@ import (
 )
 
 type fakeServerConfig struct {
-	authOK        bool
-	sentMboxes    []string
-	trashMboxes   []string
-	otherMboxes   []string
-	searchMatchID string
-	searchUID     uint32
-	appendOK      bool
-	searchDelay   time.Duration
-	moveSupported bool
-	fetchPayload  []byte
+	authOK            bool
+	sentMboxes        []string
+	trashMboxes       []string
+	otherMboxes       []string
+	searchMatchID     string
+	searchUID         uint32
+	appendOK          bool
+	searchDelay       time.Duration
+	moveSupported     bool
+	fetchPayload      []byte
+	selectFailBox     string
+	dropAfterCommands int
 }
 
 type fakeServer struct {
@@ -53,6 +55,7 @@ type fakeServer struct {
 	moveUID       uint32
 	moveDst       string
 	expungeCalled bool
+	connections   int
 }
 
 func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
@@ -83,6 +86,12 @@ func (s *fakeServer) AppendRecord() (called bool, mbox string, flags []string, d
 	return s.appendCalled, s.appendMbox, append([]string(nil), s.appendFlags...), append([]byte(nil), s.appendData...)
 }
 
+func (s *fakeServer) ConnectionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connections
+}
+
 func (s *fakeServer) run() {
 	for {
 		conn, err := s.listener.Accept()
@@ -95,10 +104,13 @@ func (s *fakeServer) run() {
 
 func (s *fakeServer) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	s.mu.Lock()
+	s.connections++
+	s.mu.Unlock()
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
 	s.writeLine(bw, "* OK [CAPABILITY IMAP4rev1] fake ready")
-
+	commands := 0
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -108,7 +120,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 		if line == "" {
 			continue
 		}
-
+		if s.config.dropAfterCommands > 0 {
+			commands++
+			if commands >= s.config.dropAfterCommands {
+				return
+			}
+		}
 		tag, cmd, args, perr := splitCommand(line)
 		if perr != nil {
 			s.writeLine(bw, tag+" BAD parse error")
@@ -134,6 +151,10 @@ func (s *fakeServer) handle(conn net.Conn) {
 			}
 			s.writeLine(bw, tag+" OK LIST completed")
 		case "SELECT", "EXAMINE":
+			if s.config.selectFailBox != "" && len(args) > 0 && args[0] == s.config.selectFailBox {
+				s.writeLine(bw, tag+" NO SELECT failed")
+				continue
+			}
 			s.writeLine(bw, "* FLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)")
 			s.writeLine(bw, "* OK [UIDVALIDITY 12345] UIDs valid")
 			s.writeLine(bw, "* 0 EXISTS")

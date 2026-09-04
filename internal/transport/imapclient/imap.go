@@ -41,10 +41,19 @@ const (
 )
 
 // Client is a minimal IMAPv4 client that can mirror a message into the Sent
-// mailbox. The zero value is usable; TLSConfig may be set to override the
-// default TLS configuration (for tests).
+// mailbox and perform message mutations. Authenticated connections are pooled
+// per host/port/username: repeated operations within one process reuse a
+// single TLS connection instead of dialing per command. IO-level failures
+// mark the session dirty and the pool discards it, so the next operation
+// reconnects; protocol rejections (NO/BAD, message not found) keep the
+// session. The zero value is usable; TLSConfig may be set to override the
+// default TLS configuration (for tests). Close logs out of every pooled
+// session.
 type Client struct {
 	TLSConfig *tls.Config
+
+	mu       sync.Mutex
+	sessions map[string]*pooledSession
 }
 
 // New returns a new Client.
@@ -52,7 +61,88 @@ func New() *Client {
 	return &Client{}
 }
 
-// AppendToSent implements transport.SentMirror.
+// pooledSession wraps one authenticated connection with its selected mailbox
+// state, so follow-up commands on the same mailbox skip the SELECT round
+// trip.
+type pooledSession struct {
+	sess        *session
+	key         string
+	selected    string
+	uidvalidity uint32
+	cancelWatch context.CancelFunc
+}
+
+func sessionKey(cfg transport.ImapConfig) string {
+	return fmt.Sprintf("%s:%d/%s", cfg.Host, cfg.Port, cfg.Username)
+}
+
+// acquire returns the pooled session for cfg with the client mutex held.
+// Operations on one client are therefore serialized (CLI invocations are
+// sequential; library callers get safe sharing). The caller MUST call the
+// returned release exactly once; it discards the session when the command
+// context expired (the watcher force-closed the connection) or the session is
+// dirty, and always unlocks.
+func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooledSession, func(), error) {
+	c.mu.Lock()
+	key := sessionKey(cfg)
+	ps, ok := c.sessions[key]
+	if !ok {
+		sess, err := c.connect(ctx, cfg)
+		if err != nil {
+			c.mu.Unlock()
+			return nil, nil, err
+		}
+		ps = &pooledSession{sess: sess, key: key}
+		if c.sessions == nil {
+			c.sessions = make(map[string]*pooledSession)
+		}
+		c.sessions[key] = ps
+	}
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	ps.cancelWatch = cancelWatch
+	conn := ps.sess.conn
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-watchCtx.Done():
+		}
+	}()
+	release := func() {
+		cancelWatch()
+		if ctx.Err() != nil || ps.sess.dirty {
+			delete(c.sessions, ps.key)
+			_ = ps.sess.conn.Close()
+		}
+		c.mu.Unlock()
+	}
+	return ps, release, nil
+}
+
+// Close logs out of and closes every pooled session. Safe to call repeatedly.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	pooled := make([]*pooledSession, 0, len(c.sessions))
+	for _, ps := range c.sessions {
+		pooled = append(pooled, ps)
+	}
+	c.sessions = nil
+	c.mu.Unlock()
+	var joined []error
+	for _, ps := range pooled {
+		logoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = c.doLogout(logoutCtx, ps.sess, ps.sess.nextTag())
+		cancel()
+		if err := ps.sess.conn.Close(); err != nil {
+			joined = append(joined, err)
+		}
+	}
+	return errors.Join(joined...)
+}
+
+// AppendToSent implements transport.SentMirror. It runs on its own dedicated
+// connection: the LOGIN/LIST/SELECT/SEARCH/APPEND/LOGOUT sequence is
+// self-contained and does not participate in the session pool.
 func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg []byte, messageID string) (transport.AppendEvidence, error) {
 	var empty transport.AppendEvidence
 
@@ -77,21 +167,23 @@ func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg
 	}()
 	defer cancel()
 
-	br := bufio.NewReader(conn)
-	bw := bufio.NewWriter(conn)
-
+	sess := &session{
+		conn: conn,
+		br:   bufio.NewReader(conn),
+		bw:   bufio.NewWriter(conn),
+	}
 	prefix := makeTagPrefix()
 	var cmdNum int
-	nextTag := func() string {
+	sess.nextTag = func() string {
 		cmdNum++
 		return fmt.Sprintf("%s%04d", prefix, cmdNum)
 	}
 
-	if err := c.doLogin(ctx, conn, br, bw, nextTag(), cfg); err != nil {
+	if err := c.doLogin(ctx, sess, sess.nextTag(), cfg); err != nil {
 		return empty, err
 	}
 
-	mailboxes, err := c.doList(ctx, conn, br, bw, nextTag())
+	mailboxes, err := c.doList(ctx, sess, sess.nextTag())
 	if err != nil {
 		return empty, err
 	}
@@ -104,25 +196,25 @@ func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg
 		}
 	}
 
-	if err := c.doSelect(ctx, conn, br, bw, nextTag(), sentBox); err != nil {
+	if err := c.doSelect(ctx, sess, sess.nextTag(), sentBox); err != nil {
 		return empty, err
 	}
 
-	found, err := c.doSearch(ctx, conn, br, bw, nextTag(), messageID)
+	found, err := c.doSearch(ctx, sess, sess.nextTag(), messageID)
 	if err != nil {
 		return empty, err
 	}
 
 	if found {
-		_ = c.doLogout(ctx, conn, br, bw, nextTag())
+		_ = c.doLogout(ctx, sess, sess.nextTag())
 		return transport.AppendEvidence{Mailbox: sentBox, Appended: false}, nil
 	}
 
-	if err := c.doAppend(ctx, conn, br, bw, nextTag(), sentBox, msg); err != nil {
+	if err := c.doAppend(ctx, sess, sess.nextTag(), sentBox, msg); err != nil {
 		return empty, err
 	}
 
-	_ = c.doLogout(ctx, conn, br, bw, nextTag())
+	_ = c.doLogout(ctx, sess, sess.nextTag())
 	return transport.AppendEvidence{Mailbox: sentBox, Appended: true}, nil
 }
 
@@ -163,15 +255,15 @@ func (c *Client) tlsConfig(host string) *tls.Config {
 	return &tls.Config{ServerName: host}
 }
 
-func (c *Client) doLogin(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag string, cfg transport.ImapConfig) error {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg transport.ImapConfig) error {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP login deadline")
 	}
 	cmd := tag + " LOGIN " + quoteIMAP(cfg.Username) + " " + quoteIMAP(cfg.Password)
-	if err := c.writeLine(bw, cmd); err != nil {
+	if err := c.writeLine(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAuthFailed, "IMAP LOGIN write")
 	}
-	status, _, err := c.readFinal(ctx, br, tag)
+	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return err
 	}
@@ -185,17 +277,17 @@ func (c *Client) doLogin(ctx context.Context, conn net.Conn, br *bufio.Reader, b
 	}
 }
 
-func (c *Client) doList(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag string) ([]mailbox, error) {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailbox, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP LIST deadline")
 	}
-	if err := c.writeLine(bw, tag+` LIST "" "*"`); err != nil {
+	if err := c.writeLine(sess, tag+` LIST "" "*"`); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP LIST write")
 	}
 
 	var mailboxes []mailbox
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP LIST read")
 		}
@@ -220,14 +312,14 @@ func (c *Client) doList(ctx context.Context, conn net.Conn, br *bufio.Reader, bw
 	}
 }
 
-func (c *Client) doSelect(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, mbox string) error {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doSelect(ctx context.Context, sess *session, tag, mbox string) error {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
 	}
-	if err := c.writeLine(bw, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
+	if err := c.writeLine(sess, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP SELECT write")
 	}
-	status, _, err := c.readFinal(ctx, br, tag)
+	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return err
 	}
@@ -240,17 +332,17 @@ func (c *Client) doSelect(ctx context.Context, conn net.Conn, br *bufio.Reader, 
 	}
 }
 
-func (c *Client) doSearch(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, messageID string) (bool, error) {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID string) (bool, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
 	}
-	if err := c.writeLine(bw, tag+" SEARCH HEADER Message-ID "+quoteIMAP(messageID)); err != nil {
+	if err := c.writeLine(sess, tag+" SEARCH HEADER Message-ID "+quoteIMAP(messageID)); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH write")
 	}
 
 	found := false
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return false, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH read")
 		}
@@ -274,16 +366,16 @@ func (c *Client) doSearch(ctx context.Context, conn net.Conn, br *bufio.Reader, 
 	}
 }
 
-func (c *Client) doAppend(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, mbox string, msg []byte) error {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, msg []byte) error {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP APPEND deadline")
 	}
 	cmd := tag + " APPEND " + quoteIMAP(mbox) + " (" + flagSeen + ") {" + strconv.Itoa(len(msg)) + "}"
-	if err := c.writeLine(bw, cmd); err != nil {
+	if err := c.writeLine(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND write")
 	}
 
-	line, err := c.readLine(br)
+	line, err := c.readLine(sess)
 	if err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND continuation read")
 	}
@@ -295,14 +387,15 @@ func (c *Client) doAppend(ctx context.Context, conn net.Conn, br *bufio.Reader, 
 		}
 	}
 
-	if _, err := bw.Write(msg); err != nil {
+	if _, err := sess.bw.Write(msg); err != nil {
+		sess.dirty = true
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write")
 	}
-	if err := c.writeLine(bw, ""); err != nil {
+	if err := c.writeLine(sess, ""); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF")
 	}
 
-	status, _, err := c.readFinal(ctx, br, tag)
+	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return err
 	}
@@ -316,42 +409,53 @@ func (c *Client) doAppend(ctx context.Context, conn net.Conn, br *bufio.Reader, 
 	}
 }
 
-func (c *Client) doLogout(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag string) error {
-	if err := c.setDeadline(ctx, conn); err != nil {
+func (c *Client) doLogout(ctx context.Context, sess *session, tag string) error {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP LOGOUT deadline")
 	}
-	return c.writeLine(bw, tag+" LOGOUT")
+	return c.writeLine(sess, tag+" LOGOUT")
 }
 
-func (c *Client) setDeadline(ctx context.Context, conn net.Conn) error {
+func (c *Client) setDeadline(ctx context.Context, sess *session) error {
 	if err := ctx.Err(); err != nil {
+		sess.dirty = true
 		return err
 	}
 	deadline := time.Now().Add(30 * time.Second)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	return conn.SetDeadline(deadline)
-}
-
-func (c *Client) writeLine(bw *bufio.Writer, line string) error {
-	if _, err := bw.WriteString(line + "\r\n"); err != nil {
+	if err := sess.conn.SetDeadline(deadline); err != nil {
+		sess.dirty = true
 		return err
 	}
-	return bw.Flush()
+	return nil
 }
 
-func (c *Client) readLine(br *bufio.Reader) (string, error) {
-	line, err := br.ReadString('\n')
+func (c *Client) writeLine(sess *session, line string) error {
+	if _, err := sess.bw.WriteString(line + "\r\n"); err != nil {
+		sess.dirty = true
+		return err
+	}
+	if err := sess.bw.Flush(); err != nil {
+		sess.dirty = true
+		return err
+	}
+	return nil
+}
+
+func (c *Client) readLine(sess *session) (string, error) {
+	line, err := sess.br.ReadString('\n')
 	if err != nil {
+		sess.dirty = true
 		return "", err
 	}
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-func (c *Client) readFinal(ctx context.Context, br *bufio.Reader, tag string) (string, string, error) {
+func (c *Client) readFinal(ctx context.Context, sess *session, tag string) (string, string, error) {
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return "", "", wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP read final response")
 		}
@@ -604,9 +708,15 @@ type session struct {
 	br      *bufio.Reader
 	bw      *bufio.Writer
 	nextTag func() string
-	close   func()
+	// dirty marks an IO-level failure (read, write, deadline, cancel): the
+	// connection state is no longer trustworthy and the pooled session must
+	// be discarded. Protocol rejections (NO/BAD) do not set it.
+	dirty bool
 }
 
+// connect dials and logs in, returning a ready session. The session outlives
+// ctx: per-command cancellation is handled by the acquire watcher, which
+// force-closes the connection.
 func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*session, error) {
 	if cfg.Host == "" {
 		return nil, &transport.TransportError{
@@ -618,33 +728,19 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	var closeOnce sync.Once
-	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
-	go func() {
-		<-ctx.Done()
-		closeConn()
-	}()
-	br := bufio.NewReader(conn)
-	bw := bufio.NewWriter(conn)
+	sess := &session{
+		conn: conn,
+		br:   bufio.NewReader(conn),
+		bw:   bufio.NewWriter(conn),
+	}
 	prefix := makeTagPrefix()
 	var cmdNum int
-	nextTag := func() string {
+	sess.nextTag = func() string {
 		cmdNum++
 		return fmt.Sprintf("%s%04d", prefix, cmdNum)
 	}
-	sess := &session{
-		conn:    conn,
-		br:      br,
-		bw:      bw,
-		nextTag: nextTag,
-		close: func() {
-			cancel()
-			closeConn()
-		},
-	}
-	if err := c.doLogin(ctx, conn, br, bw, nextTag(), cfg); err != nil {
-		sess.close()
+	if err := c.doLogin(ctx, sess, sess.nextTag(), cfg); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
 	return sess, nil
@@ -655,16 +751,16 @@ type selectInfo struct {
 	exists      int
 }
 
-func (c *Client) doSelectInfo(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, mbox string) (selectInfo, error) {
+func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox string) (selectInfo, error) {
 	var info selectInfo
-	if err := c.setDeadline(ctx, conn); err != nil {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return info, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
 	}
-	if err := c.writeLine(bw, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
+	if err := c.writeLine(sess, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
 		return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT write")
 	}
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT read")
 		}
@@ -713,18 +809,19 @@ func parseUIDValidity(line string) uint32 {
 
 // ListMailboxes returns all mailboxes on the IMAP server with their flags.
 func (c *Client) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	defer sess.close()
+	defer release()
+	return c.listMailboxes(ctx, ps)
+}
 
-	mboxes, err := c.doList(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
+func (c *Client) listMailboxes(ctx context.Context, ps *pooledSession) ([]transport.MailboxInfo, error) {
+	mboxes, err := c.doList(ctx, ps.sess, ps.sess.nextTag())
 	if err != nil {
 		return nil, err
 	}
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
-
 	infos := make([]transport.MailboxInfo, len(mboxes))
 	for i, m := range mboxes {
 		infos[i] = transport.MailboxInfo{Name: m.name, Flags: m.flags}
@@ -734,22 +831,21 @@ func (c *Client) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([
 
 // SearchUID resolves a Message-ID to its IMAP UID in the specified mailbox.
 func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, error) {
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer sess.close()
+	defer release()
 
-	info, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox)
+	info, err := c.ensureSelected(ctx, ps, mailbox)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	uids, err := c.doUIDSearch(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), messageID)
+	uids, err := c.doUIDSearch(ctx, ps.sess, ps.sess.nextTag(), messageID)
 	if err != nil {
 		return 0, 0, err
 	}
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 
 	if len(uids) == 0 {
 		return 0, info.uidvalidity, &transport.TransportError{
@@ -760,21 +856,41 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 	return uids[len(uids)-1], info.uidvalidity, nil
 }
 
-func (c *Client) doUIDSearch(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, tag, messageID string) ([]uint32, error) {
-	if err := c.setDeadline(ctx, conn); err != nil {
+// ensureSelected switches the pooled session to mailbox when needed and
+// returns the SELECT-time info. Repeated commands on the same mailbox reuse
+// the cached uidvalidity instead of issuing another SELECT.
+func (c *Client) ensureSelected(ctx context.Context, ps *pooledSession, mailbox string) (selectInfo, error) {
+	if ps.selected == mailbox {
+		return selectInfo{uidvalidity: ps.uidvalidity}, nil
+	}
+	info, err := c.doSelectInfo(ctx, ps.sess, ps.sess.nextTag(), mailbox)
+	if err != nil {
+		// A failed SELECT deselects the current mailbox (RFC 3501): the
+		// cached state is stale, but the authenticated connection stays.
+		ps.selected = ""
+		ps.uidvalidity = 0
+		return info, err
+	}
+	ps.selected = mailbox
+	ps.uidvalidity = info.uidvalidity
+	return info, nil
+}
+
+func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID string) ([]uint32, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
 	}
 	searchID := messageID
 	if !strings.HasPrefix(searchID, "<") && !strings.HasSuffix(searchID, ">") {
 		searchID = "<" + searchID + ">"
 	}
-	if err := c.writeLine(bw, tag+" UID SEARCH HEADER Message-ID "+quoteIMAP(searchID)); err != nil {
+	if err := c.writeLine(sess, tag+" UID SEARCH HEADER Message-ID "+quoteIMAP(searchID)); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH write")
 	}
 
 	var uids []uint32
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH read")
 		}
@@ -802,20 +918,20 @@ func (c *Client) doUIDSearch(ctx context.Context, conn net.Conn, br *bufio.Reade
 // SetFlags adds and removes IMAP flags on a message.
 func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return ev, err
 	}
-	defer sess.close()
+	defer release()
 
-	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox); err != nil {
+	if _, err := c.ensureSelected(ctx, ps, mailbox); err != nil {
 		return ev, err
 	}
 
 	var lastStatus string
 	if len(addFlags) > 0 {
-		cmd := fmt.Sprintf("%s UID STORE %d +FLAGS (%s)", sess.nextTag(), uid, strings.Join(addFlags, " "))
-		status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+		cmd := fmt.Sprintf("%s UID STORE %d +FLAGS (%s)", ps.sess.nextTag(), uid, strings.Join(addFlags, " "))
+		status, err := c.doCommand(ctx, ps.sess, cmd)
 		if err != nil {
 			return ev, err
 		}
@@ -823,15 +939,14 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}
 
 	if len(removeFlags) > 0 {
-		cmd := fmt.Sprintf("%s UID STORE %d -FLAGS (%s)", sess.nextTag(), uid, strings.Join(removeFlags, " "))
-		status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+		cmd := fmt.Sprintf("%s UID STORE %d -FLAGS (%s)", ps.sess.nextTag(), uid, strings.Join(removeFlags, " "))
+		status, err := c.doCommand(ctx, ps.sess, cmd)
 		if err != nil {
 			return ev, err
 		}
 		lastStatus = status
 	}
 
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 	return transport.MutationEvidence{
 		Command:        "STORE",
 		ServerResponse: lastStatus,
@@ -840,15 +955,15 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}, nil
 }
 
-func (c *Client) doCommand(ctx context.Context, conn net.Conn, br *bufio.Reader, bw *bufio.Writer, cmd string) (string, error) {
+func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (string, error) {
 	tag := cmd[:strings.Index(cmd, " ")]
-	if err := c.setDeadline(ctx, conn); err != nil {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return "", wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP command deadline")
 	}
-	if err := c.writeLine(bw, cmd); err != nil {
+	if err := c.writeLine(sess, cmd); err != nil {
 		return "", wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP command write")
 	}
-	status, text, err := c.readFinal(ctx, br, tag)
+	status, text, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return "", err
 	}
@@ -867,22 +982,21 @@ func (c *Client) doCommand(ctx context.Context, conn net.Conn, br *bufio.Reader,
 // CopyMessage copies a message by UID to dstMailbox.
 func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return ev, err
 	}
-	defer sess.close()
+	defer release()
 
-	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), srcMailbox); err != nil {
+	if _, err := c.ensureSelected(ctx, ps, srcMailbox); err != nil {
 		return ev, err
 	}
 
-	cmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
-	status, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, cmd)
+	cmd := fmt.Sprintf("%s UID COPY %d %s", ps.sess.nextTag(), uid, quoteIMAP(dstMailbox))
+	status, err := c.doCommand(ctx, ps.sess, cmd)
 	if err != nil {
 		return ev, err
 	}
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 
 	return transport.MutationEvidence{
 		Command:        "COPY",
@@ -895,28 +1009,31 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 // MoveMessage moves a message by UID to dstMailbox using native UID MOVE with COPY+EXPUNGE fallback.
 func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
-	var ev transport.MutationEvidence
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
-		return ev, err
+		return transport.MutationEvidence{}, err
 	}
-	defer sess.close()
+	defer release()
+	return c.moveMessage(ctx, ps, srcMailbox, uid, dstMailbox)
+}
 
-	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), srcMailbox); err != nil {
+func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	var ev transport.MutationEvidence
+	if _, err := c.ensureSelected(ctx, ps, srcMailbox); err != nil {
 		return ev, err
 	}
+	sess := ps.sess
 
 	tag := sess.nextTag()
 	cmd := fmt.Sprintf("%s UID MOVE %d %s", tag, uid, quoteIMAP(dstMailbox))
-	if err := c.setDeadline(ctx, sess.conn); err != nil {
+	if err := c.setDeadline(ctx, sess); err != nil {
 		return ev, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP MOVE deadline")
 	}
-	if err := c.writeLine(sess.bw, cmd); err != nil {
+	if err := c.writeLine(sess, cmd); err != nil {
 		return ev, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP MOVE write")
 	}
-	status, text, err := c.readFinal(ctx, sess.br, tag)
+	status, text, err := c.readFinal(ctx, sess, tag)
 	if err == nil && status == "OK" {
-		_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 		resp := status
 		if text != "" {
 			resp += " " + text
@@ -932,22 +1049,21 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 	// Fallback for servers without UID MOVE: COPY + STORE \Deleted + EXPUNGE
 	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
-	copyStatus, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, copyCmd)
+	copyStatus, err := c.doCommand(ctx, sess, copyCmd)
 	if err != nil {
 		return ev, err
 	}
 
 	storeCmd := fmt.Sprintf("%s UID STORE %d +FLAGS (\\Deleted)", sess.nextTag(), uid)
-	if _, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, storeCmd); err != nil {
+	if _, err := c.doCommand(ctx, sess, storeCmd); err != nil {
 		return ev, err
 	}
 
 	expungeCmd := fmt.Sprintf("%s EXPUNGE", sess.nextTag())
-	if _, err := c.doCommand(ctx, sess.conn, sess.br, sess.bw, expungeCmd); err != nil {
+	if _, err := c.doCommand(ctx, sess, expungeCmd); err != nil {
 		return ev, err
 	}
 
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 	return transport.MutationEvidence{
 		Command:        "MOVE",
 		ServerResponse: copyStatus + " (fallback COPY+EXPUNGE)",
@@ -959,23 +1075,28 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 // DeleteMessage moves a message by UID to the Trash mailbox discovered via special-use flags.
 func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32) (transport.MutationEvidence, error) {
-	var ev transport.MutationEvidence
-	mboxes, err := c.ListMailboxes(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
-		return ev, err
+		return transport.MutationEvidence{}, err
+	}
+	defer release()
+
+	mboxes, err := c.listMailboxes(ctx, ps)
+	if err != nil {
+		return transport.MutationEvidence{}, err
 	}
 
 	trashBox := pickTrash(mboxes)
 	if trashBox == "" {
-		return ev, &transport.TransportError{
+		return transport.MutationEvidence{}, &transport.TransportError{
 			Code:    transport.CodeIMAPMailboxNotFound,
 			Message: "no Trash mailbox found on IMAP server",
 		}
 	}
 
-	ev, err = c.MoveMessage(ctx, cfg, srcMailbox, uid, trashBox)
+	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, trashBox)
 	if err != nil {
-		return ev, err
+		return transport.MutationEvidence{}, err
 	}
 	ev.Command = "DELETE"
 	return ev, nil
@@ -1009,38 +1130,37 @@ func pickTrash(mboxes []transport.MailboxInfo) string {
 
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
 func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32) ([]byte, error) {
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	defer sess.close()
+	defer release()
 
-	if _, err := c.doSelectInfo(ctx, sess.conn, sess.br, sess.bw, sess.nextTag(), mailbox); err != nil {
+	if _, err := c.ensureSelected(ctx, ps, mailbox); err != nil {
 		return nil, err
 	}
 
-	tag := sess.nextTag()
+	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[])", tag, uid)
-	if err := c.setDeadline(ctx, sess.conn); err != nil {
+	if err := c.setDeadline(ctx, ps.sess); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
 	}
-	if err := c.writeLine(sess.bw, cmd); err != nil {
+	if err := c.writeLine(ps.sess, cmd); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchLiteral(ctx, sess.br, tag)
+	payload, err := c.readFetchLiteral(ctx, ps.sess, tag)
 	if err != nil {
 		return nil, err
 	}
-	_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 	return payload, nil
 }
 
-func (c *Client) readFetchLiteral(ctx context.Context, br *bufio.Reader, tag string) ([]byte, error) {
+func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string) ([]byte, error) {
 	var payload []byte
 	found := false
 	for {
-		line, err := c.readLine(br)
+		line, err := c.readLine(sess)
 		if err != nil {
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
@@ -1067,7 +1187,8 @@ func (c *Client) readFetchLiteral(ctx context.Context, br *bufio.Reader, tag str
 				length, perr := strconv.Atoi(lenStr)
 				if perr == nil && length >= 0 {
 					buf := make([]byte, length)
-					if _, rerr := io.ReadFull(br, buf); rerr != nil {
+					if _, rerr := io.ReadFull(sess.br, buf); rerr != nil {
+						sess.dirty = true
 						return nil, wrapIOError(ctx, rerr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
 					}
 					payload = buf
@@ -1083,30 +1204,29 @@ func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mail
 	var status transport.MailboxStatus
 	status.Mailbox = mailbox
 
-	sess, err := c.connect(ctx, cfg)
+	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return status, err
 	}
-	defer sess.close()
+	defer release()
 
-	tag := sess.nextTag()
+	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s STATUS %s (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", tag, quoteIMAP(mailbox))
-	if err := c.setDeadline(ctx, sess.conn); err != nil {
+	if err := c.setDeadline(ctx, ps.sess); err != nil {
 		return status, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP STATUS deadline")
 	}
-	if err := c.writeLine(sess.bw, cmd); err != nil {
+	if err := c.writeLine(ps.sess, cmd); err != nil {
 		return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS write")
 	}
 
 	for {
-		line, err := c.readLine(sess.br)
+		line, err := c.readLine(ps.sess)
 		if err != nil {
 			return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			st := parseStatus(line, tag)
 			if st == "OK" {
-				_ = c.doLogout(ctx, sess.conn, sess.br, sess.bw, sess.nextTag())
 				return status, nil
 			}
 			return status, &transport.TransportError{
