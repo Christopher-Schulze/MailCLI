@@ -437,6 +437,45 @@ func TestDraftSaveAndOpenCommands(t *testing.T) {
 	}
 }
 
+// drafts list emits summaries: envelope fields present, body content
+// absent, in both JSON and human output.
+func TestDraftsListEmitsSummariesWithoutBodies(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Listed", Body: "Secret body\n",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftList(service, []string{"--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{`"ref":"` + draft.Ref + `"`, `"subject":"Listed"`, `"ever_sent":false`, `"age_days":0`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("list JSON missing %s in %s", want, out)
+		}
+	}
+	for _, leaked := range []string{`"body":`, `"body_html"`, `"body_source"`, "Secret body"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("list JSON contains %q: body leaked", leaked)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runDraftList(service, []string{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list code = %d, stderr = %s", code, stderr.String())
+	}
+	if human := stdout.String(); !strings.Contains(human, "Listed") || !strings.Contains(human, draft.Ref) || strings.Contains(human, "Secret body") {
+		t.Fatalf("unexpected human output: %q", human)
+	}
+}
+
 func TestDraftSendWithoutTransportIsJSONFailure(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{

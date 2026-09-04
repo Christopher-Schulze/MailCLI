@@ -156,9 +156,8 @@ func runDraftCreate(service *mail.Service, args []string, stdout io.Writer, stde
 }
 
 type draftListEntry struct {
-	mail.Draft
-	AgeDays  int  `json:"age_days"`
-	EverSent bool `json:"ever_sent"`
+	mail.DraftSummary
+	AgeDays int `json:"age_days"`
 }
 
 func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -174,9 +173,8 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 	entries := make([]draftListEntry, 0, len(drafts))
 	for _, draft := range drafts {
 		entries = append(entries, draftListEntry{
-			Draft:    draft,
-			AgeDays:  int(time.Since(draft.UpdatedAt).Hours() / 24),
-			EverSent: draft.SendAttempt != nil,
+			DraftSummary: draft,
+			AgeDays:      int(time.Since(draft.UpdatedAt).Hours() / 24),
 		})
 	}
 	if *jsonOutput {

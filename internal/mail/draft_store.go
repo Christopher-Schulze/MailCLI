@@ -77,7 +77,7 @@ func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
 	return draft, nil
 }
 
-func (s *Service) ListDrafts() ([]Draft, error) {
+func (s *Service) ListDrafts() ([]DraftSummary, error) {
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return nil, err
@@ -86,24 +86,44 @@ func (s *Service) ListDrafts() ([]Draft, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list drafts: %w", err)
 	}
-	drafts := make([]Draft, 0, len(entries))
+	drafts := make([]DraftSummary, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "draft_") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		draft, err := readDraftFile(root, strings.TrimSuffix(entry.Name(), ".json"))
+		summary, err := readDraftSummary(root, strings.TrimSuffix(entry.Name(), ".json"))
 		if err != nil {
 			// Skip unreadable/corrupt draft files rather than failing the
 			// entire listing. A partial write from a crashed process should
 			// not prevent listing all other valid drafts.
 			continue
 		}
-		drafts = append(drafts, draft)
+		drafts = append(drafts, summary)
 	}
 	sort.Slice(drafts, func(left int, right int) bool {
 		return drafts[left].UpdatedAt.After(drafts[right].UpdatedAt)
 	})
 	return drafts, nil
+}
+
+// draftSummaryFrom maps a loaded draft to its list summary. Body content
+// never leaves this function: the summary carries counts and state only.
+func draftSummaryFrom(draft Draft) DraftSummary {
+	return DraftSummary{
+		Ref:             draft.Ref,
+		Kind:            draft.Kind,
+		Subject:         draft.Subject,
+		From:            draft.From,
+		To:              draft.To,
+		CC:              draft.CC,
+		CreatedAt:       draft.CreatedAt,
+		UpdatedAt:       draft.UpdatedAt,
+		BodyFormat:      draft.BodyFormat,
+		AttachmentCount: len(draft.Attachments),
+		EverSent:        draft.SendAttempt != nil,
+		SendAttempt:     draft.SendAttempt,
+		SaveAttempt:     draft.SaveAttempt,
+	}
 }
 
 type PruneCandidate struct {
@@ -129,12 +149,12 @@ type PruneDraftsRequest struct {
 	Confirm   bool
 }
 
-func pruneEligible(draft Draft, cutoff time.Time) bool {
+func pruneEligible(draft DraftSummary, cutoff time.Time) bool {
 	return draft.UpdatedAt.Before(cutoff) && draft.SendAttempt == nil && draft.SaveAttempt == nil
 }
 
-func pruneAgeDays(draft Draft) int {
-	return int(time.Since(draft.UpdatedAt).Hours() / 24)
+func pruneAgeDays(updatedAt time.Time) int {
+	return int(time.Since(updatedAt).Hours() / 24)
 }
 
 // PruneDrafts lists (dry run) or deletes stale never-sent local drafts. Drafts with a
@@ -155,7 +175,7 @@ func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, er
 			continue
 		}
 		result.Candidates = append(result.Candidates, PruneCandidate{
-			Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft),
+			Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
 		})
 	}
 	if !request.Confirm {
@@ -190,7 +210,7 @@ func pruneDraftOnce(root string, ref string, cutoff time.Time) (resultErr error)
 		}
 		return err
 	}
-	if !pruneEligible(draft, cutoff) {
+	if !pruneEligible(draftSummaryFrom(draft), cutoff) {
 		return &OperationError{Code: "prune_state_changed", Message: "draft changed since listing; skipped"}
 	}
 	if err := discardDraftFiles(root, ref); err != nil {
@@ -1857,6 +1877,38 @@ func writePrivateFile(path string, payload []byte) error {
 }
 
 func readDraftFile(root string, ref string) (Draft, error) {
+	draft, err := loadDraftDocument(root, ref)
+	if err != nil {
+		return Draft{}, err
+	}
+	if err := validateStoredDraftContent(draft); err != nil {
+		return Draft{}, fmt.Errorf("validate draft content: %w", err)
+	}
+	if err := attachDraftAttempts(root, ref, &draft); err != nil {
+		return Draft{}, err
+	}
+	return draft, nil
+}
+
+// readDraftSummary loads the list view of a draft: same envelope
+// discipline as readDraftFile but no canonical body validation and no
+// Markdown/HTML re-render, so listing stays cheap and a draft with a
+// corrupt body still appears (inspect keeps the full gate).
+func readDraftSummary(root string, ref string) (DraftSummary, error) {
+	draft, err := loadDraftDocument(root, ref)
+	if err != nil {
+		return DraftSummary{}, err
+	}
+	if err := attachDraftAttempts(root, ref, &draft); err != nil {
+		return DraftSummary{}, err
+	}
+	return draftSummaryFrom(draft), nil
+}
+
+// loadDraftDocument decodes one draft file: bounded regular file, exactly
+// one JSON object with strict fields, reference match. No content
+// validation and no attempt sidecars; callers add what their path needs.
+func loadDraftDocument(root string, ref string) (Draft, error) {
 	path, err := draftPath(root, ref)
 	if err != nil {
 		return Draft{}, err
@@ -1891,25 +1943,28 @@ func readDraftFile(root string, ref string) (Draft, error) {
 	if draft.BodyFormat == "" {
 		draft.BodyFormat = DraftBodyPlain
 	}
-	if err := validateStoredDraftContent(draft); err != nil {
-		return Draft{}, fmt.Errorf("validate draft content: %w", err)
-	}
+	return draft, nil
+}
+
+// attachDraftAttempts loads the send/save attempt sidecars onto a decoded
+// draft, enforcing the same claim-conflict rule on every read path.
+func attachDraftAttempts(root string, ref string, draft *Draft) error {
 	draft.SendAttempt = nil
 	attempt, err := readSendAttempt(root, ref)
 	if err != nil {
-		return Draft{}, err
+		return err
 	}
 	draft.SendAttempt = attempt
 	draft.SaveAttempt = nil
 	saveAttempt, err := readDraftSaveAttempt(root, ref)
 	if err != nil {
-		return Draft{}, err
+		return err
 	}
 	draft.SaveAttempt = saveAttempt
 	if draft.SendAttempt != nil && draft.SaveAttempt != nil {
-		return Draft{}, fmt.Errorf("draft has conflicting send and save claims")
+		return fmt.Errorf("draft has conflicting send and save claims")
 	}
-	return draft, nil
+	return nil
 }
 
 func syncDirectory(path string) error {

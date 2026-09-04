@@ -17,6 +17,11 @@ import (
 // parser/renderer on every draft body conversion.
 var markdown = goldmark.New()
 
+// prepareDraftContentCalls counts canonical body renders. Tests use it to
+// prove read paths that must stay render-free (draft listing); it has no
+// production meaning.
+var prepareDraftContentCalls int
+
 type preparedDraftContent struct {
 	Format DraftBodyFormat
 	Source string
@@ -25,6 +30,7 @@ type preparedDraftContent struct {
 }
 
 func prepareDraftContent(format DraftBodyFormat, source string) (preparedDraftContent, error) {
+	prepareDraftContentCalls++
 	if format == "" {
 		format = DraftBodyPlain
 	}

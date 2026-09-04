@@ -140,6 +140,26 @@ type SavedDraft struct {
 	Message       MessageSummary `json:"message"`
 }
 
+// DraftSummary is the list-view of a draft: envelope metadata plus
+// send/save attempt state, never body content. Lists must stay cheap:
+// building a summary never re-renders Markdown/HTML bodies.
+type DraftSummary struct {
+	Ref             string            `json:"ref"`
+	Kind            DraftKind         `json:"kind"`
+	Subject         string            `json:"subject,omitempty"`
+	From            string            `json:"from,omitempty"`
+	To              []Recipient       `json:"to"`
+	CC              []Recipient       `json:"cc"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	BodyFormat      DraftBodyFormat   `json:"body_format"`
+	AttachmentCount int               `json:"attachment_count"`
+	EverSent        bool              `json:"ever_sent"`
+	SendAttempt     *SendAttempt      `json:"send_attempt,omitempty"`
+	SaveAttempt     *DraftSaveAttempt `json:"save_attempt,omitempty"`
+	StateError      string            `json:"state_error,omitempty"`
+}
+
 type CreateDraftRequest struct {
 	Kind             DraftKind
 	SourceRef        string

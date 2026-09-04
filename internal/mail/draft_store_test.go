@@ -243,6 +243,142 @@ func TestSaveDraftReportsPostflightFailureWithoutRetainingLocalDraft(t *testing.
 	}
 }
 
+// Listing returns summaries without body content and without canonical
+// re-rendering: the render counter must not move during ListDrafts, even
+// with Markdown and HTML drafts present.
+func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
+	service := NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	plain, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@example.com", To: []Recipient{{Address: "a@example.com"}},
+		Subject: "Plain", Body: "Hello\n",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	rich, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@example.com", To: []Recipient{{Address: "b@example.com"}},
+		Subject: "Rich", Body: "# Title\n\nSome *text*.\n", BodyFormat: DraftBodyMarkdown,
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	html, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@example.com", To: []Recipient{{Address: "c@example.com"}},
+		Subject: "Page", Body: "<p>Hi</p>", BodyFormat: DraftBodyHTML,
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	prepareDraftContentCalls = 0
+	summaries, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	if prepareDraftContentCalls != 0 {
+		t.Fatalf("ListDrafts() rendered %d bodies, want zero", prepareDraftContentCalls)
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("ListDrafts() = %d summaries, want 3", len(summaries))
+	}
+	byRef := make(map[string]DraftSummary, len(summaries))
+	for _, summary := range summaries {
+		byRef[summary.Ref] = summary
+	}
+	for _, want := range []struct {
+		ref     string
+		subject string
+		format  DraftBodyFormat
+	}{
+		{plain.Ref, "Plain", DraftBodyPlain},
+		{rich.Ref, "Rich", DraftBodyMarkdown},
+		{html.Ref, "Page", DraftBodyHTML},
+	} {
+		got, ok := byRef[want.ref]
+		if !ok {
+			t.Fatalf("missing summary for %s", want.ref)
+		}
+		if got.Subject != want.subject || got.From != "sender@example.com" || got.BodyFormat != want.format {
+			t.Fatalf("summary = %+v, want subject/format envelope", got)
+		}
+		if len(got.To) != 1 || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+			t.Fatalf("summary = %+v, want recipients and timestamps", got)
+		}
+		if got.EverSent || got.SendAttempt != nil || got.StateError != "" {
+			t.Fatalf("summary = %+v, want pristine state", got)
+		}
+	}
+	raw, err := json.Marshal(summaries)
+	if err != nil {
+		t.Fatalf("marshal summaries: %v", err)
+	}
+	for _, leaked := range []string{"Hello", "Title", "Hi</p>", "body_html", "body_source", `"body":`} {
+		if strings.Contains(string(raw), leaked) {
+			t.Fatalf("list output contains %q: body content leaked into summaries", leaked)
+		}
+	}
+}
+
+// A draft whose body fails canonical validation still appears in the list
+// (inspect keeps the full gate and rejects it).
+func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@example.com", To: []Recipient{{Address: "a@example.com"}},
+		Subject: "Rich", Body: "# Title\n", BodyFormat: DraftBodyMarkdown,
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	path := filepath.Join(root, draft.Ref+".json")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read draft file: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(payload, &document); err != nil {
+		t.Fatalf("decode draft file: %v", err)
+	}
+	document["body"] = "tampered body that no longer matches the canonical rendering"
+	tampered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encode tampered draft: %v", err)
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatalf("write tampered draft: %v", err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err == nil {
+		t.Fatal("GetDraft() accepted a tampered body; the inspect gate is broken")
+	}
+	prepareDraftContentCalls = 0
+	summaries, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].Ref != draft.Ref || summaries[0].Subject != "Rich" {
+		t.Fatalf("ListDrafts() = %+v, want the tampered draft listed by envelope", summaries)
+	}
+	if prepareDraftContentCalls != 0 {
+		t.Fatalf("ListDrafts() rendered %d bodies, want zero", prepareDraftContentCalls)
+	}
+}
+
+// The summary carries send-attempt state and derives EverSent from it.
+func TestDraftSummaryFromKeepsAttemptState(t *testing.T) {
+	attempt := &SendAttempt{ID: "attempt_1", Outcome: SendOutcomeUnknown}
+	summary := draftSummaryFrom(Draft{
+		Ref: "draft_ref", Subject: "S", BodyFormat: DraftBodyPlain,
+		SendAttempt: attempt,
+	})
+	if !summary.EverSent || summary.SendAttempt != attempt {
+		t.Fatalf("summary = %+v, want attempt state with EverSent", summary)
+	}
+	plain := draftSummaryFrom(Draft{Ref: "draft_other"})
+	if plain.EverSent || plain.SendAttempt != nil {
+		t.Fatalf("summary = %+v, want pristine state", plain)
+	}
+}
+
 func TestDraftLifecycleAndAttachmentIntegrity(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	attachmentPath := filepath.Join(t.TempDir(), "brief.txt")
