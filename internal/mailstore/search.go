@@ -421,8 +421,10 @@ func (s *Store) scanSearchRecords(
 }
 
 // attachmentOnly reports whether an attachment filter with no text terms
-// is active: the pre-classification in dispatchSearchJobs then decides
-// positive-catalog candidates without opening their sources.
+// is active; dispatchSearchJobs' inline len(terms)==0 && hasAttachment!=nil
+// pre-classification is this predicate and decides positive-catalog
+// candidates without opening their sources. Kept as the single named
+// expression of that predicate for future callers.
 func attachmentOnly(query mail.Query) bool {
 	return strings.TrimSpace(query.Text) == "" && query.HasAttachment != nil
 }
@@ -485,7 +487,10 @@ func (s *Store) dispatchSearchJobs(
 		// monotone in catalog). No open, no scan, no byte budget.
 		// Catalog-zero candidates fall through to the scan because the
 		// catalog can lag behind a newly downloaded attachment.
-		if len(terms) == 0 && hasAttachment != nil && attachmentOnly(mail.Query{HasAttachment: hasAttachment}) {
+		// (Same predicate as attachmentOnly; dispatch receives the parts
+		// separately, so the check stays inline instead of building a
+		// throwaway Query per candidate.)
+		if len(terms) == 0 && hasAttachment != nil {
 			if *hasAttachment && item.AttachmentCount > 0 {
 				results[index] = candidateScan{
 					match: true, attachments: item.AttachmentCount,
