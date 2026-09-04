@@ -27,6 +27,98 @@ type sentMessageFixture struct {
 	Attachments    []fixtureAttachment
 }
 
+func TestSenderIdentityUsesRecentWindow(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installSentMailboxFixture(t, store)
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	tx, err := writer.Begin()
+	if err != nil {
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("begin sender identity fixture: %v", err)
+	}
+	addressStmt, err := tx.Prepare(`INSERT INTO addresses(ROWID,address,comment) VALUES (?,?,?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("prepare sender address fixture: %v", err)
+	}
+	messageStmt, err := tx.Prepare(`INSERT INTO messages(ROWID,sender,date_sent,date_received,mailbox,deleted) VALUES (?,?,?,?,?,0)`)
+	if err != nil {
+		_ = addressStmt.Close()
+		_ = tx.Rollback()
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("prepare sender message fixture: %v", err)
+	}
+	for index := 0; index < 2500; index++ {
+		addressID := int64(10000 + index)
+		rowID := int64(10000 + index)
+		if _, err := addressStmt.Exec(addressID, fmt.Sprintf("old-%04d@example.com", index), ""); err != nil {
+			_ = messageStmt.Close()
+			_ = addressStmt.Close()
+			_ = tx.Rollback()
+			closeTestResourceNow(t, writer, "sender identity fixture writer")
+			t.Fatalf("insert old sender %d: %v", index, err)
+		}
+		if _, err := messageStmt.Exec(rowID, addressID, int64(index), int64(index), 4); err != nil {
+			_ = messageStmt.Close()
+			_ = addressStmt.Close()
+			_ = tx.Rollback()
+			closeTestResourceNow(t, writer, "sender identity fixture writer")
+			t.Fatalf("insert old sent message %d: %v", index, err)
+		}
+	}
+	if _, err := addressStmt.Exec(3, "recent@example.com", "Recent"); err != nil {
+		_ = messageStmt.Close()
+		_ = addressStmt.Close()
+		_ = tx.Rollback()
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("insert recent sender: %v", err)
+	}
+	for index := 0; index < 3; index++ {
+		if _, err := messageStmt.Exec(20000+index, 3, int64(1_000_000+index), int64(1_000_000+index), 4); err != nil {
+			_ = messageStmt.Close()
+			_ = addressStmt.Close()
+			_ = tx.Rollback()
+			closeTestResourceNow(t, writer, "sender identity fixture writer")
+			t.Fatalf("insert recent sent message %d: %v", index, err)
+		}
+	}
+	if err := messageStmt.Close(); err != nil {
+		_ = addressStmt.Close()
+		_ = tx.Rollback()
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("close sender message fixture: %v", err)
+	}
+	if err := addressStmt.Close(); err != nil {
+		_ = tx.Rollback()
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("close sender address fixture: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		closeTestResourceNow(t, writer, "sender identity fixture writer")
+		t.Fatalf("commit sender identity fixture: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close sender identity fixture writer: %v", err)
+	}
+
+	identities, err := store.loadSenderIdentities(context.Background(), []int64{4})
+	if err != nil {
+		t.Fatalf("loadSenderIdentities() error = %v", err)
+	}
+	if len(identities) == 0 || identities[0].Address != "recent@example.com" || identities[0].MessageCount != 3 {
+		t.Fatalf("sender identities = %+v, want recent@example.com as the dominant recent sender", identities)
+	}
+	var counted int64
+	for _, identity := range identities {
+		counted += identity.MessageCount
+	}
+	if counted != senderIdentityRecentLimit {
+		t.Fatalf("sender identity window counted %d messages, want %d", counted, senderIdentityRecentLimit)
+	}
+}
+
 func TestSentObservationUsesSpecialUseMailboxAndNewRowIdentity(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")

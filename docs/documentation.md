@@ -59,7 +59,7 @@ Command surface:
 | `mailcli update` | Implemented | Verify a pinned Ed25519 release signature and checksum, then install with rollback |
 | `mailcli doctor` | Implemented | Validate platform, Mail.app, scripting support, permissions, and optional live access |
 | `mailcli send setup` | Implemented | Store or remove the per-account app-specific SMTP password in the macOS Keychain |
-| `mailcli accounts list` | Implemented | List enabled local Mail accounts and sender identities; a single broken account stays listed with `state:"degraded"` plus a `degraded_reason` (`mailbox_cache_unreadable`, `special_use_mailbox_unresolved`, `no_provably_sent_identity`) instead of aborting discovery; hard SQL failures still fail the command |
+| `mailcli accounts list` | Implemented | List enabled local Mail accounts and sender identities derived from the 2000 newest sent messages; a single broken account stays listed with `state:"degraded"` plus a `degraded_reason` (`mailbox_cache_unreadable`, `special_use_mailbox_unresolved`, `no_provably_sent_identity`) instead of aborting discovery; hard SQL failures still fail the command |
 | `mailcli mailboxes list` | Implemented | Recursively list every mailbox with stable account-relative paths |
 | `mailcli mailboxes resolve` | Implemented | Resolve an exact account-relative mailbox path to its stable reference |
 | `mailcli messages list` | Implemented | Page through a mailbox without loading full bodies |

@@ -12,6 +12,8 @@ import (
 	"mailcli/internal/mailref"
 )
 
+const senderIdentityRecentLimit = 2000
+
 type senderIdentity struct {
 	Address      string
 	Name         string
@@ -181,30 +183,39 @@ func strictSpecialMailboxIDs(
 	return identifiers, len(identifiers) > 0, nil
 }
 
+// loadSenderIdentities derives sender identity from the 2000 newest sent
+// messages across the account's union of Sent mailboxes.
 func (s *Store) loadSenderIdentities(
 	ctx context.Context,
 	mailboxIDs []int64,
 ) (result []senderIdentity, resultErr error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(mailboxIDs)), ",")
-	arguments := make([]any, 0, len(mailboxIDs)*2)
+	arguments := make([]any, 0, len(mailboxIDs)*2+1)
 	for _, identifier := range mailboxIDs {
 		arguments = append(arguments, identifier)
 	}
 	for _, identifier := range mailboxIDs {
 		arguments = append(arguments, identifier)
 	}
+	arguments = append(arguments, senderIdentityRecentLimit)
 	rows, err := s.database.QueryContext(ctx, `
-		WITH membership(id) AS (
+		WITH sent_membership(id) AS (
 			SELECT ROWID FROM messages WHERE mailbox IN (`+placeholders+`)
 			UNION
 			SELECT message_id FROM labels WHERE mailbox_id IN (`+placeholders+`)
+		), membership(id) AS (
+			SELECT sent.id
+			FROM sent_membership sent
+			JOIN messages message ON message.ROWID = sent.id
+			WHERE message.deleted = 0
+			ORDER BY COALESCE(message.date_sent, message.date_received) DESC, message.ROWID DESC
+			LIMIT ?
 		)
 		SELECT COALESCE(sender.address, ''), COALESCE(sender.comment, ''),
-			count(*), max(COALESCE(message.date_sent, 0))
+			count(*), max(COALESCE(message.date_sent, message.date_received, 0))
 		FROM membership
 		JOIN messages message ON message.ROWID = membership.id
 		JOIN addresses sender ON sender.ROWID = message.sender
-		WHERE message.deleted = 0
 		GROUP BY sender.address, sender.comment
 	`, arguments...)
 	if err != nil {
