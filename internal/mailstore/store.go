@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type Store struct {
@@ -17,6 +18,14 @@ type Store struct {
 	activeAccounts    []mailboxLocation
 	activeAccountKeys map[string]struct{}
 	capability        schemaCapability
+
+	// The mailbox catalog is memoized for the Store's read-only lifetime (one
+	// CLI invocation). Freshness of individual message membership lives in the
+	// per-message SQL checks, not here. The counter is a test hook.
+	mailboxCatalogOnce    sync.Once
+	mailboxCatalog        []mailboxRecord
+	mailboxCatalogErr     error
+	mailboxCatalogQueries int
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {

@@ -147,7 +147,7 @@ func (s *Store) validateReferenceMembership(ctx context.Context, ref mailref.Mes
 }
 
 func (s *Store) referenceMembershipMatches(ctx context.Context, ref mailref.Message) (bool, error) {
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return false, err
 	}

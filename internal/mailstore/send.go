@@ -109,7 +109,7 @@ func (s *Store) captureMailboxBaseline(
 }
 
 func (s *Store) mailboxIDsWithAttribute(ctx context.Context, attribute int) ([]int64, error) {
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return nil, err
 	}

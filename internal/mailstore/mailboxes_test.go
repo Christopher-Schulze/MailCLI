@@ -12,6 +12,36 @@ import (
 	"mailcli/internal/mailref"
 )
 
+// The mailbox catalog is memoized per Store: repeated catalog consumers
+// (ListMailboxes, ListMessages, membership checks, accounts) share one
+// mailboxes-table scan.
+func TestMailboxRecordsMemoizedPerStore(t *testing.T) {
+	t.Parallel()
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	ctx := context.Background()
+
+	records, err := store.mailboxRecords(ctx)
+	if err != nil {
+		t.Fatalf("mailboxRecords: %v", err)
+	}
+	if len(records) == 0 {
+		t.Fatal("mailboxRecords returned no records")
+	}
+	if store.mailboxCatalogQueries != 1 {
+		t.Fatalf("after first call: queries = %d, want 1", store.mailboxCatalogQueries)
+	}
+	again, err := store.mailboxRecords(ctx)
+	if err != nil {
+		t.Fatalf("second mailboxRecords: %v", err)
+	}
+	if len(again) != len(records) {
+		t.Fatalf("memoized records = %d, want %d", len(again), len(records))
+	}
+	if store.mailboxCatalogQueries != 1 {
+		t.Fatalf("after second call: queries = %d, want 1 (memoized)", store.mailboxCatalogQueries)
+	}
+}
 func TestListMailboxesRejectsIncompleteCatalog(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

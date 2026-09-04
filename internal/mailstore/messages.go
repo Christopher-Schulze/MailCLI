@@ -57,7 +57,7 @@ func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesReque
 	if !s.activeAccountID(mailbox.AccountID) {
 		return mail.MessagePage{}, operationError("stale_reference", "mailbox account is not active")
 	}
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return mail.MessagePage{}, err
 	}

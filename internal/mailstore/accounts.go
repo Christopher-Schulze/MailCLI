@@ -20,7 +20,7 @@ type senderIdentity struct {
 }
 
 func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -130,7 +130,7 @@ func (s *Store) resolveSearchScope(
 	if accountID != "" && !strings.EqualFold(accountID, mailbox.AccountID) {
 		return "", nil, 0, false, operationError("invalid_argument", "account and mailbox refs select different accounts")
 	}
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return "", nil, 0, false, err
 	}

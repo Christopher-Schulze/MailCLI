@@ -33,7 +33,7 @@ func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, 
 	if flaggedDraft {
 		return true, nil
 	}
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -193,7 +193,7 @@ func (s *Store) mailboxRecordForRef(
 	accountID string,
 	path []string,
 ) (mailboxRecord, error) {
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return mailboxRecord{}, err
 	}

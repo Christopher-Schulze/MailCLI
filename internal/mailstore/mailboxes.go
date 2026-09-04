@@ -35,7 +35,7 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 	if err != nil {
 		return nil, err
 	}
-	records, err := s.loadMailboxRecords(ctx)
+	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,19 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 	return mailboxes, nil
 }
 
-func (s *Store) loadMailboxRecords(ctx context.Context) (result []mailboxRecord, resultErr error) {
+// mailboxRecords returns the Envelope Index mailbox catalog, memoized for the
+// Store's lifetime. The store is opened read-only and lives for one CLI
+// invocation, so a mid-invocation catalog change is out of scope by design;
+// membership of specific messages is re-verified live in SQL on every access.
+func (s *Store) mailboxRecords(ctx context.Context) ([]mailboxRecord, error) {
+	s.mailboxCatalogOnce.Do(func() {
+		s.mailboxCatalogQueries++
+		s.mailboxCatalog, s.mailboxCatalogErr = s.queryMailboxRecords(ctx)
+	})
+	return s.mailboxCatalog, s.mailboxCatalogErr
+}
+
+func (s *Store) queryMailboxRecords(ctx context.Context) (result []mailboxRecord, resultErr error) {
 	rows, err := s.database.QueryContext(ctx, `
 		SELECT ROWID, url, total_count, unread_count
 		FROM mailboxes
