@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -152,6 +153,60 @@ func TestLoadComposerAttachmentsUnknownExtension(t *testing.T) {
 	if got[0].contentType != "application/octet-stream" {
 		t.Errorf("contentType = %q, want application/octet-stream", got[0].contentType)
 	}
+}
+
+func TestBuildMessageWithPreloadedAttachmentsPreservesWireFormat(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "invoice.pdf")
+	if err := os.WriteFile(path, []byte("invoice-bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Attachment", Body: "Body",
+		Attachments: []DraftAttachment{{Path: path}},
+	}
+	legacy, err := BuildMessage(draft, "<test@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	loaded, err := loadComposerAttachments(draft.Attachments)
+	if err != nil {
+		t.Fatalf("loadComposerAttachments() error = %v", err)
+	}
+	preloaded, err := buildMessageWithAttachments(draft, "<test@example.com>", loaded)
+	if err != nil {
+		t.Fatalf("buildMessageWithAttachments() error = %v", err)
+	}
+	if normalizeGeneratedMessage(legacy) != normalizeGeneratedMessage(preloaded) {
+		t.Fatalf("preloaded composition changed the MIME wire format:\nlegacy:\n%s\npreloaded:\n%s", legacy, preloaded)
+	}
+}
+
+func normalizeGeneratedMessage(message []byte) string {
+	lines := strings.Split(string(message), "\r\n")
+	var boundaries []string
+	for _, line := range lines {
+		marker := `boundary="`
+		start := strings.Index(line, marker)
+		if start < 0 {
+			continue
+		}
+		value := line[start+len(marker):]
+		if end := strings.IndexByte(value, '"'); end >= 0 {
+			boundaries = append(boundaries, value[:end])
+		}
+	}
+	for index, line := range lines {
+		if strings.HasPrefix(line, "Date: ") {
+			line = "Date: <generated>"
+		}
+		for _, boundary := range boundaries {
+			line = strings.ReplaceAll(line, boundary, "<boundary>")
+		}
+		lines[index] = line
+	}
+	return strings.Join(lines, "\r\n")
 }
 
 func TestBuildMessageWithHTMLBody(t *testing.T) {

@@ -12,13 +12,14 @@ import (
 )
 
 type stubSubmitter struct {
-	calls    int
-	lastHost string
-	lastPort int
-	lastFrom string
-	lastTo   []string
-	evidence transport.SubmitEvidence
-	err      error
+	calls       int
+	lastHost    string
+	lastPort    int
+	lastFrom    string
+	lastTo      []string
+	lastMessage []byte
+	evidence    transport.SubmitEvidence
+	err         error
 }
 
 func (s *stubSubmitter) Submit(
@@ -26,10 +27,11 @@ func (s *stubSubmitter) Submit(
 	cfg transport.SubmitConfig,
 	from string,
 	rcpts []string,
-	_ []byte,
+	message []byte,
 ) (transport.SubmitEvidence, error) {
 	s.calls++
 	s.lastHost, s.lastPort, s.lastFrom, s.lastTo = cfg.Host, cfg.Port, from, rcpts
+	s.lastMessage = append(s.lastMessage[:0], message...)
 	return s.evidence, s.err
 }
 
@@ -54,11 +56,15 @@ func (s *stubMirror) AppendToSent(
 type stubCredentials struct {
 	password string
 	loadErr  error
+	loadHook func()
 }
 
 func (c *stubCredentials) Load(string) (string, error) {
 	if c.loadErr != nil {
 		return "", c.loadErr
+	}
+	if c.loadHook != nil {
+		c.loadHook()
 	}
 	return c.password, nil
 }

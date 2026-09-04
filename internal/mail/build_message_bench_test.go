@@ -93,3 +93,55 @@ func BenchmarkBuildMessageAttachment1MiB(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkBuildMessageAttachment64MiB measures the current in-memory
+// composition peak at the maximum raw attachment size used by the send path.
+func BenchmarkBuildMessageAttachment64MiB(b *testing.B) {
+	attachment, cleanup := benchmarkAttachmentFile(b, 64*1024*1024)
+	defer cleanup()
+	draft := benchmarkDraft(benchmarkBody(4*1024), attachment)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := BuildMessage(draft, "<benchmark@mailcli>"); err != nil {
+			b.Fatalf("build message: %v", err)
+		}
+	}
+}
+
+// BenchmarkSendAttachmentDoubleRead64MiB models the pre-059 send path:
+// fingerprinting reads the file once and BuildMessage reads it again.
+func BenchmarkSendAttachmentDoubleRead64MiB(b *testing.B) {
+	attachment, cleanup := benchmarkAttachmentFile(b, 64*1024*1024)
+	defer cleanup()
+	draft := benchmarkDraft(benchmarkBody(4*1024), attachment)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := verifyDraftAttachments(draft.Attachments); err != nil {
+			b.Fatalf("verify attachments: %v", err)
+		}
+		if _, err := BuildMessage(draft, "<benchmark@mailcli>"); err != nil {
+			b.Fatalf("build message: %v", err)
+		}
+	}
+}
+
+// BenchmarkSendAttachmentSingleRead64MiB measures the TASK 059 send path:
+// verification and composition share the one in-memory attachment snapshot.
+func BenchmarkSendAttachmentSingleRead64MiB(b *testing.B) {
+	attachment, cleanup := benchmarkAttachmentFile(b, 64*1024*1024)
+	defer cleanup()
+	draft := benchmarkDraft(benchmarkBody(4*1024), attachment)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		loaded, err := verifyAndLoadAttachments(draft)
+		if err != nil {
+			b.Fatalf("verify and load attachments: %v", err)
+		}
+		if _, err := buildMessageWithAttachments(draft, "<benchmark@mailcli>", loaded); err != nil {
+			b.Fatalf("build message: %v", err)
+		}
+	}
+}

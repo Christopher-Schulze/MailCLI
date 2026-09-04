@@ -51,6 +51,10 @@ func BuildMessage(draft Draft, messageID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return buildMessageWithAttachments(draft, messageID, attachments)
+}
+
+func buildMessageWithAttachments(draft Draft, messageID string, attachments []composerAttachment) ([]byte, error) {
 	alternativeBoundary, err := randomBoundary()
 	if err != nil {
 		return nil, err
@@ -376,15 +380,19 @@ func readAttachmentData(attachment DraftAttachment) (composerAttachment, error) 
 			Err:     err,
 		}
 	}
-	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(attachment.Path)))
+	return composerAttachmentFromData(attachment.Path, data), nil
+}
+
+func composerAttachmentFromData(path string, data []byte) composerAttachment {
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	return composerAttachment{
-		filename:    filepath.Base(attachment.Path),
+		filename:    filepath.Base(path),
 		contentType: contentType,
 		data:        data,
-	}, nil
+	}
 }
 
 func (a composerAttachment) headers() []string {

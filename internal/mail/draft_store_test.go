@@ -3,6 +3,7 @@ package mail
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -416,18 +417,60 @@ func TestDraftLifecycleAndAttachmentIntegrity(t *testing.T) {
 	if err := os.WriteFile(attachmentPath, []byte("version two"), 0o600); err != nil {
 		t.Fatalf("change attachment: %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil || submitter.calls != 0 {
-		t.Fatalf("changed attachment send error = %v, submits = %d", err, submitter.calls)
+	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	if sendErr == nil || submitter.calls != 0 || !strings.Contains(sendErr.Error(), filepath.Base(attachmentPath)) {
+		t.Fatalf("changed attachment send result = %+v, error = %v, submits = %d", result, sendErr, submitter.calls)
 	}
 	if err := os.WriteFile(attachmentPath, []byte("version one"), 0o600); err != nil {
 		t.Fatalf("restore attachment: %v", err)
 	}
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err = service.SendDraft(context.Background(), draft.Ref)
 	if err != nil || result.Outcome != SendOutcomeSent || !result.Accepted || submitter.calls != 1 || mirror.calls != 1 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submits = %d", result, err, submitter.calls)
 	}
 	if _, err := service.GetDraft(draft.Ref); err == nil {
 		t.Fatal("sent draft still exists")
+	}
+}
+
+// The credential lookup mutates the path after send-time verification. The
+// submitter must still receive the verified in-memory snapshot rather than
+// causing a second read during composition.
+func TestSendDraftUsesVerifiedAttachmentSnapshot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	attachmentPath := filepath.Join(t.TempDir(), "brief.txt")
+	original := []byte("version one")
+	if err := os.WriteFile(attachmentPath, original, 0o600); err != nil {
+		t.Fatalf("write attachment: %v", err)
+	}
+	submitter, mirror := sendTransportStubs()
+	credentials := &stubCredentials{
+		password: "secret",
+		loadHook: func() {
+			if err := os.WriteFile(attachmentPath, []byte("version two"), 0o600); err != nil {
+				t.Fatalf("mutate attachment during credential load: %v", err)
+			}
+		},
+	}
+	service := newTransportService(root, submitter, mirror, credentials)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Send test", Body: "Body", Attachments: []string{attachmentPath},
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if submitter.calls != 1 {
+		t.Fatalf("submitter calls = %d, want one", submitter.calls)
+	}
+	message := string(submitter.lastMessage)
+	originalEncoded := base64.StdEncoding.EncodeToString(original)
+	changedEncoded := base64.StdEncoding.EncodeToString([]byte("version two"))
+	if !strings.Contains(message, originalEncoded) || strings.Contains(message, changedEncoded) {
+		t.Fatalf("submitted message did not use the verified snapshot: %q", message)
 	}
 }
 
