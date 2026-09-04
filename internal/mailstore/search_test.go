@@ -2,7 +2,9 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +206,92 @@ func TestAttachmentFilterUsesPositiveCatalogWhenSourceIsMissing(t *testing.T) {
 // their source: positive catalog counts prove both filter directions with
 // no scan and no byte budget. Catalog-zero candidates stay on the scan
 // path (catalog lag), which this fixture makes visible as missing sources.
+func TestBodySearchDegradesWhenSourceIsDeletedBeforeScan(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove fixture source: %v", err)
+	}
+	query, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Text: "needle", Limit: 10})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if page.Coverage.MissingSources != 1 || page.Coverage.Complete {
+		t.Fatalf("coverage = %#v; deleted source must degrade the page", page.Coverage)
+	}
+}
+
+func TestBodySearchAbortsOnPermissionDeniedSource(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks are bypassed for root")
+	}
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	path := base + ".emlx"
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat fixture source: %v", err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("remove fixture source permissions: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, info.Mode().Perm())
+	})
+	query, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Text: "needle", Limit: 10})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	_, err = store.SearchMessages(context.Background(), query)
+	if err == nil || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("SearchMessages() error = %v, want permission denied", err)
+	}
+}
+
+func TestSearchSourceErrorClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		err         error
+		unavailable bool
+	}{
+		{name: "typed missing", err: operationError("message_source_missing", "missing"), unavailable: true},
+		{name: "typed invalid", err: operationError("invalid_emlx", "invalid"), unavailable: true},
+		{name: "wrapped not found", err: fmt.Errorf("open source: %w", fs.ErrNotExist), unavailable: true},
+		{name: "permission denied", err: fs.ErrPermission},
+		{name: "unexpected", err: errors.New("unexpected source failure")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isUnavailableSearchSourceError(test.err); got != test.unavailable {
+				t.Fatalf("isUnavailableSearchSourceError() = %v, want %v", got, test.unavailable)
+			}
+		})
+	}
+}
+
 func TestAttachmentOnlySearchSkipsCatalogProvenSources(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)

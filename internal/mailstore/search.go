@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strings"
 	"unicode"
@@ -674,13 +675,26 @@ func (s *Store) openSearchCandidate(item messageRecord) (*emlxSource, candidateS
 	resolved := resolvedMessage{Record: item, PhysicalLocation: location}
 	source, err := s.openResolvedSource(resolved)
 	if err != nil {
-		var typed *Error
-		if errors.As(err, &typed) && (typed.Code == "message_source_missing" || typed.Code == "invalid_emlx") {
+		if isUnavailableSearchSourceError(err) {
 			return nil, candidateScan{missing: true}, nil
 		}
 		return nil, candidateScan{}, err
 	}
 	return source, candidateScan{}, nil
+}
+
+func isUnavailableSearchSourceError(err error) bool {
+	var coded interface {
+		error
+		ErrorCode() string
+	}
+	if errors.As(err, &coded) {
+		switch coded.ErrorCode() {
+		case "message_source_missing", "invalid_emlx":
+			return true
+		}
+	}
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 func scanCandidate(
