@@ -420,11 +420,9 @@ func (s *Store) scanSearchRecords(
 	return page, nil
 }
 
-// attachmentOnly reports whether the query is an attachment filter with no
-// text terms: the only source-dependent condition is the attachment count.
-// A catalog count > 0 decides both filter directions without a scan; a
-// count of 0 stays undecidable (the catalog can lag behind a newly
-// delivered attachment) and keeps the full MIME scan path.
+// attachmentOnly reports whether an attachment filter with no text terms
+// is active: the pre-classification in dispatchSearchJobs then decides
+// positive-catalog candidates without opening their sources.
 func attachmentOnly(query mail.Query) bool {
 	return strings.TrimSpace(query.Text) == "" && query.HasAttachment != nil
 }
@@ -485,7 +483,9 @@ func (s *Store) dispatchSearchJobs(
 		// entirely: count > 0 proves a match for --attachment true and
 		// disproves it for --attachment false (max(catalog, parts) is
 		// monotone in catalog). No open, no scan, no byte budget.
-		if len(terms) == 0 && hasAttachment != nil {
+		// Catalog-zero candidates fall through to the scan because the
+		// catalog can lag behind a newly downloaded attachment.
+		if len(terms) == 0 && hasAttachment != nil && attachmentOnly(mail.Query{HasAttachment: hasAttachment}) {
 			if *hasAttachment && item.AttachmentCount > 0 {
 				results[index] = candidateScan{
 					match: true, attachments: item.AttachmentCount,

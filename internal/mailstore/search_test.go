@@ -200,9 +200,10 @@ func TestAttachmentFilterUsesPositiveCatalogWhenSourceIsMissing(t *testing.T) {
 	}
 }
 
-// Catalog-proven candidates match attachment-only filters without opening
-// the source: positive catalog counts decide both directions, the scan
-// never runs, and no byte budget is consumed.
+// Catalog-proven candidates decide attachment-only filters without opening
+// their source: positive catalog counts prove both filter directions with
+// no scan and no byte budget. Catalog-zero candidates stay on the scan
+// path (catalog lag), which this fixture makes visible as missing sources.
 func TestAttachmentOnlySearchSkipsCatalogProvenSources(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
