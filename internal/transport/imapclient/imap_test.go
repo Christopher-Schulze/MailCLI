@@ -1,6 +1,7 @@
 package imapclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -487,6 +488,17 @@ func TestListMalformedResponseFailsLoudly(t *testing.T) {
 	var typed *transport.TransportError
 	if !errors.As(err, &typed) || typed.Code != transport.CodeIMAPResponseMalformed {
 		t.Fatalf("ListMailboxes error = %v, want imap_response_malformed", err)
+	}
+}
+
+func TestListLiteralSizeLimit(t *testing.T) {
+	sess := &session{br: bufio.NewReader(strings.NewReader(
+		"* LIST (\\Sent) \".\" {" + strconv.Itoa(maxListLiteralBytes+1) + "}\r\n",
+	))}
+	_, _, err := New().readLineWithLiteral(sess)
+	var malformed *malformedResponseError
+	if !errors.As(err, &malformed) {
+		t.Fatalf("readLineWithLiteral() error = %v, want malformed response", err)
 	}
 }
 

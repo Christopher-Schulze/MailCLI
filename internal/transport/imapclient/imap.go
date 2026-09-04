@@ -36,7 +36,8 @@ import (
 )
 
 const (
-	flagSeen = "\\Seen"
+	flagSeen            = "\\Seen"
+	maxListLiteralBytes = 1 << 20
 )
 
 // Client is a minimal IMAPv4 client that can mirror a message into the Sent
@@ -496,6 +497,12 @@ func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 		if !hasLiteral {
 			reconstructed.WriteString(line)
 			return reconstructed.String(), literals, nil
+		}
+		if size > maxListLiteralBytes {
+			sess.dirty = true
+			return "", nil, &malformedResponseError{err: fmt.Errorf(
+				"IMAP LIST literal size %d exceeds %d bytes", size, maxListLiteralBytes,
+			)}
 		}
 
 		reconstructed.WriteString(prefix)
