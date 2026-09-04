@@ -143,6 +143,9 @@ type stubImapOperator struct {
 	// mutation invocation, so retry tests can assert exactly-once retry.
 	mutationErrs  []error
 	mutationCalls int
+	// statusErr scripts per-mailbox CheckStatus failures for sync-check
+	// tests; absent mailboxes report s.status.
+	statusErr map[string]error
 }
 
 func (s *stubImapOperator) nextMutationErr() error {
@@ -277,6 +280,9 @@ func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapC
 func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
 	if s.err != nil {
 		return transport.MailboxStatus{}, s.err
+	}
+	if err, ok := s.statusErr[mailbox]; ok {
+		return transport.MailboxStatus{}, err
 	}
 	return s.status, nil
 }
@@ -681,6 +687,200 @@ func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
 	}
 }
+
+// A failing mailbox degrades to a failure entry: the sibling mailbox is
+// still checked, the typed server code is preserved, complete is false.
+func TestSyncCheckReportsFailingMailbox(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "synccheck1@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		statusErr: map[string]error{
+			"INBOX": &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "IMAP STATUS deadline"},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"synccheck1@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures = %+v, want exactly 1", result.Failures)
+	}
+	failure := result.Failures[0]
+	if failure.Mailbox != "INBOX" || failure.Code != transport.CodeIMAPTimeout || failure.Account != "synccheck1@gmail.com" {
+		t.Fatalf("Failure = %+v, want INBOX/imap_timeout entry", failure)
+	}
+	if len(result.Mailboxes) == 0 {
+		t.Fatal("sibling mailboxes were not checked despite one failure")
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite a failing mailbox")
+	}
+}
+
+// A dead context maps to sync_check_timeout per unchecked mailbox.
+func TestSyncCheckReportsTimeoutPerMailbox(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "synccheck2@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes:     []transport.MailboxInfo{{Name: "INBOX"}},
+		statusErr: map[string]error{"INBOX": context.DeadlineExceeded},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"synccheck2@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	found := false
+	for _, failure := range result.Failures {
+		if failure.Mailbox == "INBOX" && failure.Code == "sync_check_timeout" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Failures = %+v, want INBOX/sync_check_timeout entry", result.Failures)
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite a timed-out mailbox")
+	}
+}
+
+// Missing credentials surface as an account-level entry, never as silent
+// empty mailboxes.
+func TestSyncCheckReportsMissingCredentials(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "synccheck3@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: strictCredentials{},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures = %+v, want exactly 1", result.Failures)
+	}
+	failure := result.Failures[0]
+	if failure.Mailbox != "" || failure.Code != "imap_credentials_missing" {
+		t.Fatalf("Failure = %+v, want account-level imap_credentials_missing entry", failure)
+	}
+	if len(result.Mailboxes) != 0 {
+		t.Fatalf("Mailboxes = %+v, want none checked without credentials", result.Mailboxes)
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite missing credentials")
+	}
+}
+
+// An unresolvable provider surfaces its typed code at account level.
+func TestSyncCheckReportsUnsupportedProvider(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "synccheck4@unknown-provider.tld")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"synccheck4@unknown-provider.tld": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures = %+v, want exactly 1", result.Failures)
+	}
+	if result.Failures[0].Code != transport.CodeUnsupportedProvider {
+		t.Fatalf("Failure = %+v, want transport_unsupported_provider", result.Failures[0])
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite an unresolvable provider")
+	}
+}
+
+// A clean check reports complete with no failures.
+func TestSyncCheckCompleteWhenAllChecked(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "synccheck5@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes:  []transport.MailboxInfo{{Name: "INBOX"}},
+		status: transport.MailboxStatus{Messages: 3},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"synccheck5@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("Failures = %+v, want none", result.Failures)
+	}
+	if !result.Complete {
+		t.Fatal("Complete = false despite a clean check")
+	}
+	if len(result.Mailboxes) == 0 {
+		t.Fatal("no mailboxes checked")
+	}
+}
+
+// failureCode maps deadline/cancelation to sync_check_timeout even when the
+// context is still alive, typed errors to their code, and anything else to
+// sync_check_failed.
+func TestFailureCodeMapping(t *testing.T) {
+	ctx := context.Background()
+	if got := failureCode(ctx, context.DeadlineExceeded); got != "sync_check_timeout" {
+		t.Fatalf("deadline error = %q, want sync_check_timeout", got)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if got := failureCode(canceled, nil); got != "sync_check_timeout" {
+		t.Fatalf("canceled ctx = %q, want sync_check_timeout", got)
+	}
+	typed := &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "no"}
+	if got := failureCode(ctx, typed); got != transport.CodeIMAPAuthFailed {
+		t.Fatalf("typed error = %q, want the transport code", got)
+	}
+	if got := failureCode(ctx, errTestPlain{}); got != "sync_check_failed" {
+		t.Fatalf("plain error = %q, want sync_check_failed", got)
+	}
+}
+
+type errTestPlain struct{}
+
+func (errTestPlain) Error() string { return "plain" }
 
 func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)

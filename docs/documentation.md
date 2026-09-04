@@ -81,7 +81,7 @@ Command surface:
 | `mailcli messages move` | Implemented | Move a message to a resolved mailbox over IMAP |
 | `mailcli messages copy` | Implemented | Copy a message to a resolved mailbox over IMAP |
 | `mailcli messages delete` | Implemented | Delete a message over IMAP by moving it to the Trash mailbox after confirmation |
-| `mailcli sync` | Implemented | `--check` reports server-vs-local deltas over IMAP without Mail.app; without `--check` asks Mail.app to synchronize |
+| `mailcli sync` | Implemented | `--check` reports server-vs-local deltas over IMAP without Mail.app; skipped mailboxes appear as `failures` entries with `complete:false`; without `--check` asks Mail.app to synchronize |
 
 Agents must discover support from `mailcli capabilities --json`, never by parsing help text. The capability manifest explicitly reports that MailCLI owns no mail index or background process, can read raw MIME and send raw MIME it composes itself (`raw_mime_read:true`, `raw_mime_send:true`), has `compose_write:false`, `compose_attachment_write:false`, and `send_transport:"smtp"`, limits pages to 25 messages, raw fallback to 64 MiB, reviewed draft subjects to 64 KiB, bodies to 4 MiB, recipients to 200, attachments to 100, and attachment bytes to 512 MiB. `mailcli help` is a compact human command overview; focused flags remain under `mailcli <command> --help`.
 

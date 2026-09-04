@@ -564,6 +564,7 @@ func (g syncCheckGateway) SyncCheck(context.Context, string) (mail.SyncCheckResu
 func TestSyncCheckJSON(t *testing.T) {
 	gw := syncCheckGateway{
 		result: mail.SyncCheckResult{
+			Complete: true,
 			Mailboxes: []mail.MailboxDelta{
 				{
 					MailboxRef:     "mbx_1",
@@ -587,6 +588,62 @@ func TestSyncCheckJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"sync_check"`) || !strings.Contains(stdout.String(), `"delta":5`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestSyncCheckJSONReportsFailures(t *testing.T) {
+	gw := syncCheckGateway{
+		result: mail.SyncCheckResult{
+			Mailboxes: []mail.MailboxDelta{
+				{
+					MailboxRef:     "mbx_1",
+					AccountRef:     "acct_1",
+					Name:           "INBOX",
+					Path:           []string{"INBOX"},
+					LocalMessages:  10,
+					ServerMessages: 10,
+					Delta:          0,
+					Unseen:         1,
+				},
+			},
+			Failures: []mail.SyncCheckFailure{
+				{Account: "a@gmail.com", Mailbox: "Archive", Code: "imap_timeout", Message: "IMAP STATUS deadline"},
+			},
+			Complete: false,
+		},
+	}
+	service := mail.NewService(gw)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"sync", "--check", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"complete":false`) || !strings.Contains(out, `"failures"`) || !strings.Contains(out, `"code":"imap_timeout"`) {
+		t.Fatalf("unexpected stdout: %s", out)
+	}
+}
+
+func TestSyncCheckHumanPrintsFailuresSection(t *testing.T) {
+	gw := syncCheckGateway{
+		result: mail.SyncCheckResult{
+			Failures: []mail.SyncCheckFailure{
+				{Account: "a@gmail.com", Mailbox: "Archive", Code: "imap_timeout", Message: "IMAP STATUS deadline"},
+			},
+			Complete: false,
+		},
+	}
+	service := mail.NewService(gw)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"sync", "--check"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "failures") || !strings.Contains(out, "imap_timeout") || !strings.Contains(out, "Archive") {
+		t.Fatalf("unexpected stdout: %s", out)
 	}
 }
 

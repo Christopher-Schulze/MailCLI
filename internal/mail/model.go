@@ -323,9 +323,23 @@ type MailboxDelta struct {
 }
 
 type SyncCheckResult struct {
-	AccountRef string         `json:"account_ref,omitempty"`
-	Mailboxes  []MailboxDelta `json:"mailboxes"`
+	AccountRef string             `json:"account_ref,omitempty"`
+	Mailboxes  []MailboxDelta     `json:"mailboxes"`
+	Failures   []SyncCheckFailure `json:"failures,omitempty"`
+	// Complete is true only when every mailbox of every targeted account
+	// was checked. False means partial coverage: see Failures.
+	Complete bool `json:"complete"`
 }
+
+// SyncCheckFailure records one skipped account or mailbox: the check ran,
+// this entry explains what was not verified.
+type SyncCheckFailure struct {
+	Account string `json:"account"`
+	Mailbox string `json:"mailbox,omitempty"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type Message struct {
 	Summary         MessageSummary `json:"summary"`
 	ReplyTo         string         `json:"reply_to"`

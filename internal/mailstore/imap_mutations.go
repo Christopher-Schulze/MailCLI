@@ -494,7 +494,13 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 
 	accounts, err := c.store.ListAccounts(ctx)
 	if err != nil {
-		return result, err
+		result.Failures = append(result.Failures, mail.SyncCheckFailure{
+			Account: accountRef,
+			Code:    failureCode(ctx, err),
+			Message: err.Error(),
+		})
+		result.Complete = false
+		return result, nil
 	}
 
 	imapOp := c.send.ImapClient()
@@ -523,18 +529,50 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 	credStore := c.send.Credentials
 	for _, acct := range targetAccounts {
 		if len(acct.EmailAddresses) == 0 {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: acct.Ref,
+				Code:    "account_no_email",
+				Message: "account has no email addresses; cannot resolve provider endpoints",
+			})
 			continue
 		}
 		email := acct.EmailAddresses[0]
 		_, _, imapHost, imapPort, err := transport.ProviderHosts(email)
 		if err != nil {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    failureCode(ctx, err),
+				Message: err.Error(),
+			})
 			continue
 		}
 		if credStore == nil {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    "imap_credentials_missing",
+				Message: "no credential store configured; run 'mailcli send setup --from " + email + "'",
+			})
 			continue
 		}
 		password, err := credStore.Load(email)
-		if err != nil || password == "" {
+		if err != nil {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    failureCode(ctx, err),
+				Message: err.Error(),
+			})
+			continue
+		}
+		if password == "" {
+			code := "imap_credentials_missing"
+			if ctx.Err() != nil {
+				code = "sync_check_timeout"
+			}
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    code,
+				Message: "no stored password; run 'mailcli send setup --from " + email + "'",
+			})
 			continue
 		}
 		cfg := transport.ImapConfig{
@@ -546,11 +584,21 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 
 		localBoxes, err := c.store.ListMailboxes(ctx, mail.ListMailboxesRequest{AccountRef: acct.Ref})
 		if err != nil {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    failureCode(ctx, err),
+				Message: err.Error(),
+			})
 			continue
 		}
 
 		serverBoxes, err := c.getOrLoadMailboxes(ctx, imapOp, cfg, email)
 		if err != nil {
+			result.Failures = append(result.Failures, mail.SyncCheckFailure{
+				Account: email,
+				Code:    failureCode(ctx, err),
+				Message: err.Error(),
+			})
 			continue
 		}
 
@@ -558,6 +606,12 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			imapName := mapPathToIMAP(serverBoxes, lb.Path)
 			st, err := imapOp.CheckStatus(ctx, cfg, imapName)
 			if err != nil {
+				result.Failures = append(result.Failures, mail.SyncCheckFailure{
+					Account: email,
+					Mailbox: imapName,
+					Code:    failureCode(ctx, err),
+					Message: err.Error(),
+				})
 				continue
 			}
 			delta := st.Messages - lb.MessageCount
@@ -573,8 +627,23 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			})
 		}
 	}
+	result.Complete = len(result.Failures) == 0
 
 	return result, nil
+}
+
+// failureCode maps a sync-check error to its typed entry code. A dead
+// context (or a deadline/cancelation error, which implies one) means the
+// 30 s budget ran out: the entry is honest about partial coverage instead
+// of repeating a stale server code.
+func failureCode(ctx context.Context, err error) string {
+	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "sync_check_timeout"
+	}
+	if code := transport.ErrorCode(err); code != "" {
+		return code
+	}
+	return "sync_check_failed"
 }
 
 // isUIDValidityChangedError reports whether err is the typed mailbox rebuild
