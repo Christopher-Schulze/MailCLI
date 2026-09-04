@@ -37,6 +37,7 @@ const (
 	CodeSMTPTLSFailed           = "smtp_tls_failed"
 	CodeSMTPRejected            = "smtp_rejected"
 	CodeSMTPTimeout             = "smtp_timeout"
+	CodeSMTPTransferTimeout     = "smtp_transfer_timeout"
 	CodeIMAPConnectFailed       = "imap_connect_failed"
 	CodeSMTPCredentialsMissing  = "smtp_credentials_missing"
 	CodeIMAPAuthFailed          = "imap_auth_failed"

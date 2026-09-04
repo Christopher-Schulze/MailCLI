@@ -39,7 +39,7 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard`, `prune`, `reconcile` | Manages plain, Markdown, or safe HTML drafts, prunes stale never-sent drafts, reconciles retained send claims, and opens a reviewed new draft visibly; scripted `save` remains blocked |
-| Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required |
+| Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required. Short SMTP commands run under a 30 s budget while the DATA transfer scales with message size (up to 512 MiB attachments inside a 15 min cap) |
 | Synchronization | `sync` | `--check` reports server-vs-local deltas over IMAP; without `--check` asks Mail.app to synchronize |
 | Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 

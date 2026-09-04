@@ -12,6 +12,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -20,8 +21,17 @@ import (
 )
 
 const (
-	dialTimeout   = 10 * time.Second
+	dialTimeout = 10 * time.Second
+	// commandBudget caps every short SMTP command (greeting, EHLO,
+	// STARTTLS, AUTH, MAIL, RCPT, DATA start, final reply).
 	commandBudget = 30 * time.Second
+	// bandwidthFloorBytesPerSec is the conservative uplink assumed when
+	// sizing the DATA transfer budget: 1 MiB/s sits below typical
+	// broadband uplinks, so normal links finish long before the budget.
+	bandwidthFloorBytesPerSec = int64(1 << 20)
+	// transferCap bounds the DATA phase even for the largest messages:
+	// 512 MiB at the floor needs ~542 s, inside the 15 min cap.
+	transferCap = 15 * time.Minute
 )
 
 // Client submits fully composed RFC 5322 messages to an SMTP submission
@@ -167,12 +177,18 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg []byt
 		return "", sessionError(ctx, "DATA", err)
 	}
 
-	w := client.Text.DotWriter()
-	if _, err := w.Write(msg); err != nil {
+	// The payload (body plus attachments) gets a size-aware budget instead
+	// of the flat command budget: large sends legitimately outlast 30 s.
+	if err := bumpTransferDeadline(conn, ctx, int64(len(msg))); err != nil {
 		return "", sessionError(ctx, "DATA", err)
 	}
+
+	w := client.Text.DotWriter()
+	if _, err := w.Write(msg); err != nil {
+		return "", transferError(ctx, err)
+	}
 	if err := w.Close(); err != nil {
-		return "", sessionError(ctx, "DATA", err)
+		return "", transferError(ctx, err)
 	}
 
 	if err := bumpDeadline(conn, ctx); err != nil {
@@ -193,6 +209,49 @@ func bumpDeadline(conn net.Conn, ctx context.Context) error {
 		deadline = dl
 	}
 	return conn.SetDeadline(deadline)
+}
+
+// transferBudgetForSize returns commandBudget plus one second per
+// bandwidthFloorBytesPerSec of payload, capped at transferCap. Small
+// messages keep the flat command budget; large ones scale with size.
+func transferBudgetForSize(size int64) time.Duration {
+	budget := commandBudget
+	if size > 0 && bandwidthFloorBytesPerSec > 0 {
+		budget += time.Duration(size/bandwidthFloorBytesPerSec) * time.Second
+	}
+	if budget > transferCap {
+		budget = transferCap
+	}
+	return budget
+}
+
+// bumpTransferDeadline applies the size-aware budget to the DATA payload
+// write, still honoring an earlier ctx deadline.
+func bumpTransferDeadline(conn net.Conn, ctx context.Context, size int64) error {
+	deadline := time.Now().Add(transferBudgetForSize(size))
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	return conn.SetDeadline(deadline)
+}
+
+// transferError classifies a DATA payload failure: a done context stays a
+// command timeout, a live-context socket timeout means the message
+// outlasted its transfer budget (too big for this link), everything else
+// keeps the generic session classification.
+func transferError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return timeoutError(ctx, "DATA")
+	}
+	var netErr net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return &transport.TransportError{
+			Code:    transport.CodeSMTPTransferTimeout,
+			Message: "DATA transfer exceeded its size budget; message too large for this link or server too slow",
+			Err:     err,
+		}
+	}
+	return sessionError(ctx, "DATA", err)
 }
 
 // sessionError classifies an in-session failure: server rejections become

@@ -42,6 +42,9 @@ type fakeSMTPServer struct {
 	rejectRcpt    string
 	stallGreeting bool
 	noStartTLS    bool
+	// stallFinalReply withholds the 250 reply after DATA until the server
+	// closes, simulating a hung server for ctx-cancel tests.
+	stallFinalReply bool
 }
 
 // newFakeSMTPServer starts the fake; configure runs before the accept loop
@@ -193,6 +196,14 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 			s.mu.Lock()
 			s.data = payload
 			s.mu.Unlock()
+			if s.stallFinalReply {
+				select {
+				case <-s.closed:
+					return
+				case <-time.After(30 * time.Second):
+					return
+				}
+			}
 			if !writeLine(conn, "250 2.0.0 OK: queued") {
 				return
 			}

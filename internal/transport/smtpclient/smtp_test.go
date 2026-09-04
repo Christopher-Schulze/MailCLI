@@ -4,8 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
+	"net"
+	"net/smtp"
+	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,4 +174,155 @@ func TestSubmitNoDoubleCloseOnCancel(t *testing.T) {
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	cancel2()
 	_, _ = testClient().Submit(ctx2, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+}
+
+func TestTransferBudgetForSize(t *testing.T) {
+	if got := transferBudgetForSize(0); got != commandBudget {
+		t.Fatalf("empty payload budget = %v, want command budget %v", got, commandBudget)
+	}
+	if got := transferBudgetForSize(512 << 20); got != commandBudget+512*time.Second {
+		t.Fatalf("512 MiB budget = %v, want %v", got, commandBudget+512*time.Second)
+	}
+	if got := transferBudgetForSize(100 << 30); got != transferCap {
+		t.Fatalf("100 GiB budget = %v, want capped %v", got, transferCap)
+	}
+}
+
+func bigTestMessageLines(n int) []byte {
+	var b strings.Builder
+	b.WriteString("From: a@b.c\r\nTo: d@e.f\r\nMessage-ID: <big@a.b>\r\nSubject: big\r\n\r\n")
+	line := "payload " + strings.Repeat("x", 990) + "\r\n"
+	for i := 0; i < n; i++ {
+		b.WriteString(line)
+	}
+	return []byte(b.String())
+}
+
+// deadlineRecorder observes every SetDeadline on the SMTP connection.
+type deadlineRecorder struct {
+	net.Conn
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.deadlines = append(d.deadlines, t)
+	d.mu.Unlock()
+	return d.Conn.SetDeadline(t)
+}
+
+// A 10 MB payload earns a ~40 s transfer budget against the flat 30 s
+// command budget. The recorder proves the payload phase ran under the
+// transfer deadline and the final reply under a restored command budget:
+// deterministic, no wall-clock dependence. (Loopback kernel buffers make
+// timing-based proofs vacuous: macOS autotune absorbs megabytes, so a
+// throttled server only delays the final reply, never the client write.)
+func TestSendDataSetsTransferDeadline(t *testing.T) {
+	srv := newFakeSMTPServer(t)
+	raw, err := net.Dial("tcp", net.JoinHostPort(srv.host(), strconv.Itoa(srv.port())))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	rec := &deadlineRecorder{Conn: raw}
+	client, err := smtp.NewClient(rec, srv.host())
+	if err != nil {
+		t.Fatalf("smtp client: %v", err)
+	}
+	ctx := context.Background()
+	tlsCfg := &tls.Config{InsecureSkipVerify: true}
+	if err := bumpDeadline(rec, ctx); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	if err := client.Hello("localhost"); err != nil {
+		t.Fatalf("EHLO: %v", err)
+	}
+	if err := client.StartTLS(tlsCfg); err != nil {
+		t.Fatalf("STARTTLS: %v", err)
+	}
+	if err := client.Auth(smtp.PlainAuth("", "user", "s3cret-app-pw", srv.host())); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	if err := client.Mail("a@b.c"); err != nil {
+		t.Fatalf("MAIL: %v", err)
+	}
+	if err := client.Rcpt("d@e.f"); err != nil {
+		t.Fatalf("RCPT: %v", err)
+	}
+	msg := bigTestMessageLines(10 << 10)
+	wantTransfer := transferBudgetForSize(int64(len(msg)))
+	if wantTransfer <= commandBudget+5*time.Second {
+		t.Fatalf("test setup: transfer budget %v not clearly above command budget %v", wantTransfer, commandBudget)
+	}
+	start := time.Now()
+	resp, err := sendData(rec, ctx, client, msg)
+	if err != nil {
+		t.Fatalf("sendData: %v", err)
+	}
+	rec.mu.Lock()
+	got := append([]time.Time(nil), rec.deadlines...)
+	rec.mu.Unlock()
+	if !strings.HasPrefix(resp, "250") {
+		t.Fatalf("response = %q, want 250", resp)
+	}
+	transferIdx := -1
+	for i, dl := range got {
+		if dl.Sub(start) >= 35*time.Second && transferIdx < 0 {
+			transferIdx = i
+		}
+	}
+	if transferIdx < 0 {
+		t.Fatalf("no transfer-size deadline in %v", got)
+	}
+	last := got[len(got)-1].Sub(start)
+	if last < commandBudget-5*time.Second || last > commandBudget+5*time.Second {
+		t.Fatalf("final deadline = %v after start, want restored command budget %v", last, commandBudget)
+	}
+	if transferIdx == len(got)-1 {
+		t.Fatalf("transfer deadline is last; final reply has no restored command budget in %v", got)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if !bytes.Equal(srv.data, msg) {
+		t.Fatalf("payload bytes = %d, want %d intact", len(srv.data), len(msg))
+	}
+}
+
+// transferError maps a live-context socket timeout to the dedicated
+// transfer code, keeps done-context as command timeout, and passes
+// anything else to the generic session classification.
+func TestTransferErrorClassifiesTimeout(t *testing.T) {
+	ctx := context.Background()
+	timeoutOp := &net.OpError{Op: "write", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	var typed *transport.TransportError
+	if err := transferError(ctx, timeoutOp); !errors.As(err, &typed) || typed.Code != transport.CodeSMTPTransferTimeout {
+		t.Fatalf("transferError = %v, want smtp_transfer_timeout", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := transferError(canceled, timeoutOp); !errors.As(err, &typed) || typed.Code != transport.CodeSMTPTimeout {
+		t.Fatalf("transferError = %v, want smtp_timeout on done context", err)
+	}
+	if err := transferError(ctx, errors.New("boom")); errors.As(err, &typed) && typed.Code == transport.CodeSMTPTransferTimeout {
+		t.Fatalf("transferError = %v, plain errors must not map to transfer timeout", err)
+	}
+}
+
+// A server that stalls the final reply must be terminated by context
+// cancellation with a typed timeout, not by the command budget.
+func TestSubmitContextCancelDuringStalledReply(t *testing.T) {
+	srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) { s.stallFinalReply = true })
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := testClient().Submit(ctx, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	elapsed := time.Since(start)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != transport.CodeSMTPTimeout {
+		t.Fatalf("Submit error = %v, want smtp_timeout", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("Submit took %v, want cancel-driven abort well under the command budget", elapsed)
+	}
 }
