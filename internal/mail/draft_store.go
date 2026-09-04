@@ -670,6 +670,10 @@ func (t SendTransport) available() error {
 // envelopeFingerprint identifies the exact claimed envelope: Message-ID,
 // sender, recipients, subject, and body. Draft edits after the claim (or a
 // mismatched claim) are detected before reconciliation trusts the claim.
+// The fingerprint hashes the immutable draft fields, deliberately NOT the
+// composed message bytes: BuildMessage generates fresh random multipart
+// boundaries per invocation, so a byte hash would never reproduce at
+// reconcile time and would falsely reject legitimate multipart sends.
 func envelopeFingerprint(draft Draft, messageID string) string {
 	hash := sha256.New()
 	parts := []string{messageID, draft.From, draft.Subject}
