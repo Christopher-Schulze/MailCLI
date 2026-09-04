@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,19 +21,21 @@ import (
 )
 
 type fakeServerConfig struct {
-	authOK            bool
-	sentMboxes        []string
-	trashMboxes       []string
-	otherMboxes       []string
-	listResponse      []byte
-	searchMatchID     string
-	searchUID         uint32
-	appendOK          bool
-	searchDelay       time.Duration
-	moveSupported     bool
-	fetchPayload      []byte
-	selectFailBox     string
-	dropAfterCommands int
+	authOK              bool
+	sentMboxes          []string
+	trashMboxes         []string
+	otherMboxes         []string
+	listResponse        []byte
+	searchMatchID       string
+	searchUID           uint32
+	appendOK            bool
+	searchDelay         time.Duration
+	moveSupported       bool
+	uidExpungeSupported bool
+	initialDeletedUIDs  []uint32
+	fetchPayload        []byte
+	selectFailBox       string
+	dropAfterCommands   int
 	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
 	// first report this UIDVALIDITY instead of 12345, simulating a mailbox
 	// rebuild between resolution and mutation.
@@ -51,23 +54,26 @@ type fakeServer struct {
 	cert     tls.Certificate
 	config   fakeServerConfig
 
-	mu            sync.Mutex
-	selectCalls   int
-	appendCalled  bool
-	appendMbox    string
-	appendFlags   []string
-	appendData    []byte
-	storeCalled   bool
-	storeUID      uint32
-	storeFlags    string
-	copyCalled    bool
-	copyUID       uint32
-	copyDst       string
-	moveCalled    bool
-	moveUID       uint32
-	moveDst       string
-	expungeCalled bool
-	connections   int
+	mu               sync.Mutex
+	selectCalls      int
+	appendCalled     bool
+	appendMbox       string
+	appendFlags      []string
+	appendData       []byte
+	storeCalled      bool
+	storeUID         uint32
+	storeFlags       string
+	copyCalled       bool
+	copyUID          uint32
+	copyDst          string
+	moveCalled       bool
+	moveUID          uint32
+	moveDst          string
+	expungeCalled    bool
+	uidExpungeCalled bool
+	uidExpungeUID    uint32
+	deletedUIDs      map[uint32]struct{}
+	connections      int
 }
 
 func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
@@ -78,7 +84,13 @@ func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
 		t.Fatalf("listen: %v", err)
 	}
 	tl := tls.NewListener(l, &tls.Config{Certificates: []tls.Certificate{cert}})
-	s := &fakeServer{t: t, listener: tl, cert: cert, config: cfg}
+	s := &fakeServer{
+		t: t, listener: tl, cert: cert, config: cfg,
+		deletedUIDs: make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
+	}
+	for _, uid := range cfg.initialDeletedUIDs {
+		s.deletedUIDs[uid] = struct{}{}
+	}
 	go s.run()
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -121,6 +133,17 @@ func (s *fakeServer) ConnectionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.connections
+}
+
+func (s *fakeServer) DeletedUIDs() []uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uids := make([]uint32, 0, len(s.deletedUIDs))
+	for uid := range s.deletedUIDs {
+		uids = append(uids, uid)
+	}
+	sort.Slice(uids, func(left, right int) bool { return uids[left] < uids[right] })
+	return uids
 }
 
 func (s *fakeServer) run() {
@@ -272,9 +295,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.writeLine(bw, tag+" OK STATUS completed")
 		case "EXPUNGE":
 			s.mu.Lock()
+			expunged := len(s.deletedUIDs)
+			clear(s.deletedUIDs)
 			s.expungeCalled = true
 			s.mu.Unlock()
-			s.writeLine(bw, "* 1 EXPUNGE")
+			s.writeLine(bw, fmt.Sprintf("* %d EXPUNGE", expunged))
 			s.writeLine(bw, tag+" OK EXPUNGE completed")
 		case "UID":
 			if len(args) == 0 {
@@ -284,6 +309,20 @@ func (s *fakeServer) handle(conn net.Conn) {
 			subCmd := strings.ToUpper(args[0])
 			switch subCmd {
 			case "SEARCH":
+				if len(args) == 2 && strings.EqualFold(args[1], "DELETED") {
+					uids := s.DeletedUIDs()
+					values := make([]string, len(uids))
+					for index, uid := range uids {
+						values[index] = strconv.FormatUint(uint64(uid), 10)
+					}
+					if len(values) == 0 {
+						s.writeLine(bw, "* SEARCH")
+					} else {
+						s.writeLine(bw, "* SEARCH "+strings.Join(values, " "))
+					}
+					s.writeLine(bw, tag+" OK SEARCH completed")
+					continue
+				}
 				match := false
 				if s.config.searchMatchID != "" && len(args) >= 4 {
 					if strings.EqualFold(args[1], "HEADER") && strings.EqualFold(args[2], "Message-ID") {
@@ -313,9 +352,28 @@ func (s *fakeServer) handle(conn net.Conn) {
 				if len(args) > 2 {
 					s.storeFlags = strings.Join(args[2:], " ")
 				}
+				if strings.Contains(strings.ToLower(strings.Join(args[2:], " ")), "\\deleted") {
+					s.deletedUIDs[uint32(uid)] = struct{}{}
+				}
 				s.mu.Unlock()
 				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d FLAGS (\\Seen))", uid))
 				s.writeLine(bw, tag+" OK STORE completed")
+			case "EXPUNGE":
+				if !s.config.uidExpungeSupported {
+					s.writeLine(bw, tag+" BAD UID EXPUNGE unsupported")
+					continue
+				}
+				uid := 0
+				if len(args) > 1 {
+					uid, _ = strconv.Atoi(args[1])
+				}
+				s.mu.Lock()
+				delete(s.deletedUIDs, uint32(uid))
+				s.uidExpungeCalled = true
+				s.uidExpungeUID = uint32(uid)
+				s.mu.Unlock()
+				s.writeLine(bw, "* 1 EXPUNGE")
+				s.writeLine(bw, tag+" OK UID EXPUNGE completed")
 			case "COPY":
 				uid := 0
 				dst := ""

@@ -67,6 +67,13 @@ type MutationEvidence struct {
 	TargetMailbox  string // destination mailbox (for COPY, MOVE, DELETE)
 	UID            uint32 // affected message UID
 	UIDValidity    uint32 // SELECT-time UIDVALIDITY of the source mailbox
+	// ExpungeBranch identifies the MOVE fallback cleanup: uid_expunge,
+	// deferred, or plain_expunge. It is empty for native MOVE and other
+	// mutations.
+	ExpungeBranch string
+	// ForeignDeletedCount is populated when expunge is deferred because other
+	// deleted UIDs are present in the source mailbox.
+	ForeignDeletedCount int
 	// ExpectedUIDValidity is the UIDVALIDITY the caller resolved before the
 	// mutation; together with UIDValidity it forms the compared pair.
 	ExpectedUIDValidity uint32

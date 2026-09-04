@@ -607,7 +607,7 @@ func TestMoveMessageFallback(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:        true,
 		otherMboxes:   []string{"INBOX", "Archive"},
-		moveSupported: false, // forces fallback COPY + STORE \Deleted + EXPUNGE
+		moveSupported: false, // forces fallback COPY + STORE \\Deleted + scoped cleanup
 	})
 
 	host, portStr, _ := net.SplitHostPort(srv.Addr())
@@ -620,14 +620,86 @@ func TestMoveMessageFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveMessage fallback: %v", err)
 	}
-	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" {
+	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" || ev.ExpungeBranch != "plain_expunge" {
 		t.Fatalf("unexpected evidence: %+v", ev)
 	}
 	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	if !srv.copyCalled || !srv.storeCalled || !srv.expungeCalled {
-		t.Fatalf("fallback chain incomplete: copy=%v, store=%v, expunge=%v", srv.copyCalled, srv.storeCalled, srv.expungeCalled)
+	copyCalled, storeCalled, expungeCalled := srv.copyCalled, srv.storeCalled, srv.expungeCalled
+	srv.mu.Unlock()
+	if !copyCalled || !storeCalled || !expungeCalled {
+		t.Fatalf("fallback chain incomplete: copy=%v, store=%v, expunge=%v", copyCalled, storeCalled, expungeCalled)
 	}
+	if deleted := srv.DeletedUIDs(); len(deleted) != 0 {
+		t.Fatalf("plain EXPUNGE left deleted UIDs: %v", deleted)
+	}
+}
+
+func TestMoveMessageFallbackUsesUIDExpunge(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX", "Archive"},
+		moveSupported: false, uidExpungeSupported: true, initialDeletedUIDs: []uint32{99},
+	})
+	client, cfg := newFakeClient(t, srv)
+
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	if err != nil {
+		t.Fatalf("MoveMessage UID EXPUNGE fallback: %v", err)
+	}
+	if ev.ExpungeBranch != "uid_expunge" || ev.ForeignDeletedCount != 0 {
+		t.Fatalf("unexpected UID EXPUNGE evidence: %+v", ev)
+	}
+	srv.mu.Lock()
+	uidExpungeCalled, uidExpungeUID, expungeCalled := srv.uidExpungeCalled, srv.uidExpungeUID, srv.expungeCalled
+	srv.mu.Unlock()
+	if !uidExpungeCalled || uidExpungeUID != 42 || expungeCalled {
+		t.Fatalf("UID EXPUNGE state: called=%v uid=%d plain=%v", uidExpungeCalled, uidExpungeUID, expungeCalled)
+	}
+	if deleted := srv.DeletedUIDs(); len(deleted) != 1 || deleted[0] != 99 {
+		t.Fatalf("UID EXPUNGE removed foreign deleted UID: %v", deleted)
+	}
+}
+
+func TestMoveMessageFallbackDefersWithForeignDeleted(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX", "Archive"},
+		moveSupported: false, initialDeletedUIDs: []uint32{99},
+	})
+	client, cfg := newFakeClient(t, srv)
+
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	if err != nil {
+		t.Fatalf("MoveMessage deferred fallback: %v", err)
+	}
+	if ev.ExpungeBranch != "deferred" || ev.ForeignDeletedCount != 1 {
+		t.Fatalf("unexpected deferred evidence: %+v", ev)
+	}
+	if !strings.Contains(ev.ServerResponse, "expunge deferred (other deleted messages present") {
+		t.Fatalf("deferred response = %q", ev.ServerResponse)
+	}
+	srv.mu.Lock()
+	uidExpungeCalled, expungeCalled := srv.uidExpungeCalled, srv.expungeCalled
+	srv.mu.Unlock()
+	if uidExpungeCalled || expungeCalled {
+		t.Fatalf("deferred cleanup issued expunge: UID=%v plain=%v", uidExpungeCalled, expungeCalled)
+	}
+	if deleted := srv.DeletedUIDs(); len(deleted) != 2 || deleted[0] != 42 || deleted[1] != 99 {
+		t.Fatalf("deferred move lost deleted UID state: %v", deleted)
+	}
+}
+
+func newFakeClient(t *testing.T, srv *fakeServer) (*Client, transport.ImapConfig) {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	return client, transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 }
 
 func TestDeleteMessage(t *testing.T) {

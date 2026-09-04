@@ -416,6 +416,8 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		UID:                 ev.UID,
 		ExpectedUIDValidity: ev.ExpectedUIDValidity,
 		UIDValidity:         ev.UIDValidity,
+		ExpungeBranch:       ev.ExpungeBranch,
+		ForeignDeletedCount: ev.ForeignDeletedCount,
 	}
 	summary.StalenessNote = stalenessExplanation
 	return summary, nil
@@ -460,6 +462,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 			Command: ev.Command, ServerResponse: ev.ServerResponse,
 			Mailbox: ev.Mailbox, TargetMailbox: ev.TargetMailbox, UID: ev.UID,
 			ExpectedUIDValidity: ev.ExpectedUIDValidity, UIDValidity: ev.UIDValidity,
+			ExpungeBranch: ev.ExpungeBranch, ForeignDeletedCount: ev.ForeignDeletedCount,
 		},
 	}, nil
 }

@@ -995,14 +995,22 @@ func (c *Client) ensureSelected(ctx context.Context, ps *pooledSession, mailbox 
 }
 
 func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID string) ([]uint32, error) {
-	if err := c.setDeadline(ctx, sess); err != nil {
-		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
-	}
 	searchID := messageID
 	if !strings.HasPrefix(searchID, "<") && !strings.HasSuffix(searchID, ">") {
 		searchID = "<" + searchID + ">"
 	}
-	if err := c.writeLine(sess, tag+" UID SEARCH HEADER Message-ID "+quoteIMAP(searchID)); err != nil {
+	return c.doUIDSearchCriteria(ctx, sess, tag, "HEADER Message-ID "+quoteIMAP(searchID))
+}
+
+func (c *Client) doUIDSearchDeleted(ctx context.Context, sess *session, tag string) ([]uint32, error) {
+	return c.doUIDSearchCriteria(ctx, sess, tag, "DELETED")
+}
+
+func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, criteria string) ([]uint32, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
+	}
+	if err := c.writeLine(sess, tag+" UID SEARCH "+criteria); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH write")
 	}
 
@@ -1024,8 +1032,8 @@ func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID 
 		}
 		if strings.HasPrefix(line, "* SEARCH") {
 			fields := strings.Fields(line)
-			for _, f := range fields[2:] {
-				if uid, err := strconv.ParseUint(f, 10, 32); err == nil {
+			for _, field := range fields[2:] {
+				if uid, err := strconv.ParseUint(field, 10, 32); err == nil {
 					uids = append(uids, uint32(uid))
 				}
 			}
@@ -1096,24 +1104,32 @@ func checkUIDValidity(expected, observed uint32) error {
 }
 
 func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (string, error) {
-	tag := cmd[:strings.Index(cmd, " ")]
-	if err := c.setDeadline(ctx, sess); err != nil {
-		return "", wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP command deadline")
-	}
-	if err := c.writeLine(sess, cmd); err != nil {
-		return "", wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP command write")
-	}
-	status, text, err := c.readFinal(ctx, sess, tag)
+	status, text, err := c.doCommandResponse(ctx, sess, cmd)
 	if err != nil {
 		return "", err
 	}
-	if status == "OK" {
-		if text != "" {
-			return status + " " + text, nil
-		}
-		return status, nil
+	if text != "" {
+		return status + " " + text, nil
 	}
-	return "", &transport.TransportError{
+	return status, nil
+}
+
+func (c *Client) doCommandResponse(ctx context.Context, sess *session, cmd string) (string, string, error) {
+	tag := cmd[:strings.Index(cmd, " ")]
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return "", "", wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP command deadline")
+	}
+	if err := c.writeLine(sess, cmd); err != nil {
+		return "", "", wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP command write")
+	}
+	status, text, err := c.readFinal(ctx, sess, tag)
+	if err != nil {
+		return "", "", err
+	}
+	if status == "OK" {
+		return status, text, nil
+	}
+	return status, text, &transport.TransportError{
 		Code:    transport.CodeIMAPMutationFailed,
 		Message: "IMAP command failed: " + status + " " + text,
 	}
@@ -1197,7 +1213,8 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		}, nil
 	}
 
-	// Fallback for servers without UID MOVE: COPY + STORE \Deleted + EXPUNGE
+	// Fallback for servers without UID MOVE: COPY + STORE \\Deleted, then
+	// prefer UID EXPUNGE so unrelated deleted messages cannot be removed.
 	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
 	copyStatus, err := c.doCommand(ctx, sess, copyCmd)
 	if err != nil {
@@ -1209,6 +1226,48 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		return ev, err
 	}
 
+	uidExpungeCmd := fmt.Sprintf("%s UID EXPUNGE %d", sess.nextTag(), uid)
+	uidExpungeStatus, _, uidExpungeErr := c.doCommandResponse(ctx, sess, uidExpungeCmd)
+	if uidExpungeErr == nil {
+		return transport.MutationEvidence{
+			Command:             "MOVE",
+			ServerResponse:      copyStatus + " (fallback UID EXPUNGE)",
+			Mailbox:             srcMailbox,
+			TargetMailbox:       dstMailbox,
+			UID:                 uid,
+			UIDValidity:         info.uidvalidity,
+			ExpectedUIDValidity: expectedUIDValidity,
+			ExpungeBranch:       "uid_expunge",
+		}, nil
+	}
+	if !strings.EqualFold(uidExpungeStatus, "NO") && !strings.EqualFold(uidExpungeStatus, "BAD") {
+		return ev, uidExpungeErr
+	}
+
+	deletedUIDs, err := c.doUIDSearchDeleted(ctx, sess, sess.nextTag())
+	if err != nil {
+		return ev, err
+	}
+	foreignDeleted := 0
+	for _, deletedUID := range deletedUIDs {
+		if deletedUID != uid {
+			foreignDeleted++
+		}
+	}
+	if foreignDeleted > 0 {
+		return transport.MutationEvidence{
+			Command:             "MOVE",
+			ServerResponse:      fmt.Sprintf("%s (moved + flagged deleted; expunge deferred (other deleted messages present: %d))", copyStatus, foreignDeleted),
+			Mailbox:             srcMailbox,
+			TargetMailbox:       dstMailbox,
+			UID:                 uid,
+			UIDValidity:         info.uidvalidity,
+			ExpectedUIDValidity: expectedUIDValidity,
+			ExpungeBranch:       "deferred",
+			ForeignDeletedCount: foreignDeleted,
+		}, nil
+	}
+
 	expungeCmd := fmt.Sprintf("%s EXPUNGE", sess.nextTag())
 	if _, err := c.doCommand(ctx, sess, expungeCmd); err != nil {
 		return ev, err
@@ -1216,12 +1275,13 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 
 	return transport.MutationEvidence{
 		Command:             "MOVE",
-		ServerResponse:      copyStatus + " (fallback COPY+EXPUNGE)",
+		ServerResponse:      copyStatus + " (fallback plain EXPUNGE)",
 		Mailbox:             srcMailbox,
 		TargetMailbox:       dstMailbox,
 		UID:                 uid,
 		UIDValidity:         info.uidvalidity,
 		ExpectedUIDValidity: expectedUIDValidity,
+		ExpungeBranch:       "plain_expunge",
 	}, nil
 }
 
