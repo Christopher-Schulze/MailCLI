@@ -90,7 +90,7 @@ type ImapOperator interface {
 	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
 	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
 	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (MutationEvidence, error)
-	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32) ([]byte, error)
+	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error)
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }
 

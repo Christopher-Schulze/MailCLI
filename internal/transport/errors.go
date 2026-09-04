@@ -48,5 +48,6 @@ const (
 	CodeIMAPMessageNotFound     = "imap_message_not_found"
 	CodeIMAPMutationFailed      = "imap_mutation_failed"
 	CodeIMAPFetchFailed         = "imap_fetch_failed"
+	CodeIMAPRawSourceTooLarge   = "raw_source_too_large"
 	CodeLocalOnlyMailbox        = "local_only_mailbox"
 )

@@ -1146,7 +1146,9 @@ func pickTrash(mboxes []transport.MailboxInfo) string {
 }
 
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
-func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32) ([]byte, error) {
+// maxBytes bounds the announced literal (parity with the local raw-source
+// cap); maxBytes <= 0 leaves the fetch uncapped for content hydration.
+func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error) {
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -1166,14 +1168,14 @@ func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchLiteral(ctx, ps.sess, tag)
+	payload, err := c.readFetchLiteral(ctx, ps.sess, tag, maxBytes)
 	if err != nil {
 		return nil, err
 	}
 	return payload, nil
 }
 
-func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string) ([]byte, error) {
+func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, maxBytes int64) ([]byte, error) {
 	var payload []byte
 	found := false
 	for {
@@ -1203,6 +1205,19 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 				lenStr := line[idx+1 : len(line)-1]
 				length, perr := strconv.Atoi(lenStr)
 				if perr == nil && length >= 0 {
+					if maxBytes > 0 && int64(length) > maxBytes {
+						// Refuse before buffering: the session is dirty
+						// (release discards it) and the unread literal is
+						// never parsed. Do not attempt to skip it.
+						sess.dirty = true
+						return nil, &transport.TransportError{
+							Code: transport.CodeIMAPRawSourceTooLarge,
+							Message: fmt.Sprintf(
+								"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
+								length, maxBytes,
+							),
+						}
+					}
 					buf := make([]byte, length)
 					if _, rerr := io.ReadFull(sess.br, buf); rerr != nil {
 						sess.dirty = true

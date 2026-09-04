@@ -37,6 +37,11 @@ type fakeServerConfig struct {
 	// rebuild between resolution and mutation.
 	changedUIDValidityAfter int
 	changedUIDValidityValue uint32
+	// hugeFetchBytes, when non-zero, makes the next FETCH announce a
+	// literal of that size and then close the connection without sending
+	// payload bytes, simulating an oversized message.
+	hugeFetchBytes int
+	hugeFetchDone  bool
 }
 
 type fakeServer struct {
@@ -91,6 +96,18 @@ func (s *fakeServer) bumpSelectCount() int {
 	defer s.mu.Unlock()
 	s.selectCalls++
 	return s.selectCalls
+}
+
+// claimHugeFetch reports whether this FETCH must announce the oversized
+// literal; exactly one call per server wins.
+func (s *fakeServer) claimHugeFetch() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.config.hugeFetchBytes > 0 && !s.config.hugeFetchDone {
+		s.config.hugeFetchDone = true
+		return true
+	}
+	return false
 }
 
 func (s *fakeServer) AppendRecord() (called bool, mbox string, flags []string, data []byte) {
@@ -327,6 +344,10 @@ func (s *fakeServer) handle(conn net.Conn) {
 				uid := 0
 				if len(args) > 1 {
 					uid, _ = strconv.Atoi(args[1])
+				}
+				if s.claimHugeFetch() {
+					s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", uid, s.config.hugeFetchBytes))
+					return
 				}
 				payload := s.config.fetchPayload
 				if len(payload) == 0 {

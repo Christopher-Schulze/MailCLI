@@ -13,6 +13,7 @@ import (
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 type Client struct {
@@ -177,7 +178,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		}
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, summary, rawErr := c.hydrateMessage(ctx, ref)
+		rawBytes, summary, rawErr := c.hydrateMessage(ctx, ref, false)
 		if rawErr == nil && len(rawBytes) > 0 {
 			return messageFromRawFallback(local, summary, string(rawBytes))
 		}
@@ -253,8 +254,12 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
-		if rawErr == nil && len(rawBytes) > 0 {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
+		if rawErr != nil {
+			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
+				return "", rawErr
+			}
+		} else if len(rawBytes) > 0 {
 			return string(rawBytes), nil
 		}
 	}
@@ -277,8 +282,12 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref)
-		if rawErr == nil && len(rawBytes) > 0 {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
+		if rawErr != nil {
+			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
+				return rawErr
+			}
+		} else if len(rawBytes) > 0 {
 			_, werr := writer.Write(rawBytes)
 			return werr
 		}
@@ -307,7 +316,7 @@ func (c *Client) SaveAttachmentTo(
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef)
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, false)
 		if rawErr == nil && len(rawBytes) > 0 {
 			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)
 		}

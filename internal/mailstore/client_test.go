@@ -146,6 +146,10 @@ type stubImapOperator struct {
 	// statusErr scripts per-mailbox CheckStatus failures for sync-check
 	// tests; absent mailboxes report s.status.
 	statusErr map[string]error
+	// fetchErr scripts an IMAP fetch failure for raw-source tests.
+	fetchErr error
+	// lastFetchMax records the bound the last FetchMessage carried.
+	lastFetchMax int64
 }
 
 func (s *stubImapOperator) nextMutationErr() error {
@@ -270,9 +274,13 @@ func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.Imap
 	}, nil
 }
 
-func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32) ([]byte, error) {
+func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error) {
+	s.lastFetchMax = maxBytes
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.fetchErr != nil {
+		return nil, s.fetchErr
 	}
 	return s.raw, nil
 }
@@ -881,6 +889,101 @@ func TestFailureCodeMapping(t *testing.T) {
 type errTestPlain struct{}
 
 func (errTestPlain) Error() string { return "plain" }
+
+// An oversized IMAP fetch on the raw-source path surfaces the typed error
+// instead of being masked by the local missing-source error, and carries
+// the shared cap as its bound.
+func TestGetRawSourcePropagatesOversizedFetch(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "rawcap1@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove .emlx source: %v", err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+		fetchErr: &transport.TransportError{
+			Code:    transport.CodeIMAPRawSourceTooLarge,
+			Message: "IMAP FETCH announced 134217728 bytes exceeding the 67108864 byte raw-source cap",
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"rawcap1@gmail.com": "secret"},
+		},
+	}
+	_, err = client.GetRawSource(context.Background(), messageRef)
+	if transport.ErrorCode(err) != transport.CodeIMAPRawSourceTooLarge {
+		t.Fatalf("GetRawSource() error = %v, want raw_source_too_large (not the masked local error)", err)
+	}
+	if fakeImap.lastFetchMax != mail.MaximumRawSourceBytes {
+		t.Fatalf("fetch bound = %d, want shared cap %d", fakeImap.lastFetchMax, mail.MaximumRawSourceBytes)
+	}
+}
+
+// Content hydration stays uncapped: the bound on the GetMessage fallback
+// path is zero, matching the uncapped local content path.
+func TestGetMessageHydrationFetchUncapped(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "rawcap2@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove .emlx source: %v", err)
+	}
+	raw := "From: Alice <alice@example.com>\r\nSubject: Quarterly Report\r\n\r\nFull body\r\n"
+	fakeImap := &stubImapOperator{
+		raw:   []byte(raw),
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"rawcap2@gmail.com": "secret"},
+		},
+	}
+	message, err := client.GetMessage(context.Background(), messageRef)
+	if err != nil || message.Content != "Full body" {
+		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
+	}
+	if fakeImap.lastFetchMax != 0 {
+		t.Fatalf("content fetch bound = %d, want uncapped (0)", fakeImap.lastFetchMax)
+	}
+}
 
 func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)

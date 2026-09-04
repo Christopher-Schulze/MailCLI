@@ -460,7 +460,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 // 5322 source. It also returns the summary derived from the local store
 // record, so the hydration fallback can fill metadata the raw message alone
 // cannot provide (ref, subject, sender, dates, flags, mailbox).
-func (c *Client) hydrateMessage(ctx context.Context, messageRef string) ([]byte, mail.MessageSummary, error) {
+func (c *Client) hydrateMessage(ctx context.Context, messageRef string, enforceRawCap bool) ([]byte, mail.MessageSummary, error) {
 	target, err := c.resolveImapTarget(ctx, messageRef)
 	if err != nil {
 		return nil, mail.MessageSummary{}, err
@@ -474,14 +474,24 @@ func (c *Client) hydrateMessage(ctx context.Context, messageRef string) ([]byte,
 		}
 	}
 
-	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid)
+	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid, rawFetchBound(enforceRawCap))
 	return raw, target.summary, err
 }
 
 // HydrateMessageBytes fetches the complete raw RFC 5322 source of a message over IMAP.
-func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string) ([]byte, error) {
-	raw, _, err := c.hydrateMessage(ctx, messageRef)
+func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string, enforceRawCap bool) ([]byte, error) {
+	raw, _, err := c.hydrateMessage(ctx, messageRef, enforceRawCap)
 	return raw, err
+}
+
+// rawFetchBound returns the raw-source cap for capped fetches (parity with
+// the local store limit) and uncapped for content hydration, which has no
+// local size limit either.
+func rawFetchBound(enforceRawCap bool) int64 {
+	if !enforceRawCap {
+		return 0
+	}
+	return mail.MaximumRawSourceBytes
 }
 
 // SyncCheck inspects server-vs-local message counts across mailboxes without launching Mail.app.

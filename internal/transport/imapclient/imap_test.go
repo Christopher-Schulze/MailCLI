@@ -7,9 +7,11 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -547,12 +549,48 @@ func TestFetchMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42)
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
 	if !bytes.Equal(payload, expectedBody) {
 		t.Fatalf("expected payload %q, got %q", expectedBody, payload)
+	}
+}
+
+// An announced literal above the cap fails closed before buffering: the
+// fake sends no payload bytes at all, so a buffering implementation could
+// not produce this typed code. The poisoned session is discarded and the
+// next op re-establishes transparently.
+func TestFetchRejectsOversizedLiteral(t *testing.T) {
+	const announced = 256 << 20
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:         true,
+		otherMboxes:    []string{"INBOX"},
+		fetchPayload:   []byte("From: me@test.com\r\nSubject: Hi\r\n\r\nHello body!\r\n"),
+		hugeFetchBytes: announced,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	_, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != transport.CodeIMAPRawSourceTooLarge {
+		t.Fatalf("FetchMessage error = %v, want raw_source_too_large", err)
+	}
+	if !strings.Contains(typed.Message, "268435456") || !strings.Contains(typed.Message, "67108864") {
+		t.Fatalf("error message = %q, want announced size and cap", typed.Message)
+	}
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
+	if err != nil {
+		t.Fatalf("follow-up FetchMessage after discard: %v", err)
+	}
+	if len(payload) == 0 {
+		t.Fatal("follow-up fetch returned no payload")
 	}
 }
 

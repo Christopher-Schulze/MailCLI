@@ -45,7 +45,7 @@ func TestSessionReuseSingleConnection(t *testing.T) {
 	if _, err := client.CheckStatus(ctx, cfg, "INBOX"); err != nil {
 		t.Fatalf("CheckStatus: %v", err)
 	}
-	if _, err := client.FetchMessage(ctx, cfg, "INBOX", 42); err != nil {
+	if _, err := client.FetchMessage(ctx, cfg, "INBOX", 42, 0); err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
 	if got := srv.ConnectionCount(); got != 1 {
