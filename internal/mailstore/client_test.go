@@ -1087,6 +1087,154 @@ func TestListAccountsHealthyStateOk(t *testing.T) {
 	}
 }
 
+// A locally materialized (external-file) attachment satisfies the IMAP
+// fallback without any hydration: no IMAP fetch runs even though the
+// .emlx source is missing.
+func TestSaveAttachmentSkipsHydrateWhenMaterialized(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "materialize1@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	resolved, err := store.resolveMessage(context.Background(), messageRef)
+	if err != nil {
+		t.Fatalf("resolveMessage() error = %v", err)
+	}
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove .emlx source: %v", err)
+	}
+	// Materialize the catalog attachment (id 2, invoice.pdf) externally.
+	externalDir, err := store.attachmentDirectory(resolved, "2")
+	if err != nil {
+		t.Fatalf("attachmentDirectory() error = %v", err)
+	}
+	if err := os.MkdirAll(externalDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(externalDir, "invoice.pdf"), []byte("materialized-bytes"), 0o600); err != nil {
+		t.Fatalf("write external attachment: %v", err)
+	}
+
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"materialize1@gmail.com": "secret"},
+		},
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	if err := client.SaveAttachmentTo(context.Background(), messageRef, "2", output); err != nil {
+		t.Fatalf("SaveAttachmentTo() error = %v", err)
+	}
+	content, err := os.ReadFile(output)
+	if err != nil || string(content) != "materialized-bytes" {
+		t.Fatalf("attachment bytes = %q, error = %v; want the external file content", content, err)
+	}
+	if fakeImap.lastFetchMax != 0 {
+		t.Fatalf("IMAP fetch ran (bound %d) although the attachment was locally materialized", fakeImap.lastFetchMax)
+	}
+}
+
+// The attachment hydration fetch honors the shared raw-source cap, and an
+// oversized fetch surfaces the typed error instead of the masked local
+// missing-source error.
+func TestSaveAttachmentHydrationHonorsCapAndFailsTyped(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		raw      []byte
+		fetchErr error
+		wantCode string
+	}{
+		{
+			name: "capped fetch succeeds",
+			raw: []byte("From: Alice <alice@example.com>\r\nSubject: Quarterly Report\r\n" +
+				"Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+				"--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+				"--b\r\nContent-Disposition: attachment; filename=invoice.pdf\r\n" +
+				"Content-Transfer-Encoding: base64\r\n\r\naW52b2ljZS1ieXRlcw==\r\n--b--\r\n"),
+			wantCode: "",
+		},
+		{
+			name: "oversized fetch fails typed",
+			fetchErr: &transport.TransportError{
+				Code:    transport.CodeIMAPRawSourceTooLarge,
+				Message: "IMAP FETCH announced 134217728 bytes exceeding the 67108864 byte raw-source cap",
+			},
+			wantCode: transport.CodeIMAPRawSourceTooLarge,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			installImapIdentityFixture(t, store, "materialize2@gmail.com")
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+				MailboxRef: inboxRef, Limit: 3,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+			location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+			if err != nil {
+				t.Fatalf("parseMailboxURL() error = %v", err)
+			}
+			base, err := store.messageBasePath(location, 101)
+			if err != nil {
+				t.Fatalf("messageBasePath() error = %v", err)
+			}
+			if err := os.Remove(base + ".emlx"); err != nil {
+				t.Fatalf("remove .emlx source: %v", err)
+			}
+			fakeImap := &stubImapOperator{
+				boxes:    []transport.MailboxInfo{{Name: "INBOX"}},
+				uid:      101,
+				raw:      test.raw,
+				fetchErr: test.fetchErr,
+			}
+			client := &Client{
+				store: store,
+				send: mail.SendTransport{
+					Imap:        fakeImap,
+					Credentials: stubCredentials{"materialize2@gmail.com": "secret"},
+				},
+			}
+			output := filepath.Join(t.TempDir(), "invoice.pdf")
+			err = client.SaveAttachmentTo(context.Background(), messageRef, "2", output)
+			if test.wantCode == "" {
+				if err != nil {
+					t.Fatalf("SaveAttachmentTo() error = %v", err)
+				}
+				content, readErr := os.ReadFile(output)
+				if readErr != nil || string(content) != "invoice-bytes" {
+					t.Fatalf("attachment bytes = %q, error = %v", content, readErr)
+				}
+			} else if transport.ErrorCode(err) != test.wantCode {
+				t.Fatalf("SaveAttachmentTo() error = %v, want %s (not the masked local error)", err, test.wantCode)
+			}
+			if fakeImap.lastFetchMax != mail.MaximumRawSourceBytes {
+				t.Fatalf("fetch bound = %d, want the shared cap %d", fakeImap.lastFetchMax, mail.MaximumRawSourceBytes)
+			}
+		})
+	}
+}
+
 func TestClientRejectsStaleStoreMailboxIdentityBeforeWrite(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")

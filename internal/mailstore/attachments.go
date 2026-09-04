@@ -130,6 +130,42 @@ func (s *Store) SaveAttachmentTo(
 	return extractMIMEAttachment(source.Reader(), attachmentID, outputPath)
 }
 
+// saveMaterializedAttachment copies an externally materialized attachment
+// without opening the message source. It serves the IMAP fallback of
+// attachments save: when Mail stored the bytes as an external file, the
+// fallback must not re-hydrate the whole message over IMAP. saved=false
+// means the attachment is not locally materialized and the caller may
+// hydrate.
+func (s *Store) saveMaterializedAttachment(
+	ctx context.Context,
+	messageRef string,
+	attachmentID string,
+	outputPath string,
+) (saved bool, resultErr error) {
+	resolved, err := s.resolveMessage(ctx, messageRef)
+	if err != nil {
+		return false, err
+	}
+	records, err := s.attachmentRecords(ctx, resolved.Record.RowID)
+	if err != nil {
+		return false, err
+	}
+	for _, record := range records {
+		if record.ID != attachmentID {
+			continue
+		}
+		external, available, err := s.findExternalAttachment(resolved, record)
+		if err != nil {
+			return false, err
+		}
+		if !available {
+			return false, nil
+		}
+		return true, s.copyExternalAttachment(external, outputPath)
+	}
+	return false, nil
+}
+
 func mergeAttachmentRecords(
 	records []attachmentRecord,
 	parts map[string]mimePart,

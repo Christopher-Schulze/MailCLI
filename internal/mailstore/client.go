@@ -314,10 +314,24 @@ func (c *Client) SaveAttachmentTo(
 			return err
 		}
 		localErr = err
+		// Local materialization beats hydration: if Mail stored the
+		// attachment as an external file, copying it needs no IMAP traffic
+		// even when the .emlx source is partial or missing.
+		saved, materializedErr := c.store.saveMaterializedAttachment(ctx, messageRef, attachmentID, outputPath)
+		if materializedErr != nil {
+			return materializedErr
+		}
+		if saved {
+			return nil
+		}
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, false)
-		if rawErr == nil && len(rawBytes) > 0 {
+		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, true)
+		if rawErr != nil {
+			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
+				return rawErr
+			}
+		} else if len(rawBytes) > 0 {
 			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)
 		}
 	}
