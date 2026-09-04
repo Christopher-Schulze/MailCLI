@@ -160,6 +160,11 @@ func pruneAgeDays(updatedAt time.Time) int {
 // PruneDrafts lists (dry run) or deletes stale never-sent local drafts. Drafts with a
 // send or save attempt are reconcilable at-most-once state and are never pruned.
 func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, error) {
+	if request.OlderThan < 24*time.Hour {
+		return PruneDraftsResult{}, validationError(
+			"older-than must be at least 1 day; every never-sent draft would be pruned at lower values",
+		)
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return PruneDraftsResult{}, err

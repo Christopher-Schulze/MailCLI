@@ -693,6 +693,28 @@ func TestPruneDryRunListsOnlyStaleNeverSentDrafts(t *testing.T) {
 	}
 }
 
+// Sub-day cutoffs would select every never-sent draft (or reach into the
+// future for negative values); the service rejects them like the CLI does.
+func TestPruneRejectsSubDayThresholds(t *testing.T) {
+	service := NewServiceWithDraftRoot(&draftGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	draft := createSendTestDraft(t, service)
+	for _, olderThan := range []time.Duration{0, -24 * time.Hour} {
+		result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: olderThan, Confirm: true})
+		if err == nil || len(result.Candidates) != 0 || result.Removed != nil {
+			t.Fatalf("PruneDrafts(%v) = %+v, error = %v; want rejection before any listing", olderThan, result, err)
+		}
+		if errorCode(err) != "invalid_argument" {
+			t.Fatalf("PruneDrafts(%v) error = %v, want invalid_argument", olderThan, err)
+		}
+	}
+	if _, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour}); err != nil {
+		t.Fatalf("PruneDrafts(24h) error = %v; the exact 1-day floor is valid", err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("rejected prune deleted the draft: %v", err)
+	}
+}
+
 func TestPruneConfirmRemovesStaleDraftsAndLockFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)

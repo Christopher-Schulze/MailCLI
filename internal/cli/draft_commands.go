@@ -207,11 +207,20 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 
 func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts prune", stderr)
-	olderThan := flags.Int("older-than", 30, "age threshold in days for never-sent drafts")
+	olderThan := flags.Int("older-than", 30, "age threshold in days for never-sent drafts (minimum 1)")
 	confirm := flags.Bool("confirm", false, "delete the listed stale drafts")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *olderThan < 1 {
+		return failCommand("drafts.prune", *jsonOutput, &commandError{
+			code: "invalid_argument",
+			message: fmt.Sprintf(
+				"--older-than must be at least 1 day (got %d); every never-sent draft would be pruned at lower values",
+				*olderThan,
+			),
+		}, stdout, stderr)
 	}
 	result, err := service.PruneDrafts(mail.PruneDraftsRequest{
 		OlderThan: time.Duration(*olderThan) * 24 * time.Hour,

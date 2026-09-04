@@ -686,6 +686,35 @@ func TestSyncCheckHumanPrintsFailuresSection(t *testing.T) {
 	}
 }
 
+// The CLI rejects --older-than below 1 day as invalid_argument in both
+// human and JSON modes; 1 day and the default work.
+func TestDraftsPruneRejectsSubDayOlderThan(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	for _, olderThan := range []string{"0", "-1"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run(context.Background(), service, []string{"drafts", "prune", "--older-than", olderThan, "--json"}, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("prune --older-than %s code = %d, stderr = %s", olderThan, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), `"code":"invalid_argument"`) || !strings.Contains(stdout.String(), olderThan) {
+			t.Fatalf("prune --older-than %s stdout = %s, want invalid_argument naming the value", olderThan, stdout.String())
+		}
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"drafts", "prune", "--older-than", "1"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "no stale never-sent drafts") {
+		t.Fatalf("prune --older-than 1 code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), service, []string{"drafts", "prune"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("default prune code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
 func TestRequiredFlagValidation(t *testing.T) {
 	tests := []struct {
 		name     string
