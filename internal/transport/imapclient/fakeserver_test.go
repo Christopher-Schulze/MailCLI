@@ -32,6 +32,11 @@ type fakeServerConfig struct {
 	fetchPayload      []byte
 	selectFailBox     string
 	dropAfterCommands int
+	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
+	// first report this UIDVALIDITY instead of 12345, simulating a mailbox
+	// rebuild between resolution and mutation.
+	changedUIDValidityAfter int
+	changedUIDValidityValue uint32
 }
 
 type fakeServer struct {
@@ -41,6 +46,7 @@ type fakeServer struct {
 	config   fakeServerConfig
 
 	mu            sync.Mutex
+	selectCalls   int
 	appendCalled  bool
 	appendMbox    string
 	appendFlags   []string
@@ -78,6 +84,13 @@ func (s *fakeServer) Close() error {
 
 func (s *fakeServer) Addr() string {
 	return s.listener.Addr().String()
+}
+
+func (s *fakeServer) bumpSelectCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.selectCalls++
+	return s.selectCalls
 }
 
 func (s *fakeServer) AppendRecord() (called bool, mbox string, flags []string, data []byte) {
@@ -155,8 +168,13 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.writeLine(bw, tag+" NO SELECT failed")
 				continue
 			}
+			selectN := s.bumpSelectCount()
+			uidvalidity := uint32(12345)
+			if s.config.changedUIDValidityAfter > 0 && selectN > s.config.changedUIDValidityAfter {
+				uidvalidity = s.config.changedUIDValidityValue
+			}
 			s.writeLine(bw, "* FLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)")
-			s.writeLine(bw, "* OK [UIDVALIDITY 12345] UIDs valid")
+			s.writeLine(bw, fmt.Sprintf("* OK [UIDVALIDITY %d] UIDs valid", uidvalidity))
 			s.writeLine(bw, "* 0 EXISTS")
 			s.writeLine(bw, "* 0 RECENT")
 			s.writeLine(bw, tag+" OK [READ-WRITE] SELECT completed")

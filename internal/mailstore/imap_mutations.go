@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -299,7 +300,14 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 		}
 	}
 
-	ev, err := imapOp.SetFlags(ctx, target.cfg, target.imapMailbox, target.uid, addFlags, removeFlags)
+	ev, err := imapOp.SetFlags(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, addFlags, removeFlags)
+	if isUIDValidityChangedError(err) {
+		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		if retryErr != nil {
+			return mail.MessageSummary{}, retryErr
+		}
+		ev, err = imapOp.SetFlags(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, addFlags, removeFlags)
+	}
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
@@ -315,10 +323,12 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 		summary.Junk = *request.Junk
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
-		Command:        ev.Command,
-		ServerResponse: ev.ServerResponse,
-		Mailbox:        ev.Mailbox,
-		UID:            ev.UID,
+		Command:             ev.Command,
+		ServerResponse:      ev.ServerResponse,
+		Mailbox:             ev.Mailbox,
+		UID:                 ev.UID,
+		ExpectedUIDValidity: ev.ExpectedUIDValidity,
+		UIDValidity:         ev.UIDValidity,
 	}
 	summary.StalenessNote = stalenessExplanation
 	return summary, nil
@@ -367,9 +377,20 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 
 	var ev transport.MutationEvidence
 	if request.Copy {
-		ev, err = imapOp.CopyMessage(ctx, target.cfg, target.imapMailbox, target.uid, dstImapBox)
+		ev, err = imapOp.CopyMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
 	} else {
-		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, dstImapBox)
+		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
+	}
+	if isUIDValidityChangedError(err) {
+		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		if retryErr != nil {
+			return mail.MessageSummary{}, retryErr
+		}
+		if request.Copy {
+			ev, err = imapOp.CopyMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
+		} else {
+			ev, err = imapOp.MoveMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
+		}
 	}
 	if err != nil {
 		return mail.MessageSummary{}, err
@@ -380,11 +401,13 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		summary.MailboxRef = request.DestinationMailbox
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
-		Command:        ev.Command,
-		ServerResponse: ev.ServerResponse,
-		Mailbox:        ev.Mailbox,
-		TargetMailbox:  ev.TargetMailbox,
-		UID:            ev.UID,
+		Command:             ev.Command,
+		ServerResponse:      ev.ServerResponse,
+		Mailbox:             ev.Mailbox,
+		TargetMailbox:       ev.TargetMailbox,
+		UID:                 ev.UID,
+		ExpectedUIDValidity: ev.ExpectedUIDValidity,
+		UIDValidity:         ev.UIDValidity,
 	}
 	summary.StalenessNote = stalenessExplanation
 	return summary, nil
@@ -412,7 +435,14 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		}
 	}
 
-	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid)
+	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity)
+	if isUIDValidityChangedError(err) {
+		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		if retryErr != nil {
+			return mail.DeleteResult{}, retryErr
+		}
+		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity)
+	}
 	if err != nil {
 		return mail.DeleteResult{}, err
 	}
@@ -421,6 +451,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		ServerTruth: &mail.ServerMutationEvidence{
 			Command: ev.Command, ServerResponse: ev.ServerResponse,
 			Mailbox: ev.Mailbox, TargetMailbox: ev.TargetMailbox, UID: ev.UID,
+			ExpectedUIDValidity: ev.ExpectedUIDValidity, UIDValidity: ev.UIDValidity,
 		},
 	}, nil
 }
@@ -544,4 +575,11 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 	}
 
 	return result, nil
+}
+
+// isUIDValidityChangedError reports whether err is the typed mailbox rebuild
+// error returned by checkUIDValidity in the transport layer.
+func isUIDValidityChangedError(err error) bool {
+	var typed *transport.TransportError
+	return errors.As(err, &typed) && typed.Code == "mailbox_uidvalidity_changed"
 }

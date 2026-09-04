@@ -899,7 +899,7 @@ func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID 
 }
 
 // SetFlags adds and removes IMAP flags on a message.
-func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
@@ -907,7 +907,11 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}
 	defer release()
 
-	if _, err := c.ensureSelected(ctx, ps, mailbox); err != nil {
+	info, err := c.ensureSelected(ctx, ps, mailbox)
+	if err != nil {
+		return ev, err
+	}
+	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
 		return ev, err
 	}
 
@@ -931,11 +935,29 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}
 
 	return transport.MutationEvidence{
-		Command:        "STORE",
-		ServerResponse: lastStatus,
-		Mailbox:        mailbox,
-		UID:            uid,
+		Command:             "STORE",
+		ServerResponse:      lastStatus,
+		Mailbox:             mailbox,
+		UID:                 uid,
+		UIDValidity:         info.uidvalidity,
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
+}
+
+// checkUIDValidity rejects a mutation before it runs when the mailbox was
+// rebuilt between the SEARCH that resolved the UID and this SELECT: the
+// stored UID would address a different message.
+func checkUIDValidity(expected, observed uint32) error {
+	if expected != 0 && observed != 0 && expected != observed {
+		return &transport.TransportError{
+			Code: "mailbox_uidvalidity_changed",
+			Message: fmt.Sprintf(
+				"mailbox was rebuilt between resolution and mutation (UIDVALIDITY %d -> %d); message moved or mailbox rebuilt; rerun the command",
+				expected, observed,
+			),
+		}
+	}
+	return nil
 }
 
 func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (string, error) {
@@ -962,16 +984,18 @@ func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (stri
 	}
 }
 
-// CopyMessage copies a message by UID to dstMailbox.
-func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return ev, err
 	}
 	defer release()
-
-	if _, err := c.ensureSelected(ctx, ps, srcMailbox); err != nil {
+	info, err := c.ensureSelected(ctx, ps, srcMailbox)
+	if err != nil {
+		return ev, err
+	}
+	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
 		return ev, err
 	}
 
@@ -982,27 +1006,33 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 	}
 
 	return transport.MutationEvidence{
-		Command:        "COPY",
-		ServerResponse: status,
-		Mailbox:        srcMailbox,
-		TargetMailbox:  dstMailbox,
-		UID:            uid,
+		Command:             "COPY",
+		ServerResponse:      status,
+		Mailbox:             srcMailbox,
+		TargetMailbox:       dstMailbox,
+		UID:                 uid,
+		UIDValidity:         info.uidvalidity,
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
 // MoveMessage moves a message by UID to dstMailbox using native UID MOVE with COPY+EXPUNGE fallback.
-func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
 	}
 	defer release()
-	return c.moveMessage(ctx, ps, srcMailbox, uid, dstMailbox)
+	return c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, dstMailbox)
 }
 
-func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
+func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
-	if _, err := c.ensureSelected(ctx, ps, srcMailbox); err != nil {
+	info, err := c.ensureSelected(ctx, ps, srcMailbox)
+	if err != nil {
+		return ev, err
+	}
+	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
 		return ev, err
 	}
 	sess := ps.sess
@@ -1022,11 +1052,13 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 			resp += " " + text
 		}
 		return transport.MutationEvidence{
-			Command:        "MOVE",
-			ServerResponse: resp,
-			Mailbox:        srcMailbox,
-			TargetMailbox:  dstMailbox,
-			UID:            uid,
+			Command:             "MOVE",
+			ServerResponse:      resp,
+			Mailbox:             srcMailbox,
+			TargetMailbox:       dstMailbox,
+			UID:                 uid,
+			UIDValidity:         info.uidvalidity,
+			ExpectedUIDValidity: expectedUIDValidity,
 		}, nil
 	}
 
@@ -1048,16 +1080,18 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	}
 
 	return transport.MutationEvidence{
-		Command:        "MOVE",
-		ServerResponse: copyStatus + " (fallback COPY+EXPUNGE)",
-		Mailbox:        srcMailbox,
-		TargetMailbox:  dstMailbox,
-		UID:            uid,
+		Command:             "MOVE",
+		ServerResponse:      copyStatus + " (fallback COPY+EXPUNGE)",
+		Mailbox:             srcMailbox,
+		TargetMailbox:       dstMailbox,
+		UID:                 uid,
+		UIDValidity:         info.uidvalidity,
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
 // DeleteMessage moves a message by UID to the Trash mailbox discovered via special-use flags.
-func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32) (transport.MutationEvidence, error) {
+func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
@@ -1077,7 +1111,7 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 		}
 	}
 
-	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, trashBox)
+	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, trashBox)
 	if err != nil {
 		return transport.MutationEvidence{}, err
 	}

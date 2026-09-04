@@ -257,6 +257,10 @@ type ServerMutationEvidence struct {
 	Mailbox        string `json:"mailbox"`
 	TargetMailbox  string `json:"target_mailbox,omitempty"`
 	UID            uint32 `json:"uid"`
+	// ExpectedUIDValidity is the UIDVALIDITY resolved before the mutation;
+	// with UIDValidity it forms the compared pair (048: fail closed on rebuild).
+	ExpectedUIDValidity uint32 `json:"expected_uidvalidity,omitempty"`
+	UIDValidity         uint32 `json:"uidvalidity,omitempty"`
 }
 
 type MessageSummary struct {

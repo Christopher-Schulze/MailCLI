@@ -66,6 +66,10 @@ type MutationEvidence struct {
 	Mailbox        string // source mailbox
 	TargetMailbox  string // destination mailbox (for COPY, MOVE, DELETE)
 	UID            uint32 // affected message UID
+	UIDValidity    uint32 // SELECT-time UIDVALIDITY of the source mailbox
+	// ExpectedUIDValidity is the UIDVALIDITY the caller resolved before the
+	// mutation; together with UIDValidity it forms the compared pair.
+	ExpectedUIDValidity uint32
 }
 
 // MailboxStatus records server state from an IMAP STATUS command.
@@ -82,10 +86,10 @@ type ImapOperator interface {
 	SentMirror
 	ListMailboxes(ctx context.Context, cfg ImapConfig) ([]MailboxInfo, error)
 	SearchUID(ctx context.Context, cfg ImapConfig, mailbox string, messageID string) (uid uint32, uidvalidity uint32, err error)
-	SetFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (MutationEvidence, error)
-	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (MutationEvidence, error)
-	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (MutationEvidence, error)
-	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32) (MutationEvidence, error)
+	SetFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (MutationEvidence, error)
+	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
+	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
+	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (MutationEvidence, error)
 	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32) ([]byte, error)
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }

@@ -39,7 +39,7 @@ func TestSessionReuseSingleConnection(t *testing.T) {
 	if _, _, err := client.SearchUID(ctx, cfg, "INBOX", "<found@example.com>"); err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
-	if _, err := client.SetFlags(ctx, cfg, "INBOX", 42, []string{"\\Seen"}, nil); err != nil {
+	if _, err := client.SetFlags(ctx, cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil); err != nil {
 		t.Fatalf("SetFlags: %v", err)
 	}
 	if _, err := client.CheckStatus(ctx, cfg, "INBOX"); err != nil {
@@ -77,7 +77,7 @@ func TestSessionReuseDeleteSingleConnection(t *testing.T) {
 	client := Client{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
 	ctx := context.Background()
 
-	if _, err := client.DeleteMessage(ctx, cfg, "INBOX", 42); err != nil {
+	if _, err := client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345); err != nil {
 		t.Fatalf("DeleteMessage: %v", err)
 	}
 	if got := srv.ConnectionCount(); got != 1 {
@@ -139,7 +139,7 @@ func TestFailedSelectKeepsSession(t *testing.T) {
 	if _, err := client.ListMailboxes(ctx, cfg); err != nil {
 		t.Fatalf("ListMailboxes: %v", err)
 	}
-	if _, err := client.SetFlags(ctx, cfg, "Broken", 42, []string{"\\Seen"}, nil); err == nil {
+	if _, err := client.SetFlags(ctx, cfg, "Broken", 42, 12345, []string{"\\Seen"}, nil); err == nil {
 		t.Fatal("SetFlags on broken mailbox: expected error, got nil")
 	}
 	if _, err := client.CheckStatus(ctx, cfg, "INBOX"); err != nil {

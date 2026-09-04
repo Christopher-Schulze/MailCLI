@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"strconv"
 	"testing"
@@ -415,7 +416,7 @@ func TestSetFlags(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, []string{"\\Seen", "\\Flagged"}, []string{"\\Draft"})
+	ev, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, 12345, []string{"\\Seen", "\\Flagged"}, []string{"\\Draft"})
 	if err != nil {
 		t.Fatalf("SetFlags: %v", err)
 	}
@@ -441,7 +442,7 @@ func TestCopyMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.CopyMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	ev, err := client.CopyMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
 	if err != nil {
 		t.Fatalf("CopyMessage: %v", err)
 	}
@@ -468,7 +469,7 @@ func TestMoveMessageNative(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
 	if err != nil {
 		t.Fatalf("MoveMessage native: %v", err)
 	}
@@ -495,7 +496,7 @@ func TestMoveMessageFallback(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
 	if err != nil {
 		t.Fatalf("MoveMessage fallback: %v", err)
 	}
@@ -523,7 +524,7 @@ func TestDeleteMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42)
+	ev, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345)
 	if err != nil {
 		t.Fatalf("DeleteMessage: %v", err)
 	}
@@ -552,6 +553,109 @@ func TestFetchMessage(t *testing.T) {
 	}
 	if !bytes.Equal(payload, expectedBody) {
 		t.Fatalf("expected payload %q, got %q", expectedBody, payload)
+	}
+}
+
+func TestMutationFailsClosedOnUIDValidityChange(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		otherMboxes:   []string{"INBOX"},
+		searchMatchID: "<x@example.com>",
+		// First SELECT reports 12345; every later SELECT reports 99999.
+		changedUIDValidityAfter: 1,
+		changedUIDValidityValue: 99999,
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	// The client resolves the UID with UIDVALIDITY 12345 (first SELECT),
+	// then the mailbox is rebuilt on the server: the mutation runs on a
+	// fresh connection (session re-establishment mid-command, the
+	// defense-in-depth case from the 048 notes), observes 99999 on its own
+	// SELECT, and must fail BEFORE any STORE runs.
+	_, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
+	if err != nil {
+		t.Fatalf("SearchUID: %v", err)
+	}
+	mutClient := New()
+	mutClient.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	_, err = mutClient.SetFlags(context.Background(), cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != "mailbox_uidvalidity_changed" {
+		t.Fatalf("SetFlags error = %v, want mailbox_uidvalidity_changed", err)
+	}
+	srv.mu.Lock()
+	selectCalls := srv.selectCalls
+	storeCalled := srv.storeCalled
+	srv.mu.Unlock()
+	if selectCalls != 2 {
+		t.Fatalf("SELECT calls = %d, want 2 (resolve + mutation on a fresh connection)", selectCalls)
+	}
+	if storeCalled {
+		t.Fatal("STORE ran despite the UIDVALIDITY mismatch")
+	}
+}
+
+func TestMutationMatchingUIDValidityProceeds(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	ev, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil)
+	if err != nil {
+		t.Fatalf("SetFlags: %v", err)
+	}
+	if ev.UIDValidity != 12345 {
+		t.Fatalf("evidence UIDValidity = %d, want 12345", ev.UIDValidity)
+	}
+	if ev.ExpectedUIDValidity != 12345 {
+		t.Fatalf("evidence ExpectedUIDValidity = %d, want 12345", ev.ExpectedUIDValidity)
+	}
+}
+
+// Same mailbox, same client, same session: the mutation reuses the SELECT
+// state SearchUID established instead of issuing another SELECT (048
+// acceptance: no extra IMAP round trip in the common case).
+func TestMutationReusesSelectedSessionWithoutExtraSelect(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:        true,
+		otherMboxes:   []string{"INBOX"},
+		searchMatchID: "<x@example.com>",
+	})
+
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	uid, validity, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
+	if err != nil {
+		t.Fatalf("SearchUID: %v", err)
+	}
+	if _, err := client.SetFlags(context.Background(), cfg, "INBOX", uid, validity, []string{"\\Seen"}, nil); err != nil {
+		t.Fatalf("SetFlags: %v", err)
+	}
+	srv.mu.Lock()
+	selectCalls := srv.selectCalls
+	storeCalled := srv.storeCalled
+	srv.mu.Unlock()
+	if selectCalls != 1 {
+		t.Fatalf("SELECT calls = %d, want 1 (shared with SearchUID)", selectCalls)
+	}
+	if !storeCalled {
+		t.Fatal("STORE did not run despite matching UIDVALIDITY")
 	}
 }
 

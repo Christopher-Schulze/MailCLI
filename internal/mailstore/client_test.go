@@ -138,6 +138,30 @@ type stubImapOperator struct {
 	lastMailbox  string
 	status       transport.MailboxStatus
 	err          error
+	// mutationErrs scripts per-call mutation results: each mutation op
+	// consumes the head (nil head = success). mutationCalls counts every
+	// mutation invocation, so retry tests can assert exactly-once retry.
+	mutationErrs  []error
+	mutationCalls int
+}
+
+func (s *stubImapOperator) nextMutationErr() error {
+	s.mutationCalls++
+	if len(s.mutationErrs) > 0 {
+		err := s.mutationErrs[0]
+		s.mutationErrs = s.mutationErrs[1:]
+		return err
+	}
+	return s.err
+}
+
+// stubValidity mirrors the SearchUID default: tests that never set
+// uidvalidity resolve and observe 12345.
+func (s *stubImapOperator) stubValidity() uint32 {
+	if s.uidvalidity != 0 {
+		return s.uidvalidity
+	}
+	return 12345
 }
 
 func (s *stubImapOperator) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg []byte, messageID string) (transport.AppendEvidence, error) {
@@ -174,64 +198,72 @@ func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConf
 	return uid, val, nil
 }
 
-func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
-	if s.err != nil {
-		return transport.MutationEvidence{}, s.err
+func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+	if err := s.nextMutationErr(); err != nil {
+		return transport.MutationEvidence{}, err
 	}
 	s.lastCommand = "STORE"
 	s.lastUsername = cfg.Username
 	s.lastMailbox = mailbox
 	return transport.MutationEvidence{
-		Command:        "STORE",
-		ServerResponse: "OK STORE completed",
-		Mailbox:        mailbox,
-		UID:            uid,
+		Command:             "STORE",
+		ServerResponse:      "OK STORE completed",
+		Mailbox:             mailbox,
+		UID:                 uid,
+		UIDValidity:         s.stubValidity(),
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
-func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
-	if s.err != nil {
-		return transport.MutationEvidence{}, s.err
+func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	if err := s.nextMutationErr(); err != nil {
+		return transport.MutationEvidence{}, err
 	}
 	s.lastCommand = "COPY"
 	return transport.MutationEvidence{
-		Command:        "COPY",
-		ServerResponse: "OK COPY completed",
-		Mailbox:        srcMailbox,
-		TargetMailbox:  dstMailbox,
-		UID:            uid,
+		Command:             "COPY",
+		ServerResponse:      "OK COPY completed",
+		Mailbox:             srcMailbox,
+		TargetMailbox:       dstMailbox,
+		UID:                 uid,
+		UIDValidity:         s.stubValidity(),
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
-func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, dstMailbox string) (transport.MutationEvidence, error) {
-	if s.err != nil {
-		return transport.MutationEvidence{}, s.err
+func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	if err := s.nextMutationErr(); err != nil {
+		return transport.MutationEvidence{}, err
 	}
 	s.lastCommand = "MOVE"
 	s.lastUsername = cfg.Username
 	s.lastMailbox = srcMailbox
 	return transport.MutationEvidence{
-		Command:        "MOVE",
-		ServerResponse: "OK MOVE completed",
-		Mailbox:        srcMailbox,
-		TargetMailbox:  dstMailbox,
-		UID:            uid,
+		Command:             "MOVE",
+		ServerResponse:      "OK MOVE completed",
+		Mailbox:             srcMailbox,
+		TargetMailbox:       dstMailbox,
+		UID:                 uid,
+		UIDValidity:         s.stubValidity(),
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
-func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32) (transport.MutationEvidence, error) {
-	if s.err != nil {
-		return transport.MutationEvidence{}, s.err
+func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
+	if err := s.nextMutationErr(); err != nil {
+		return transport.MutationEvidence{}, err
 	}
 	s.lastCommand = "DELETE"
 	s.lastUsername = cfg.Username
 	s.lastMailbox = srcMailbox
 	return transport.MutationEvidence{
-		Command:        "DELETE",
-		ServerResponse: "OK DELETE completed",
-		Mailbox:        srcMailbox,
-		TargetMailbox:  "Trash",
-		UID:            uid,
+		Command:             "DELETE",
+		ServerResponse:      "OK DELETE completed",
+		Mailbox:             srcMailbox,
+		TargetMailbox:       "Trash",
+		UID:                 uid,
+		UIDValidity:         s.stubValidity(),
+		ExpectedUIDValidity: expectedUIDValidity,
 	}, nil
 }
 
@@ -488,6 +520,165 @@ func TestClientRevalidatesStoreRefBeforeMarkAndObservesState(t *testing.T) {
 	}
 	if fakeImap.lastMailbox != "INBOX" {
 		t.Fatalf("IMAP mailbox = %q, want INBOX", fakeImap.lastMailbox)
+	}
+}
+
+func uidValidityChangedErrorForTest() error {
+	return &transport.TransportError{
+		Code:    "mailbox_uidvalidity_changed",
+		Message: "mailbox was rebuilt between resolution and mutation (UIDVALIDITY 12345 -> 99999); message moved or mailbox rebuilt; rerun the command",
+	}
+}
+
+// On a UIDVALIDITY mismatch the mutation wrapper re-resolves once and
+// retries exactly once: first STORE fails, second succeeds.
+func TestMarkMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes:        []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:          101,
+		mutationErrs: []error{uidValidityChangedErrorForTest()},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	read := true
+	result, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
+	})
+	if err != nil || !result.Read || result.ServerTruth == nil || result.ServerTruth.Command != "STORE" {
+		t.Fatalf("MarkMessage() = %+v, error = %v", result, err)
+	}
+	if result.ServerTruth.ExpectedUIDValidity != 12345 || result.ServerTruth.UIDValidity != 12345 {
+		t.Fatalf("ServerTruth pair = (%d, %d), want (12345, 12345)",
+			result.ServerTruth.ExpectedUIDValidity, result.ServerTruth.UIDValidity)
+	}
+	if fakeImap.mutationCalls != 2 {
+		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
+	}
+}
+
+// A repeated mismatch fails closed after exactly one retry: no loop.
+func TestMarkMessageFailsClosedOnRepeatedUIDValidityChange(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:   101,
+		mutationErrs: []error{
+			uidValidityChangedErrorForTest(),
+			uidValidityChangedErrorForTest(),
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	read := true
+	_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
+	})
+	if errorCodeForTest(err) != "mailbox_uidvalidity_changed" {
+		t.Fatalf("MarkMessage() error = %v, want mailbox_uidvalidity_changed", err)
+	}
+	if fakeImap.mutationCalls != 2 {
+		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry, no loop)", fakeImap.mutationCalls)
+	}
+}
+
+func TestDeleteMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes:        []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:          101,
+		mutationErrs: []error{uidValidityChangedErrorForTest()},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	result, err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
+		Ref: page.Messages[0].Ref, AllowDraftMutation: true,
+	})
+	if err != nil || !result.Deleted || result.ServerTruth == nil || result.ServerTruth.Command != "DELETE" {
+		t.Fatalf("DeleteMessage() = %+v, error = %v", result, err)
+	}
+	if fakeImap.mutationCalls != 2 {
+		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
+	}
+}
+
+func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Status Update")
+	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Sent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"},
+			{Name: "Sent", Flags: []string{"\\Sent"}},
+		},
+		uid:          102,
+		mutationErrs: []error{uidValidityChangedErrorForTest()},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	result, err := client.TransferMessage(context.Background(), mail.TransferMessageRequest{
+		Ref: messageRef, DestinationMailbox: destinationRef, Copy: true,
+	})
+	if err != nil || result.ServerTruth == nil || result.ServerTruth.Command != "COPY" {
+		t.Fatalf("TransferMessage() = %+v, error = %v", result, err)
+	}
+	if fakeImap.mutationCalls != 2 {
+		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
 	}
 }
 
