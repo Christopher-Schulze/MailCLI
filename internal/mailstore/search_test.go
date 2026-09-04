@@ -353,9 +353,7 @@ func TestBodySearchChunkedCandidatesMatchMonolithic(t *testing.T) {
 		t.Fatalf("chunked = %d messages, monolithic = %d", len(chunkedPage.Messages), len(baselinePage.Messages))
 	}
 	for index := range chunkedPage.Messages {
-		if chunkedPage.Messages[index].Summary.Ref != baselinePage.Messages[index].Summary.Ref ||
-			chunkedPage.Messages[index].Snippet != baselinePage.Messages[index].Snippet ||
-			chunkedPage.Messages[index].Summary.AttachmentCount != baselinePage.Messages[index].Summary.AttachmentCount {
+		if chunkedPage.Messages[index] != baselinePage.Messages[index] {
 			t.Fatalf("message %d differs: chunked %#v monolithic %#v",
 				index, chunkedPage.Messages[index], baselinePage.Messages[index])
 		}
@@ -458,28 +456,47 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 
 // The candidate stream yields strictly-descending (date_received, ROWID)
 // tuples: a max-messages bound that cuts mid-corpus keeps the covered
-// prefix and reports incomplete, and the next chunk continues without
-// re-serving rows.
+// prefix and reports incomplete, and the exact boundary
+// (MaxMessages == CandidateMessages) stays complete - the count query
+// knows the total, so a full final chunk must not read as truncated.
 func TestBodySearchChunkRespectsMaxMessagesBound(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
-	query, err := mail.PrepareQuery(mail.Query{
-		MailboxRef: inboxRef, Text: "needle", Limit: 25, MaxMessages: 2,
+	// Fixture corpus: 3 needle candidates. Bound at 3 == total: complete.
+	exact, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 25, MaxMessages: 3,
 	})
 	if err != nil {
 		t.Fatalf("PrepareQuery() error = %v", err)
 	}
-	page, err := store.SearchMessages(context.Background(), query)
+	page, err := store.SearchMessages(context.Background(), exact)
 	if err != nil {
 		t.Fatalf("SearchMessages() error = %v", err)
 	}
-	if page.Coverage.CandidateMessages < page.Coverage.ScannedMessages+page.Coverage.CatalogProvenMessages {
-		t.Fatalf("coverage counts exceed candidates: %#v", page.Coverage)
+	if page.Coverage.CandidateMessages != 3 {
+		t.Fatalf("candidates = %d, want 3", page.Coverage.CandidateMessages)
 	}
-	if page.Coverage.Complete {
-		t.Fatalf("bound of 2 over %d candidates must be incomplete: %#v",
-			page.Coverage.CandidateMessages, page.Coverage)
+	if !page.Coverage.Complete {
+		t.Fatalf("exact boundary (total == max) must stay complete: %#v", page.Coverage)
+	}
+
+	// Bound at 2 < 3: truncated, incomplete.
+	cut, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 25, MaxMessages: 2,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(cut) error = %v", err)
+	}
+	cutPage, err := store.SearchMessages(context.Background(), cut)
+	if err != nil {
+		t.Fatalf("SearchMessages(cut) error = %v", err)
+	}
+	if cutPage.Coverage.CandidateMessages < cutPage.Coverage.ScannedMessages+cutPage.Coverage.CatalogProvenMessages {
+		t.Fatalf("coverage counts exceed candidates: %#v", cutPage.Coverage)
+	}
+	if cutPage.Coverage.Complete {
+		t.Fatalf("bound of 2 over 3 candidates must be incomplete: %#v", cutPage.Coverage)
 	}
 }
 

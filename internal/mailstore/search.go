@@ -436,7 +436,7 @@ func (s *Store) scanSearchRecordsChunked(
 			}
 		}
 	}
-	limitedByCount := loaded >= maximum && streamHasMore(stream)
+	limitedByCount := total > maximum
 	coverage.Complete = coverage.Complete && !limitedByCount
 	hasMore := len(results) > prepared.Query.Limit
 	if hasMore {
@@ -455,12 +455,6 @@ func (s *Store) scanSearchRecordsChunked(
 		return page, err
 	}
 	return page, nil
-}
-
-// streamHasMore reports whether the candidate stream can still yield
-// candidates beyond the loaded window.
-func streamHasMore(stream *searchCandidateStream) bool {
-	return !stream.done
 }
 
 func (s *Store) querySearchRecords(
