@@ -39,3 +39,5 @@ coverage*.out
 *.bak
 *.backup
 *~
+
+/AGENTS.md
