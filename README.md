@@ -47,8 +47,9 @@ Run `mailcli help` for the compact command overview. Focused command help accept
 `help`, `-h`, or `--help` and renders aligned long options with semantic value
 names and readable defaults.
 
-Capability discovery, local draft management, local reply/forward creation, sending, credential setup, and the unsupported native save preflight bypass the Mail store and
-Mail.app entirely. Missing or unknown command/subcommand routes do the same.
+Capability discovery, local draft management, sending, credential setup, and the unsupported native save preflight bypass the Mail store and
+Mail.app entirely. Reply and forward creation read the source message's header block from the Mail store and write only local draft files.
+Missing or unknown command/subcommand routes do the same.
 They therefore avoid SQLite, `plutil`, and Apple Events startup work.
 
 ## Architecture

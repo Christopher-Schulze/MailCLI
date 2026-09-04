@@ -141,10 +141,12 @@ type SavedDraft struct {
 }
 
 type CreateDraftRequest struct {
-	Kind      DraftKind
-	SourceRef string
-	ReplyAll  bool
-	Input     DraftInput
+	Kind             DraftKind
+	SourceRef        string
+	ReplyAll         bool
+	SourceMessageID  string
+	SourceReferences string
+	Input            DraftInput
 }
 
 type UpdateDraftRequest struct {

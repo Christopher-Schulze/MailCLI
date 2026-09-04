@@ -152,9 +152,7 @@ func RequiresMailService(args []string) bool {
 			return false
 		}
 		switch args[1] {
-		case "reply", "forward":
-			return false
-		case "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
+		case "reply", "forward", "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
 			return true
 		default:
 			return false

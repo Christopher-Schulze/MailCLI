@@ -165,9 +165,9 @@ func runMessages(
 	case "raw":
 		return runMessagesRaw(ctx, mailService, args[1:], stdout, stderr)
 	case "reply":
-		return runMessageReply(mailService, args[1:], stdout, stderr)
+		return runMessageReply(ctx, mailService, args[1:], stdout, stderr)
 	case "forward":
-		return runMessageForward(mailService, args[1:], stdout, stderr)
+		return runMessageForward(ctx, mailService, args[1:], stdout, stderr)
 	case "mark":
 		return runMessageMark(ctx, mailService, args[1:], stdout, stderr)
 	case "move":

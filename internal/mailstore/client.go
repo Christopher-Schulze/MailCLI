@@ -691,6 +691,45 @@ func (c *Client) localMessageID(resolved resolvedMessage) (result string, result
 	return messageID, nil
 }
 
+// MessageThreadSource resolves the reply/forward derivation inputs from the
+// source message's header block (header-only read, no body scan). The
+// message's current membership is revalidated as part of the source open.
+func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.ThreadSource, error) {
+	if c.store == nil {
+		return mail.ThreadSource{}, c.readUnavailableError()
+	}
+	_, source, err := c.store.openMessageSource(ctx, ref)
+	if err != nil {
+		return mail.ThreadSource{}, err
+	}
+	defer func() { _ = source.Close() }()
+	headers, err := sourceHeadersFromReader(source.Reader())
+	if err != nil {
+		return mail.ThreadSource{}, err
+	}
+	if headers.MessageID == "" {
+		return mail.ThreadSource{}, operationError(
+			"invalid_message_source", "source message has no Message-ID header",
+		)
+	}
+	// The composer writes threading headers verbatim, so the source message
+	// id travels in its bracketed msg-id form; the header reader returns the
+	// bare id.
+	messageID := headers.MessageID
+	if messageID != "" && !strings.HasPrefix(messageID, "<") {
+		messageID = "<" + messageID + ">"
+	}
+	return mail.ThreadSource{
+		Subject:    headers.Subject,
+		From:       headers.From,
+		ReplyTo:    headers.ReplyTo,
+		To:         headers.To,
+		CC:         headers.CC,
+		MessageID:  messageID,
+		References: headers.References,
+	}, nil
+}
+
 func (c *Client) readUnavailableError() error {
 	if c.storeErr != nil {
 		return c.storeErr

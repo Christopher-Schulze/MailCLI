@@ -335,15 +335,18 @@ func runDraftDiscard(service *mail.Service, args []string, stdout io.Writer, std
 	return 0
 }
 
-func runMessageReply(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	return runDerivedDraft(service, mail.DraftKindReply, args, stdout, stderr)
+func runMessageReply(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDerivedDraft(ctx, service, mail.DraftKindReply, args, stdout, stderr)
 }
 
-func runMessageForward(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	return runDerivedDraft(service, mail.DraftKindForward, args, stdout, stderr)
+func runMessageForward(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDerivedDraft(ctx, service, mail.DraftKindForward, args, stdout, stderr)
 }
 
-func runDerivedDraft(service *mail.Service, kind mail.DraftKind, args []string, stdout io.Writer, stderr io.Writer) int {
+// runDerivedDraft resolves the source message's thread headers from the Mail
+// store, derives subject/recipients/thread chain (explicit input wins), and
+// creates the local review draft.
+func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.DraftKind, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages "+string(kind), stderr)
 	messageRef := flags.String("message", "", "source message ref")
 	inputFlags := registerDraftInputFlags(flags)
@@ -359,8 +362,17 @@ func runDerivedDraft(service *mail.Service, kind mail.DraftKind, args []string, 
 	if err != nil {
 		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
 	}
+	source, err := service.ThreadSource(ctx, *messageRef)
+	if err != nil {
+		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+	}
+	derived, sourceMessageID, references, err := mail.DeriveReplyInput(source, kind, replyAll, input)
+	if err != nil {
+		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+	}
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{
-		Kind: kind, SourceRef: *messageRef, ReplyAll: replyAll, Input: input,
+		Kind: kind, SourceRef: *messageRef, ReplyAll: replyAll, Input: derived,
+		SourceMessageID: sourceMessageID, SourceReferences: references,
 	})
 	if err != nil {
 		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)

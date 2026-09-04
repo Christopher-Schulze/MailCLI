@@ -1024,3 +1024,59 @@ func messageRefWithSubject(t *testing.T, messages []mail.MessageSummary, subject
 	t.Fatalf("message subject %q not found", subject)
 	return ""
 }
+
+func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	client := &Client{store: store}
+	page, listErr := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 10})
+	if listErr != nil {
+		t.Fatalf("ListMessages() error = %v", listErr)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Status Update")
+	source, err := client.MessageThreadSource(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("MessageThreadSource() error = %v", err)
+	}
+	if source.MessageID != "<102@example.com>" {
+		t.Fatalf("message id = %q", source.MessageID)
+	}
+	if !strings.Contains(source.From, "alice@example.com") {
+		t.Fatalf("from = %q", source.From)
+	}
+	if len(source.To) != 1 || source.To[0].Address != "christopher@example.com" {
+		t.Fatalf("to = %+v", source.To)
+	}
+
+	writeFixtureEMLX(t, store, 102, "imap://"+testAccountID+"/INBOX", []byte(
+		"From: Alice <alice@example.com>\r\n"+
+			"To: Christopher <christopher@example.com>\r\n"+
+			"Cc: Zoe <zoe@example.com>\r\n"+
+			"Reply-To: Bob <bob@example.com>\r\n"+
+			"Subject: Threaded\r\n"+
+			"Message-ID: <reply-102@example.com>\r\n"+
+			"References: <root-1@example.com> <reply-101@example.com>\r\n"+
+			"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n",
+	))
+	source, err = client.MessageThreadSource(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("MessageThreadSource() error = %v", err)
+	}
+	if source.Subject != "Threaded" ||
+		!strings.Contains(source.ReplyTo, "bob@example.com") ||
+		source.MessageID != "<reply-102@example.com>" ||
+		source.References != "<root-1@example.com> <reply-101@example.com>" {
+		t.Fatalf("thread source = %+v", source)
+	}
+	if len(source.CC) != 1 || source.CC[0].Address != "zoe@example.com" {
+		t.Fatalf("cc = %+v", source.CC)
+	}
+
+	writeFixtureEMLX(t, store, 102, "imap://"+testAccountID+"/INBOX", []byte(
+		"From: Alice <alice@example.com>\r\nSubject: No ID\r\n\r\nBody\r\n",
+	))
+	if _, err := client.MessageThreadSource(context.Background(), ref); err == nil ||
+		errorCodeForTest(err) != "invalid_message_source" {
+		t.Fatalf("missing Message-ID error = %v", err)
+	}
+}

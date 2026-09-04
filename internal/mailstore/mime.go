@@ -97,26 +97,55 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 	return document, nil
 }
 
-// messageIDFromSource reads only the header block of a raw RFC 5322 message
-// and resolves the Message-ID header. Full MIME parsing would stream and drain
-// every attachment body just to read this one header, so mutation targeting
-// uses this instead. A missing Message-ID header yields "" (same semantics as
-// the previous full-parse path).
-func messageIDFromSource(reader io.Reader) (string, error) {
+// sourceHeaders carries the header-block values reply/forward derivation and
+// mutation targeting need, without parsing the MIME body.
+type sourceHeaders struct {
+	MessageID  string
+	References string
+	Subject    string
+	From       string
+	ReplyTo    string
+	To         []mail.Recipient
+	CC         []mail.Recipient
+}
+
+// sourceHeadersFromReader reads only the header block of a raw RFC 5322
+// message. Full MIME parsing would stream and drain every attachment body to
+// read these headers, so derivation and mutation targeting use this instead.
+func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	headers, err := readRawHeaders(reader)
 	if err != nil {
-		return "", err
+		return sourceHeaders{}, err
 	}
 	entity, readErr := message.Read(strings.NewReader(headers))
 	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
-		return "", operationError("invalid_message_source", fmt.Sprintf("parse RFC headers: %v", readErr))
+		return sourceHeaders{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC headers: %v", readErr))
 	}
 	header := messageMail.Header{Header: entity.Header}
-	messageID, err := header.MessageID()
-	if err != nil {
-		return "", nil
+	var out sourceHeaders
+	if id, err := header.MessageID(); err == nil {
+		out.MessageID = id
 	}
-	return messageID, nil
+	if subject, err := header.Subject(); err == nil {
+		out.Subject = subject
+	}
+	out.From, _ = firstFormattedAddress(&header, "From")
+	out.ReplyTo, _ = firstFormattedAddress(&header, "Reply-To")
+	out.To, _ = headerRecipients(&header, "To")
+	out.CC, _ = headerRecipients(&header, "Cc")
+	out.References = strings.TrimSpace(header.Get("References"))
+	return out, nil
+}
+
+// messageIDFromSource resolves the Message-ID header from the header block
+// only. A missing Message-ID header yields "" (same semantics as the previous
+// full-parse path).
+func messageIDFromSource(reader io.Reader) (string, error) {
+	headers, err := sourceHeadersFromReader(reader)
+	if err != nil {
+		return "", err
+	}
+	return headers.MessageID, nil
 }
 
 func parseMIMEEntity(

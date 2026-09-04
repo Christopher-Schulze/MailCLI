@@ -921,6 +921,9 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 		if err != nil || !ref.IsStoreBound() {
 			return Draft{}, validationError("reply and forward drafts require a store-bound source message ref")
 		}
+		if err := validateThreadSource(request.SourceMessageID, request.SourceReferences); err != nil {
+			return Draft{}, err
+		}
 	}
 	if request.Kind == DraftKindNew && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("new drafts require at least one recipient")
@@ -949,13 +952,28 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	now := time.Now().UTC()
 	return Draft{
 		Ref: ref, Kind: request.Kind, SourceRef: request.SourceRef,
-		ReplyAll: request.ReplyAll, From: request.Input.From,
-		To: nonNilRecipients(request.Input.To), CC: nonNilRecipients(request.Input.CC),
+		ReplyAll:        request.ReplyAll,
+		SourceMessageID: request.SourceMessageID, SourceReferences: request.SourceReferences,
+		From: request.Input.From,
+		To:   nonNilRecipients(request.Input.To), CC: nonNilRecipients(request.Input.CC),
 		BCC: nonNilRecipients(request.Input.BCC), Subject: request.Input.Subject,
 		Body: content.Plain, BodyFormat: content.Format,
 		BodySource: content.Source, BodyHTML: content.HTML, Attachments: attachments,
 		CreatedAt: now, UpdatedAt: now,
 	}, nil
+}
+
+// validateThreadSource keeps control characters out of the threading headers
+// written into drafts (the composer copies them verbatim into the message).
+func validateThreadSource(sourceMessageID, sourceReferences string) error {
+	if strings.ContainsAny(sourceMessageID, "\r\n") {
+		return validationError("source message id contains control characters")
+	}
+	// Raw check: strings.Fields would treat CR/LF as whitespace and hide them.
+	if strings.ContainsAny(sourceReferences, "\r\n") {
+		return validationError("source references contain control characters")
+	}
+	return nil
 }
 
 func validateDraftLimits(input DraftInput) error {

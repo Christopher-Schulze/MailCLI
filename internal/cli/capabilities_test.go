@@ -99,7 +99,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 	for _, id := range []string{"messages.reply", "messages.forward"} {
 		command := manifest.Commands[slices.Index(got, id)]
-		if command.StoreDependency != "draft-store" || command.MailAppDependency != "none" {
+		if command.StoreDependency != "mail-store" || command.MailAppDependency != "none" {
 			t.Fatalf("%s capability = %+v", id, command)
 		}
 	}
