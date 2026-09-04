@@ -115,7 +115,7 @@ func isHardCatalogError(err error) bool {
 	var typed *Error
 	if errors.As(err, &typed) {
 		switch typed.Code {
-		case "invalid_mailbox_cache", "invalid_path_segment", "special_use_mailbox_unresolved":
+		case "invalid_mailbox_cache", "mailbox_cache_malformed", "invalid_path_segment", "special_use_mailbox_unresolved":
 			return false
 		}
 		return true
