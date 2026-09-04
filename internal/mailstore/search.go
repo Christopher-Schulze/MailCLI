@@ -382,6 +382,7 @@ func (s *Store) scanSearchRecordsChunked(
 	var reservedBytes int64
 	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
 	loaded := 0
+chunkLoop:
 	for loaded < maximum && len(results) <= prepared.Query.Limit {
 		chunkWant := min(candidateChunkSize, maximum-loaded)
 		items, chunkTotal, err := stream.next(chunkWant)
@@ -432,7 +433,7 @@ func (s *Store) scanSearchRecordsChunked(
 				batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
 			}
 			if budgetLimited {
-				break
+				break chunkLoop
 			}
 		}
 	}

@@ -454,6 +454,55 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 	return page, nil
 }
 
+// The byte-budget stop must survive chunking: with more candidates than
+// one chunk (512), an exhausted budget stops the WHOLE scan. Oracle: the
+// first candidate alone exceeds MaxBytes=1, so the budget breaks in chunk
+// 1; row 616 lives in chunk 2 - if the outer chunk loop kept running, its
+// missing source would be attempted and counted.
+func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	// Remove the source of the first row of chunk 2 (600 extras occupy
+	// rowIDs 104..703 descending by date_received; chunk 1 holds the
+	// newest 512, chunk 2 starts at rowID 104+600-512 = 192... compute
+	// directly: candidates are date_received DESC, extras are 1000-index
+	// descending, so chunk 2 starts at the 513th-newest = extra index 600-512=88
+	// counting from oldest extras last. Row 616 is safely inside chunk 2.
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 616)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove chunk-2 source: %v", err)
+	}
+	query, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 25,
+		MaxBytes: 1, MaxMessages: 100000,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if page.Coverage.Complete {
+		t.Fatalf("budget-limited scan must be incomplete: %#v", page.Coverage)
+	}
+	if page.Coverage.ScannedBytes > 1 {
+		t.Fatalf("scanned bytes %d exceed the budget of 1", page.Coverage.ScannedBytes)
+	}
+	if page.Coverage.MissingSources != 0 {
+		t.Fatalf("missing sources = %d; the outer chunk loop reached chunk 2 after the budget break",
+			page.Coverage.MissingSources)
+	}
+}
+
 // The candidate stream yields strictly-descending (date_received, ROWID)
 // tuples: a max-messages bound that cuts mid-corpus keeps the covered
 // prefix and reports incomplete, and the exact boundary
