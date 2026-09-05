@@ -37,6 +37,17 @@ func TestRunUnknownCommandWithoutMailStore(t *testing.T) {
 	}
 }
 
+func TestRunStoreCommandReportsMissingStore(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, stderr, code := runWithArgsAndStderr(t, []string{"mailcli", "accounts", "list"})
+	if code == 0 {
+		t.Fatal("run() = 0, want missing-store failure")
+	}
+	if !strings.Contains(stderr, "Mail.app") {
+		t.Fatalf("stderr = %q, want Mail.app diagnostic", stderr)
+	}
+}
+
 func runWithArgs(t *testing.T, args []string) (string, int) {
 	t.Helper()
 	stdout, _, code := runWithArgsAndStderr(t, args)

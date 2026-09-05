@@ -24,7 +24,9 @@ func (s *Service) SaveAttachment(
 		return SavedAttachment{}, err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, removeIfPresent(temporaryPath))
+		if err := removeIfPresent(temporaryPath); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
 	}()
 	if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, temporaryPath); err != nil {
 		return SavedAttachment{}, err
@@ -34,7 +36,10 @@ func (s *Service) SaveAttachment(
 	}
 	saved, err = inspectSavedAttachment(request.AttachmentID, request.OutputPath)
 	if err != nil {
-		return SavedAttachment{}, errors.Join(err, removeIfPresent(request.OutputPath))
+		if cleanupErr := removeIfPresent(request.OutputPath); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+		return SavedAttachment{}, err
 	}
 	return saved, nil
 }
@@ -84,7 +89,11 @@ func publishAttachment(temporaryPath string, outputPath string) error {
 		return fmt.Errorf("publish attachment without overwrite: %w", err)
 	}
 	if err := os.Chmod(outputPath, 0o600); err != nil {
-		return errors.Join(fmt.Errorf("restrict saved attachment: %w", err), removeIfPresent(outputPath))
+		primaryErr := fmt.Errorf("restrict saved attachment: %w", err)
+		if cleanupErr := removeIfPresent(outputPath); cleanupErr != nil {
+			return errors.Join(primaryErr, cleanupErr)
+		}
+		return primaryErr
 	}
 	return nil
 }
@@ -95,7 +104,9 @@ func inspectSavedAttachment(attachmentID string, path string) (saved SavedAttach
 		return SavedAttachment{}, fmt.Errorf("open saved attachment: %w", err)
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, file.Close())
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
 	}()
 	hash := sha256.New()
 	size, err := io.Copy(hash, file)

@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,34 @@ func (s *stubSubmitter) Submit(
 	s.calls++
 	s.lastHost, s.lastPort, s.lastFrom, s.lastTo = cfg.Host, cfg.Port, from, rcpts
 	s.lastMessage = append(s.lastMessage[:0], message...)
+	if start := strings.Index(string(message), "Message-ID: "); start >= 0 {
+		line := string(message[start+len("Message-ID: "):])
+		if end := strings.IndexByte(line, '\r'); end >= 0 {
+			s.evidence.MessageID = strings.TrimSpace(line[:end])
+		}
+	}
+	return s.evidence, s.err
+}
+
+type streamingSubmitter struct {
+	stubSubmitter
+	readerCalls int
+	readerSize  int64
+}
+
+func (s *streamingSubmitter) SubmitReader(
+	_ context.Context, _ transport.SubmitConfig, _ string, _ []string, messageID string, reader io.Reader, size int64,
+) (transport.SubmitEvidence, error) {
+	s.readerCalls++
+	s.readerSize = size
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return transport.SubmitEvidence{}, err
+	}
+	if int64(len(payload)) != size {
+		return transport.SubmitEvidence{}, errors.New("stream size mismatch")
+	}
+	s.evidence.MessageID = messageID
 	return s.evidence, s.err
 }
 
@@ -49,6 +78,28 @@ func (s *stubMirror) AppendToSent(
 	messageID string,
 ) (transport.AppendEvidence, error) {
 	s.calls++
+	s.lastID = messageID
+	return s.evidence, s.err
+}
+
+type streamingMirror struct {
+	stubMirror
+	readerCalls int
+	readerSize  int64
+}
+
+func (s *streamingMirror) AppendToSentReader(
+	_ context.Context, _ transport.ImapConfig, reader io.Reader, size int64, messageID string,
+) (transport.AppendEvidence, error) {
+	s.readerCalls++
+	s.readerSize = size
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return transport.AppendEvidence{}, err
+	}
+	if int64(len(payload)) != size {
+		return transport.AppendEvidence{}, errors.New("stream size mismatch")
+	}
 	s.lastID = messageID
 	return s.evidence, s.err
 }
@@ -112,6 +163,62 @@ func assertNoSendClaim(t *testing.T, root string, ref string) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("send claim still exists: %v", err)
+	}
+}
+
+func TestSendDraftRejectsInvalidStoredRecipient(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	draft.To[0].Address = "not an address"
+	if err := writeDraftFile(root, draft); err != nil {
+		t.Fatalf("writeDraftFile() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "invalid_argument" {
+		t.Fatalf("SendDraft() error = %v, want invalid_argument", err)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("submission calls = %d, mirror calls = %d", submitter.calls, mirror.calls)
+	}
+}
+
+func TestSendDraftRejectsDuplicateStoredRecipient(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	draft.CC = []Recipient{{Address: draft.To[0].Address}}
+	if err := writeDraftFile(root, draft); err != nil {
+		t.Fatalf("writeDraftFile() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "invalid_argument" {
+		t.Fatalf("SendDraft() error = %v, want invalid_argument", err)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("submission calls = %d, mirror calls = %d", submitter.calls, mirror.calls)
+	}
+}
+
+func TestSendDraftRetainsUnknownSMTPOutcome(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	submitter.err = &transport.SubmissionError{
+		Stage: "final_reply",
+		Err:   &transport.TransportError{Code: transport.CodeSMTPTimeout, Message: "SMTP final reply timed out"},
+	}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	result, err := service.SendDraft(context.Background(), draft.Ref)
+	if errorCode(err) != transport.CodeSMTPSubmissionUnknown || result.Outcome != SendOutcomeUnknown ||
+		!result.DraftRetained || submitter.calls != 1 || mirror.calls != 0 {
+		t.Fatalf("SendDraft() = %+v, error = %v, submitter calls = %d, mirror calls = %d", result, err, submitter.calls, mirror.calls)
+	}
+	retained, getErr := service.GetDraft(draft.Ref)
+	if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil ||
+		retained.SendAttempt.Transport.SubmissionStage != "final_reply" {
+		t.Fatalf("retained attempt = %+v, error = %v", retained.SendAttempt, getErr)
 	}
 }
 
@@ -219,6 +326,39 @@ func TestSendDraftUnsupportedProviderIsRejected(t *testing.T) {
 	assertNoSendClaim(t, root, draft.Ref)
 }
 
+func TestSendDraftUsesReplayableStreamingTransport(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	attachment := filepath.Join(t.TempDir(), "invoice.txt")
+	if err := os.WriteFile(attachment, []byte("attachment bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	submitter := &streamingSubmitter{stubSubmitter: stubSubmitter{
+		evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK"},
+	}}
+	mirror := &streamingMirror{stubMirror: stubMirror{
+		evidence: transport.AppendEvidence{Mailbox: "Sent", Appended: true},
+	}}
+	service := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"},
+	})
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Stream", Body: "Body", Attachments: []string{attachment},
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	if submitter.readerCalls != 1 || mirror.readerCalls != 1 || submitter.readerSize <= 0 || submitter.readerSize != mirror.readerSize {
+		t.Fatalf("stream calls = submitter:%d mirror:%d sizes:%d/%d", submitter.readerCalls, mirror.readerCalls, submitter.readerSize, mirror.readerSize)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("legacy calls = submitter:%d mirror:%d", submitter.calls, mirror.calls)
+	}
+}
+
 func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()
@@ -265,6 +405,41 @@ func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 		t.Fatal("reconciled draft still exists")
 	}
 	assertNoSendClaim(t, root, draft.Ref)
+}
+
+func TestReconcileMirrorPendingVerifiesExistingSentIdentity(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	imap := &reconcileImapStub{
+		mailboxes: []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+	}
+	service.send.Imap = imap
+	draft := createTransportDraft(t, service)
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "imap_append_failed" {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil {
+		t.Fatalf("GetDraft() = %+v, error = %v", retained, err)
+	}
+	messageID := retained.SendAttempt.MessageID
+	imap.uid = 42
+	imap.fetchRaw = []byte("From: sender@icloud.com\r\n" +
+		"To: recipient@example.com\r\n" +
+		"Message-ID: " + messageID + "\r\n" +
+		"Subject: Send test\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n")
+	mirror.err = nil
+	calls := mirror.calls
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || result.DraftRetained || mirror.calls != calls {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v, mirror calls = %d want %d", result, err, mirror.calls, calls)
+	}
+	if imap.fetchCalls != 1 {
+		t.Fatalf("FetchMessage() calls = %d, want 1", imap.fetchCalls)
+	}
 }
 
 func TestReconcileDraftMirrorFailureKeepsClaim(t *testing.T) {
@@ -367,6 +542,10 @@ type reconcileImapStub struct {
 	searchID    string
 	searchBox   string
 	searchCalls int
+	matchCount  int
+	fetchRaw    []byte
+	fetchErr    error
+	fetchCalls  int
 }
 
 func (s *reconcileImapStub) ListMailboxes(context.Context, transport.ImapConfig) ([]transport.MailboxInfo, error) {
@@ -378,7 +557,18 @@ func (s *reconcileImapStub) SearchUID(
 ) (uint32, uint32, int, error) {
 	s.searchCalls++
 	s.searchBox, s.searchID = mailbox, messageID
-	return s.uid, 77, 1, s.searchErr
+	matchCount := s.matchCount
+	if matchCount == 0 {
+		matchCount = 1
+	}
+	return s.uid, 77, matchCount, s.searchErr
+}
+
+func (s *reconcileImapStub) FetchMessage(
+	_ context.Context, _ transport.ImapConfig, _ string, _ uint32, _ uint32, _ int64,
+) ([]byte, error) {
+	s.fetchCalls++
+	return s.fetchRaw, s.fetchErr
 }
 
 func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) {
@@ -398,6 +588,11 @@ func TestReconcileUnknownClaimFindsSentMessage(t *testing.T) {
 	imap := &reconcileImapStub{
 		mailboxes: []transport.MailboxInfo{{Name: "Sent Messages", Flags: []string{"\\Sent"}}},
 		uid:       42,
+		fetchRaw: []byte("From: sender@icloud.com\r\n" +
+			"To: recipient@example.com\r\n" +
+			"Message-ID: <claim@example.com>\r\n" +
+			"Subject: Send test\r\n" +
+			"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n"),
 	}
 	service.send.Imap = imap
 
@@ -412,6 +607,48 @@ func TestReconcileUnknownClaimFindsSentMessage(t *testing.T) {
 	if err != nil || claim.Outcome != SendOutcomeSent || claim.Transport == nil ||
 		claim.Transport.MessageID != "<claim@example.com>" || claim.Transport.MirrorMailbox != "Sent Messages" {
 		t.Fatalf("claim after reconcile = %+v, error = %v", claim, err)
+	}
+}
+
+func TestReconcileUnknownClaimRejectsDuplicateMessageID(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	beginUnknownClaim(t, root, draft)
+	imap := &reconcileImapStub{
+		mailboxes:  []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+		uid:        42,
+		matchCount: 2,
+	}
+	service.send.Imap = imap
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "send_outcome_unverifiable" || result.Outcome != SendOutcomeUnknown {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
+	}
+	if imap.fetchCalls != 0 {
+		t.Fatalf("FetchMessage() calls = %d, want 0 for duplicate candidates", imap.fetchCalls)
+	}
+}
+
+func TestReconcileUnknownClaimRejectsIdentityMismatch(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	beginUnknownClaim(t, root, draft)
+	service.send.Imap = &reconcileImapStub{
+		mailboxes: []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+		uid:       42,
+		fetchRaw: []byte("From: sender@icloud.com\r\n" +
+			"To: recipient@example.com\r\n" +
+			"Message-ID: <claim@example.com>\r\n" +
+			"Subject: Changed\r\n" +
+			"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n"),
+	}
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "send_identity_mismatch" || result.Outcome != SendOutcomeUnknown {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
 	}
 }
 

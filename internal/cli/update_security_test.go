@@ -35,8 +35,8 @@ func TestParseReleasePublicKeyWrongLength(t *testing.T) {
 
 func TestChecksumForArchiveValid(t *testing.T) {
 	digestHex := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	checksums := digestHex + "  mailcli_1.2.0_darwin_arm64.tar.gz\n"
-	digest, err := checksumForArchive("mailcli_1.2.0_darwin_arm64.tar.gz", checksums)
+	checksums := digestHex + "  mailcli_1.3.0_darwin_arm64.tar.gz\n"
+	digest, err := checksumForArchive("mailcli_1.3.0_darwin_arm64.tar.gz", checksums)
 	if err != nil {
 		t.Fatalf("checksumForArchive error = %v", err)
 	}
@@ -47,7 +47,7 @@ func TestChecksumForArchiveValid(t *testing.T) {
 
 func TestChecksumForArchiveMissing(t *testing.T) {
 	checksums := "abc123  other_archive.tar.gz\n"
-	_, err := checksumForArchive("mailcli_1.2.0_darwin_arm64.tar.gz", checksums)
+	_, err := checksumForArchive("mailcli_1.3.0_darwin_arm64.tar.gz", checksums)
 	if err == nil {
 		t.Fatal("checksumForArchive error = nil, want missing archive error")
 	}

@@ -197,8 +197,13 @@ func appendScalarFilters(where *[]string, arguments *[]any, prepared mail.Prepar
 		*arguments = append(*arguments, *query.Flagged)
 	}
 	if prepared.Cursor != nil {
-		*where = append(*where, "(m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))")
-		*arguments = append(*arguments, prepared.Cursor.ReceivedAt, prepared.Cursor.ReceivedAt, prepared.Cursor.RowID)
+		if prepared.Cursor.ReceivedAtNull {
+			*where = append(*where, "m.date_received IS NULL AND m.ROWID < ?")
+			*arguments = append(*arguments, prepared.Cursor.RowID)
+		} else {
+			*where = append(*where, "((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)")
+			*arguments = append(*arguments, prepared.Cursor.ReceivedAt, prepared.Cursor.ReceivedAt, prepared.Cursor.RowID)
+		}
 	}
 }
 
@@ -269,12 +274,11 @@ func (s *Store) newSearchCandidateStream(ctx context.Context, plan searchPlan) *
 	return &searchCandidateStream{store: s, ctx: ctx, plan: plan}
 }
 
-// next returns the next chunk of candidates and whether the stream is
-// exhausted. total is returned on every call; it comes from the same
-// window count as the monolithic path.
-func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total int, resultErr error) {
+// next returns the next chunk of candidates. The caller supplies the
+// candidate total from countSearchCandidates; chunk queries stay keyset-only.
+func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultErr error) {
 	if st.done {
-		return nil, 0, nil
+		return nil, nil
 	}
 	query := `SELECT
 		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
@@ -283,8 +287,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
 		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
-		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
-		count(*) OVER ()
+		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
 	`
 	arguments := append([]any(nil), st.plan.arguments...)
 	if st.haveLast {
@@ -312,7 +315,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 	query = st.plan.prefixSQL + query
 	rows, err := st.store.database.QueryContext(st.ctx, query, arguments...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("query Envelope Index search candidates: %w", err)
+		return nil, fmt.Errorf("query Envelope Index search candidates: %w", err)
 	}
 	defer joinCloseError(&resultErr, rows, "search candidate rows")
 	var items []messageRecord
@@ -325,22 +328,23 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
-			&item.Junk, &item.Size, &item.AttachmentCount, &total,
+			&item.Junk, &item.Size, &item.AttachmentCount,
 		); err != nil {
-			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
+			return nil, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
 		// Only the chunk's last row seeds the next keyset cursor; track
 		// whether that row's raw date is NULL (messageRecord carries the
 		// COALESCEd value only).
 		lastDateNull = dateNull != 0
+		item.DateReceivedNull = lastDateNull
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate Envelope Index search candidates: %w", err)
+		return nil, fmt.Errorf("iterate Envelope Index search candidates: %w", err)
 	}
 	if len(items) == 0 {
 		st.done = true
-		return nil, total, nil
+		return nil, nil
 	}
 	st.last = items[len(items)-1]
 	st.lastNull = lastDateNull
@@ -348,7 +352,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, total i
 	if len(items) < limit {
 		st.done = true
 	}
-	return items, total, nil
+	return items, nil
 }
 
 // countSearchCandidates runs one count(*) over the same filters as the
@@ -405,12 +409,9 @@ func (s *Store) scanSearchRecordsChunked(
 chunkLoop:
 	for loaded < maximum && len(results) <= prepared.Query.Limit {
 		chunkWant := min(candidateChunkSize, maximum-loaded)
-		items, chunkTotal, err := stream.next(chunkWant)
+		items, err := stream.next(chunkWant)
 		if err != nil {
 			return mail.SearchPage{}, err
-		}
-		if chunkTotal > total {
-			total = chunkTotal
 		}
 		if len(items) == 0 {
 			break
@@ -464,7 +465,7 @@ chunkLoop:
 		results = results[:prepared.Query.Limit]
 		resultItems = resultItems[:prepared.Query.Limit]
 	}
-	if coverage.ScannedMessages+coverage.CatalogProvenMessages < coverage.CandidateMessages {
+	if coverage.ScannedMessages+coverage.CatalogProvenMessages != coverage.CandidateMessages {
 		coverage.Complete = false
 	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
@@ -488,7 +489,7 @@ func (s *Store) querySearchRecords(
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
-		COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
+		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
 		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
 		count(*) OVER ()
@@ -503,15 +504,17 @@ func (s *Store) querySearchRecords(
 	var items []messageRecord
 	for rows.Next() {
 		var item messageRecord
+		var dateNull bool
 		if err := rows.Scan(
 			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-			&item.DateSent, &item.DateReceived, &item.Read, &item.Flagged, &item.Deleted,
+			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
 			&item.Junk, &item.Size, &item.AttachmentCount, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
+		item.DateReceivedNull = dateNull
 		if items == nil {
 			items = make([]messageRecord, 0, min(limit, total))
 		}
@@ -882,7 +885,7 @@ func runeByteRangeFast(value string, startRune int, endRune int) (int, int) {
 }
 
 func searchCursorFor(item messageRecord, fingerprint string, storeUUID string) (string, error) {
-	return mail.EncodeSearchCursor(fingerprint, storeUUID, item.DateReceived, item.RowID)
+	return mail.EncodeSearchCursor(fingerprint, storeUUID, item.DateReceived, item.DateReceivedNull, item.RowID)
 }
 
 func buildSearchText(item messageRecord, document mimeDocument) string {

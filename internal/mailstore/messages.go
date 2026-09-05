@@ -14,34 +14,36 @@ import (
 	"mailcli/internal/mailref"
 )
 
-const listCursorVersion = 1
+const listCursorVersion = 2
 
 type messageRecord struct {
-	RowID           int64
-	StoreMessageID  int64
-	StoreGlobalID   int64
-	StoreMailboxID  int64
-	PhysicalURL     string
-	Subject         string
-	SenderAddress   string
-	SenderName      string
-	SummaryText     string
-	DateSent        int64
-	DateReceived    int64
-	Read            bool
-	Flagged         bool
-	Deleted         bool
-	Junk            bool
-	Size            int64
-	AttachmentCount int
+	RowID            int64
+	StoreMessageID   int64
+	StoreGlobalID    int64
+	StoreMailboxID   int64
+	PhysicalURL      string
+	Subject          string
+	SenderAddress    string
+	SenderName       string
+	SummaryText      string
+	DateSent         int64
+	DateReceived     int64
+	DateReceivedNull bool
+	Read             bool
+	Flagged          bool
+	Deleted          bool
+	Junk             bool
+	Size             int64
+	AttachmentCount  int
 }
 
 type listCursor struct {
-	Version      int    `json:"version"`
-	StoreUUID    string `json:"store_uuid"`
-	MailboxRef   string `json:"mailbox_ref"`
-	DateReceived int64  `json:"date_received"`
-	RowID        int64  `json:"row_id"`
+	Version          int    `json:"version"`
+	StoreUUID        string `json:"store_uuid"`
+	MailboxRef       string `json:"mailbox_ref"`
+	DateReceived     int64  `json:"date_received"`
+	DateReceivedNull bool   `json:"date_received_null"`
+	RowID            int64  `json:"row_id"`
 }
 
 func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesRequest) (mail.MessagePage, error) {
@@ -105,10 +107,17 @@ func (s *Store) queryMailboxMessages(
 	query := mailboxMessagesSQL("")
 	arguments := []any{mailboxRowID, mailboxRowID}
 	if cursor != nil {
-		query = mailboxMessagesSQL(`
-			AND (m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))
-		`)
-		arguments = append(arguments, cursor.DateReceived, cursor.DateReceived, cursor.RowID)
+		if cursor.DateReceivedNull {
+			query = mailboxMessagesSQL(`
+				AND m.date_received IS NULL AND m.ROWID < ?
+			`)
+			arguments = append(arguments, cursor.RowID)
+		} else {
+			query = mailboxMessagesSQL(`
+				AND ((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)
+			`)
+			arguments = append(arguments, cursor.DateReceived, cursor.DateReceived, cursor.RowID)
+		}
 	}
 	arguments = append(arguments, limit)
 	rows, err := s.database.QueryContext(ctx, query, arguments...)
@@ -118,7 +127,7 @@ func (s *Store) queryMailboxMessages(
 	defer joinCloseError(&resultErr, rows, "message rows")
 	items := make([]messageRecord, 0, limit)
 	for rows.Next() {
-		item, err := scanMessageRecord(rows)
+		item, err := scanMessageRecordWithDateNull(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +151,7 @@ func mailboxMessagesSQL(cursorClause string) string {
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
 			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
-			COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
+			COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 			EXISTS(
 				SELECT 1 FROM server_messages sm
 				WHERE sm.message = m.ROWID AND sm.junk_level > 0
@@ -180,6 +189,22 @@ func scanMessageRecord(row rowScanner) (messageRecord, error) {
 	return item, nil
 }
 
+func scanMessageRecordWithDateNull(row rowScanner) (messageRecord, error) {
+	var item messageRecord
+	var dateNull bool
+	if err := row.Scan(
+		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+		&item.PhysicalURL,
+		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
+		&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
+		&item.Junk, &item.Size, &item.AttachmentCount,
+	); err != nil {
+		return messageRecord{}, fmt.Errorf("scan Envelope Index message: %w", err)
+	}
+	item.DateReceivedNull = dateNull
+	return item, nil
+}
+
 func mapMessagePage(
 	items []messageRecord,
 	mailboxRef string,
@@ -204,7 +229,8 @@ func mapMessagePage(
 		last := items[len(items)-1]
 		cursor, err := encodeListCursor(listCursor{
 			StoreUUID: storeUUID, MailboxRef: mailboxRef,
-			DateReceived: last.DateReceived, RowID: last.RowID,
+			DateReceived: last.DateReceived, DateReceivedNull: last.DateReceivedNull,
+			RowID: last.RowID,
 		})
 		if err != nil {
 			return mail.MessagePage{}, err

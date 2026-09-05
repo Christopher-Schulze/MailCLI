@@ -2,7 +2,10 @@
 
 package cli
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 var osStdin = os.Stdin
 

@@ -75,6 +75,9 @@ func runDraftHandoffWith(
 	for _, attachment := range draft.Attachments {
 		attachments = append(attachments, attachment.Path)
 	}
+	if err := validateHandoffAttachments(draft.Attachments); err != nil {
+		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
+	}
 	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	result, err := handoff(operationCtx, compose.Request{
@@ -93,6 +96,36 @@ func runDraftHandoffWith(
 	}
 	writeFormat(stdout, "Opened visible draft in Mail.app\nDraft: %s (retained locally)\n", draft.Ref)
 	return 0
+}
+
+func validateHandoffAttachments(attachments []mail.DraftAttachment) error {
+	for _, attachment := range attachments {
+		info, err := os.Stat(attachment.Path)
+		if err != nil {
+			code := "handoff_attachment_unreadable"
+			if os.IsNotExist(err) {
+				code = "handoff_attachment_missing"
+			}
+			return &commandError{
+				code: code,
+				message: fmt.Sprintf(
+					"attachment %s is unavailable: %v; it may have been moved or deleted after the draft was created; update the draft attachments",
+					attachment.Path, err,
+				),
+			}
+		}
+		if !info.Mode().IsRegular() {
+			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " is not a regular file; update the draft attachments"}
+		}
+		file, err := os.Open(attachment.Path)
+		if err != nil {
+			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " cannot be opened; update the draft attachments"}
+		}
+		if err := file.Close(); err != nil {
+			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " cannot be closed cleanly; update the draft attachments"}
+		}
+	}
+	return nil
 }
 
 func runDraftPreview(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -253,7 +286,10 @@ func resolveEditor(explicit string, arguments []string) (string, []string, error
 		return explicit, append([]string(nil), arguments...), nil
 	}
 	for _, variable := range []string{"VISUAL", "EDITOR"} {
-		fields := strings.Fields(os.Getenv(variable))
+		fields, err := splitEditorCommand(os.Getenv(variable))
+		if err != nil {
+			return "", nil, err
+		}
 		if len(fields) > 0 {
 			return fields[0], append(fields[1:], arguments...), nil
 		}
@@ -262,6 +298,57 @@ func resolveEditor(explicit string, arguments []string) (string, []string, error
 		return "", nil, &commandError{code: "editor_unavailable", message: "no editor configured; use --editor"}
 	}
 	return "/usr/bin/vi", append([]string(nil), arguments...), nil
+}
+
+func splitEditorCommand(value string) ([]string, error) {
+	var fields []string
+	var current strings.Builder
+	var quote rune
+	started := false
+	escaped := false
+	for _, char := range value {
+		if escaped {
+			current.WriteRune(char)
+			started = true
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+			started = true
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+				continue
+			}
+			current.WriteRune(char)
+			started = true
+			continue
+		}
+		switch char {
+		case '\'', '"':
+			quote = char
+			started = true
+		case ' ', '\t', '\n', '\r':
+			if started {
+				fields = append(fields, current.String())
+				current.Reset()
+				started = false
+			}
+		default:
+			current.WriteRune(char)
+			started = true
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, &commandError{code: "invalid_editor", message: fmt.Sprintf("editor command has an unterminated quote or escape: %q", value)}
+	}
+	if started {
+		fields = append(fields, current.String())
+	}
+	return fields, nil
 }
 
 func draftInputFromStored(draft mail.Draft) mail.DraftInput {

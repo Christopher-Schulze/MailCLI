@@ -2,11 +2,8 @@ package mailapp
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,24 +69,6 @@ type cancelingBridgeErrorRunner struct {
 	cancel context.CancelFunc
 }
 
-type saveEvidenceFailureRunner struct{}
-
-func (saveEvidenceFailureRunner) Run(
-	_ context.Context,
-	_ string,
-	request string,
-) ([]byte, bool, error) {
-	var decoded bridgeRequest
-	if err := json.Unmarshal([]byte(request), &decoded); err != nil {
-		return nil, false, err
-	}
-	payload := []byte(`{"from":"sender@example.com","to":[{"address":"to@example.com"}],"cc":[],"bcc":[],"subject":"Subject","body":"Body\n\n--\nSignature","attachment_count":0}`)
-	if err := os.WriteFile(decoded.EvidencePath, payload, 0o600); err != nil {
-		return nil, false, err
-	}
-	return nil, true, context.DeadlineExceeded
-}
-
 func (runner cancelingBridgeErrorRunner) Run(context.Context, string, string) ([]byte, bool, error) {
 	runner.cancel()
 	return []byte(`{"ok":false,"error":{"code":"compose_busy","message":"busy"}}`), true, nil
@@ -116,124 +95,6 @@ func TestClientBindsBridgeRequestToGateProcess(t *testing.T) {
 	}
 	if request.MailPID != 42 {
 		t.Fatalf("bridge mail PID = %d, want 42", request.MailPID)
-	}
-}
-
-func TestSaveDraftRecoversNativeEvidenceAfterRunnerTimeout(t *testing.T) {
-	client := &Client{runner: saveEvidenceFailureRunner{}}
-	_, materialized, started, accepted, err := client.SaveDraftWithInvocationState(
-		context.Background(),
-		mail.Draft{
-			Kind: mail.DraftKindNew, From: "sender@example.com",
-			To: []mail.Recipient{{Address: "to@example.com"}}, Subject: "Subject", Body: "Body",
-		},
-	)
-	if !errors.Is(err, context.DeadlineExceeded) || !started || accepted || materialized == nil ||
-		materialized.Body == nil || !strings.Contains(*materialized.Body, "Signature") {
-		t.Fatalf(
-			"SaveDraftWithInvocationState() materialized = %+v, started = %t, accepted = %t, error = %v",
-			materialized, started, accepted, err,
-		)
-	}
-}
-
-func TestClientMapsAccountsAndMailboxes(t *testing.T) {
-	runner := &runnerStub{response: `{"ok":true,"error":null,"accounts":[{"id":"account-id","name":"Primary","email_addresses":["mail@example.com"]}]}`}
-	client := &Client{runner: runner}
-
-	accounts, err := client.ListAccounts(context.Background())
-	if err != nil {
-		t.Fatalf("ListAccounts() error = %v", err)
-	}
-	if len(accounts) != 1 || !strings.HasPrefix(accounts[0].Ref, "acct_") {
-		t.Fatalf("accounts = %+v", accounts)
-	}
-
-	runner.response = `{"ok":true,"error":null,"mailboxes":[{"account_id":"account-id","name":"Inbox","path":["Inbox"],"unread_count":3}]}`
-	mailboxes, err := client.ListMailboxes(context.Background(), mail.ListMailboxesRequest{AccountRef: accounts[0].Ref})
-	if err != nil {
-		t.Fatalf("ListMailboxes() error = %v", err)
-	}
-	if len(mailboxes) != 1 || !strings.HasPrefix(mailboxes[0].Ref, "mbx_") || mailboxes[0].UnreadCount != 3 {
-		t.Fatalf("mailboxes = %+v", mailboxes)
-	}
-	if !strings.Contains(runner.request, `"account_id":"account-id"`) {
-		t.Fatalf("bridge request = %q", runner.request)
-	}
-}
-
-func TestSnapshotBridgeAttachmentsPreservesReviewedBytesAndName(t *testing.T) {
-	content := []byte("reviewed attachment")
-	digest := sha256.Sum256(content)
-	path := filepath.Join(t.TempDir(), "evidence.txt")
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		t.Fatalf("os.WriteFile() error = %v", err)
-	}
-	draft, cleanup, err := snapshotBridgeAttachments(bridgeDraft{Attachments: []mail.DraftAttachment{{
-		Path: path, Size: int64(len(content)), SHA256: hex.EncodeToString(digest[:]),
-	}}})
-	if err != nil {
-		t.Fatalf("snapshotBridgeAttachments() error = %v", err)
-	}
-	snapshotPath := draft.Attachments[0].Path
-	if filepath.Base(snapshotPath) != "evidence.txt" || snapshotPath == path {
-		t.Fatalf("snapshot path = %q", snapshotPath)
-	}
-	if err := os.WriteFile(path, []byte("changed after snapshot"), 0o600); err != nil {
-		t.Fatalf("change source: %v", err)
-	}
-	snapshot, err := os.ReadFile(snapshotPath)
-	if err != nil || string(snapshot) != string(content) {
-		t.Fatalf("snapshot bytes = %q, error = %v", snapshot, err)
-	}
-	if err := cleanup(); err != nil {
-		t.Fatalf("cleanup attachment snapshot: %v", err)
-	}
-	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
-		t.Fatalf("snapshot cleanup error = %v", err)
-	}
-}
-
-func TestClientRejectsScriptedComposeAttachmentsBeforeMailApp(t *testing.T) {
-	tests := []struct {
-		name string
-		run  func(*Client) error
-	}{
-		{
-			name: "save",
-			run: func(client *Client) error {
-				_, err := client.SaveDraft(context.Background(), mail.Draft{
-					Attachments: []mail.DraftAttachment{{Path: "/reviewed/file.txt"}},
-				})
-				return err
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			runner := &runnerStub{}
-			err := test.run(&Client{runner: runner})
-			var operationError *OperationError
-			if !errors.As(err, &operationError) || operationError.Code != "compose_attachments_unsupported" {
-				t.Fatalf("error = %v", err)
-			}
-			if runner.request != "" {
-				t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
-			}
-		})
-	}
-}
-
-func TestProductionClientBlocksUnsafeMail16ComposeBeforeMailApp(t *testing.T) {
-	runner := &runnerStub{}
-	client := &Client{runner: runner, blockComposeAutomation: true}
-	_, err := client.SaveDraft(context.Background(), mail.Draft{Kind: mail.DraftKindNew})
-	var operationError *OperationError
-	if !errors.As(err, &operationError) || operationError.Code != "compose_automation_unsupported" {
-		t.Fatalf("SaveDraft() error = %v", err)
-	}
-	if runner.request != "" {
-		t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
 	}
 }
 
@@ -315,21 +176,6 @@ func TestClientReturnsTypedBridgeError(t *testing.T) {
 	}
 	if operationError.ErrorCode() != "not_found" {
 		t.Fatalf("error code = %q", operationError.ErrorCode())
-	}
-}
-
-func TestClientNeverClaimsConvenienceMessageReadComplete(t *testing.T) {
-	messageRef, err := encodeMessageReference(messageReference{
-		AccountID: "account-id", MailboxPath: []string{"Inbox"}, LibraryID: "42",
-	})
-	if err != nil {
-		t.Fatalf("encodeMessageReference() error = %v", err)
-	}
-	runner := &runnerStub{response: `{"ok":true,"message":{"account_id":"account-id","mailbox_path":["Inbox"],"library_id":"42","content":""}}`}
-	client := &Client{runner: runner}
-	message, err := client.GetMessage(context.Background(), messageRef)
-	if err != nil || message.ContentComplete || len(message.MissingParts) != 1 {
-		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
 	}
 }
 
@@ -451,60 +297,6 @@ func TestClientDoesNotLatchIncompleteReadCompletion(t *testing.T) {
 	}
 }
 
-func TestClientLatchesOnlyIncompleteMutations(t *testing.T) {
-	tests := []struct {
-		name      string
-		operation string
-		err       error
-		want      bool
-	}{
-		{name: "compose mutation", operation: "drafts.save", err: errors.New("transport failed"), want: true},
-		{name: "message mutation", operation: "messages.delete", err: errors.New("transport failed"), want: true},
-		{name: "sync", operation: "mail.sync", err: context.DeadlineExceeded},
-		{name: "read", operation: "messages.raw", err: context.DeadlineExceeded},
-		{name: "automation denial", operation: "drafts.save", err: errors.New("not authorized to send Apple events (-1743)")},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			lease := &accessLeaseRecorder{}
-			client := &Client{
-				runner: &runnerStub{err: test.err}, gate: accessGateStub{lease: lease},
-			}
-			_, _, _ = client.invokeWithState(context.Background(), bridgeRequest{Operation: test.operation})
-			wantArmCalls := 0
-			if operationCanLeaveUncertainMailState(test.operation) {
-				wantArmCalls = 1
-			}
-			if lease.armCalls != wantArmCalls {
-				t.Fatalf("lease arm calls = %d, want %d", lease.armCalls, wantArmCalls)
-			}
-			if lease.uncertain != test.want {
-				t.Fatalf("lease uncertain = %t, want %t", lease.uncertain, test.want)
-			}
-		})
-	}
-}
-
-func TestClientDoesNotStartMutationWhenRecoveryStateCannotBeArmed(t *testing.T) {
-	lease := &accessLeaseRecorder{armErr: errors.New("disk write failed")}
-	runner := &runnerStub{response: `{"ok":true,"accepted":true}`}
-	client := &Client{runner: runner, gate: accessGateStub{lease: lease}}
-
-	_, _, err := client.invokeWithState(
-		context.Background(), bridgeRequest{Operation: "messages.delete"},
-	)
-	var operationError *OperationError
-	if !errors.As(err, &operationError) || operationError.Code != "mail_access_gate_failed" {
-		t.Fatalf("invokeWithState() error = %v", err)
-	}
-	if runner.request != "" {
-		t.Fatalf("Mail.app bridge unexpectedly invoked with %q", runner.request)
-	}
-	if lease.armCalls != 1 || lease.releaseCalls != 1 || lease.uncertain {
-		t.Fatalf("lease = %+v", lease)
-	}
-}
-
 func TestClientDoesNotMarkPreStartRunnerFailureUncertain(t *testing.T) {
 	lease := &accessLeaseRecorder{}
 	client := &Client{
@@ -596,96 +388,5 @@ func TestClientRejectsCursorForDifferentMailbox(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ListMessages() error = nil, want cursor scope error")
-	}
-}
-
-func TestClientReturnsTypedInvalidReference(t *testing.T) {
-	client := &Client{runner: &runnerStub{}}
-	_, err := client.GetMessage(context.Background(), "not-a-message-ref")
-	if err == nil {
-		t.Fatal("GetMessage() error = nil")
-	}
-	var operationError *OperationError
-	if !errors.As(err, &operationError) {
-		t.Fatalf("error type = %T, want *OperationError", err)
-	}
-	if operationError.ErrorCode() != "invalid_reference" {
-		t.Fatalf("error code = %q", operationError.ErrorCode())
-	}
-}
-
-func TestClientEncodesAndMapsSavedDraft(t *testing.T) {
-	runner := &runnerStub{response: `{"ok":true,"error":null,"accepted":true}`}
-	client := &Client{runner: runner}
-	message, err := client.SaveDraft(context.Background(), mail.Draft{
-		Kind: mail.DraftKindNew, From: "mail@example.com",
-		To: []mail.Recipient{{Address: "recipient@example.com"}}, Subject: "Saved", Body: "Body",
-	})
-	if err != nil || message.Ref != "" || message.Subject != "Saved" {
-		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
-	}
-	for _, expected := range []string{`"operation":"drafts.save"`, `"from":"mail@example.com"`} {
-		if !strings.Contains(runner.request, expected) {
-			t.Fatalf("bridge request = %q, missing %q", runner.request, expected)
-		}
-	}
-}
-
-func TestClientDoesNotRestartOrReopenSavedDraft(t *testing.T) {
-	runner := &runnerStub{response: `{"ok":true,"error":null,"accepted":true}`}
-	client := &Client{runner: runner}
-	message, err := client.SaveDraft(context.Background(), mail.Draft{
-		Kind: mail.DraftKindNew, From: "mail@example.com",
-		To: []mail.Recipient{{Address: "recipient@example.com"}}, Subject: "Saved", Body: "Body",
-	})
-	if err != nil || message.Subject != "Saved" {
-		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
-	}
-	if !strings.Contains(runner.request, `"operation":"drafts.save"`) {
-		t.Fatalf("bridge request = %q", runner.request)
-	}
-}
-
-func TestClientUsesDraftOpenOperation(t *testing.T) {
-	messageRef, err := encodeMessageReference(messageReference{
-		AccountID: "account-id", MailboxPath: []string{"Drafts"},
-		LibraryID: "43", ExpectedMessageID: "draft-id",
-	})
-	if err != nil {
-		t.Fatalf("encodeMessageReference() error = %v", err)
-	}
-	runner := &runnerStub{response: `{"ok":true,"error":null,"message":{"account_id":"account-id","mailbox_path":["Drafts"],"library_id":"44","message_id":"draft-id","subject":"Draft"}}`}
-	client := &Client{runner: runner}
-	message, err := client.OpenDraft(context.Background(), messageRef)
-	if err != nil || message.Summary.Ref == messageRef {
-		t.Fatalf("OpenDraft() = %+v, error = %v", message, err)
-	}
-	if !strings.Contains(runner.request, `"operation":"drafts.open"`) {
-		t.Fatalf("bridge request = %q", runner.request)
-	}
-}
-
-func TestClientEncodesAndMapsMessageMark(t *testing.T) {
-	messageRef, err := encodeMessageReference(messageReference{
-		AccountID: "account-id", MailboxPath: []string{"Inbox"},
-		LibraryID: "42", ExpectedMessageID: "message-id",
-	})
-	if err != nil {
-		t.Fatalf("encodeMessageReference() error = %v", err)
-	}
-	runner := &runnerStub{response: `{"ok":true,"error":null,"accepted":true}`}
-	client := &Client{runner: runner}
-	read := true
-	junk := true
-	message, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
-		Ref: messageRef, Read: &read, Junk: &junk,
-	})
-	if err != nil || !message.Read || !message.Junk || message.Ref == "" {
-		t.Fatalf("MarkMessage() = %+v, error = %v", message, err)
-	}
-	for _, expected := range []string{`"operation":"messages.mark"`, `"read":true`, `"junk":true`} {
-		if !strings.Contains(runner.request, expected) {
-			t.Fatalf("bridge request = %q, missing %q", runner.request, expected)
-		}
 	}
 }

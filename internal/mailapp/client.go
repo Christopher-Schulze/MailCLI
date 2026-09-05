@@ -3,13 +3,10 @@ package mailapp
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,140 +46,13 @@ type OperationError struct {
 }
 
 type bridgeRequest struct {
-	Operation              string       `json:"operation"`
-	MailPID                int          `json:"mail_pid,omitempty"`
-	AccountID              string       `json:"account_id,omitempty"`
-	MailboxPath            []string     `json:"mailbox_path,omitempty"`
-	MessageID              string       `json:"message_id,omitempty"`
-	ExpectedMessageID      string       `json:"expected_message_id,omitempty"`
-	ExpectedSubject        string       `json:"expected_subject,omitempty"`
-	Offset                 int          `json:"offset,omitempty"`
-	ExpectedPreviousID     string       `json:"expected_previous_id,omitempty"`
-	Limit                  int          `json:"limit,omitempty"`
-	AttachmentID           string       `json:"attachment_id,omitempty"`
-	OutputPath             string       `json:"output_path,omitempty"`
-	Draft                  *bridgeDraft `json:"draft,omitempty"`
-	Read                   *bool        `json:"read,omitempty"`
-	Flagged                *bool        `json:"flagged,omitempty"`
-	Junk                   *bool        `json:"junk,omitempty"`
-	DestinationAccountID   string       `json:"destination_account_id,omitempty"`
-	DestinationMailboxPath []string     `json:"destination_mailbox_path,omitempty"`
-	Copy                   bool         `json:"copy,omitempty"`
-	MaximumRawSourceBytes  int64        `json:"maximum_raw_source_bytes,omitempty"`
-	EvidencePath           string       `json:"evidence_path,omitempty"`
-}
-
-type bridgeDraft struct {
-	Kind                          mail.DraftKind         `json:"kind"`
-	Source                        *messageReference      `json:"source,omitempty"`
-	ReplyAll                      bool                   `json:"reply_all,omitempty"`
-	From                          string                 `json:"from,omitempty"`
-	To                            []mail.Recipient       `json:"to"`
-	CC                            []mail.Recipient       `json:"cc"`
-	BCC                           []mail.Recipient       `json:"bcc"`
-	Subject                       string                 `json:"subject,omitempty"`
-	Body                          string                 `json:"body"`
-	Attachments                   []mail.DraftAttachment `json:"attachments"`
-	ExpectedNativeAttachmentCount int                    `json:"expected_native_attachment_count,omitempty"`
-}
-
-func (c *Client) SaveAttachmentTo(
-	ctx context.Context,
-	messageRef string,
-	attachmentID string,
-	outputPath string,
-) error {
-	ref, err := decodeMessageReference(messageRef)
-	if err != nil {
-		return invalidReference("message ref", err)
-	}
-	_, err = c.invoke(ctx, bridgeRequest{
-		Operation: "attachments.save", AccountID: ref.AccountID,
-		MailboxPath: ref.MailboxPath, MessageID: ref.LibraryID,
-		ExpectedMessageID: ref.ExpectedMessageID, ExpectedSubject: ref.ExpectedSubject,
-		AttachmentID: attachmentID,
-		OutputPath:   outputPath,
-	})
-	return err
-}
-
-func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
-	summary, _, _, _, err := c.SaveDraftWithInvocationState(ctx, draft)
-	return summary, err
-}
-
-func (c *Client) SaveDraftWithMaterialization(
-	ctx context.Context,
-	draft mail.Draft,
-) (mail.MessageSummary, *mail.SendMaterialization, error) {
-	summary, materialized, _, _, err := c.SaveDraftWithInvocationState(ctx, draft)
-	return summary, materialized, err
-}
-
-func (c *Client) SaveDraftWithInvocationState(
-	ctx context.Context,
-	draft mail.Draft,
-) (result mail.MessageSummary, materialized *mail.SendMaterialization, invocationStarted bool, accepted bool, resultErr error) {
-	if err := c.validateComposeDraft(draft); err != nil {
-		return mail.MessageSummary{}, nil, false, false, err
-	}
-	bridge, err := encodeBridgeDraft(draft)
-	if err != nil {
-		return mail.MessageSummary{}, nil, false, false, err
-	}
-	bridge, cleanup, err := snapshotBridgeAttachments(bridge)
-	if err != nil {
-		return mail.MessageSummary{}, nil, false, false, err
-	}
-	evidenceRoot, err := os.MkdirTemp("", "mailcli-save-evidence-*")
-	if err != nil {
-		return mail.MessageSummary{}, nil, false, false, errors.Join(err, attachmentSnapshotCleanupError(cleanup()))
-	}
-	defer func() {
-		resultErr = errors.Join(
-			resultErr,
-			bridgeCleanupError("remove private draft-save evidence", os.RemoveAll(evidenceRoot)),
-		)
-	}()
-	evidencePath := filepath.Join(evidenceRoot, "materialization.json")
-	response, _, invokeErr := c.invokeWithState(ctx, bridgeRequest{
-		Operation: "drafts.save", Draft: &bridge, EvidencePath: evidencePath,
-	})
-	cleanupErr := attachmentSnapshotCleanupError(cleanup())
-	materialized, evidenceErr := readDraftSaveEvidence(evidencePath)
-	invocationStarted = materialized != nil
-	if response.Materialized != nil {
-		materialized = mapSendMaterialization(response.Materialized)
-		invocationStarted = true
-	}
-	if invokeErr != nil {
-		return mail.MessageSummary{}, materialized, invocationStarted, response.Accepted, errors.Join(invokeErr, evidenceErr, cleanupErr)
-	}
-	if !response.Accepted {
-		return mail.MessageSummary{}, materialized, invocationStarted, false, errors.Join(&OperationError{
-			Code: "mutation_not_accepted", Message: "Mail.app did not accept the native draft save",
-		}, evidenceErr, cleanupErr)
-	}
-	summary := mail.MessageSummary{Subject: draft.Subject}
-	if materialized != nil {
-		summary.Subject = materialized.Subject
-		summary.Sender = materialized.From
-		summary.AttachmentCount = materialized.AttachmentCount
-	}
-	return summary, materialized, invocationStarted, true, errors.Join(evidenceErr, cleanupErr)
-}
-
-func (c *Client) validateComposeDraft(draft mail.Draft) error {
-	if err := c.ComposeWriteSupportError(); err != nil {
-		return err
-	}
-	if len(draft.Attachments) == 0 {
-		return nil
-	}
-	return &OperationError{
-		Code:    "compose_attachments_unsupported",
-		Message: "Mail 16 rejects scripted compose attachments; remove reviewed attachments or add them manually in Mail",
-	}
+	Operation          string   `json:"operation"`
+	MailPID            int      `json:"mail_pid,omitempty"`
+	AccountID          string   `json:"account_id,omitempty"`
+	MailboxPath        []string `json:"mailbox_path,omitempty"`
+	Offset             int      `json:"offset,omitempty"`
+	ExpectedPreviousID string   `json:"expected_previous_id,omitempty"`
+	Limit              int      `json:"limit,omitempty"`
 }
 
 func (c *Client) ComposeWriteSupportError() error {
@@ -193,205 +63,6 @@ func (c *Client) ComposeWriteSupportError() error {
 		Code:    "compose_automation_unsupported",
 		Message: "Mail 16 compose scripting discards reviewed content or creates phantom drafts; use 'drafts send --confirm' for sending and Mail's UI for native draft save",
 	}
-}
-
-func readDraftSaveEvidence(path string) (*mail.SendMaterialization, error) {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect draft-save evidence: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 20*1024*1024 {
-		return nil, fmt.Errorf("draft-save evidence is not a bounded regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open draft-save evidence: %w", err)
-	}
-	payload, readErr := io.ReadAll(io.LimitReader(file, 20*1024*1024+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil {
-		return nil, errors.Join(readErr, closeErr)
-	}
-	if len(payload) > 20*1024*1024 {
-		return nil, fmt.Errorf("draft-save evidence exceeds 20 MiB")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	var evidence bridgeMaterialized
-	if err := decoder.Decode(&evidence); err != nil {
-		return nil, fmt.Errorf("decode draft-save evidence: %w", err)
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("draft-save evidence must contain one JSON object")
-	}
-	return mapSendMaterialization(&evidence), nil
-}
-
-func snapshotBridgeAttachments(draft bridgeDraft) (bridgeDraft, func() error, error) {
-	if len(draft.Attachments) == 0 {
-		return draft, func() error { return nil }, nil
-	}
-	root, err := os.MkdirTemp("", "mailcli-send-attachments-*")
-	if err != nil {
-		return bridgeDraft{}, func() error { return nil }, fmt.Errorf("create private attachment snapshot: %w", err)
-	}
-	cleanup := func() error { return os.RemoveAll(root) }
-	attachments := make([]mail.DraftAttachment, 0, len(draft.Attachments))
-	for index, attachment := range draft.Attachments {
-		directory := filepath.Join(root, fmt.Sprintf("%04d", index))
-		if err := os.Mkdir(directory, 0o700); err != nil {
-			return bridgeDraft{}, func() error { return nil }, errors.Join(
-				fmt.Errorf("create attachment snapshot directory: %w", err), cleanup(),
-			)
-		}
-		target := filepath.Join(directory, filepath.Base(attachment.Path))
-		if err := copyVerifiedAttachment(attachment, target); err != nil {
-			return bridgeDraft{}, func() error { return nil }, errors.Join(err, cleanup())
-		}
-		attachment.Path = target
-		attachments = append(attachments, attachment)
-	}
-	draft.Attachments = attachments
-	return draft, cleanup, nil
-}
-
-func attachmentSnapshotCleanupError(err error) error {
-	if err == nil {
-		return nil
-	}
-	return &OperationError{
-		Code:    "attachment_snapshot_cleanup_failed",
-		Message: fmt.Sprintf("remove private attachment snapshot: %v", err),
-	}
-}
-
-func copyVerifiedAttachment(attachment mail.DraftAttachment, target string) (resultErr error) {
-	info, err := os.Lstat(attachment.Path)
-	if err != nil {
-		return fmt.Errorf("inspect reviewed attachment: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return &OperationError{Code: "attachment_changed", Message: "reviewed attachment is not a regular file"}
-	}
-	source, err := os.Open(attachment.Path)
-	if err != nil {
-		return fmt.Errorf("open reviewed attachment: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, source.Close())
-	}()
-	opened, err := source.Stat()
-	if err != nil || !os.SameFile(info, opened) {
-		return &OperationError{Code: "attachment_changed", Message: "reviewed attachment changed while opening"}
-	}
-	destination, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("create attachment snapshot: %w", err)
-	}
-	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(destination, hash), source)
-	closeErr := destination.Close()
-	final, statErr := source.Stat()
-	digest := hex.EncodeToString(hash.Sum(nil))
-	if copyErr != nil || closeErr != nil || statErr != nil || !os.SameFile(opened, final) ||
-		opened.Size() != final.Size() || !opened.ModTime().Equal(final.ModTime()) ||
-		written != attachment.Size || !strings.EqualFold(digest, attachment.SHA256) {
-		return errors.Join(
-			&OperationError{Code: "attachment_changed", Message: "reviewed attachment bytes changed before Mail.app composition"},
-			os.Remove(target),
-		)
-	}
-	return nil
-}
-
-func encodeBridgeDraft(draft mail.Draft) (bridgeDraft, error) {
-	bridge := bridgeDraft{
-		Kind: draft.Kind, ReplyAll: draft.ReplyAll, From: draft.From,
-		To: draft.To, CC: draft.CC, BCC: draft.BCC,
-		Subject: draft.Subject, Body: draft.Body, Attachments: draft.Attachments,
-		ExpectedNativeAttachmentCount: draft.ExpectedNativeAttachmentCount,
-	}
-	if draft.SourceRef == "" {
-		return bridge, nil
-	}
-	source, err := decodeMessageReference(draft.SourceRef)
-	if err != nil {
-		return bridgeDraft{}, invalidReference("source message ref", err)
-	}
-	bridge.Source = &source
-	return bridge, nil
-}
-
-func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageRequest) (mail.MessageSummary, error) {
-	ref, err := decodeMessageReference(request.Ref)
-	if err != nil {
-		return mail.MessageSummary{}, invalidReference("message ref", err)
-	}
-	response, err := c.invoke(ctx, bridgeRequest{
-		Operation: "messages.mark", AccountID: ref.AccountID,
-		MailboxPath: ref.MailboxPath, MessageID: ref.LibraryID,
-		ExpectedMessageID: ref.ExpectedMessageID, ExpectedSubject: ref.ExpectedSubject,
-		Read: request.Read, Flagged: request.Flagged, Junk: request.Junk,
-	})
-	if err != nil {
-		return mail.MessageSummary{}, err
-	}
-	if !response.Accepted {
-		return mail.MessageSummary{}, &OperationError{
-			Code: "mutation_not_accepted", Message: "Mail.app did not accept the message state change",
-		}
-	}
-	return requestedMessageState(request), nil
-}
-
-func (c *Client) TransferMessage(
-	ctx context.Context,
-	request mail.TransferMessageRequest,
-) (mail.MessageSummary, error) {
-	ref, err := decodeMessageReference(request.Ref)
-	if err != nil {
-		return mail.MessageSummary{}, invalidReference("message ref", err)
-	}
-	destination, err := decodeMailboxReference(request.DestinationMailbox)
-	if err != nil {
-		return mail.MessageSummary{}, invalidReference("destination mailbox ref", err)
-	}
-	response, err := c.invoke(ctx, bridgeRequest{
-		Operation: "messages.transfer", AccountID: ref.AccountID,
-		MailboxPath: ref.MailboxPath, MessageID: ref.LibraryID,
-		ExpectedMessageID:      ref.ExpectedMessageID,
-		ExpectedSubject:        ref.ExpectedSubject,
-		DestinationAccountID:   destination.AccountID,
-		DestinationMailboxPath: destination.Path, Copy: request.Copy,
-	})
-	if err != nil {
-		return mail.MessageSummary{}, err
-	}
-	if !response.Accepted {
-		return mail.MessageSummary{}, &OperationError{
-			Code: "mutation_not_accepted", Message: "Mail.app did not accept the message transfer",
-		}
-	}
-	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox}, nil
-}
-
-func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRequest) (mail.DeleteResult, error) {
-	ref, err := decodeMessageReference(request.Ref)
-	if err != nil {
-		return mail.DeleteResult{}, invalidReference("message ref", err)
-	}
-	if _, err := c.invoke(ctx, bridgeRequest{
-		Operation: "messages.delete", AccountID: ref.AccountID,
-		MailboxPath: ref.MailboxPath, MessageID: ref.LibraryID,
-		ExpectedMessageID: ref.ExpectedMessageID, ExpectedSubject: ref.ExpectedSubject,
-	}); err != nil {
-		return mail.DeleteResult{}, err
-	}
-	return mail.DeleteResult{MessageRef: request.Ref, Deleted: true}, nil
 }
 
 func (c *Client) Sync(ctx context.Context, accountRef string) error {
@@ -408,47 +79,13 @@ func (c *Client) Sync(ctx context.Context, accountRef string) error {
 }
 
 type bridgeResponse struct {
-	OK               bool                `json:"ok"`
-	Error            *bridgeError        `json:"error"`
-	Accounts         []bridgeAccount     `json:"accounts"`
-	Mailboxes        []bridgeMailbox     `json:"mailboxes"`
-	Messages         []bridgeMessage     `json:"messages"`
-	Message          *bridgeMessage      `json:"message"`
-	RawSource        string              `json:"raw_source"`
-	NextOffset       *int                `json:"next_offset"`
-	NextPreviousID   *string             `json:"next_previous_id"`
-	Accepted         bool                `json:"accepted"`
-	RecoveryRequired bool                `json:"recovery_required"`
-	Materialized     *bridgeMaterialized `json:"materialized"`
-}
-
-type bridgeMaterialized struct {
-	From            string           `json:"from"`
-	To              []mail.Recipient `json:"to"`
-	CC              []mail.Recipient `json:"cc"`
-	BCC             []mail.Recipient `json:"bcc"`
-	Subject         string           `json:"subject"`
-	Body            *string          `json:"body"`
-	AttachmentCount int              `json:"attachment_count"`
-}
-
-func mapSendMaterialization(value *bridgeMaterialized) *mail.SendMaterialization {
-	if value == nil {
-		return nil
-	}
-	return &mail.SendMaterialization{
-		From: value.From, To: append([]mail.Recipient(nil), value.To...),
-		CC: append([]mail.Recipient(nil), value.CC...), BCC: append([]mail.Recipient(nil), value.BCC...),
-		Subject: value.Subject, Body: cloneStringPointer(value.Body), AttachmentCount: value.AttachmentCount,
-	}
-}
-
-func cloneStringPointer(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
+	OK               bool            `json:"ok"`
+	Error            *bridgeError    `json:"error"`
+	Accounts         []bridgeAccount `json:"accounts"`
+	Messages         []bridgeMessage `json:"messages"`
+	NextOffset       *int            `json:"next_offset"`
+	NextPreviousID   *string         `json:"next_previous_id"`
+	RecoveryRequired bool            `json:"recovery_required"`
 }
 
 type bridgeError struct {
@@ -462,35 +99,21 @@ type bridgeAccount struct {
 	EmailAddresses []string `json:"email_addresses"`
 }
 
-type bridgeMailbox struct {
-	AccountID   string   `json:"account_id"`
-	Name        string   `json:"name"`
-	Path        []string `json:"path"`
-	UnreadCount int      `json:"unread_count"`
-}
-
 type bridgeMessage struct {
-	AccountID       string            `json:"account_id"`
-	MailboxPath     []string          `json:"mailbox_path"`
-	LibraryID       string            `json:"library_id"`
-	MessageID       string            `json:"message_id"`
-	Subject         string            `json:"subject"`
-	Sender          string            `json:"sender"`
-	DateReceived    string            `json:"date_received"`
-	DateSent        string            `json:"date_sent"`
-	Read            bool              `json:"read"`
-	Flagged         bool              `json:"flagged"`
-	Junk            bool              `json:"junk"`
-	Deleted         bool              `json:"deleted"`
-	Size            int64             `json:"size"`
-	AttachmentCount int               `json:"attachment_count"`
-	ReplyTo         string            `json:"reply_to"`
-	To              []mail.Recipient  `json:"to"`
-	CC              []mail.Recipient  `json:"cc"`
-	BCC             []mail.Recipient  `json:"bcc"`
-	Headers         string            `json:"headers"`
-	Content         string            `json:"content"`
-	Attachments     []mail.Attachment `json:"attachments"`
+	AccountID       string   `json:"account_id"`
+	MailboxPath     []string `json:"mailbox_path"`
+	LibraryID       string   `json:"library_id"`
+	MessageID       string   `json:"message_id"`
+	Subject         string   `json:"subject"`
+	Sender          string   `json:"sender"`
+	DateReceived    string   `json:"date_received"`
+	DateSent        string   `json:"date_sent"`
+	Read            bool     `json:"read"`
+	Flagged         bool     `json:"flagged"`
+	Junk            bool     `json:"junk"`
+	Deleted         bool     `json:"deleted"`
+	Size            int64    `json:"size"`
+	AttachmentCount int      `json:"attachment_count"`
 }
 
 func NewClient() *Client {
@@ -662,38 +285,6 @@ func (c *Client) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 	return accounts, nil
 }
 
-func (c *Client) ListMailboxes(ctx context.Context, request mail.ListMailboxesRequest) ([]mail.Mailbox, error) {
-	bridge := bridgeRequest{Operation: "mailboxes.list"}
-	if request.AccountRef != "" {
-		account, err := decodeAccountReference(request.AccountRef)
-		if err != nil {
-			return nil, invalidReference("account ref", err)
-		}
-		bridge.AccountID = account.AccountID
-	}
-
-	response, err := c.invoke(ctx, bridge)
-	if err != nil {
-		return nil, err
-	}
-	mailboxes := make([]mail.Mailbox, 0, len(response.Mailboxes))
-	for _, item := range response.Mailboxes {
-		accountRef, err := encodeAccountReference(item.AccountID)
-		if err != nil {
-			return nil, err
-		}
-		mailboxRef, err := encodeMailboxReference(item.AccountID, item.Path)
-		if err != nil {
-			return nil, err
-		}
-		mailboxes = append(mailboxes, mail.Mailbox{
-			Ref: mailboxRef, AccountRef: accountRef, Name: item.Name,
-			Path: item.Path, UnreadCount: item.UnreadCount,
-		})
-	}
-	return mailboxes, nil
-}
-
 func (c *Client) ListMessages(ctx context.Context, request mail.ListMessagesRequest) (mail.MessagePage, error) {
 	bridge, err := listMessagesBridgeRequest(request)
 	if err != nil {
@@ -750,65 +341,6 @@ func addListCursor(page mail.MessagePage, response bridgeResponse, mailboxRef st
 	return page, nil
 }
 
-func (c *Client) GetMessage(ctx context.Context, ref string) (mail.Message, error) {
-	return c.readMessage(ctx, ref, "messages.get")
-}
-
-func (c *Client) OpenDraft(ctx context.Context, ref string) (mail.Message, error) {
-	return c.readMessage(ctx, ref, "drafts.open")
-}
-
-func (c *Client) readMessage(ctx context.Context, ref string, operation string) (mail.Message, error) {
-	messageRef, err := decodeMessageReference(ref)
-	if err != nil {
-		return mail.Message{}, invalidReference("message ref", err)
-	}
-	response, err := c.invoke(ctx, bridgeRequest{
-		Operation: operation, AccountID: messageRef.AccountID,
-		MailboxPath: messageRef.MailboxPath, MessageID: messageRef.LibraryID,
-		ExpectedMessageID: messageRef.ExpectedMessageID, ExpectedSubject: messageRef.ExpectedSubject,
-	})
-	if err != nil {
-		return mail.Message{}, err
-	}
-	if response.Message == nil {
-		return mail.Message{}, fmt.Errorf("mail bridge returned no message")
-	}
-	summary, err := mapMessageSummary(*response.Message)
-	if err != nil {
-		return mail.Message{}, err
-	}
-	attachments := append([]mail.Attachment(nil), response.Message.Attachments...)
-	return mail.Message{
-		Summary: summary, ReplyTo: response.Message.ReplyTo,
-		To: response.Message.To, CC: response.Message.CC, BCC: response.Message.BCC,
-		Headers: response.Message.Headers, Content: response.Message.Content,
-		ContentSource: "mail_app", ContentComplete: false,
-		MissingParts: []string{"raw RFC 5322 verification required"},
-		Attachments:  attachments,
-	}, nil
-}
-
-func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
-	messageRef, err := decodeMessageReference(ref)
-	if err != nil {
-		return "", invalidReference("message ref", err)
-	}
-	response, err := c.invoke(ctx, bridgeRequest{
-		Operation: "messages.raw", AccountID: messageRef.AccountID,
-		MailboxPath: messageRef.MailboxPath, MessageID: messageRef.LibraryID,
-		ExpectedMessageID: messageRef.ExpectedMessageID, ExpectedSubject: messageRef.ExpectedSubject,
-		MaximumRawSourceBytes: mail.MaximumRawSourceBytes,
-	})
-	if err != nil {
-		return "", err
-	}
-	if int64(len(response.RawSource)) > mail.MaximumRawSourceBytes {
-		return "", &OperationError{Code: "raw_source_too_large", Message: "raw RFC message source exceeds 64 MiB"}
-	}
-	return response.RawSource, nil
-}
-
 func invalidReference(name string, err error) error {
 	return &OperationError{
 		Code: "invalid_reference", Message: fmt.Sprintf("invalid %s: %v", name, err),
@@ -861,13 +393,8 @@ func (c *Client) invokeWithState(
 	return response, started, invokeErr
 }
 
-func operationCanLeaveUncertainMailState(operation string) bool {
-	switch operation {
-	case "drafts.save", "messages.mark", "messages.transfer", "messages.delete":
-		return true
-	default:
-		return false
-	}
+func operationCanLeaveUncertainMailState(string) bool {
+	return false
 }
 
 func isAutomationDenial(err error) bool {
@@ -993,20 +520,6 @@ func (c *Client) messagePage(items []bridgeMessage) (mail.MessagePage, error) {
 		messages = append(messages, summary)
 	}
 	return mail.MessagePage{Messages: messages}, nil
-}
-
-func requestedMessageState(request mail.MarkMessageRequest) mail.MessageSummary {
-	result := mail.MessageSummary{Ref: request.Ref}
-	if request.Read != nil {
-		result.Read = *request.Read
-	}
-	if request.Flagged != nil {
-		result.Flagged = *request.Flagged
-	}
-	if request.Junk != nil {
-		result.Junk = *request.Junk
-	}
-	return result
 }
 
 func mapMessageSummary(item bridgeMessage) (mail.MessageSummary, error) {

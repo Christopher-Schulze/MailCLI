@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	stdmail "net/mail"
 	"os"
 	"path/filepath"
@@ -37,7 +41,7 @@ func (s *Service) CreateDraft(request CreateDraftRequest) (Draft, error) {
 	if err != nil {
 		return Draft{}, err
 	}
-	if err := writeDraftFile(root, draft, true); err != nil {
+	if err := writeDraftFile(root, draft); err != nil {
 		return Draft{}, err
 	}
 	return draft, nil
@@ -91,11 +95,17 @@ func (s *Service) ListDrafts() ([]DraftSummary, error) {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "draft_") || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		summary, err := readDraftSummary(root, strings.TrimSuffix(entry.Name(), ".json"))
+		ref := strings.TrimSuffix(entry.Name(), ".json")
+		summary, err := readDraftSummary(root, ref)
 		if err != nil {
-			// Skip unreadable/corrupt draft files rather than failing the
-			// entire listing. A partial write from a crashed process should
-			// not prevent listing all other valid drafts.
+			var operation *OperationError
+			if errors.Is(err, os.ErrNotExist) || (errors.As(err, &operation) && operation.Code == "not_found") {
+				continue
+			}
+			drafts = append(drafts, DraftSummary{
+				Ref:        ref,
+				StateError: err.Error(),
+			})
 			continue
 		}
 		drafts = append(drafts, summary)
@@ -141,6 +151,7 @@ type PruneDraftsResult struct {
 	DryRun     bool             `json:"dry_run"`
 	Candidates []PruneCandidate `json:"candidates,omitempty"`
 	Removed    []string         `json:"removed,omitempty"`
+	SweptLocks []string         `json:"swept_locks,omitempty"`
 	Failed     []PruneFailure   `json:"failed,omitempty"`
 }
 
@@ -193,10 +204,67 @@ func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, er
 		}
 		result.Removed = append(result.Removed, candidate.Ref)
 	}
+	swept, failures, err := sweepOrphanDraftLocks(root)
+	result.SweptLocks = swept
+	result.Failed = append(result.Failed, failures...)
+	if err != nil {
+		return result, err
+	}
 	if len(result.Failed) > 0 {
 		return result, &OperationError{Code: "prune_failed", Message: "one or more drafts could not be pruned"}
 	}
 	return result, nil
+}
+
+func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list draft locks: %w", err)
+	}
+	var swept []string
+	var failures []PruneFailure
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		ref := strings.TrimSuffix(name, ".lock")
+		if _, err := draftPath(root, ref); err != nil {
+			continue
+		}
+		draftFile, err := draftPath(root, ref)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(draftFile); err == nil || !os.IsNotExist(err) {
+			continue
+		}
+		lockFile, err := os.OpenFile(filepath.Join(root, name), os.O_RDWR, 0o600)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			continue
+		}
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = lockFile.Close()
+			if errors.Is(err, syscall.EWOULDBLOCK) {
+				continue
+			}
+			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			continue
+		}
+		removeErr := os.Remove(lockFile.Name())
+		unlockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		closeErr := lockFile.Close()
+		if err := errors.Join(removeErr, unlockErr, closeErr); err != nil {
+			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			continue
+		}
+		swept = append(swept, ref)
+	}
+	return swept, failures, nil
 }
 
 func pruneDraftOnce(root string, ref string, cutoff time.Time) (resultErr error) {
@@ -247,16 +315,17 @@ func (s *Service) UpdateDraft(request UpdateDraftRequest) (result Draft, resultE
 	if err := rejectClaimedDraft(current); err != nil {
 		return Draft{}, err
 	}
-	replacement, err := prepareDraft(CreateDraftRequest{
+	replacement, err := prepareDraftWithAttachments(CreateDraftRequest{
 		Kind: current.Kind, SourceRef: current.SourceRef,
-		ReplyAll: current.ReplyAll, Input: request.Input,
-	})
+		ReplyAll: current.ReplyAll, SourceMessageID: current.SourceMessageID,
+		SourceReferences: current.SourceReferences, Input: request.Input,
+	}, current.Attachments)
 	if err != nil {
 		return Draft{}, err
 	}
 	replacement.Ref = current.Ref
 	replacement.CreatedAt = current.CreatedAt
-	if err := writeDraftFile(root, replacement, false); err != nil {
+	if err := writeDraftFile(root, replacement); err != nil {
 		return Draft{}, err
 	}
 	return replacement, nil
@@ -294,6 +363,15 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := validateStoredDraftLimits(draft); err != nil {
 		return SendResult{}, err
 	}
+	if err := validateThreadSource(draft.SourceMessageID, draft.SourceReferences); err != nil {
+		return SendResult{}, err
+	}
+	if len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
+		return SendResult{}, validationError("sending a draft requires at least one recipient")
+	}
+	if err := validateStoredDraftAddresses(draft); err != nil {
+		return SendResult{}, err
+	}
 	if draft.SendAttempt != nil {
 		return replaySendAttempt(root, ref, *draft.SendAttempt)
 	}
@@ -303,8 +381,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if draft.Kind == DraftKindForward && len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
 		return SendResult{}, validationError("sending a forward draft requires at least one explicit recipient")
 	}
-	attachments, err := verifyAndLoadAttachments(draft)
-	if err != nil {
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return SendResult{}, err
 	}
 	if err := s.send.available(); err != nil {
@@ -318,28 +395,56 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	password, err := s.send.Credentials.Load(sender)
-	if err != nil || password == "" {
-		return SendResult{}, missingCredentialsError(sender)
-	}
 	messageID, err := newMessageID(sender)
 	if err != nil {
 		return SendResult{}, err
 	}
-	message, err := buildMessageWithAttachments(draft, messageID, attachments)
+	envelopeRecipients, err := draftEnvelopeRecipients(draft)
 	if err != nil {
 		return SendResult{}, err
+	}
+	message, err := composeDraftSpool(draft, messageID)
+	if err != nil {
+		return SendResult{}, err
+	}
+	defer func() {
+		if err := message.Remove(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	password, err := s.send.Credentials.Load(sender)
+	if err != nil || password == "" {
+		return SendResult{}, missingCredentialsError(sender)
 	}
 	attempt, err := beginSendAttempt(root, ref, messageID, envelopeFingerprint(draft, messageID))
 	if err != nil {
 		return SendResult{}, err
 	}
-	submitEvidence, err := s.send.Submitter.Submit(
+	submitEvidence, err := submitComposedMessage(
 		ctx,
+		s.send.Submitter,
 		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
-		sender, draftEnvelopeRecipients(draft), message,
+		sender, envelopeRecipients, message,
 	)
 	if err != nil {
+		var submissionErr *transport.SubmissionError
+		if errors.As(err, &submissionErr) {
+			attempt.InvocationStarted = true
+			attempt.Transport = &TransportEvidence{
+				MessageID:       attempt.MessageID,
+				SubmissionStage: submissionErr.Stage,
+			}
+			attempt.Outcome = SendOutcomeUnknown
+			attempt.UpdatedAt = time.Now().UTC()
+			result = resultForAttempt(ref, attempt, true)
+			if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+				return result, &OperationError{
+					Code:    "send_state_unknown",
+					Message: fmt.Sprintf("SMTP submission outcome is unknown and its local state could not be retained safely: %v", stateErr),
+				}
+			}
+			return result, err
+		}
 		// The server never accepted the message, so the claim can be
 		// released and a later send may retry the submission.
 		if cleanupErr := removeSendAttempt(root, ref); cleanupErr != nil {
@@ -355,7 +460,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.AcceptedByMail = true
 	attempt.Transport = &TransportEvidence{
 		ServerResponse: submitEvidence.ServerResponse,
-		MessageID:      submitEvidence.MessageID,
+		MessageID:      attempt.MessageID,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
 	attempt.UpdatedAt = time.Now().UTC()
@@ -366,10 +471,12 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			Message: fmt.Sprintf("the server accepted the message, but its local send state could not be recorded safely: %v", err),
 		}
 	}
-	appendEvidence, err := s.send.Mirror.AppendToSent(
+	appendEvidence, err := mirrorComposedMessage(
 		ctx,
+		s.send.Mirror,
 		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
-		message, attempt.Transport.MessageID,
+		message,
+		attempt.MessageID,
 	)
 	if err != nil {
 		// The submission was accepted, so the send itself is never retried;
@@ -562,14 +669,25 @@ func (s *Service) reconcileUnknownViaImap(
 	if sentBox == "" {
 		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
 	}
-	uid, _, _, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
+	uid, uidValidity, matchCount, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
 	if err != nil {
 		var transportErr *transport.TransportError
 		if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
 			return resultForReconcile(ref, attempt), err
 		}
 	}
-	if uid != 0 {
+	if matchCount > 1 {
+		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft,
+			fmt.Sprintf("the Sent mailbox contains %d messages with the claimed Message-ID", matchCount))
+	}
+	if uid != 0 && matchCount == 1 {
+		raw, fetchErr := imap.FetchMessage(ctx, cfg, sentBox, uid, uidValidity, MaximumRawSourceBytes)
+		if fetchErr != nil {
+			return resultForReconcile(ref, attempt), fetchErr
+		}
+		if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
+			return resultForReconcile(ref, attempt), identityErr
+		}
 		attempt.InvocationStarted = true
 		attempt.AcceptedByMail = true
 		attempt.SentStoreObserved = true
@@ -593,12 +711,16 @@ func (s *Service) reconcileUnknownViaImap(
 // actionable typed error: Message-ID, attempt start, recipients, and manual
 // remediation, without ever unlocking automatic retries.
 func unverifiableSendError(attempt SendAttempt, draft Draft, finding string) error {
+	recipients, err := draftEnvelopeRecipients(draft)
+	if err != nil {
+		recipients = draftRecipientValues(draft)
+	}
 	return &OperationError{
 		Code: "send_outcome_unverifiable",
 		Message: fmt.Sprintf(
 			"send outcome unknown: %s (Message-ID %s, started %s, recipients %s); verify the message in the Sent or spam folder manually, or discard the draft to stop reconciliation",
 			finding, attempt.MessageID, attempt.StartedAt.Format(time.RFC3339),
-			strings.Join(draftEnvelopeRecipients(draft), ", "),
+			strings.Join(recipients, ", "),
 		),
 	}
 }
@@ -618,8 +740,8 @@ func (s *Service) reconcileMirrorPending(
 	ref string,
 	draft Draft,
 	attempt SendAttempt,
-) (SendResult, error) {
-	result := resultForReconcile(ref, attempt)
+) (result SendResult, resultErr error) {
+	result = resultForReconcile(ref, attempt)
 	if attempt.Transport == nil || strings.TrimSpace(attempt.Transport.MessageID) == "" {
 		return result, &OperationError{
 			Code:    "send_reconcile_unavailable",
@@ -632,8 +754,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: "direct SMTP send is unavailable because no send transport is configured",
 		}
 	}
-	attachments, err := verifyAndLoadAttachments(draft)
-	if err != nil {
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return result, err
 	}
 	sender, err := sendSender(draft.From)
@@ -648,14 +769,78 @@ func (s *Service) reconcileMirrorPending(
 	if err != nil || password == "" {
 		return result, missingCredentialsError(sender)
 	}
-	message, err := buildMessageWithAttachments(draft, attempt.Transport.MessageID, attachments)
+	if imap := s.send.ImapClient(); imap != nil {
+		mailboxes, listErr := imap.ListMailboxes(ctx, transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password})
+		if listErr != nil {
+			return result, mirrorPendingError(listErr)
+		}
+		sentBox := transport.PickSentMailbox(mailboxes)
+		if sentBox == "" {
+			return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
+		}
+		uid, uidValidity, matchCount, searchErr := imap.SearchUID(
+			ctx,
+			transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+			sentBox,
+			attempt.MessageID,
+		)
+		if searchErr != nil {
+			var transportErr *transport.TransportError
+			if !errors.As(searchErr, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
+				return result, mirrorPendingError(searchErr)
+			}
+		}
+		if matchCount > 1 {
+			return result, unverifiableSendError(attempt, draft,
+				fmt.Sprintf("the Sent mailbox contains %d messages with the claimed Message-ID", matchCount))
+		}
+		if uid != 0 && matchCount == 1 {
+			raw, fetchErr := imap.FetchMessage(ctx,
+				transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+				sentBox, uid, uidValidity, MaximumRawSourceBytes)
+			if fetchErr != nil {
+				return result, mirrorPendingError(fetchErr)
+			}
+			if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
+				return result, identityErr
+			}
+			attempt.SentStoreObserved = true
+			attempt.Transport.MirrorMailbox = sentBox
+			attempt.Transport.MirrorAppended = false
+			attempt.Outcome = SendOutcomeSent
+			attempt.UpdatedAt = time.Now().UTC()
+			result = resultForReconcile(ref, attempt)
+			if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+				return result, &OperationError{
+					Code:    "send_reconcile_state_failed",
+					Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
+				}
+			}
+			if cleanupErr := discardDraftFiles(root, ref); cleanupErr != nil {
+				return result, &OperationError{
+					Code:    "send_cleanup_failed",
+					Message: fmt.Sprintf("the existing Sent message was verified, but local draft cleanup failed: %v", cleanupErr),
+				}
+			}
+			result.DraftRetained = false
+			return result, nil
+		}
+	}
+	message, err := composeDraftSpool(draft, attempt.MessageID)
 	if err != nil {
 		return result, err
 	}
-	appendEvidence, err := s.send.Mirror.AppendToSent(
+	defer func() {
+		if err := message.Remove(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	appendEvidence, err := mirrorComposedMessage(
 		ctx,
+		s.send.Mirror,
 		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
-		message, attempt.Transport.MessageID,
+		message,
+		attempt.MessageID,
 	)
 	if err != nil {
 		return result, mirrorPendingError(err)
@@ -694,6 +879,79 @@ func (t SendTransport) available() error {
 	return nil
 }
 
+func composeDraftSpool(draft Draft, messageID string) (*ComposedMessage, error) {
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+		return nil, err
+	}
+	return ComposeMessageSpool(draft, messageID)
+}
+
+func submitComposedMessage(
+	ctx context.Context,
+	submitter transport.Submitter,
+	cfg transport.SubmitConfig,
+	from string,
+	recipients []string,
+	message *ComposedMessage,
+) (evidence transport.SubmitEvidence, resultErr error) {
+	if streaming, ok := submitter.(transport.StreamingSubmitter); ok {
+		reader, err := message.Open()
+		if err != nil {
+			return transport.SubmitEvidence{}, err
+		}
+		defer func() {
+			if err := reader.Close(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
+		return streaming.SubmitReader(ctx, cfg, from, recipients, message.MessageID(), reader, message.Size())
+	}
+	payload, err := readComposedMessage(message)
+	if err != nil {
+		return transport.SubmitEvidence{}, err
+	}
+	return submitter.Submit(ctx, cfg, from, recipients, payload)
+}
+
+func mirrorComposedMessage(
+	ctx context.Context,
+	mirror transport.SentMirror,
+	cfg transport.ImapConfig,
+	message *ComposedMessage,
+	messageID string,
+) (evidence transport.AppendEvidence, resultErr error) {
+	if streaming, ok := mirror.(transport.StreamingSentMirror); ok {
+		reader, err := message.Open()
+		if err != nil {
+			return transport.AppendEvidence{}, err
+		}
+		defer func() {
+			if err := reader.Close(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}()
+		return streaming.AppendToSentReader(ctx, cfg, reader, message.Size(), messageID)
+	}
+	payload, err := readComposedMessage(message)
+	if err != nil {
+		return transport.AppendEvidence{}, err
+	}
+	return mirror.AppendToSent(ctx, cfg, payload, messageID)
+}
+
+func readComposedMessage(message *ComposedMessage) (payload []byte, resultErr error) {
+	reader, err := message.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := reader.Close(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	return io.ReadAll(reader)
+}
+
 // envelopeFingerprint identifies the exact claimed envelope: Message-ID,
 // sender, recipients, subject, and body. Draft edits after the claim (or a
 // mismatched claim) are detected before reconciliation trusts the claim.
@@ -720,6 +978,189 @@ func envelopeFingerprint(draft Draft, messageID string) string {
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
+func messageIdentityFingerprint(draft Draft, messageID string) string {
+	parts := []string{
+		strings.TrimSpace(messageID),
+		canonicalDraftAddress(draft.From),
+		canonicalDraftAddresses(draft.To),
+		canonicalDraftAddresses(draft.CC),
+		strings.TrimSpace(draft.Subject),
+		normalizeMessageBody(draft.Body),
+	}
+	return hashMessageIdentity(parts)
+}
+
+func rawMessageIdentityFingerprint(raw []byte) (string, error) {
+	message, err := stdmail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate is not a readable RFC 5322 message: %v", err)}
+	}
+	from, err := canonicalHeaderAddress(message.Header.Get("From"))
+	if err != nil {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate has an invalid From header: %v", err)}
+	}
+	to, err := canonicalHeaderAddresses(message.Header.Get("To"))
+	if err != nil {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate has an invalid To header: %v", err)}
+	}
+	cc, err := canonicalHeaderAddresses(message.Header.Get("Cc"))
+	if err != nil {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate has an invalid Cc header: %v", err)}
+	}
+	body, err := readPlainMessageBody(message.Header, message.Body)
+	if err != nil {
+		return "", err
+	}
+	return hashMessageIdentity([]string{
+		strings.TrimSpace(message.Header.Get("Message-ID")),
+		from,
+		to,
+		cc,
+		decodeMessageHeader(message.Header.Get("Subject")),
+		normalizeMessageBody(body),
+	}), nil
+}
+
+func verifySentMessageIdentity(raw []byte, draft Draft, messageID string) error {
+	actual, err := rawMessageIdentityFingerprint(raw)
+	if err != nil {
+		return err
+	}
+	if actual != messageIdentityFingerprint(draft, messageID) {
+		return &OperationError{
+			Code:    "send_identity_mismatch",
+			Message: "the Sent candidate has the claimed Message-ID but does not match the draft envelope and body",
+		}
+	}
+	return nil
+}
+
+func canonicalDraftAddress(value string) string {
+	parsed, err := stdmail.ParseAddress(strings.TrimSpace(value))
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+	return strings.ToLower(parsed.Address)
+}
+
+func canonicalDraftAddresses(values []Recipient) string {
+	addresses := make([]string, 0, len(values))
+	for _, value := range values {
+		addresses = append(addresses, canonicalDraftAddress(value.Address))
+	}
+	return strings.Join(addresses, "\x00")
+}
+
+func canonicalHeaderAddress(value string) (string, error) {
+	parsed, err := stdmail.ParseAddress(strings.TrimSpace(value))
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(parsed.Address), nil
+}
+
+func canonicalHeaderAddresses(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	parsed, err := stdmail.ParseAddressList(value)
+	if err != nil {
+		return "", err
+	}
+	addresses := make([]string, 0, len(parsed))
+	for _, address := range parsed {
+		addresses = append(addresses, strings.ToLower(address.Address))
+	}
+	return strings.Join(addresses, "\x00"), nil
+}
+
+func hashMessageIdentity(parts []string) string {
+	hash := sha256.New()
+	for _, part := range parts {
+		hash.Write([]byte(part))
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func decodeMessageHeader(value string) string {
+	decoded, err := (&mime.WordDecoder{}).DecodeHeader(value)
+	if err != nil {
+		return strings.TrimSpace(value)
+	}
+	return strings.TrimSpace(decoded)
+}
+
+func normalizeMessageBody(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+}
+
+func readPlainMessageBody(header stdmail.Header, body io.Reader) (string, error) {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		return readDecodedMessagePart(header, body)
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate multipart body has no boundary"}
+	}
+	reader := multipart.NewReader(body, boundary)
+	for {
+		part, err := reader.NextRawPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate multipart body is malformed: %v", err)}
+		}
+		partHeader := stdmail.Header(part.Header)
+		partType, partParams, parseErr := mime.ParseMediaType(partHeader.Get("Content-Type"))
+		if parseErr == nil && strings.HasPrefix(strings.ToLower(partType), "multipart/") {
+			nestedBoundary := partParams["boundary"]
+			if nestedBoundary == "" {
+				continue
+			}
+			nested, nestedErr := readPlainMessageBody(partHeader, part)
+			if nestedErr == nil {
+				return nested, nil
+			}
+			continue
+		}
+		if parseErr == nil && strings.EqualFold(partType, "text/plain") {
+			return readDecodedMessagePart(partHeader, part)
+		}
+	}
+	return "", &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate has no text/plain body"}
+}
+
+func readDecodedMessagePart(header stdmail.Header, body io.Reader) (string, error) {
+	limited := io.LimitReader(body, maximumDraftStateBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("reading the Sent candidate body failed: %v", err)}
+	}
+	if int64(len(data)) > maximumDraftStateBytes {
+		return "", &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate body exceeds the reconciliation limit"}
+	}
+	encoding := strings.ToLower(strings.TrimSpace(header.Get("Content-Transfer-Encoding")))
+	switch encoding {
+	case "base64":
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(data)))
+		if err != nil {
+			return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate body has invalid base64: %v", err)}
+		}
+		return string(decoded), nil
+	case "quoted-printable":
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data)))
+		if err != nil {
+			return "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate body has invalid quoted-printable data: %v", err)}
+		}
+		return string(decoded), nil
+	default:
+		return string(data), nil
+	}
+}
+
 func sendSender(from string) (string, error) {
 	parsed, err := stdmail.ParseAddress(strings.TrimSpace(from))
 	if err != nil || parsed.Address == "" {
@@ -755,18 +1196,62 @@ func newMessageID(sender string) (string, error) {
 	return "<" + hex.EncodeToString(value[:]) + "@" + domain + ">", nil
 }
 
-func draftEnvelopeRecipients(draft Draft) []string {
+func validateStoredDraftAddresses(draft Draft) error {
+	if strings.TrimSpace(draft.From) != "" {
+		if _, err := stdmail.ParseAddress(draft.From); err != nil {
+			return validationError("invalid from address")
+		}
+	}
+	seen := make(map[string]struct{}, len(draft.To)+len(draft.CC)+len(draft.BCC))
+	for _, group := range [][]Recipient{draft.To, draft.CC, draft.BCC} {
+		for _, recipient := range group {
+			address := recipient.Address
+			if recipient.Name != "" {
+				address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
+			}
+			parsed, err := stdmail.ParseAddress(address)
+			if err != nil || parsed.Address == "" {
+				return validationError("invalid recipient address")
+			}
+			normalized := strings.ToLower(parsed.Address)
+			if _, duplicate := seen[normalized]; duplicate {
+				return validationError("duplicate recipient address")
+			}
+			seen[normalized] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func draftEnvelopeRecipients(draft Draft) ([]string, error) {
+	if err := validateStoredDraftAddresses(draft); err != nil {
+		return nil, err
+	}
 	recipients := make([]Recipient, 0, len(draft.To)+len(draft.CC)+len(draft.BCC))
 	recipients = append(recipients, draft.To...)
 	recipients = append(recipients, draft.CC...)
 	recipients = append(recipients, draft.BCC...)
 	addresses := make([]string, 0, len(recipients))
-	for _, recipient := range recipients {
-		if parsed, err := stdmail.ParseAddress(recipient.Address); err == nil && parsed.Address != "" {
-			addresses = append(addresses, parsed.Address)
+	for index, recipient := range recipients {
+		parsed, err := stdmail.ParseAddress(recipient.Address)
+		if err != nil || parsed.Address == "" {
+			return nil, validationError(fmt.Sprintf("invalid recipient address at position %d", index+1))
 		}
+		addresses = append(addresses, parsed.Address)
 	}
-	return addresses
+	return addresses, nil
+}
+
+func draftRecipientValues(draft Draft) []string {
+	recipients := make([]Recipient, 0, len(draft.To)+len(draft.CC)+len(draft.BCC))
+	recipients = append(recipients, draft.To...)
+	recipients = append(recipients, draft.CC...)
+	recipients = append(recipients, draft.BCC...)
+	values := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		values = append(values, recipient.Address)
+	}
+	return values
 }
 
 // DeliverViaTransport submits a draft over direct SMTP and mirrors it into
@@ -774,15 +1259,24 @@ func draftEnvelopeRecipients(draft Draft) []string {
 // resubmits after an accepted submission, even when the mirror fails; the
 // partial evidence is returned alongside the mirror error. Callers own
 // at-most-once semantics.
-func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (TransportEvidence, error) {
+func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (evidence TransportEvidence, resultErr error) {
 	if send.Submitter == nil || send.Mirror == nil || send.Credentials == nil {
 		return TransportEvidence{}, &OperationError{
 			Code:    "send_transport_unavailable",
 			Message: "direct SMTP send is unavailable because no send transport is configured",
 		}
 	}
-	attachments, err := verifyAndLoadAttachments(draft)
+	if len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
+		return TransportEvidence{}, validationError("sending a draft requires at least one recipient")
+	}
+	if err := validateThreadSource(draft.SourceMessageID, draft.SourceReferences); err != nil {
+		return TransportEvidence{}, err
+	}
+	envelopeRecipients, err := draftEnvelopeRecipients(draft)
 	if err != nil {
+		return TransportEvidence{}, err
+	}
+	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return TransportEvidence{}, err
 	}
 	sender, err := sendSender(draft.From)
@@ -801,26 +1295,34 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	message, err := buildMessageWithAttachments(draft, messageID, attachments)
+	message, err := composeDraftSpool(draft, messageID)
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	submitEvidence, err := send.Submitter.Submit(
+	defer func() {
+		if err := message.Remove(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	submitEvidence, err := submitComposedMessage(
 		ctx,
+		send.Submitter,
 		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
-		sender, draftEnvelopeRecipients(draft), message,
+		sender, envelopeRecipients, message,
 	)
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	evidence := TransportEvidence{
+	evidence = TransportEvidence{
 		ServerResponse: submitEvidence.ServerResponse,
 		MessageID:      submitEvidence.MessageID,
 	}
-	appendEvidence, err := send.Mirror.AppendToSent(
+	appendEvidence, err := mirrorComposedMessage(
 		ctx,
+		send.Mirror,
 		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
-		message, submitEvidence.MessageID,
+		message,
+		submitEvidence.MessageID,
 	)
 	if err != nil {
 		return evidence, err
@@ -855,8 +1357,6 @@ func cloneSendMaterialization(value *SendMaterialization) *SendMaterialization {
 }
 
 type DraftSaveBackend interface {
-	PrepareDraftSave(ctx context.Context, draft Draft) (SendObservationBaseline, error)
-	SaveDraftWithEvidence(ctx context.Context, draft Draft) (DraftSaveEvidence, error)
 	ReconcileDraftSave(ctx context.Context, draft Draft, attempt DraftSaveAttempt) (DraftSaveEvidence, error)
 }
 
@@ -902,58 +1402,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return SavedDraft{}, err
 	}
-	if !durable {
-		return s.saveDraftLegacy(ctx, root, ref, draft)
-	}
-	baseline, err := backend.PrepareDraftSave(ctx, draft)
-	if err != nil {
-		return SavedDraft{}, err
-	}
-	if !validObservationBaseline(&baseline) {
-		return SavedDraft{}, &OperationError{
-			Code: "draft_save_prepare_failed", Message: "Mail backend returned an invalid Drafts observation baseline",
-		}
-	}
-	attempt, err := beginDraftSaveAttempt(root, ref, &baseline)
-	if err != nil {
-		return SavedDraft{}, err
-	}
-	draft.PreparedSaveBaseline = cloneSendObservationBaseline(&baseline)
-	evidence, saveErr := backend.SaveDraftWithEvidence(ctx, draft)
-	if !evidence.InvocationStarted {
-		if cleanupErr := removeDraftSaveAttempt(root, ref); cleanupErr != nil {
-			return SavedDraft{}, &OperationError{
-				Code:    "draft_save_state_cleanup_failed",
-				Message: fmt.Sprintf("native draft save did not start, but its local claim could not be cleared: %v", cleanupErr),
-			}
-		}
-		if saveErr == nil {
-			saveErr = &OperationError{Code: "draft_save_not_started", Message: "Mail.app draft save did not start"}
-		}
-		return SavedDraft{}, saveErr
-	}
-	attempt.InvocationStarted = true
-	attempt.AcceptedByMail = evidence.AcceptedByMail
-	attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
-	attempt.ObservedMessageRef = evidence.ObservedMessage.Ref
-	if attempt.ObservationBaseline == nil {
-		attempt.ObservationBaseline = cloneSendObservationBaseline(evidence.ObservationBaseline)
-	}
-	attempt.UpdatedAt = time.Now().UTC()
-	if err := replaceDraftSaveAttempt(root, ref, attempt); err != nil {
-		return SavedDraft{}, &OperationError{
-			Code:    "draft_save_outcome_unknown",
-			Message: fmt.Sprintf("native draft save started, but its outcome state could not be recorded safely: %v", err),
-		}
-	}
-	if evidence.ObservedMessage.Ref != "" {
-		return finishObservedDraftSave(root, ref, evidence.ObservedMessage, saveErr)
-	}
-	message := "Mail.app draft-save outcome is not yet proven; the local draft is retained and duplicate saves are blocked"
-	if saveErr != nil {
-		message += ": " + saveErr.Error()
-	}
-	return SavedDraft{}, &OperationError{Code: "draft_save_outcome_unknown", Message: message}
+	return s.saveDraftLegacy(ctx, root, ref, draft)
 }
 
 func (s *Service) saveDraftLegacy(
@@ -1060,6 +1509,10 @@ func (s *Service) validateDraftSender(ctx context.Context, sender string) error 
 }
 
 func prepareDraft(request CreateDraftRequest) (Draft, error) {
+	return prepareDraftWithAttachments(request, nil)
+}
+
+func prepareDraftWithAttachments(request CreateDraftRequest, previous []DraftAttachment) (Draft, error) {
 	if request.Kind == "" {
 		request.Kind = DraftKindNew
 	}
@@ -1094,7 +1547,7 @@ func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	if err != nil {
 		return Draft{}, err
 	}
-	attachments, err := fingerprintAttachments(request.Input.Attachments)
+	attachments, err := fingerprintAttachmentsWithPrevious(request.Input.Attachments, previous)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -1185,12 +1638,17 @@ func validateDraftAddresses(input DraftInput) error {
 	return nil
 }
 
-func fingerprintAttachments(paths []string) ([]DraftAttachment, error) {
+func fingerprintAttachmentsWithPrevious(paths []string, previous []DraftAttachment) ([]DraftAttachment, error) {
 	attachments := make([]DraftAttachment, 0, len(paths))
 	remaining := MaximumDraftAttachmentBytes
 	for _, path := range paths {
 		if !filepath.IsAbs(path) {
 			return nil, validationError("draft attachment paths must be absolute")
+		}
+		if reused, ok := reuseAttachmentFingerprint(path, previous); ok && reused.Size <= remaining {
+			attachments = append(attachments, reused)
+			remaining -= reused.Size
+			continue
 		}
 		attachment, err := fingerprintAttachment(path, remaining)
 		if err != nil {
@@ -1200,6 +1658,20 @@ func fingerprintAttachments(paths []string) ([]DraftAttachment, error) {
 		remaining -= attachment.Size
 	}
 	return attachments, nil
+}
+
+func reuseAttachmentFingerprint(path string, previous []DraftAttachment) (DraftAttachment, bool) {
+	for _, attachment := range previous {
+		if attachment.Path != path || attachment.ModTimeNanos == 0 || attachment.SHA256 == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() != attachment.Size || info.ModTime().UnixNano() != attachment.ModTimeNanos {
+			return DraftAttachment{}, false
+		}
+		return attachment, true
+	}
+	return DraftAttachment{}, false
 }
 
 func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, error) {
@@ -1228,7 +1700,10 @@ func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, err
 	if err := file.Close(); err != nil {
 		return DraftAttachment{}, fmt.Errorf("close draft attachment: %w", err)
 	}
-	return DraftAttachment{Path: path, Size: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
+	return DraftAttachment{
+		Path: path, Size: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)),
+		ModTimeNanos: info.ModTime().UnixNano(),
+	}, nil
 }
 
 func verifyDraftAttachments(attachments []DraftAttachment) error {
@@ -1879,7 +2354,7 @@ func discardDraftFiles(root string, ref string) error {
 	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), removeDraftLockFile(root, ref))
 }
 
-func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) {
+func writeDraftFile(root string, draft Draft) (resultErr error) {
 	path, err := draftPath(root, draft.Ref)
 	if err != nil {
 		return err
@@ -1894,25 +2369,6 @@ func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) 
 	if int64(len(payload)) > maximumDraftStateBytes {
 		return validationError("draft state exceeds 20 MiB")
 	}
-	if exclusive {
-		// Atomic create: write to temp file, then rename into place.
-		// This prevents a partial draft_*.json from appearing if the
-		// process crashes mid-write, which would break ListDrafts.
-		temporary, err := attachmentTemporaryPath(path)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			resultErr = errors.Join(resultErr, removeIfPresent(temporary))
-		}()
-		if err := writePrivateFile(temporary, payload); err != nil {
-			return fmt.Errorf("write draft create: %w", err)
-		}
-		if err := os.Rename(temporary, path); err != nil {
-			return fmt.Errorf("publish draft create: %w", err)
-		}
-		return syncDirectory(root)
-	}
 	temporary, err := attachmentTemporaryPath(path)
 	if err != nil {
 		return err
@@ -1921,10 +2377,10 @@ func writeDraftFile(root string, draft Draft, exclusive bool) (resultErr error) 
 		resultErr = errors.Join(resultErr, removeIfPresent(temporary))
 	}()
 	if err := writePrivateFile(temporary, payload); err != nil {
-		return fmt.Errorf("write draft update: %w", err)
+		return fmt.Errorf("write draft: %w", err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("publish draft update: %w", err)
+		return fmt.Errorf("publish draft: %w", err)
 	}
 	return syncDirectory(root)
 }
@@ -1953,15 +2409,29 @@ func writePrivateFile(path string, payload []byte) error {
 func readDraftFile(root string, ref string) (Draft, error) {
 	draft, err := loadDraftDocument(root, ref)
 	if err != nil {
-		return Draft{}, err
+		return Draft{}, wrapDraftStateError(root, ref, err)
 	}
 	if err := validateStoredDraftContent(draft); err != nil {
-		return Draft{}, fmt.Errorf("validate draft content: %w", err)
+		return Draft{}, wrapDraftStateError(root, ref, fmt.Errorf("validate draft content: %w", err))
 	}
 	if err := attachDraftAttempts(root, ref, &draft); err != nil {
-		return Draft{}, err
+		return Draft{}, wrapDraftStateError(root, ref, err)
 	}
 	return draft, nil
+}
+
+func wrapDraftStateError(root, ref string, err error) error {
+	var operation *OperationError
+	if errors.As(err, &operation) && operation.Code == "not_found" {
+		return err
+	}
+	return &OperationError{
+		Code: "draft_state_error",
+		Message: fmt.Sprintf(
+			"draft %s has invalid state in %s: %v; delete the corrupt state file or discard the draft",
+			ref, filepath.Base(filepath.Join(root, ref+".json")), err,
+		),
+	}
 }
 
 // readDraftSummary loads the list view of a draft: same envelope

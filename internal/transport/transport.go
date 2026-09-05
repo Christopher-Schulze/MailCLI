@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"io"
 	"strings"
 )
 
@@ -123,7 +124,7 @@ type ImapOperator interface {
 	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
 	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
 	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (MutationEvidence, error)
-	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error)
+	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error)
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }
 
@@ -132,9 +133,20 @@ type Submitter interface {
 	Submit(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, msg []byte) (SubmitEvidence, error)
 }
 
+// StreamingSubmitter is an optional transport extension for bounded-memory
+// submission of a replayable RFC 5322 source.
+type StreamingSubmitter interface {
+	SubmitReader(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, messageID string, msg io.Reader, size int64) (SubmitEvidence, error)
+}
+
 // SentMirror mirrors an accepted message into the account's Sent mailbox.
 type SentMirror interface {
 	AppendToSent(ctx context.Context, cfg ImapConfig, msg []byte, messageID string) (AppendEvidence, error)
+}
+
+// StreamingSentMirror is an optional mirror extension for replayable sources.
+type StreamingSentMirror interface {
+	AppendToSentReader(ctx context.Context, cfg ImapConfig, msg io.Reader, size int64, messageID string) (AppendEvidence, error)
 }
 
 // CredentialStore reads and stores app-specific passwords in the macOS keychain.

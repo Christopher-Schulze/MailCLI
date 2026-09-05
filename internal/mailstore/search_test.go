@@ -399,7 +399,7 @@ func TestSearchCursorIsBoundToMailStore(t *testing.T) {
 		t.Fatalf("DecodeSearchCursor() error = %v", err)
 	}
 	wrongStore, err := mail.EncodeSearchCursor(
-		first.Fingerprint, "different-store", cursor.ReceivedAt, cursor.RowID,
+		first.Fingerprint, "different-store", cursor.ReceivedAt, cursor.ReceivedAtNull, cursor.RowID,
 	)
 	if err != nil {
 		t.Fatalf("EncodeSearchCursor() error = %v", err)

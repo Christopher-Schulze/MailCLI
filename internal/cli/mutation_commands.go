@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -38,7 +39,7 @@ func runMessageMark(
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.mark", responseData{MessageState: &message})
 	}
-	writeFormat(stdout, "%s\tread=%t\tflagged=%t\tjunk=%t\n", message.Ref, message.Read, message.Flagged, message.Junk)
+	writeFormat(stdout, "%s\tread=%t\tflagged=%t\tjunk=%t%s\n", message.Ref, message.Read, message.Flagged, message.Junk, mutationEvidenceSuffix(message.ServerTruth))
 	return 0
 }
 
@@ -82,7 +83,7 @@ func runMessageTransfer(
 	if *jsonOutput {
 		return writeSuccess(stdout, command, responseData{MessageState: &message})
 	}
-	writeFormat(stdout, "%s\t%s\n", message.Ref, message.MailboxRef)
+	writeFormat(stdout, "%s\t%s%s\n", message.Ref, message.MailboxRef, mutationEvidenceSuffix(message.ServerTruth))
 	return 0
 }
 
@@ -115,8 +116,15 @@ func runMessageDelete(
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.delete", responseData{DeleteResult: &result})
 	}
-	writeFormat(stdout, "deleted\t%s\n", result.MessageRef)
+	writeFormat(stdout, "deleted\t%s%s\n", result.MessageRef, mutationEvidenceSuffix(result.ServerTruth))
 	return 0
+}
+
+func mutationEvidenceSuffix(evidence *mail.ServerMutationEvidence) string {
+	if evidence == nil || evidence.DuplicateMatches <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("\tduplicate_matches=%d", evidence.DuplicateMatches)
 }
 
 func runSync(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

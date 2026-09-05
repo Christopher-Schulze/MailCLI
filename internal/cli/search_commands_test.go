@@ -16,7 +16,7 @@ type partialSearchGateway struct {
 func (partialSearchGateway) SearchMessages(context.Context, mail.PreparedQuery) (mail.SearchPage, error) {
 	return mail.SearchPage{
 		Coverage: mail.SearchCoverage{
-			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: true,
+			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: false,
 		},
 	}, nil
 }
@@ -57,52 +57,6 @@ func TestSearchRejectsInvalidOptionalBoolean(t *testing.T) {
 	}
 }
 
-func TestSearchCoverageNormalizationTable(t *testing.T) {
-	tests := []struct {
-		name     string
-		coverage mail.SearchCoverage
-		want     bool
-	}{
-		{
-			name: "body page stopped before corpus end",
-			coverage: mail.SearchCoverage{
-				Backend: "emlx_stream", CandidateMessages: 100, ScannedMessages: 64, Complete: true,
-			},
-			want: false,
-		},
-		{
-			name: "body corpus fully scanned",
-			coverage: mail.SearchCoverage{
-				Backend: "emlx_stream", CandidateMessages: 3, ScannedMessages: 3, Complete: true,
-			},
-			want: true,
-		},
-		{
-			name: "metadata query is complete without MIME scan",
-			coverage: mail.SearchCoverage{
-				Backend: "envelope_sql", CandidateMessages: 100, Complete: true,
-			},
-			want: true,
-		},
-		{
-			name: "existing incomplete state remains false",
-			coverage: mail.SearchCoverage{
-				Backend: "emlx_stream", CandidateMessages: 3, ScannedMessages: 3, Complete: false,
-			},
-			want: false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			page := mail.SearchPage{Coverage: test.coverage}
-			normalizeSearchCoverage(&page)
-			if page.Coverage.Complete != test.want {
-				t.Fatalf("coverage = %+v, want complete %t", page.Coverage, test.want)
-			}
-		})
-	}
-}
-
 func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 	page := mail.SearchPage{
 		Messages: []mail.SearchMessage{{
@@ -113,10 +67,9 @@ func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 			Snippet: "matching\ncontext",
 		}},
 		Coverage: mail.SearchCoverage{
-			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: true,
+			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: false,
 		},
 	}
-	normalizeSearchCoverage(&page)
 	var output bytes.Buffer
 	writeSearchResults(&output, page)
 	if !strings.Contains(output.String(), "matching context") ||

@@ -4,18 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-
-	"mailcli/internal/mailref"
 )
-
-type transferBaseline struct {
-	Source               resolvedMessage
-	SourceMailbox        mailboxRecord
-	Destination          mailref.Mailbox
-	DestinationMailbox   mailboxRecord
-	MaximumRowID         int64
-	DestinationHadSource bool
-}
 
 func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, attribute int) (bool, error) {
 	resolved, err := s.resolveMessage(ctx, messageRef)
@@ -64,130 +53,6 @@ func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, 
 	}
 	_, protected = identifiers[sourceMailbox.RowID]
 	return protected, nil
-}
-
-func (s *Store) captureTransferBaseline(
-	ctx context.Context,
-	messageRef string,
-	destinationRef string,
-) (transferBaseline, error) {
-	source, err := s.resolveMessage(ctx, messageRef)
-	if err != nil {
-		return transferBaseline{}, err
-	}
-	sourceMailbox, err := s.mailboxRecordForRef(
-		ctx, source.Reference.AccountID, source.Reference.MailboxPath,
-	)
-	if err != nil {
-		return transferBaseline{}, err
-	}
-	destination, err := mailref.DecodeMailbox(destinationRef)
-	if err != nil {
-		return transferBaseline{}, operationError(
-			"invalid_reference", "invalid destination mailbox ref: "+err.Error(),
-		)
-	}
-	mailbox, err := s.mailboxRecordForRef(ctx, destination.AccountID, destination.Path)
-	if err != nil {
-		return transferBaseline{}, err
-	}
-	var maximumRowID int64
-	if err := s.database.QueryRowContext(ctx, "SELECT COALESCE(max(ROWID), 0) FROM messages").Scan(
-		&maximumRowID,
-	); err != nil {
-		return transferBaseline{}, fmt.Errorf("capture transfer baseline: %w", err)
-	}
-	destinationHadSource, err := s.messageHasMembership(ctx, source.Reference.LibraryID, mailbox.RowID)
-	if err != nil {
-		return transferBaseline{}, err
-	}
-	return transferBaseline{
-		Source: source, SourceMailbox: sourceMailbox, Destination: destination,
-		DestinationMailbox: mailbox, MaximumRowID: maximumRowID,
-		DestinationHadSource: destinationHadSource,
-	}, nil
-}
-
-func observedTransferCandidates(
-	candidates []messageRecord,
-	baseline transferBaseline,
-	copyMessage bool,
-) []messageRecord {
-	observed := make([]messageRecord, 0, len(candidates))
-	for _, candidate := range candidates {
-		if candidate.RowID == baseline.Source.Record.RowID {
-			if !copyMessage || !baseline.DestinationHadSource {
-				observed = append(observed, candidate)
-			}
-			continue
-		}
-		if candidate.RowID > baseline.MaximumRowID {
-			observed = append(observed, candidate)
-		}
-	}
-	return observed
-}
-
-func (s *Store) transferCandidates(
-	ctx context.Context,
-	baseline transferBaseline,
-) (result []messageRecord, resultErr error) {
-	source := baseline.Source.Record
-	rows, err := s.database.QueryContext(ctx, `
-		WITH membership(id) AS (
-			SELECT ROWID FROM messages WHERE mailbox = ?
-			UNION
-			SELECT message_id FROM labels WHERE mailbox_id = ?
-		)
-		SELECT
-			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
-			m.mailbox, mb.url,
-			subject.subject, sender.address, sender.comment,
-			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
-			COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
-			EXISTS (
-				SELECT 1 FROM server_messages sm
-				WHERE sm.message = m.ROWID AND sm.junk_level > 0
-			),
-			m.size,
-			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
-		FROM membership membership
-		JOIN messages m ON m.ROWID = membership.id
-		JOIN mailboxes mb ON mb.ROWID = m.mailbox
-		JOIN subjects subject ON subject.ROWID = m.subject
-		JOIN addresses sender ON sender.ROWID = m.sender
-		LEFT JOIN summaries summary ON summary.ROWID = m.summary
-		WHERE m.deleted = 0 AND subject.subject = ?
-		AND sender.address = ? AND m.size = ?
-		AND (
-			m.ROWID = ? OR
-			(? > 0 AND ? > 0 AND m.message_id = ? AND m.global_message_id = ?)
-		)
-		ORDER BY m.ROWID
-		LIMIT 8
-	`,
-		baseline.DestinationMailbox.RowID, baseline.DestinationMailbox.RowID,
-		source.Subject, source.SenderAddress, source.Size,
-		source.RowID,
-		source.StoreMessageID, source.StoreGlobalID,
-		source.StoreMessageID, source.StoreGlobalID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query transferred message: %w", err)
-	}
-	defer joinCloseError(&resultErr, rows, "transfer candidate rows")
-	var records []messageRecord
-	for rows.Next() {
-		record, err := scanMessageRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate transferred message: %w", err)
-	}
-	return records, nil
 }
 
 func (s *Store) mailboxRecordForRef(

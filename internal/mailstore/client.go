@@ -7,13 +7,11 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mailcli/internal/mail"
-	"mailcli/internal/mailref"
-	"mailcli/internal/transport"
 )
 
 type Client struct {
@@ -22,31 +20,20 @@ type Client struct {
 	// fallback serves explicitly documented Apple Events operations such as
 	// live diagnostics, draft workflows, sync, and store-unavailable listing.
 	// IMAP mutation target resolution must never consult it.
-	fallback          mail.Gateway
+	fallback          mail.FallbackGateway
 	send              mail.SendTransport
 	storeOpenDuration time.Duration
+	mailboxCacheMu    sync.Mutex
+	mailboxCache      map[string]mailboxCacheEntry
 }
 
-type draftSaveMaterializer interface {
-	SaveDraftWithMaterialization(
-		ctx context.Context,
-		draft mail.Draft,
-	) (mail.MessageSummary, *mail.SendMaterialization, error)
-}
-
-type draftSaveInvocationMaterializer interface {
-	SaveDraftWithInvocationState(
-		ctx context.Context,
-		draft mail.Draft,
-	) (mail.MessageSummary, *mail.SendMaterialization, bool, bool, error)
-}
-
-func NewClient(ctx context.Context, fallback mail.Gateway, config Config, send mail.SendTransport) *Client {
+func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config, send mail.SendTransport) *Client {
 	started := time.Now()
 	store, err := Open(ctx, config)
 	return &Client{
 		store: store, storeErr: err, fallback: fallback, send: send,
 		storeOpenDuration: time.Since(started),
+		mailboxCache:      make(map[string]mailboxCacheEntry),
 	}
 }
 
@@ -59,6 +46,7 @@ func (c *Client) ComposeWriteSupportError() error {
 }
 
 func (c *Client) Close() error {
+	c.invalidateMailboxCache()
 	if c.store == nil {
 		return nil
 	}
@@ -259,10 +247,9 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
 		if rawErr != nil {
-			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
-				return "", rawErr
-			}
-		} else if len(rawBytes) > 0 {
+			return "", rawErr
+		}
+		if len(rawBytes) > 0 {
 			return string(rawBytes), nil
 		}
 	}
@@ -287,10 +274,9 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
 		if rawErr != nil {
-			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
-				return rawErr
-			}
-		} else if len(rawBytes) > 0 {
+			return rawErr
+		}
+		if len(rawBytes) > 0 {
 			_, werr := writer.Write(rawBytes)
 			return werr
 		}
@@ -331,10 +317,9 @@ func (c *Client) SaveAttachmentTo(
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, true)
 		if rawErr != nil {
-			if transport.ErrorCode(rawErr) == transport.CodeIMAPRawSourceTooLarge {
-				return rawErr
-			}
-		} else if len(rawBytes) > 0 {
+			return rawErr
+		}
+		if len(rawBytes) > 0 {
 			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)
 		}
 	}
@@ -344,91 +329,11 @@ func (c *Client) SaveAttachmentTo(
 	return c.readUnavailableError()
 }
 
-func (c *Client) SaveDraft(ctx context.Context, draft mail.Draft) (mail.MessageSummary, error) {
-	evidence, err := c.SaveDraftWithEvidence(ctx, draft)
-	return evidence.ObservedMessage, err
-}
-
-func (c *Client) PrepareDraftSave(
-	ctx context.Context,
-	_ mail.Draft,
-) (mail.SendObservationBaseline, error) {
-	if c.store == nil {
-		return mail.SendObservationBaseline{}, c.safeWriteUnavailableError()
+func (c *Client) SaveDraft(ctx context.Context, _ mail.Draft) (mail.MessageSummary, error) {
+	if err := c.ComposeWriteSupportError(); err != nil {
+		return mail.MessageSummary{}, err
 	}
-	baseline, err := c.store.captureMailboxBaseline(
-		ctx, mailboxAttributeDrafts, "draft_store_unavailable",
-		"no active Drafts mailbox is available in the local Mail store",
-	)
-	if err != nil {
-		return mail.SendObservationBaseline{}, err
-	}
-	return *c.store.exportSendBaseline(baseline), nil
-}
-
-func (c *Client) SaveDraftWithEvidence(
-	ctx context.Context,
-	draft mail.Draft,
-) (mail.DraftSaveEvidence, error) {
-	baseline, err := c.draftSaveBaseline(ctx, draft.PreparedSaveBaseline)
-	if err != nil {
-		return mail.DraftSaveEvidence{}, err
-	}
-	evidence := mail.DraftSaveEvidence{ObservationBaseline: c.store.exportSendBaseline(baseline)}
-	if draft.Kind == mail.DraftKindForward {
-		native, err := c.sourceAttachmentFingerprints(ctx, draft.SourceRef)
-		if err != nil {
-			return evidence, err
-		}
-		draft.ExpectedNativeAttachmentCount = len(native)
-	}
-	automationDraft, err := c.automationDraft(ctx, draft)
-	if err != nil {
-		return evidence, err
-	}
-	if c.fallback == nil {
-		return evidence, c.writeUnavailableError()
-	}
-	var materialized *mail.SendMaterialization
-	var invocationStarted bool
-	var accepted bool
-	var saveErr error
-	if gateway, ok := c.fallback.(draftSaveInvocationMaterializer); ok {
-		_, materialized, invocationStarted, accepted, saveErr = gateway.SaveDraftWithInvocationState(
-			ctx, automationDraft,
-		)
-	} else if gateway, ok := c.fallback.(draftSaveMaterializer); ok {
-		_, materialized, saveErr = gateway.SaveDraftWithMaterialization(ctx, automationDraft)
-		invocationStarted = materialized != nil || saveErr == nil
-		accepted = saveErr == nil
-	} else {
-		_, saveErr = c.fallback.SaveDraft(ctx, automationDraft)
-		invocationStarted = saveErr == nil
-		accepted = saveErr == nil
-	}
-	evidence.InvocationStarted = invocationStarted
-	evidence.AcceptedByMail = accepted
-	evidence.Materialized = cloneSaveMaterialization(materialized)
-	observationDraft, materializationErr := c.materializedObservationDraft(ctx, draft, materialized)
-	var observationErr error
-	if materializationErr == nil {
-		observationCtx, cancel := context.WithTimeout(context.Background(), sendObservationWindow)
-		defer cancel()
-		var found bool
-		evidence.ObservedMessage, found, observationErr = c.store.observeMailboxCandidate(
-			observationCtx, baseline, observationDraft, false,
-		)
-		if found && observationErr == nil {
-			return evidence, automationPostflightError(saveErr)
-		}
-	}
-	if saveErr != nil {
-		return evidence, errors.Join(saveErr, materializationErr, observationErr)
-	}
-	return evidence, errors.Join(materializationErr, observationErr, operationError(
-		"draft_outcome_unknown",
-		"Mail.app accepted the native draft save, but the local Drafts store did not expose a unique result; the local review draft was retained",
-	))
+	return mail.MessageSummary{}, c.safeWriteUnavailableError()
 }
 
 func (c *Client) ReconcileDraftSave(
@@ -662,61 +567,6 @@ func (c *Client) Sync(ctx context.Context, accountRef string) error {
 	return c.fallback.Sync(ctx, accountRef)
 }
 
-func (c *Client) automationDraft(ctx context.Context, draft mail.Draft) (mail.Draft, error) {
-	if draft.SourceRef == "" {
-		return draft, nil
-	}
-	ref, err := c.automationMessageRef(ctx, draft.SourceRef)
-	if err != nil {
-		return mail.Draft{}, err
-	}
-	draft.SourceRef = ref
-	return draft, nil
-}
-
-func (c *Client) automationMessageRef(ctx context.Context, value string) (string, error) {
-	ref, err := mailref.DecodeMessage(value)
-	if err != nil {
-		return "", operationError("invalid_reference", "invalid message ref: "+err.Error())
-	}
-	if !ref.IsStoreBound() {
-		return value, nil
-	}
-	if c.store == nil {
-		return "", c.readUnavailableError()
-	}
-	resolved, err := c.store.resolveMessage(ctx, value)
-	if err != nil {
-		return "", err
-	}
-	expectedMessageID := ref.ExpectedMessageID
-	if expectedMessageID == "" {
-		if messageID, identityErr := c.localMessageID(resolved); identityErr == nil {
-			expectedMessageID = messageID
-		}
-	}
-	return mailref.EncodeMessage(mailref.Message{
-		AccountID:         resolved.PhysicalLocation.AccountID,
-		MailboxPath:       resolved.PhysicalLocation.VisiblePath,
-		LibraryID:         strconv.FormatInt(resolved.Record.RowID, 10),
-		ExpectedMessageID: expectedMessageID,
-		ExpectedSubject:   resolved.Record.Subject,
-	})
-}
-
-func (c *Client) localMessageID(resolved resolvedMessage) (result string, resultErr error) {
-	source, err := c.store.openResolvedSource(resolved)
-	if err != nil {
-		return "", err
-	}
-	defer joinCloseError(&resultErr, source, "message identity source")
-	messageID, err := messageIDFromSource(source.Reader())
-	if err != nil {
-		return "", err
-	}
-	return messageID, nil
-}
-
 // MessageThreadSource resolves the reply/forward derivation inputs from the
 // source message's header block (header-only read, no body scan). The
 // message's current membership is revalidated as part of the source open.
@@ -786,35 +636,4 @@ func safeTargetedFallback(err error) bool {
 	default:
 		return false
 	}
-}
-
-func automationPostflightError(err error) error {
-	return errors.Join(
-		errorWithCode(err, "attachment_snapshot_cleanup_failed"),
-		errorWithCode(err, "bridge_cleanup_failed"),
-	)
-}
-
-func errorWithCode(err error, code string) error {
-	if err == nil {
-		return nil
-	}
-	if coded, ok := err.(interface {
-		error
-		ErrorCode() string
-	}); ok && coded.ErrorCode() == code {
-		return coded
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, child := range joined.Unwrap() {
-			if matched := errorWithCode(child, code); matched != nil {
-				return matched
-			}
-		}
-		return nil
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return errorWithCode(wrapped.Unwrap(), code)
-	}
-	return nil
 }

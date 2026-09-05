@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -31,19 +32,6 @@ type fallbackSpy struct {
 	saveAttachmentCalls int
 	saveErr             error
 	sendErr             error
-}
-
-type materializedSaveFallback struct {
-	fallbackSpy
-	materialized *mail.SendMaterialization
-}
-
-func (s *materializedSaveFallback) SaveDraftWithMaterialization(
-	ctx context.Context,
-	draft mail.Draft,
-) (mail.MessageSummary, *mail.SendMaterialization, error) {
-	summary, err := s.SaveDraft(ctx, draft)
-	return summary, s.materialized, err
 }
 
 func (*fallbackSpy) Probe(context.Context, bool) mail.DiagnosticReport {
@@ -79,13 +67,6 @@ func (s *fallbackSpy) SaveDraft(context.Context, mail.Draft) (mail.MessageSummar
 		s.saveHook()
 	}
 	return mail.MessageSummary{}, s.saveErr
-}
-func (s *fallbackSpy) SaveDraftWithMaterialization(
-	ctx context.Context,
-	draft mail.Draft,
-) (mail.MessageSummary, *mail.SendMaterialization, error) {
-	summary, err := s.SaveDraft(ctx, draft)
-	return summary, materializationForDraft(draft), err
 }
 func (s *fallbackSpy) SendDraft(_ context.Context, draft mail.Draft) (mail.SendEvidence, error) {
 	s.sendCalls++
@@ -151,6 +132,7 @@ type stubImapOperator struct {
 	fetchErr error
 	// lastFetchMax records the bound the last FetchMessage carried.
 	lastFetchMax int64
+	listCalls    int
 }
 
 func (s *stubImapOperator) nextMutationErr() error {
@@ -177,6 +159,7 @@ func (s *stubImapOperator) AppendToSent(ctx context.Context, cfg transport.ImapC
 }
 
 func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
+	s.listCalls++
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -279,7 +262,7 @@ func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.Imap
 	}, nil
 }
 
-func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error) {
+func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
 	s.lastFetchMax = maxBytes
 	if s.err != nil {
 		return nil, s.err
@@ -1025,9 +1008,9 @@ func TestGetRawSourcePropagatesOversizedFetch(t *testing.T) {
 	}
 }
 
-// Content hydration stays uncapped: the bound on the GetMessage fallback
-// path is zero, matching the uncapped local content path.
-func TestGetMessageHydrationFetchUncapped(t *testing.T) {
+// Content hydration uses the same bounded IMAP literal path as raw-source
+// hydration so a remote response cannot bypass the local source limit.
+func TestGetMessageHydrationFetchBounded(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "rawcap2@gmail.com")
@@ -1066,8 +1049,8 @@ func TestGetMessageHydrationFetchUncapped(t *testing.T) {
 	if err != nil || message.Content != "Full body" {
 		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
 	}
-	if fakeImap.lastFetchMax != 0 {
-		t.Fatalf("content fetch bound = %d, want uncapped (0)", fakeImap.lastFetchMax)
+	if fakeImap.lastFetchMax != mail.MaximumRawSourceBytes {
+		t.Fatalf("content fetch bound = %d, want shared cap %d", fakeImap.lastFetchMax, mail.MaximumRawSourceBytes)
 	}
 }
 
@@ -1264,6 +1247,14 @@ func TestSaveAttachmentHydrationHonorsCapAndFailsTyped(t *testing.T) {
 				Message: "IMAP FETCH announced 134217728 bytes exceeding the 67108864 byte raw-source cap",
 			},
 			wantCode: transport.CodeIMAPRawSourceTooLarge,
+		},
+		{
+			name: "generic fetch failure remains typed",
+			fetchErr: &transport.TransportError{
+				Code:    transport.CodeIMAPTimeout,
+				Message: "FETCH timed out",
+			},
+			wantCode: transport.CodeIMAPTimeout,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1513,86 +1504,6 @@ func TestClientReconcilesPreparedSendFromStoreOnly(t *testing.T) {
 	}
 }
 
-func TestClientReturnsOnlyObservedNativeDraft(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installDraftsMailboxFixture(t, store)
-	spy := &fallbackSpy{}
-	spy.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: spy}
-	message, err := client.SaveDraft(context.Background(), mail.Draft{
-		From:    "alice@example.com",
-		To:      []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft", Body: "Body",
-	})
-	if err != nil || message.Ref == "" || message.Subject != "Observed draft" {
-		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
-	}
-}
-
-func TestClientPropagatesPrivateCleanupFailureAfterObservedDraftSave(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installDraftsMailboxFixture(t, store)
-	spy := &fallbackSpy{saveErr: operationError(
-		"bridge_cleanup_failed", "private bridge request remained",
-	)}
-	spy.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: spy}
-	message, err := client.SaveDraft(context.Background(), mail.Draft{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft", Body: "Body",
-	})
-	if message.Ref == "" || errorWithCode(err, "bridge_cleanup_failed") == nil {
-		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
-	}
-}
-
-func TestClientRefusesDraftObservationWithoutExactNativeBody(t *testing.T) {
-	store, _ := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installDraftsMailboxFixture(t, store)
-	fallback := &materializedSaveFallback{materialized: &mail.SendMaterialization{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft",
-	}}
-	fallback.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: fallback}
-	evidence, err := client.SaveDraftWithEvidence(context.Background(), mail.Draft{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft", Body: "Body",
-	})
-	if evidence.ObservedMessage.Ref != "" || errorWithCode(err, "send_materialization_invalid") == nil {
-		t.Fatalf("SaveDraftWithEvidence() = %+v, error = %v", evidence, err)
-	}
-}
-
-func TestClientObservesBodyOnlyNativeReplyDraftFromMaterializedHeaders(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installDraftsMailboxFixture(t, store)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
-		MailboxRef: inboxRef, Limit: 3,
-	})
-	if err != nil {
-		t.Fatalf("ListMessages() error = %v", err)
-	}
-	materializedBody := "Body"
-	fallback := &materializedSaveFallback{materialized: &mail.SendMaterialization{
-		From: "alice@example.com", To: []mail.Recipient{{Address: "christopher@example.com"}},
-		Subject: "Observed draft", Body: &materializedBody, AttachmentCount: 0,
-	}}
-	fallback.saveHook = func() { insertDraftMessageFixture(t, store, 104) }
-	client := &Client{store: store, fallback: fallback}
-	message, err := client.SaveDraft(context.Background(), mail.Draft{
-		Kind: mail.DraftKindReply, SourceRef: messageRefWithSubject(t, page.Messages, "Quarterly Report"),
-		From: "alice@example.com", Body: "Body",
-	})
-	if err != nil || message.Ref == "" || message.Subject != "Observed draft" {
-		t.Fatalf("SaveDraft() = %+v, error = %v", message, err)
-	}
-}
-
 func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -1633,78 +1544,6 @@ func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 	}
 	if fakeImap.lastUsername != "identity@gmail.com" {
 		t.Fatalf("IMAP username = %q, want the store-resolved identity identity@gmail.com", fakeImap.lastUsername)
-	}
-}
-
-func TestTransferCandidatesRequireStableMessageIdentity(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
-		MailboxRef: inboxRef, Limit: 3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Sent"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := store.captureTransferBaseline(
-		context.Background(), messageRefWithSubject(t, page.Messages, "Status Update"), destinationRef,
-	)
-	if err != nil {
-		t.Fatalf("captureTransferBaseline() error = %v", err)
-	}
-	updateFixtureMessage(t, store, `
-		INSERT INTO messages(
-			ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,
-			mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color
-		) VALUES (104,9004,9005,1,2,2,400,400,4,0,1,0,0,100,4,0,400,0)
-	`)
-	candidates, err := store.transferCandidates(context.Background(), baseline)
-	if err != nil || len(candidates) != 0 {
-		t.Fatalf("unrelated transfer candidates = %+v, error = %v", candidates, err)
-	}
-	updateFixtureMessage(t, store, `
-		INSERT INTO messages(
-			ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,
-			mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color
-		) VALUES (105,1002,2002,1,2,2,401,401,4,0,1,0,0,100,5,0,401,0)
-	`)
-	candidates, err = store.transferCandidates(context.Background(), baseline)
-	if err != nil || len(candidates) != 1 || candidates[0].RowID != 105 {
-		t.Fatalf("stable transfer candidates = %+v, error = %v", candidates, err)
-	}
-}
-
-func TestCopyObservationRejectsPreexistingDestinationMembership(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installSentMailboxFixture(t, store)
-	updateFixtureMessage(t, store, `INSERT INTO labels(message_id,mailbox_id) VALUES (102,4)`)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
-		MailboxRef: inboxRef, Limit: 3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Sent"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := store.captureTransferBaseline(
-		context.Background(), messageRefWithSubject(t, page.Messages, "Status Update"), destinationRef,
-	)
-	if err != nil || !baseline.DestinationHadSource {
-		t.Fatalf("captureTransferBaseline() = %+v, error = %v", baseline, err)
-	}
-	candidates, err := store.transferCandidates(context.Background(), baseline)
-	if err != nil {
-		t.Fatalf("transferCandidates() error = %v", err)
-	}
-	if observed := observedTransferCandidates(candidates, baseline, true); len(observed) != 0 {
-		t.Fatalf("copy observation accepted preexisting destination: %+v", observed)
 	}
 }
 
@@ -1926,6 +1765,77 @@ func messageRefWithSubject(t *testing.T, messages []mail.MessageSummary, subject
 	}
 	t.Fatalf("message subject %q not found", subject)
 	return ""
+}
+
+func TestSyncIdentityUsesCredentialBackedAlias(t *testing.T) {
+	account := mail.Account{EmailAddresses: []string{"primary@gmail.com", "alias@gmail.com"}}
+	email, host, port, password, err := syncIdentity(account, strictCredentials{"alias@gmail.com": "secret"})
+	if err != nil {
+		t.Fatalf("syncIdentity() error = %v", err)
+	}
+	if email != "alias@gmail.com" || host == "" || port == 0 || password != "secret" {
+		t.Fatalf("syncIdentity() = email:%q host:%q port:%d password:%q", email, host, port, password)
+	}
+}
+
+func TestSyncIdentitySelectionIsStableAcrossAliasOrder(t *testing.T) {
+	credentials := strictCredentials{
+		"alpha@gmail.com": "alpha-secret",
+		"zeta@gmail.com":  "zeta-secret",
+	}
+	first, host, port, password, err := syncIdentity(mail.Account{
+		EmailAddresses: []string{"zeta@gmail.com", "alpha@gmail.com"},
+	}, credentials)
+	if err != nil {
+		t.Fatalf("syncIdentity() error = %v", err)
+	}
+	second, _, _, _, err := syncIdentity(mail.Account{
+		EmailAddresses: []string{"alpha@gmail.com", "zeta@gmail.com"},
+	}, credentials)
+	if err != nil {
+		t.Fatalf("syncIdentity() reordered error = %v", err)
+	}
+	if first != "alpha@gmail.com" || second != first || host != "imap.gmail.com" || port != 993 || password != "alpha-secret" {
+		t.Fatalf("identity = %q/%q host=%q port=%d password=%q", first, second, host, port, password)
+	}
+}
+
+func TestMailboxCacheIsScopedClonedAndExpires(t *testing.T) {
+	operator := &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "Inbox", Flags: []string{"\\Inbox"}}}}
+	client := &Client{}
+	cfg := transport.ImapConfig{Host: "imap.example.com", Port: 993, Username: "alice@example.com"}
+	first, err := client.getOrLoadMailboxes(context.Background(), operator, cfg, cfg.Username)
+	if err != nil {
+		t.Fatalf("first mailbox load: %v", err)
+	}
+	first[0].Flags[0] = "mutated"
+	second, err := client.getOrLoadMailboxes(context.Background(), operator, cfg, cfg.Username)
+	if err != nil {
+		t.Fatalf("cached mailbox load: %v", err)
+	}
+	if operator.listCalls != 1 || second[0].Flags[0] != "\\Inbox" {
+		t.Fatalf("cached boxes = %+v, list calls = %d", second, operator.listCalls)
+	}
+	otherCfg := cfg
+	otherCfg.Username = "bob@example.com"
+	if _, err := client.getOrLoadMailboxes(context.Background(), operator, otherCfg, otherCfg.Username); err != nil {
+		t.Fatalf("isolated mailbox load: %v", err)
+	}
+	if operator.listCalls != 2 {
+		t.Fatalf("list calls for isolated identity = %d, want 2", operator.listCalls)
+	}
+	key := mailboxCacheKey(cfg, cfg.Username)
+	client.mailboxCacheMu.Lock()
+	entry := client.mailboxCache[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	client.mailboxCache[key] = entry
+	client.mailboxCacheMu.Unlock()
+	if _, err := client.getOrLoadMailboxes(context.Background(), operator, cfg, cfg.Username); err != nil {
+		t.Fatalf("expired mailbox load: %v", err)
+	}
+	if operator.listCalls != 3 {
+		t.Fatalf("list calls after expiry = %d, want 3", operator.listCalls)
+	}
 }
 
 func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {

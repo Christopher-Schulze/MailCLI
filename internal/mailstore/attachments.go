@@ -358,36 +358,6 @@ func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]
 	return result, nil
 }
 
-func hashRegularFile(path string) (result [sha256.Size]byte, resultErr error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return result, fmt.Errorf("inspect external attachment for hashing: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return result, operationError("ambiguous_attachment", "external attachment is not a regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return result, fmt.Errorf("open external attachment for hashing: %w", err)
-	}
-	defer joinCloseError(&resultErr, file, "external attachment")
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) {
-		return result, operationError("store_changed", "external attachment changed while opening")
-	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return result, fmt.Errorf("hash external attachment: %w", err)
-	}
-	final, err := file.Stat()
-	if err != nil || !os.SameFile(opened, final) || opened.Size() != final.Size() ||
-		!opened.ModTime().Equal(final.ModTime()) {
-		return result, operationError("store_changed", "external attachment changed while hashing")
-	}
-	copy(result[:], hash.Sum(nil))
-	return result, nil
-}
-
 func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath string) (resultErr error) {
 	source, openedInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, selected.Path)
 	if err != nil {

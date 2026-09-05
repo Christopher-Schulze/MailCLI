@@ -45,7 +45,7 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 
 Run `mailcli help` for the compact command overview. Focused command help accepts
 `help`, `-h`, or `--help` and renders aligned long options with semantic value
-names and readable defaults.
+names and readable defaults. The global `--json` flag may appear before, between, or after the command path; a value position such as `--query --json` remains a value.
 
 Capability discovery, local draft management, sending, credential setup, and the unsupported native save preflight bypass the Mail store and
 Mail.app entirely. Reply and forward creation read the source message's header block from the Mail store and write only local draft files.
@@ -97,10 +97,10 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The release archive (example below uses `v1.2.0`; take the current version from GitHub Releases) installs both the native CLI and its companion agent skill:
+The release archive for `v1.3.0` installs both the native CLI and its companion agent skill:
 
 ```bash
-VERSION=1.2.0 # example version; take the current version from GitHub Releases
+VERSION=1.3.0
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
 curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS.sig"
@@ -334,6 +334,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 
 ```bash
 ./scripts/tests/test.sh
+go test ./internal/mailstore -run '^$' -bench '^BenchmarkAttachmentCatalogShortcut$' -benchtime=1x
 ./scripts/build/build.sh
 ./scripts/release/build-release.sh "${VERSION:?set to the release version}"
 MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore

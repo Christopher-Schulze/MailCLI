@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,25 @@ type sentMessageFixture struct {
 	Body           string
 	RecipientTypes []int
 	Attachments    []fixtureAttachment
+}
+
+func hashRegularFileForTest(path string) ([sha256.Size]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return [sha256.Size]byte{}, copyErr
+	}
+	if closeErr != nil {
+		return [sha256.Size]byte{}, closeErr
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest, nil
 }
 
 func TestSenderIdentityUsesRecentWindow(t *testing.T) {
@@ -207,7 +227,7 @@ func TestBodyMatchesExactEmptyNativeMaterialization(t *testing.T) {
 
 func TestAttachmentFingerprintsAllowOnlyMaterializedMailOwnedExtras(t *testing.T) {
 	reviewed := writeDraftAttachmentFixture(t, "reviewed.bin", []byte("reviewed"))
-	reviewedDigest, err := hashRegularFile(reviewed.Path)
+	reviewedDigest, err := hashRegularFileForTest(reviewed.Path)
 	if err != nil {
 		t.Fatalf("hashRegularFile() error = %v", err)
 	}

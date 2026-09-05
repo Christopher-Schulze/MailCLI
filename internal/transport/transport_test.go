@@ -139,3 +139,64 @@ func TestErrorCodeFreeFunction(t *testing.T) {
 		t.Errorf("ErrorCode(plain) = %q, want empty", got)
 	}
 }
+
+func TestPickSentMailboxPrefersSpecialUseBeforeFallback(t *testing.T) {
+	mailboxes := []MailboxInfo{
+		{Name: "Sent Messages"},
+		{Name: "Archive", Flags: []string{"\\sent"}},
+		{Name: "Gesendet"},
+	}
+	if got := PickSentMailbox(mailboxes); got != "Archive" {
+		t.Fatalf("PickSentMailbox() = %q, want special-use Archive", got)
+	}
+}
+
+func TestPickSentMailboxUsesCaseInsensitiveFallback(t *testing.T) {
+	if got := PickSentMailbox([]MailboxInfo{{Name: "gEsEnDeT"}}); got != "gEsEnDeT" {
+		t.Fatalf("PickSentMailbox() = %q, want fallback mailbox", got)
+	}
+	if got := PickSentMailbox(nil); got != "" {
+		t.Fatalf("PickSentMailbox(nil) = %q, want empty", got)
+	}
+}
+
+func TestPickTrashMailboxPrefersSpecialUseBeforeFallback(t *testing.T) {
+	mailboxes := []MailboxInfo{
+		{Name: "Trash"},
+		{Name: "Deleted", Flags: []string{"\\TRASH"}},
+		{Name: "Papierkorb"},
+	}
+	if got := PickTrashMailbox(mailboxes); got != "Deleted" {
+		t.Fatalf("PickTrashMailbox() = %q, want special-use Deleted", got)
+	}
+}
+
+func TestPickTrashMailboxUsesLocalizedFallbacks(t *testing.T) {
+	for _, name := range []string{"trash", "Deleted Messages", "[Gmail]/Papierkorb", "INBOX.Trash"} {
+		t.Run(name, func(t *testing.T) {
+			if got := PickTrashMailbox([]MailboxInfo{{Name: name}}); got != name {
+				t.Fatalf("PickTrashMailbox(%q) = %q, want fallback", name, got)
+			}
+		})
+	}
+	if got := PickTrashMailbox(nil); got != "" {
+		t.Fatalf("PickTrashMailbox(nil) = %q, want empty", got)
+	}
+}
+
+func TestSubmissionErrorPreservesUnknownOutcome(t *testing.T) {
+	inner := fmt.Errorf("connection closed")
+	err := &SubmissionError{Stage: "final reply", Err: inner}
+	if got := err.ErrorCode(); got != CodeSMTPSubmissionUnknown {
+		t.Fatalf("ErrorCode() = %q, want %q", got, CodeSMTPSubmissionUnknown)
+	}
+	if got := err.Unwrap(); got != inner {
+		t.Fatalf("Unwrap() = %v, want %v", got, inner)
+	}
+	if got := err.Error(); got != "smtp_submission_unknown: SMTP submission outcome is unknown during final reply: connection closed" {
+		t.Fatalf("Error() = %q, want detailed outcome", got)
+	}
+	if got := (&SubmissionError{Stage: "DATA"}).Error(); got != "smtp_submission_unknown: SMTP submission outcome is unknown during DATA" {
+		t.Fatalf("Error() without cause = %q, want concise outcome", got)
+	}
+}

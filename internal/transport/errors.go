@@ -9,6 +9,25 @@ type TransportError struct {
 	Err     error
 }
 
+// SubmissionError marks a failure after SMTP accepted the DATA command. The
+// server may already have stored the message, so callers must not retry it
+// automatically.
+type SubmissionError struct {
+	Stage string
+	Err   error
+}
+
+func (e *SubmissionError) Error() string {
+	if e.Err == nil {
+		return CodeSMTPSubmissionUnknown + ": SMTP submission outcome is unknown during " + e.Stage
+	}
+	return fmt.Sprintf("%s: SMTP submission outcome is unknown during %s: %v", CodeSMTPSubmissionUnknown, e.Stage, e.Err)
+}
+
+func (e *SubmissionError) Unwrap() error { return e.Err }
+
+func (e *SubmissionError) ErrorCode() string { return CodeSMTPSubmissionUnknown }
+
 func (e *TransportError) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("%s: %s: %v", e.Code, e.Message, e.Err)
@@ -38,6 +57,7 @@ const (
 	CodeSMTPRejected            = "smtp_rejected"
 	CodeSMTPTimeout             = "smtp_timeout"
 	CodeSMTPTransferTimeout     = "smtp_transfer_timeout"
+	CodeSMTPSubmissionUnknown   = "smtp_submission_unknown"
 	CodeIMAPConnectFailed       = "imap_connect_failed"
 	CodeSMTPCredentialsMissing  = "smtp_credentials_missing"
 	CodeIMAPAuthFailed          = "imap_auth_failed"
@@ -49,6 +69,8 @@ const (
 	CodeIMAPMutationFailed      = "imap_mutation_failed"
 	CodeIMAPFetchFailed         = "imap_fetch_failed"
 	CodeIMAPResponseMalformed   = "imap_response_malformed"
+	CodeIMAPInvalidValue        = "invalid_imap_value"
+	CodeIMAPMessageUIDMismatch  = "imap_message_uid_mismatch"
 	CodeIMAPRawSourceTooLarge   = "raw_source_too_large"
 	CodeLocalOnlyMailbox        = "local_only_mailbox"
 	CodeMessageAlreadyTrashed   = "message_already_trashed"

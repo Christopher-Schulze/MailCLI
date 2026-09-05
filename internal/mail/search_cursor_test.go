@@ -9,7 +9,7 @@ func TestEncodeSearchCursorRoundtrip(t *testing.T) {
 	storeUUID := "store-uuid-xyz"
 	receivedAt := int64(1700000000)
 	rowID := int64(42)
-	encoded, err := EncodeSearchCursor(fingerprint, storeUUID, receivedAt, rowID)
+	encoded, err := EncodeSearchCursor(fingerprint, storeUUID, receivedAt, false, rowID)
 	if err != nil {
 		t.Fatalf("EncodeSearchCursor error = %v", err)
 	}
@@ -49,7 +49,7 @@ func TestDecodeSearchCursorRejectsInvalidBase64(t *testing.T) {
 }
 
 func TestDecodeSearchCursorRejectsFingerprintMismatch(t *testing.T) {
-	encoded, err := EncodeSearchCursor("correct-fp", "store-uuid", 1700000000, 1)
+	encoded, err := EncodeSearchCursor("correct-fp", "store-uuid", 1700000000, false, 1)
 	if err != nil {
 		t.Fatalf("EncodeSearchCursor error = %v", err)
 	}
@@ -60,7 +60,7 @@ func TestDecodeSearchCursorRejectsFingerprintMismatch(t *testing.T) {
 }
 
 func TestDecodeSearchCursorRejectsRowIDZero(t *testing.T) {
-	encoded, err := EncodeSearchCursor("fp", "store-uuid", 1700000000, 0)
+	encoded, err := EncodeSearchCursor("fp", "store-uuid", 1700000000, false, 0)
 	if err != nil {
 		t.Fatalf("EncodeSearchCursor error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestDecodeSearchCursorRejectsRowIDZero(t *testing.T) {
 }
 
 func TestDecodeSearchCursorRejectsEmptyStoreUUID(t *testing.T) {
-	encoded, err := EncodeSearchCursor("fp", "", 1700000000, 1)
+	encoded, err := EncodeSearchCursor("fp", "", 1700000000, false, 1)
 	if err != nil {
 		t.Fatalf("EncodeSearchCursor error = %v", err)
 	}

@@ -1,12 +1,15 @@
 package mail
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"mime/quotedprintable"
 	"net/mail"
@@ -40,8 +43,9 @@ func (e *ComposerError) Unwrap() error { return e.Err }
 
 // BuildMessage renders a draft into exact RFC 5322 bytes ready for SMTP
 // submission. messageID is used verbatim as the Message-ID header. BCC
-// recipients are deliberately omitted from the output. Reply drafts carry
-// In-Reply-To and References threading headers; forwards carry none. Subject
+// recipients are deliberately omitted from the output. Reply and forward
+// drafts carry In-Reply-To and References threading headers when source
+// threading is available. Subject
 // prefixes (Re:/Fwd:) are applied at draft creation and are never added here.
 func BuildMessage(draft Draft, messageID string) ([]byte, error) {
 	if messageID == "" {
@@ -52,6 +56,176 @@ func BuildMessage(draft Draft, messageID string) ([]byte, error) {
 		return nil, err
 	}
 	return buildMessageWithAttachments(draft, messageID, attachments)
+}
+
+// ComposedMessage is a private replayable spool for a composed RFC 5322
+// message. The encoded attachment bytes stay on disk until all consumers have
+// replayed the source.
+type ComposedMessage struct {
+	path      string
+	size      int64
+	messageID string
+}
+
+func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error) {
+	if messageID == "" {
+		return nil, &ComposerError{Message: "message id is required"}
+	}
+	alternativeBoundary, err := randomBoundary()
+	if err != nil {
+		return nil, err
+	}
+	mixedBoundary := ""
+	if len(draft.Attachments) > 0 {
+		mixedBoundary, err = randomBoundary()
+		if err != nil {
+			return nil, err
+		}
+	}
+	contentType := "multipart/alternative; boundary=\"" + alternativeBoundary + "\""
+	if len(draft.Attachments) > 0 {
+		contentType = "multipart/mixed; boundary=\"" + mixedBoundary + "\""
+	}
+
+	header := &bytes.Buffer{}
+	writeComposerHeaders(header, draft, messageID, contentType)
+	header.WriteString(composerCRLF)
+	alternative := &bytes.Buffer{}
+	writeAlternativeMultipart(alternative, alternativeBoundary, draft)
+	alternative.WriteString(composerCRLF)
+
+	file, err := os.CreateTemp("", "mailcli-message-")
+	if err != nil {
+		return nil, &ComposerError{Message: "create private message spool", Err: err}
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		cleanup()
+		return nil, &ComposerError{Message: "protect private message spool", Err: err}
+	}
+	writer := bufio.NewWriterSize(file, 32*1024)
+	write := func(value string) error {
+		if _, err := io.WriteString(writer, value); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := writer.Write(header.Bytes()); err != nil {
+		cleanup()
+		return nil, &ComposerError{Message: "write message headers", Err: err}
+	}
+	if len(draft.Attachments) == 0 {
+		if _, err := writer.Write(alternative.Bytes()); err != nil {
+			cleanup()
+			return nil, &ComposerError{Message: "write message body", Err: err}
+		}
+	} else {
+		if err := write("--" + mixedBoundary + composerCRLF +
+			"Content-Type: multipart/alternative; boundary=\"" + alternativeBoundary + "\"" + composerCRLF + composerCRLF); err != nil {
+			cleanup()
+			return nil, &ComposerError{Message: "write multipart headers", Err: err}
+		}
+		if _, err := writer.Write(alternative.Bytes()); err != nil {
+			cleanup()
+			return nil, &ComposerError{Message: "write multipart body", Err: err}
+		}
+		for _, attachment := range draft.Attachments {
+			if err := write("--" + mixedBoundary + composerCRLF); err != nil {
+				cleanup()
+				return nil, &ComposerError{Message: "write attachment boundary", Err: err}
+			}
+			for _, line := range composerAttachmentHeaders(attachment.Path) {
+				if err := write(line + composerCRLF); err != nil {
+					cleanup()
+					return nil, &ComposerError{Message: "write attachment headers", Err: err}
+				}
+			}
+			if err := write(composerCRLF); err != nil {
+				cleanup()
+				return nil, &ComposerError{Message: "write attachment separator", Err: err}
+			}
+			if err := streamAttachmentBase64(writer, attachment); err != nil {
+				cleanup()
+				return nil, err
+			}
+			if err := write(composerCRLF); err != nil {
+				cleanup()
+				return nil, &ComposerError{Message: "write attachment terminator", Err: err}
+			}
+		}
+		if err := write("--" + mixedBoundary + "--" + composerCRLF); err != nil {
+			cleanup()
+			return nil, &ComposerError{Message: "write multipart terminator", Err: err}
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		cleanup()
+		return nil, &ComposerError{Message: "flush message spool", Err: err}
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, &ComposerError{Message: "close message spool", Err: err}
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return nil, &ComposerError{Message: "stat message spool", Err: err}
+	}
+	return &ComposedMessage{path: path, size: stat.Size(), messageID: messageID}, nil
+}
+
+func (m *ComposedMessage) Open() (io.ReadCloser, error) {
+	return os.Open(m.path)
+}
+
+func (m *ComposedMessage) Size() int64 { return m.size }
+
+func (m *ComposedMessage) MessageID() string { return m.messageID }
+
+func (m *ComposedMessage) Remove() error { return os.Remove(m.path) }
+
+func composerAttachmentHeaders(path string) []string {
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return []string{
+		"Content-Type: " + contentType,
+		"Content-Transfer-Encoding: base64",
+		"Content-Disposition: " + mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}),
+	}
+}
+
+func streamAttachmentBase64(writer io.Writer, attachment DraftAttachment) (resultErr error) {
+	file, err := os.Open(attachment.Path)
+	if err != nil {
+		return &ComposerError{Message: "read draft attachment " + filepath.Base(attachment.Path), Err: err}
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	encoder := base64.NewEncoder(base64.StdEncoding, &base64LineWriter{w: writer})
+	hash := sha256.New()
+	limited := io.LimitReader(file, attachment.Size+1)
+	written, copyErr := io.Copy(encoder, io.TeeReader(limited, hash))
+	closeErr := encoder.Close()
+	if copyErr != nil {
+		return &ComposerError{Message: "encode draft attachment " + filepath.Base(attachment.Path), Err: copyErr}
+	}
+	if closeErr != nil {
+		return &ComposerError{Message: "encode draft attachment " + filepath.Base(attachment.Path), Err: closeErr}
+	}
+	actualHash := hex.EncodeToString(hash.Sum(nil))
+	if written != attachment.Size || !strings.EqualFold(actualHash, attachment.SHA256) {
+		return validationError("draft attachment " + filepath.Base(attachment.Path) + " changed after review; update the draft before sending")
+	}
+	return nil
 }
 
 func buildMessageWithAttachments(draft Draft, messageID string, attachments []composerAttachment) ([]byte, error) {
@@ -196,7 +370,7 @@ func writeBase64Body(buffer *bytes.Buffer, data []byte) {
 // base64LineWriter wraps a writer and inserts CRLF every composerLineLength
 // bytes of base64 output, per RFC 2045.
 type base64LineWriter struct {
-	w *bytes.Buffer
+	w io.Writer
 	n int
 }
 
@@ -204,7 +378,9 @@ func (lw *base64LineWriter) Write(p []byte) (int, error) {
 	written := 0
 	for len(p) > 0 {
 		if lw.n >= composerLineLength {
-			lw.w.WriteString(composerCRLF)
+			if _, err := io.WriteString(lw.w, composerCRLF); err != nil {
+				return written, err
+			}
 			lw.n = 0
 		}
 		chunk := len(p)
@@ -232,7 +408,7 @@ func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentT
 	writeHeader(buffer, "Date", time.Now().Format(time.RFC1123Z))
 	writeHeader(buffer, "Message-ID", messageID)
 	writeHeader(buffer, "MIME-Version", "1.0")
-	if draft.Kind == DraftKindReply && draft.SourceMessageID != "" {
+	if (draft.Kind == DraftKindReply || draft.Kind == DraftKindForward) && draft.SourceMessageID != "" {
 		writeHeader(buffer, "In-Reply-To", draft.SourceMessageID)
 		writeHeader(buffer, "References", threadReferences(draft.SourceReferences, draft.SourceMessageID))
 	}

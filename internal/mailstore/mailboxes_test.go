@@ -76,6 +76,24 @@ func TestListMailboxesRejectsIncompleteCatalog(t *testing.T) {
 	}
 }
 
+func TestLoadMailboxCacheBoundsUseTypedMalformedError(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	path := filepath.Join(store.versionRoot, testAccountID, ".mboxCache.plist")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	for _, size := range []int64{0, maximumMailboxCacheBytes + 1} {
+		if err := os.Truncate(path, size); err != nil {
+			t.Fatalf("Truncate(%d) error = %v", size, err)
+		}
+		_, err := store.loadMailboxCache(context.Background(), testAccountID)
+		if errorCodeForTest(err) != "mailbox_cache_malformed" {
+			t.Fatalf("loadMailboxCache(size=%d) error = %v, want mailbox_cache_malformed", size, err)
+		}
+	}
+}
+
 func TestParseMailboxCacheXML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

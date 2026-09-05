@@ -3,6 +3,7 @@ package mailstore
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,7 +27,7 @@ func (s *Store) loadMailboxCache(ctx context.Context, accountID string) (mailbox
 		return mailboxCache{}, fmt.Errorf("open mailbox cache: %w", err)
 	}
 	if info.Size() < 1 || info.Size() > maximumMailboxCacheBytes {
-		resultErr := error(fmt.Errorf("mailbox cache is not a bounded regular file"))
+		resultErr := operationError("mailbox_cache_malformed", "mailbox cache is not a bounded regular file")
 		joinCloseError(&resultErr, file, "mailbox cache")
 		return mailboxCache{}, resultErr
 	}
@@ -38,7 +39,7 @@ func readMailboxCache(
 	file *os.File,
 	expected os.FileInfo,
 ) (result mailboxCache, resultErr error) {
-	defer joinCloseError(&resultErr, file, "mailbox cache")
+	defer closeMailboxCache(&resultErr, file)
 	opened, err := file.Stat()
 	if err != nil {
 		return mailboxCache{}, operationError("invalid_mailbox_cache", fmt.Sprintf("inspect opened mailbox cache: %v", err))
@@ -48,12 +49,27 @@ func readMailboxCache(
 	}
 	cache, err := parseMailboxCacheXML(io.LimitReader(file, maximumMailboxCacheBytes+1))
 	if err != nil {
+		var typed *Error
+		if errors.As(err, &typed) && typed.Code == "mailbox_cache_malformed" {
+			return mailboxCache{}, typed
+		}
 		return mailboxCache{}, operationError("invalid_mailbox_cache", err.Error())
 	}
 	if err := ctx.Err(); err != nil {
 		return mailboxCache{}, err
 	}
 	return cache, nil
+}
+
+func closeMailboxCache(resultErr *error, file *os.File) {
+	if err := file.Close(); err != nil {
+		var typed *Error
+		if errors.As(*resultErr, &typed) {
+			typed.Message += "; close mailbox cache: " + err.Error()
+			return
+		}
+		*resultErr = errors.Join(*resultErr, fmt.Errorf("close mailbox cache: %w", err))
+	}
 }
 
 func parseMailboxCacheXML(reader io.Reader) (mailboxCache, error) {

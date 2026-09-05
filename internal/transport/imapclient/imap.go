@@ -19,6 +19,7 @@ package imapclient
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -36,8 +37,12 @@ import (
 )
 
 const (
-	flagSeen            = "\\Seen"
-	maxListLiteralBytes = 1 << 20
+	flagSeen                 = "\\Seen"
+	maxIMAPResponseLineBytes = 1 << 20
+	maxListLiteralBytes      = 1 << 20
+	maxListResponseBytes     = 8 << 20
+	maxListLiteralCount      = 128
+	maxUIDSearchResults      = 100000
 )
 
 // Client is a minimal IMAPv4 client that can mirror a message into the Sent
@@ -144,7 +149,19 @@ func (c *Client) Close() error {
 // connection: the LOGIN/LIST/SELECT/SEARCH/APPEND/LOGOUT sequence is
 // self-contained and does not participate in the session pool.
 func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg []byte, messageID string) (transport.AppendEvidence, error) {
+	return c.AppendToSentReader(ctx, cfg, bytes.NewReader(msg), int64(len(msg)), messageID)
+}
+
+// AppendToSentReader mirrors a replayable message source without retaining
+// the complete RFC 5322 payload in memory.
+func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfig, msg io.Reader, size int64, messageID string) (transport.AppendEvidence, error) {
 	var empty transport.AppendEvidence
+	if size < 0 {
+		return empty, &transport.TransportError{
+			Code:    transport.CodeIMAPInvalidValue,
+			Message: "message size cannot be negative",
+		}
+	}
 
 	if cfg.Host == "" {
 		return empty, &transport.TransportError{
@@ -210,7 +227,7 @@ func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg
 		return transport.AppendEvidence{Mailbox: sentBox, Appended: false}, nil
 	}
 
-	if err := c.doAppend(ctx, sess, sess.nextTag(), sentBox, msg); err != nil {
+	if err := c.doAppend(ctx, sess, sess.nextTag(), sentBox, msg, size); err != nil {
 		return empty, err
 	}
 
@@ -259,7 +276,15 @@ func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg tra
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP login deadline")
 	}
-	cmd := tag + " LOGIN " + quoteIMAP(cfg.Username) + " " + quoteIMAP(cfg.Password)
+	username, err := safeQuoteIMAP(cfg.Username)
+	if err != nil {
+		return err
+	}
+	password, err := safeQuoteIMAP(cfg.Password)
+	if err != nil {
+		return err
+	}
+	cmd := tag + " LOGIN " + username + " " + password
 	if err := c.writeLine(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAuthFailed, "IMAP LOGIN write")
 	}
@@ -322,7 +347,11 @@ func (c *Client) doSelect(ctx context.Context, sess *session, tag, mbox string) 
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
 	}
-	if err := c.writeLine(sess, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
+	quotedMailbox, err := safeQuoteIMAP(mbox)
+	if err != nil {
+		return err
+	}
+	if err := c.writeLine(sess, tag+" SELECT "+quotedMailbox); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP SELECT write")
 	}
 	status, _, err := c.readFinal(ctx, sess, tag)
@@ -342,7 +371,11 @@ func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID str
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
 	}
-	if err := c.writeLine(sess, tag+" SEARCH HEADER Message-ID "+quoteIMAP(messageID)); err != nil {
+	quotedMessageID, err := safeQuoteIMAP(messageID)
+	if err != nil {
+		return false, err
+	}
+	if err := c.writeLine(sess, tag+" SEARCH HEADER Message-ID "+quotedMessageID); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH write")
 	}
 
@@ -372,11 +405,15 @@ func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID str
 	}
 }
 
-func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, msg []byte) error {
+func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, msg io.Reader, size int64) error {
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP APPEND deadline")
 	}
-	cmd := tag + " APPEND " + quoteIMAP(mbox) + " (" + flagSeen + ") {" + strconv.Itoa(len(msg)) + "}"
+	quotedMailbox, err := safeQuoteIMAP(mbox)
+	if err != nil {
+		return err
+	}
+	cmd := tag + " APPEND " + quotedMailbox + " (" + flagSeen + ") {" + strconv.FormatInt(size, 10) + "}"
 	if err := c.writeLine(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND write")
 	}
@@ -393,9 +430,21 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		}
 	}
 
-	if _, err := sess.bw.Write(msg); err != nil {
+	written, err := io.Copy(sess.bw, msg)
+	if err != nil {
 		sess.dirty = true
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write")
+	}
+	if size >= 0 && written != size {
+		sess.dirty = true
+		return &transport.TransportError{
+			Code:    transport.CodeIMAPAppendFailed,
+			Message: fmt.Sprintf("message source ended after %d of %d bytes", written, size),
+		}
+	}
+	if err := sess.bw.Flush(); err != nil {
+		sess.dirty = true
+		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal flush")
 	}
 	if err := c.writeLine(sess, ""); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF")
@@ -439,6 +488,13 @@ func (c *Client) setDeadline(ctx context.Context, sess *session) error {
 }
 
 func (c *Client) writeLine(sess *session, line string) error {
+	if strings.ContainsAny(line, "\r\n\x00") {
+		sess.dirty = true
+		return &transport.TransportError{
+			Code:    transport.CodeIMAPInvalidValue,
+			Message: "IMAP command contains a forbidden control character",
+		}
+	}
 	if _, err := sess.bw.WriteString(line + "\r\n"); err != nil {
 		sess.dirty = true
 		return err
@@ -451,12 +507,25 @@ func (c *Client) writeLine(sess *session, line string) error {
 }
 
 func (c *Client) readLine(sess *session) (string, error) {
-	line, err := sess.br.ReadString('\n')
-	if err != nil {
+	var line []byte
+	for {
+		fragment, err := sess.br.ReadSlice('\n')
+		if len(line)+len(fragment) > maxIMAPResponseLineBytes {
+			sess.dirty = true
+			return "", &malformedResponseError{err: fmt.Errorf(
+				"IMAP response line exceeds %d bytes", maxIMAPResponseLineBytes,
+			)}
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			return strings.TrimRight(string(line), "\r\n"), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
 		sess.dirty = true
 		return "", err
 	}
-	return strings.TrimRight(line, "\r\n"), nil
 }
 
 const imapLiteralMarker = "\x00"
@@ -484,6 +553,7 @@ func listResponseMalformed(err error) *transport.TransportError {
 func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 	var reconstructed strings.Builder
 	var literals [][]byte
+	literalBytes := 0
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
@@ -495,13 +565,31 @@ func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 			return "", nil, &malformedResponseError{err: err}
 		}
 		if !hasLiteral {
+			if reconstructed.Len()+len(line) > maxListResponseBytes {
+				sess.dirty = true
+				return "", nil, &malformedResponseError{err: fmt.Errorf(
+					"IMAP LIST response exceeds %d bytes", maxListResponseBytes,
+				)}
+			}
 			reconstructed.WriteString(line)
 			return reconstructed.String(), literals, nil
 		}
-		if size > maxListLiteralBytes {
+		if len(literals) >= maxListLiteralCount {
 			sess.dirty = true
 			return "", nil, &malformedResponseError{err: fmt.Errorf(
-				"IMAP LIST literal size %d exceeds %d bytes", size, maxListLiteralBytes,
+				"IMAP LIST literal count exceeds %d", maxListLiteralCount,
+			)}
+		}
+		if size > maxListLiteralBytes || literalBytes > maxListResponseBytes-size {
+			sess.dirty = true
+			return "", nil, &malformedResponseError{err: fmt.Errorf(
+				"IMAP LIST literal response exceeds %d bytes", maxListResponseBytes,
+			)}
+		}
+		if reconstructed.Len()+len(prefix)+1 > maxListResponseBytes {
+			sess.dirty = true
+			return "", nil, &malformedResponseError{err: fmt.Errorf(
+				"IMAP LIST response exceeds %d bytes", maxListResponseBytes,
 			)}
 		}
 
@@ -516,6 +604,7 @@ func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 			return "", nil, err
 		}
 		literals = append(literals, literal)
+		literalBytes += size
 	}
 }
 
@@ -608,6 +697,18 @@ func quoteIMAP(s string) string {
 	return b.String()
 }
 
+func safeQuoteIMAP(s string) (string, error) {
+	for index := 0; index < len(s); index++ {
+		if s[index] < 0x20 || s[index] == 0x7f {
+			return "", &transport.TransportError{
+				Code:    transport.CodeIMAPInvalidValue,
+				Message: fmt.Sprintf("IMAP value contains control character at byte %d", index),
+			}
+		}
+	}
+	return quoteIMAP(s), nil
+}
+
 func parseListLine(line string, literals ...[]byte) (string, []string, error) {
 	parser := imapValueParser{literals: literals}
 	const prefix = "* LIST "
@@ -684,16 +785,6 @@ func (p *imapValueParser) parseValues(s string) ([]string, error) {
 		s = strings.TrimSpace(rest)
 	}
 	return values, nil
-}
-
-func parseValues(s string) ([]string, error) {
-	var parser imapValueParser
-	return parser.parseValues(s)
-}
-
-func parseIMAPValue(s string) (string, string, error) {
-	var parser imapValueParser
-	return parser.parse(s)
 }
 
 func (p *imapValueParser) parse(s string) (string, string, error) {
@@ -881,7 +972,11 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return info, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
 	}
-	if err := c.writeLine(sess, tag+" SELECT "+quoteIMAP(mbox)); err != nil {
+	quotedMailbox, err := safeQuoteIMAP(mbox)
+	if err != nil {
+		return info, err
+	}
+	if err := c.writeLine(sess, tag+" SELECT "+quotedMailbox); err != nil {
 		return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT write")
 	}
 	for {
@@ -983,8 +1078,8 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 }
 
 // ensureSelected switches the pooled session to mailbox when needed and
-// returns the SELECT-time info. Repeated commands on the same mailbox reuse
-// the cached uidvalidity instead of issuing another SELECT.
+// returns the SELECT-time info. Repeated read commands on the same mailbox
+// reuse the cached UIDVALIDITY; mutations call ensureSelectedFresh.
 func (c *Client) ensureSelected(ctx context.Context, ps *pooledSession, mailbox string) (selectInfo, error) {
 	if ps.selected == mailbox {
 		return selectInfo{uidvalidity: ps.uidvalidity}, nil
@@ -1002,12 +1097,22 @@ func (c *Client) ensureSelected(ctx context.Context, ps *pooledSession, mailbox 
 	return info, nil
 }
 
+func (c *Client) ensureSelectedFresh(ctx context.Context, ps *pooledSession, mailbox string) (selectInfo, error) {
+	ps.selected = ""
+	ps.uidvalidity = 0
+	return c.ensureSelected(ctx, ps, mailbox)
+}
+
 func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID string) ([]uint32, error) {
 	searchID := messageID
 	if !strings.HasPrefix(searchID, "<") && !strings.HasSuffix(searchID, ">") {
 		searchID = "<" + searchID + ">"
 	}
-	return c.doUIDSearchCriteria(ctx, sess, tag, "HEADER Message-ID "+quoteIMAP(searchID))
+	quotedMessageID, err := safeQuoteIMAP(searchID)
+	if err != nil {
+		return nil, err
+	}
+	return c.doUIDSearchCriteria(ctx, sess, tag, "HEADER Message-ID "+quotedMessageID)
 }
 
 func (c *Client) doUIDSearchDeleted(ctx context.Context, sess *session, tag string) ([]uint32, error) {
@@ -1042,6 +1147,13 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 			fields := strings.Fields(line)
 			for _, field := range fields[2:] {
 				if uid, err := strconv.ParseUint(field, 10, 32); err == nil {
+					if len(uids) >= maxUIDSearchResults {
+						sess.dirty = true
+						return nil, &transport.TransportError{
+							Code:    transport.CodeIMAPResponseMalformed,
+							Message: fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
+						}
+					}
 					uids = append(uids, uint32(uid))
 				}
 			}
@@ -1058,7 +1170,7 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}
 	defer release()
 
-	info, err := c.ensureSelected(ctx, ps, mailbox)
+	info, err := c.ensureSelectedFresh(ctx, ps, mailbox)
 	if err != nil {
 		return ev, err
 	}
@@ -1150,7 +1262,7 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 		return ev, err
 	}
 	defer release()
-	info, err := c.ensureSelected(ctx, ps, srcMailbox)
+	info, err := c.ensureSelectedFresh(ctx, ps, srcMailbox)
 	if err != nil {
 		return ev, err
 	}
@@ -1158,7 +1270,11 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 		return ev, err
 	}
 
-	cmd := fmt.Sprintf("%s UID COPY %d %s", ps.sess.nextTag(), uid, quoteIMAP(dstMailbox))
+	quotedDestination, err := safeQuoteIMAP(dstMailbox)
+	if err != nil {
+		return ev, err
+	}
+	cmd := fmt.Sprintf("%s UID COPY %d %s", ps.sess.nextTag(), uid, quotedDestination)
 	status, err := c.doCommand(ctx, ps.sess, cmd)
 	if err != nil {
 		return ev, err
@@ -1187,7 +1303,7 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
-	info, err := c.ensureSelected(ctx, ps, srcMailbox)
+	info, err := c.ensureSelectedFresh(ctx, ps, srcMailbox)
 	if err != nil {
 		return ev, err
 	}
@@ -1195,9 +1311,13 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		return ev, err
 	}
 	sess := ps.sess
+	quotedDestination, err := safeQuoteIMAP(dstMailbox)
+	if err != nil {
+		return ev, err
+	}
 
 	tag := sess.nextTag()
-	cmd := fmt.Sprintf("%s UID MOVE %d %s", tag, uid, quoteIMAP(dstMailbox))
+	cmd := fmt.Sprintf("%s UID MOVE %d %s", tag, uid, quotedDestination)
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return ev, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP MOVE deadline")
 	}
@@ -1205,7 +1325,10 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		return ev, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP MOVE write")
 	}
 	status, text, err := c.readFinal(ctx, sess, tag)
-	if err == nil && status == "OK" {
+	if err != nil {
+		return ev, err
+	}
+	if status == "OK" {
 		resp := status
 		if text != "" {
 			resp += " " + text
@@ -1220,10 +1343,16 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 			ExpectedUIDValidity: expectedUIDValidity,
 		}, nil
 	}
+	if status != "NO" && status != "BAD" {
+		return ev, &transport.TransportError{
+			Code:    transport.CodeIMAPMutationFailed,
+			Message: "IMAP MOVE failed without fallback permission: " + status + " " + text,
+		}
+	}
 
 	// Fallback for servers without UID MOVE: COPY + STORE \\Deleted, then
 	// prefer UID EXPUNGE so unrelated deleted messages cannot be removed.
-	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quoteIMAP(dstMailbox))
+	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quotedDestination)
 	copyStatus, err := c.doCommand(ctx, sess, copyCmd)
 	if err != nil {
 		return ev, err
@@ -1313,6 +1442,12 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 			Message: "no Trash mailbox found on IMAP server",
 		}
 	}
+	if strings.EqualFold(srcMailbox, trashBox) {
+		return transport.MutationEvidence{}, &transport.TransportError{
+			Code:    transport.CodeMessageAlreadyTrashed,
+			Message: "message is already in the Trash mailbox",
+		}
+	}
 
 	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, trashBox)
 	if err != nil {
@@ -1323,16 +1458,19 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 }
 
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
-// maxBytes bounds the announced literal (parity with the local raw-source
-// cap); maxBytes <= 0 leaves the fetch uncapped for content hydration.
-func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, maxBytes int64) ([]byte, error) {
+// maxBytes bounds the announced literal.
+func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	if _, err := c.ensureSelected(ctx, ps, mailbox); err != nil {
+	info, err := c.ensureSelectedFresh(ctx, ps, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
 		return nil, err
 	}
 
@@ -1345,14 +1483,14 @@ func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchLiteral(ctx, ps.sess, tag, maxBytes)
+	payload, err := c.readFetchLiteral(ctx, ps.sess, tag, uid, maxBytes)
 	if err != nil {
 		return nil, err
 	}
 	return payload, nil
 }
 
-func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, maxBytes int64) ([]byte, error) {
+func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64) ([]byte, error) {
 	var payload []byte
 	found := false
 	for {
@@ -1377,6 +1515,14 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 			}
 		}
 		if strings.HasPrefix(line, "* ") && strings.Contains(line, "FETCH ") {
+			responseUID, ok := parseFetchUID(line)
+			if !ok || responseUID != requestedUID {
+				sess.dirty = true
+				return nil, &transport.TransportError{
+					Code:    transport.CodeIMAPMessageUIDMismatch,
+					Message: fmt.Sprintf("IMAP FETCH returned UID %d for requested UID %d", responseUID, requestedUID),
+				}
+			}
 			idx := strings.LastIndex(line, "{")
 			if idx != -1 && strings.HasSuffix(line, "}") {
 				lenStr := line[idx+1 : len(line)-1]
@@ -1408,6 +1554,22 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 	}
 }
 
+func parseFetchUID(line string) (uint32, bool) {
+	fields := strings.Fields(line)
+	for index := 0; index+1 < len(fields); index++ {
+		if strings.TrimLeft(fields[index], "(") != "UID" {
+			continue
+		}
+		value := strings.TrimRight(fields[index+1], ")")
+		uid, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return 0, false
+		}
+		return uint32(uid), true
+	}
+	return 0, false
+}
+
 // CheckStatus queries server message counts, unseen count, and UIDs via IMAP STATUS.
 func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
 	var status transport.MailboxStatus
@@ -1419,8 +1581,12 @@ func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mail
 	}
 	defer release()
 
+	quotedMailbox, err := safeQuoteIMAP(mailbox)
+	if err != nil {
+		return status, err
+	}
 	tag := ps.sess.nextTag()
-	cmd := fmt.Sprintf("%s STATUS %s (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", tag, quoteIMAP(mailbox))
+	cmd := fmt.Sprintf("%s STATUS %s (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", tag, quotedMailbox)
 	if err := c.setDeadline(ctx, ps.sess); err != nil {
 		return status, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP STATUS deadline")
 	}

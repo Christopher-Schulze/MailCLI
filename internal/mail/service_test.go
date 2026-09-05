@@ -3,6 +3,7 @@ package mail
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 	"time"
 )
@@ -205,5 +206,53 @@ func TestServicePassthroughAndHealth(t *testing.T) {
 	}
 	if elapsedMilliseconds(time.Now()) < 0 {
 		t.Fatal("elapsedMilliseconds() < 0")
+	}
+}
+
+type serviceStreamingGateway struct {
+	*gatewayStub
+}
+
+func (g serviceStreamingGateway) WriteRawSource(_ context.Context, _ string, writer io.Writer) error {
+	_, err := io.WriteString(writer, "streamed source")
+	return err
+}
+
+type serviceSyncChecker struct {
+	*gatewayStub
+	result SyncCheckResult
+}
+
+func (g serviceSyncChecker) SyncCheck(context.Context, string) (SyncCheckResult, error) {
+	return g.result, nil
+}
+
+func TestServicePassthroughsDraftMailboxAndStreamingOperations(t *testing.T) {
+	gateway := &gatewayStub{mailboxes: []Mailbox{{Ref: "mbx"}}}
+	service := NewService(&serviceStreamingGateway{gatewayStub: gateway})
+
+	mailboxes, err := service.ListMailboxes(context.Background(), ListMailboxesRequest{AccountRef: "acct"})
+	if err != nil || len(mailboxes) != 1 || mailboxes[0].Ref != "mbx" {
+		t.Fatalf("ListMailboxes() = %#v, error = %v", mailboxes, err)
+	}
+	if _, err := service.OpenDraft(context.Background(), "draft_ref"); err != nil {
+		t.Fatalf("OpenDraft() error = %v", err)
+	}
+	var raw bytes.Buffer
+	if err := service.WriteRawSource(context.Background(), "msg_ref", &raw); err != nil {
+		t.Fatalf("streaming WriteRawSource() error = %v", err)
+	}
+	if raw.String() != "streamed source" {
+		t.Fatalf("streaming raw source = %q, want streamed source", raw.String())
+	}
+
+	if _, err := service.SyncCheck(context.Background(), "acct"); err == nil {
+		t.Fatal("SyncCheck() without checker error = nil")
+	}
+	want := SyncCheckResult{AccountRef: "acct", Complete: true}
+	checked := NewService(serviceSyncChecker{gatewayStub: gateway, result: want})
+	got, err := checked.SyncCheck(context.Background(), "acct")
+	if err != nil || got.AccountRef != want.AccountRef || !got.Complete {
+		t.Fatalf("SyncCheck() = %#v, error = %v, want %#v", got, err, want)
 	}
 }

@@ -69,10 +69,24 @@ func discoverVersionRoot(mailRoot string) (string, error) {
 			fmt.Sprintf("no readable Mail Envelope Index exists under %s", mailRoot),
 		)
 	}
+	for _, candidate := range candidates {
+		if candidate.version == 10 {
+			return candidate.path, nil
+		}
+	}
 	sort.Slice(candidates, func(left int, right int) bool {
 		return candidates[left].version > candidates[right].version
 	})
-	return candidates[0].path, nil
+	if candidates[0].version > 10 {
+		return "", operationError(
+			"unsupported_mail_store_schema",
+			fmt.Sprintf("Mail store layout V%d is unsupported; upgrade MailCLI", candidates[0].version),
+		)
+	}
+	return "", operationError(
+		"mail_store_unavailable",
+		fmt.Sprintf("no readable V10 Mail Envelope Index exists under %s", mailRoot),
+	)
 }
 
 func loadActiveAccountURLs(ctx context.Context, config Config) ([]string, error) {

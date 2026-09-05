@@ -149,6 +149,14 @@ func TestAppendToSent(t *testing.T) {
 	}
 }
 
+func TestAppendToSentReaderRejectsNegativeSize(t *testing.T) {
+	client := New()
+	_, err := client.AppendToSentReader(context.Background(), transport.ImapConfig{}, strings.NewReader("message"), -1, "<x@example.com>")
+	if transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
+		t.Fatalf("error = %v, want invalid_imap_value", err)
+	}
+}
+
 func TestAppendToSentContextCancel(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:     true,
@@ -226,6 +234,14 @@ func TestQuoteIMAP(t *testing.T) {
 	for _, c := range cases {
 		if got := quoteIMAP(c.in); got != c.want {
 			t.Fatalf("quoteIMAP(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSafeQuoteIMAPRejectsControlCharacters(t *testing.T) {
+	for _, value := range []string{"line\nfeed", "carriage\rreturn", "nul\x00value", "escape\x1bvalue"} {
+		if _, err := safeQuoteIMAP(value); transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
+			t.Fatalf("safeQuoteIMAP(%q) error = %v, want invalid_imap_value", value, err)
 		}
 	}
 }
@@ -772,7 +788,7 @@ func TestFetchMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
@@ -800,7 +816,7 @@ func TestFetchRejectsOversizedLiteral(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	_, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
+	_, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
 	var typed *transport.TransportError
 	if !errors.As(err, &typed) || typed.Code != transport.CodeIMAPRawSourceTooLarge {
 		t.Fatalf("FetchMessage error = %v, want raw_source_too_large", err)
@@ -808,12 +824,59 @@ func TestFetchRejectsOversizedLiteral(t *testing.T) {
 	if !strings.Contains(typed.Message, "268435456") || !strings.Contains(typed.Message, "67108864") {
 		t.Fatalf("error message = %q, want announced size and cap", typed.Message)
 	}
-	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, mail.MaximumRawSourceBytes)
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
 	if err != nil {
 		t.Fatalf("follow-up FetchMessage after discard: %v", err)
 	}
 	if len(payload) == 0 {
 		t.Fatal("follow-up fetch returned no payload")
+	}
+}
+
+func TestFetchFailsClosedOnUIDValidityChangeBeforeLiteral(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, searchMatchID: "<x@example.com>",
+		changedUIDValidityAfter: 1, changedUIDValidityValue: 99999,
+		fetchPayload: []byte("must not be read"),
+	})
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<x@example.com>")
+	if err != nil {
+		t.Fatalf("SearchUID: %v", err)
+	}
+	_, err = client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != "mailbox_uidvalidity_changed" {
+		t.Fatalf("FetchMessage error = %v, want mailbox_uidvalidity_changed", err)
+	}
+	srv.mu.Lock()
+	selectCalls, storeCalled := srv.selectCalls, srv.storeCalled
+	srv.mu.Unlock()
+	if selectCalls != 2 {
+		t.Fatalf("SELECT calls = %d, want 2", selectCalls)
+	}
+	if storeCalled {
+		t.Fatal("FETCH payload path was reached after UIDVALIDITY mismatch")
+	}
+}
+
+func TestFetchRejectsResponseUIDMismatch(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, fetchResponseUID: 99,
+	})
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	_, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
+	var typed *transport.TransportError
+	if !errors.As(err, &typed) || typed.Code != transport.CodeIMAPMessageUIDMismatch {
+		t.Fatalf("FetchMessage error = %v, want %s", err, transport.CodeIMAPMessageUIDMismatch)
 	}
 }
 
@@ -885,10 +948,9 @@ func TestMutationMatchingUIDValidityProceeds(t *testing.T) {
 	}
 }
 
-// Same mailbox, same client, same session: the mutation reuses the SELECT
-// state SearchUID established instead of issuing another SELECT (048
-// acceptance: no extra IMAP round trip in the common case).
-func TestMutationReusesSelectedSessionWithoutExtraSelect(t *testing.T) {
+// Mutations refresh SELECT state before acting so UIDVALIDITY is current even
+// when SearchUID previously selected the same mailbox.
+func TestMutationRefreshesSelectedSessionBeforeMutation(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:        true,
 		otherMboxes:   []string{"INBOX"},
@@ -912,8 +974,8 @@ func TestMutationReusesSelectedSessionWithoutExtraSelect(t *testing.T) {
 	selectCalls := srv.selectCalls
 	storeCalled := srv.storeCalled
 	srv.mu.Unlock()
-	if selectCalls != 1 {
-		t.Fatalf("SELECT calls = %d, want 1 (shared with SearchUID)", selectCalls)
+	if selectCalls != 2 {
+		t.Fatalf("SELECT calls = %d, want 2 (fresh mutation selection)", selectCalls)
 	}
 	if !storeCalled {
 		t.Fatal("STORE did not run despite matching UIDVALIDITY")

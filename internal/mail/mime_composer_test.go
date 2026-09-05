@@ -2,6 +2,7 @@ package mail
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +252,53 @@ func TestBuildMessageReplyWithThreading(t *testing.T) {
 	}
 	if !contains(msgStr, "References: <msg-1@example.com> <original@example.com>") {
 		t.Error("message missing References header")
+	}
+}
+
+func TestComposeMessageSpoolCanBeRemovedAfterReplay(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Spool", Body: "Body",
+	}
+	message, err := ComposeMessageSpool(draft, "<spool@example.com>")
+	if err != nil {
+		t.Fatalf("ComposeMessageSpool() error = %v", err)
+	}
+	reader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if message.Size() <= 0 || message.MessageID() != "<spool@example.com>" {
+		t.Fatalf("message metadata = size %d, id %q", message.Size(), message.MessageID())
+	}
+	if err := message.Remove(); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if _, err := message.Open(); err == nil {
+		t.Fatal("Open() after Remove() succeeded")
+	}
+}
+
+func TestBuildMessageForwardWithThreading(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Fwd: Original", Body: "Forward body", Kind: DraftKindForward,
+		SourceMessageID: "<original@example.com>", SourceReferences: "<msg-1@example.com>",
+	}
+	msg, err := BuildMessage(draft, "<forward@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage error = %v", err)
+	}
+	msgStr := string(msg)
+	if !contains(msgStr, "In-Reply-To: <original@example.com>") ||
+		!contains(msgStr, "References: <msg-1@example.com> <original@example.com>") {
+		t.Fatalf("forward message missing threading headers: %s", msgStr)
 	}
 }
 

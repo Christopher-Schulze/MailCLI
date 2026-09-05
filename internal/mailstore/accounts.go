@@ -189,20 +189,36 @@ func (s *Store) loadSenderIdentities(
 	ctx context.Context,
 	mailboxIDs []int64,
 ) (result []senderIdentity, resultErr error) {
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(mailboxIDs)), ",")
-	arguments := make([]any, 0, len(mailboxIDs)*2+1)
-	for _, identifier := range mailboxIDs {
-		arguments = append(arguments, identifier)
+	if len(mailboxIDs) == 0 {
+		return []senderIdentity{}, nil
+	}
+	arguments := make([]any, 0, len(mailboxIDs)*4+1)
+	arms := make([]string, 0, len(mailboxIDs)*2)
+	for range mailboxIDs {
+		arms = append(arms,
+			`SELECT id FROM (
+				SELECT ROWID AS id FROM messages
+				WHERE mailbox = ? AND deleted = 0
+				ORDER BY COALESCE(date_sent, date_received) DESC, ROWID DESC
+				LIMIT ?
+			)`,
+			`SELECT id FROM (
+				SELECT labels.message_id AS id
+				FROM labels
+				JOIN messages ON messages.ROWID = labels.message_id
+				WHERE labels.mailbox_id = ? AND messages.deleted = 0
+				ORDER BY COALESCE(messages.date_sent, messages.date_received) DESC, messages.ROWID DESC
+				LIMIT ?
+			)`,
+		)
 	}
 	for _, identifier := range mailboxIDs {
-		arguments = append(arguments, identifier)
+		arguments = append(arguments, identifier, senderIdentityRecentLimit, identifier, senderIdentityRecentLimit)
 	}
 	arguments = append(arguments, senderIdentityRecentLimit)
 	rows, err := s.database.QueryContext(ctx, `
 		WITH sent_membership(id) AS (
-			SELECT ROWID FROM messages WHERE mailbox IN (`+placeholders+`)
-			UNION
-			SELECT message_id FROM labels WHERE mailbox_id IN (`+placeholders+`)
+			`+strings.Join(arms, "\n\t\t\tUNION\n\t\t\t")+`
 		), membership(id) AS (
 			SELECT sent.id
 			FROM sent_membership sent

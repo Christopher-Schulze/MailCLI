@@ -29,6 +29,21 @@ func TestDiscoverVersionRootSelectsHighestReadableStore(t *testing.T) {
 	}
 }
 
+func TestDiscoverVersionRootRejectsNewerLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "V11", "MailData", envelopeIndexName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("database"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := discoverVersionRoot(root); errorCodeForTest(err) != "unsupported_mail_store_schema" {
+		t.Fatalf("discoverVersionRoot() error = %v, want unsupported_mail_store_schema", err)
+	}
+}
+
 func TestDiscoverVersionRootRejectsSymlinkedIndex(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

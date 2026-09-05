@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,32 +27,7 @@ type draftGateway struct {
 
 type durableDraftSaveGateway struct {
 	gatewayStub
-	saveCalls      int
 	reconcileCalls int
-}
-
-func (g *durableDraftSaveGateway) PrepareDraftSave(
-	context.Context,
-	Draft,
-) (SendObservationBaseline, error) {
-	return SendObservationBaseline{
-		StoreUUID: "store", MaximumRowID: 10, CapturedUnix: 1, SentMailboxIDs: []int64{5},
-	}, nil
-}
-
-func (g *durableDraftSaveGateway) SaveDraftWithEvidence(
-	_ context.Context,
-	draft Draft,
-) (DraftSaveEvidence, error) {
-	g.saveCalls++
-	body := draft.Body
-	return DraftSaveEvidence{
-		InvocationStarted: true, AcceptedByMail: true,
-		Materialized: &SendMaterialization{
-			From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
-			Subject: draft.Subject, Body: &body, AttachmentCount: len(draft.Attachments),
-		},
-	}, context.DeadlineExceeded
 }
 
 func (g *durableDraftSaveGateway) ReconcileDraftSave(
@@ -187,35 +163,30 @@ func TestSaveDraftPersistsToMailBeforeLocalCleanup(t *testing.T) {
 	}
 }
 
-func TestSaveDraftDurablyReconcilesWithoutDuplicateInvocation(t *testing.T) {
+func TestSaveDraftReconcilesHistoricalClaimWithoutNewInvocation(t *testing.T) {
 	gateway := &durableDraftSaveGateway{}
 	gateway.accounts = []Account{{EmailAddresses: []string{"mail@example.com"}}}
-	service := NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(gateway, root)
 	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
 		From: "mail@example.com", To: []Recipient{{Address: "recipient@example.com"}},
-		Subject: "Saved once", Body: strings.Repeat("body", 20*1024),
+		Subject: "Saved once", Body: "Body",
 	}})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SaveDraft(context.Background(), draft.Ref); errorCode(err) != "draft_save_outcome_unknown" {
-		t.Fatalf("first SaveDraft() error = %v", err)
+	baseline := &SendObservationBaseline{
+		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
 	}
-	retained, err := service.GetDraft(draft.Ref)
-	if err != nil || retained.SaveAttempt == nil || retained.SaveAttempt.Materialized == nil {
-		t.Fatalf("retained draft = %+v, error = %v", retained, err)
-	}
-	if _, err := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, Input: DraftInput{
-		To: draft.To, Body: draft.Body,
-	}}); errorCode(err) != "draft_save_retry_blocked" {
-		t.Fatalf("UpdateDraft() error = %v", err)
+	if _, err := beginDraftSaveAttempt(root, draft.Ref, baseline); err != nil {
+		t.Fatalf("beginDraftSaveAttempt() error = %v", err)
 	}
 	saved, err := service.SaveDraft(context.Background(), draft.Ref)
 	if err != nil || saved.Message.Ref != "msg_observed" {
 		t.Fatalf("reconciled SaveDraft() = %+v, error = %v", saved, err)
 	}
-	if gateway.saveCalls != 1 || gateway.reconcileCalls != 1 {
-		t.Fatalf("save calls = %d, reconcile calls = %d", gateway.saveCalls, gateway.reconcileCalls)
+	if gateway.reconcileCalls != 1 {
+		t.Fatalf("reconcile calls = %d, want 1", gateway.reconcileCalls)
 	}
 	if _, err := service.GetDraft(draft.Ref); errorCode(err) != "not_found" {
 		t.Fatalf("GetDraft() after reconcile error = %v", err)
@@ -676,6 +647,82 @@ func TestReconcileUnknownDraftLeavesNoLockFile(t *testing.T) {
 	assertNoDraftLockFiles(t, root)
 }
 
+func TestSweepOrphanDraftLocksRemovesUnheldMissingDraftLock(t *testing.T) {
+	root := t.TempDir()
+	ref := "draft_000000000000000000000000"
+	path := filepath.Join(root, ref+".lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	swept, failures, err := sweepOrphanDraftLocks(root)
+	if err != nil {
+		t.Fatalf("sweepOrphanDraftLocks() error = %v", err)
+	}
+	if len(failures) != 0 || len(swept) != 1 || swept[0] != ref {
+		t.Fatalf("swept = %v, failures = %v", swept, failures)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock stat error = %v, want not-exist", err)
+	}
+}
+
+func TestSweepOrphanDraftLocksLeavesHeldLock(t *testing.T) {
+	root := t.TempDir()
+	ref := "draft_000000000000000000000001"
+	path := filepath.Join(root, ref+".lock")
+	helper := exec.Command(os.Args[0], "-test.run=TestDraftLockHelperProcess", "--", path)
+	helper.Env = append(os.Environ(), "MAILCLI_DRAFT_LOCK_HELPER=1")
+	stdout, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe() error = %v", err)
+	}
+	if err := helper.Start(); err != nil {
+		t.Fatalf("helper start: %v", err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != "locked" {
+		_ = helper.Process.Kill()
+		t.Fatalf("helper readiness = %q, error = %v", line, err)
+	}
+	defer func() { _ = helper.Process.Kill(); _ = helper.Wait() }()
+
+	swept, failures, err := sweepOrphanDraftLocks(root)
+	if err != nil {
+		t.Fatalf("sweepOrphanDraftLocks() error = %v", err)
+	}
+	if len(swept) != 0 || len(failures) != 0 {
+		t.Fatalf("swept = %v, failures = %v, want held lock untouched", swept, failures)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("held lock stat error = %v", err)
+	}
+}
+
+func TestDraftLockHelperProcess(t *testing.T) {
+	if os.Getenv("MAILCLI_DRAFT_LOCK_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) < 2 {
+		os.Exit(2)
+	}
+	path := os.Args[len(os.Args)-1]
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		os.Exit(2)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		os.Exit(2)
+	}
+	fmt.Println("locked")
+	select {}
+}
+
 func assertNoDraftLockFiles(t *testing.T, root string) {
 	t.Helper()
 	entries, err := os.ReadDir(root)
@@ -800,7 +847,7 @@ func TestPruneSkipsDraftsWithSendAttempt(t *testing.T) {
 	}
 }
 
-func TestListDraftsSkipsCorruptFiles(t *testing.T) {
+func TestListDraftsSurfacesCorruptFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft, err := service.CreateDraft(CreateDraftRequest{Kind: DraftKindNew, Input: DraftInput{
@@ -818,8 +865,20 @@ func TestListDraftsSkipsCorruptFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
-	if len(drafts) != 1 || drafts[0].Ref != draft.Ref {
-		t.Fatalf("ListDrafts() = %+v, want only the valid draft", drafts)
+	if len(drafts) != 2 {
+		t.Fatalf("ListDrafts() = %+v, want valid and state-error entries", drafts)
+	}
+	var foundValid, foundCorrupt bool
+	for _, summary := range drafts {
+		if summary.Ref == draft.Ref && summary.StateError == "" {
+			foundValid = true
+		}
+		if summary.Ref == "draft_corrupt" {
+			foundCorrupt = summary.StateError != ""
+		}
+	}
+	if !foundValid || !foundCorrupt {
+		t.Fatalf("ListDrafts() = %+v, want valid and draft_corrupt with state_error", drafts)
 	}
 }
 

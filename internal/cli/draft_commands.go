@@ -9,7 +9,10 @@ import (
 	"mailcli/internal/mail"
 )
 
-const maximumDraftInputBytes = 16 * 1024 * 1024
+const (
+	maximumDraftInputBytes = 16 * 1024 * 1024
+	draftSendTimeout       = 15 * time.Minute
+)
 
 type commandError struct {
 	code    string
@@ -234,7 +237,7 @@ func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stder
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.prune", responseData{PruneResult: &result})
 	}
-	if len(result.Candidates) == 0 {
+	if len(result.Candidates) == 0 && len(result.SweptLocks) == 0 {
 		writeLine(stdout, "no stale never-sent drafts")
 		return 0
 	}
@@ -246,6 +249,9 @@ func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stder
 	}
 	for _, ref := range result.Removed {
 		writeFormat(stdout, "removed\t%s\n", ref)
+	}
+	for _, ref := range result.SweptLocks {
+		writeFormat(stdout, "swept_lock\t%s\n", ref)
 	}
 	for _, failure := range result.Failed {
 		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, failure.Error)
@@ -303,7 +309,7 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 	if !*confirm {
 		return failCommand("drafts.send", *jsonOutput, confirmationRequired("draft send"), stdout, stderr)
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	operationCtx, cancel := context.WithTimeout(ctx, draftSendTimeout)
 	defer cancel()
 	result, err := service.SendDraft(operationCtx, *ref)
 	if err != nil {

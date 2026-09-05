@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,6 +72,10 @@ type failingGateway struct {
 }
 
 type busyProbeGateway struct {
+	testGateway
+}
+
+type duplicateEvidenceGateway struct {
 	testGateway
 }
 
@@ -170,6 +175,18 @@ func (busyProbeGateway) Probe(context.Context, bool) mail.DiagnosticReport {
 	return mail.DiagnosticReport{Checks: []mail.Check{{
 		Name: "mail-automation", Status: "fail", Code: "mail_busy", Detail: "did not start",
 	}}}
+}
+
+func (duplicateEvidenceGateway) MarkMessage(context.Context, mail.MarkMessageRequest) (mail.MessageSummary, error) {
+	return mail.MessageSummary{Ref: "msg_ref", ServerTruth: &mail.ServerMutationEvidence{
+		Command: "STORE", DuplicateMatches: 2,
+	}}, nil
+}
+
+func TestOneLineReplacesUnicodeControls(t *testing.T) {
+	if got := oneLine("subject\r\n\t\x00\u0085\u2028\u2029value"); got != "subject       value" {
+		t.Fatalf("oneLine() = %q", got)
+	}
 }
 
 func TestRunTable(t *testing.T) {
@@ -289,6 +306,27 @@ func TestVersionJSON(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"error":null`) {
 		t.Fatalf("stdout = %q, want stable null error field", stdout.String())
+	}
+}
+
+func TestNormalizeGlobalJSONSupportsAnyPositionWithoutStealingValues(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "before command", args: []string{"--json", "version"}, want: []string{"version", "--json"}},
+		{name: "between command and subcommand", args: []string{"messages", "--json", "list"}, want: []string{"messages", "list", "--json"}},
+		{name: "after option value", args: []string{"messages", "search", "--query", "--json"}, want: []string{"messages", "search", "--query", "--json"}},
+		{name: "repeated global flag", args: []string{"--json", "version", "--json"}, want: []string{"version", "--json"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, requested := normalizeGlobalJSON(test.args)
+			if !requested || !slices.Equal(got, test.want) {
+				t.Fatalf("normalizeGlobalJSON(%q) = %q, %t, want %q, true", test.args, got, requested, test.want)
+			}
+		})
 	}
 }
 

@@ -56,6 +56,31 @@ func TestSubmitSuccess(t *testing.T) {
 	}
 }
 
+func TestSubmitReaderSuccess(t *testing.T) {
+	srv := newFakeSMTPServer(t)
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	reader := strings.NewReader(testMessage)
+	ev, err := testClient().SubmitReader(context.Background(), cfg, "a@b.c", []string{"d@e.f"}, "<streamed@a.b>", reader, int64(len(testMessage)))
+	if err != nil {
+		t.Fatalf("SubmitReader: %v", err)
+	}
+	if ev.MessageID != "<streamed@a.b>" || !strings.HasPrefix(ev.ServerResponse, "250") {
+		t.Fatalf("evidence = %+v", ev)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if string(srv.data) != testMessage {
+		t.Fatalf("payload = %q, want %q", srv.data, testMessage)
+	}
+}
+
+func TestSubmitReaderRejectsNegativeSize(t *testing.T) {
+	_, err := testClient().SubmitReader(context.Background(), transport.SubmitConfig{}, "a@b.c", []string{"d@e.f"}, "", strings.NewReader(testMessage), -1)
+	if transport.ErrorCode(err) != transport.CodeSMTPRejected {
+		t.Fatalf("error = %v, want smtp_rejected", err)
+	}
+}
+
 func TestSubmitErrors(t *testing.T) {
 	cfg := func(srv *fakeSMTPServer) transport.SubmitConfig {
 		return transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
@@ -255,7 +280,7 @@ func TestSendDataSetsTransferDeadline(t *testing.T) {
 		t.Fatalf("test setup: transfer budget %v not clearly above command budget %v", wantTransfer, commandBudget)
 	}
 	start := time.Now()
-	resp, err := sendData(rec, ctx, client, msg)
+	resp, err := sendData(rec, ctx, client, bytes.NewReader(msg), int64(len(msg)))
 	if err != nil {
 		t.Fatalf("sendData: %v", err)
 	}

@@ -14,7 +14,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.2.0"
+	version       = "1.3.0"
 	schemaVersion = 1
 )
 
@@ -128,55 +128,70 @@ func RequiresMailService(args []string) bool {
 	if helpOnly(args[1:]) {
 		return false
 	}
+	spec, ok := commandRegistry[args[0]]
+	return ok && spec.requiresMailService != nil && spec.requiresMailService(args[1:])
+}
+
+func RequiresSignalContext(args []string) bool {
+	args, _ = normalizeGlobalJSON(args)
+	if len(args) == 0 || helpOnly(args[1:]) {
+		return false
+	}
+	spec, ok := commandRegistry[args[0]]
+	if !ok {
+		return false
+	}
+	return (spec.requiresSignal != nil && spec.requiresSignal(args[1:])) ||
+		(spec.requiresMailService != nil && spec.requiresMailService(args[1:]))
+}
+
+func RequiresMainThread(args []string) bool {
+	args, _ = normalizeGlobalJSON(args)
+	if len(args) == 0 || helpOnly(args[1:]) {
+		return false
+	}
+	spec, ok := commandRegistry[args[0]]
+	return ok && spec.requiresMainThread != nil && spec.requiresMainThread(args[1:])
+}
+
+func serviceCommandRequired(args []string) bool {
+	return !helpOnly(args)
+}
+
+func accountCommandRequired(args []string) bool {
+	return len(args) > 0 && args[0] == "list" && !helpOnly(args[1:])
+}
+
+func mailboxCommandRequired(args []string) bool {
+	return len(args) > 0 && (args[0] == "list" || args[0] == "resolve") && !helpOnly(args[1:])
+}
+
+func messageCommandRequired(args []string) bool {
+	if len(args) == 0 || helpOnly(args[1:]) {
+		return false
+	}
 	switch args[0] {
-	case "drafts":
-		if len(args) < 2 || helpOnly(args[2:]) {
-			return false
-		}
-		switch args[1] {
-		case "create", "list", "inspect", "preview", "edit", "handoff", "update", "save", "send", "discard":
-			return false
-		case "open", "reconcile":
-			return true
-		default:
-			return false
-		}
-	case "send":
-		return false
-	case "accounts":
-		return len(args) >= 2 && args[1] == "list" && !helpOnly(args[2:])
-	case "mailboxes":
-		return len(args) >= 2 && (args[1] == "list" || args[1] == "resolve") && !helpOnly(args[2:])
-	case "messages":
-		if len(args) < 2 || helpOnly(args[2:]) {
-			return false
-		}
-		switch args[1] {
-		case "reply", "forward", "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
-			return true
-		default:
-			return false
-		}
-	case "attachments":
-		return len(args) >= 2 && (args[1] == "list" || args[1] == "save") && !helpOnly(args[2:])
-	case "doctor", "sync":
+	case "reply", "forward", "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
 		return true
-	case "update":
-		return false
 	default:
 		return false
 	}
 }
 
-func RequiresSignalContext(args []string) bool {
-	args, _ = normalizeGlobalJSON(args)
-	return RequiresMailService(args) || len(args) > 0 && args[0] == "update" ||
-		len(args) > 1 && args[0] == "drafts" && (args[1] == "edit" || args[1] == "handoff")
+func attachmentCommandRequired(args []string) bool {
+	return len(args) > 0 && (args[0] == "list" || args[0] == "save") && !helpOnly(args[1:])
 }
 
-func RequiresMainThread(args []string) bool {
-	args, _ = normalizeGlobalJSON(args)
-	return len(args) > 1 && args[0] == "drafts" && args[1] == "handoff"
+func draftCommandRequired(args []string) bool {
+	return len(args) > 0 && (args[0] == "open" || args[0] == "reconcile") && !helpOnly(args[1:])
+}
+
+func draftSignalRequired(args []string) bool {
+	return len(args) > 0 && (args[0] == "edit" || args[0] == "handoff") && !helpOnly(args[1:])
+}
+
+func draftHandoffRequired(args []string) bool {
+	return len(args) > 0 && args[0] == "handoff" && !helpOnly(args[1:])
 }
 
 func runJSONCommand(
@@ -271,6 +286,66 @@ func (w *countingWriter) Write(payload []byte) (int, error) {
 	return written, err
 }
 
+type commandRunner func(context.Context, *mail.Service, []string, io.Writer, io.Writer) int
+
+type commandSpec struct {
+	run                 commandRunner
+	requiresMailService func([]string) bool
+	requiresSignal      func([]string) bool
+	requiresMainThread  func([]string) bool
+}
+
+var commandRegistry = map[string]commandSpec{
+	"help": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
+		writeHelp(stdout)
+		return 0
+	}},
+	"--help": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
+		writeHelp(stdout)
+		return 0
+	}},
+	"-h": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
+		writeHelp(stdout)
+		return 0
+	}},
+	"version": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runVersion(args, stdout, stderr)
+	}},
+	"--version": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runVersion(args, stdout, stderr)
+	}},
+	"update": {run: func(ctx context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runUpdate(ctx, args, stdout, stderr)
+	}, requiresSignal: func([]string) bool { return true }},
+	"capabilities": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runCapabilities(args, stdout, stderr)
+	}},
+	"doctor": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runDoctor(ctx, service, args, stdout, stderr)
+	}, requiresMailService: serviceCommandRequired},
+	"accounts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runAccounts(ctx, service, args, stdout, stderr)
+	}, requiresMailService: accountCommandRequired},
+	"mailboxes": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runMailboxes(ctx, service, args, stdout, stderr)
+	}, requiresMailService: mailboxCommandRequired},
+	"messages": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runMessages(ctx, service, args, stdout, stderr)
+	}, requiresMailService: messageCommandRequired},
+	"attachments": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runAttachments(ctx, service, args, stdout, stderr)
+	}, requiresMailService: attachmentCommandRequired},
+	"drafts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runDrafts(ctx, service, args, stdout, stderr)
+	}, requiresMailService: draftCommandRequired, requiresSignal: draftSignalRequired, requiresMainThread: draftHandoffRequired},
+	"send": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runSend(args, stdout, stderr)
+	}},
+	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runSync(ctx, service, args, stdout, stderr)
+	}, requiresMailService: func([]string) bool { return true }, requiresSignal: func([]string) bool { return true }},
+}
+
 func runCommand(
 	ctx context.Context,
 	mailService *mail.Service,
@@ -278,54 +353,38 @@ func runCommand(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	switch args[0] {
-	case "help", "--help", "-h":
-		writeHelp(stdout)
-		return 0
-	case "version", "--version":
-		return runVersion(args[1:], stdout, stderr)
-	case "update":
-		return runUpdate(ctx, args[1:], stdout, stderr)
-	case "capabilities":
-		return runCapabilities(args[1:], stdout, stderr)
-	case "doctor":
-		return runDoctor(ctx, mailService, args[1:], stdout, stderr)
-	case "accounts":
-		return runAccounts(ctx, mailService, args[1:], stdout, stderr)
-	case "mailboxes":
-		return runMailboxes(ctx, mailService, args[1:], stdout, stderr)
-	case "messages":
-		return runMessages(ctx, mailService, args[1:], stdout, stderr)
-	case "attachments":
-		return runAttachments(ctx, mailService, args[1:], stdout, stderr)
-	case "drafts":
-		return runDrafts(ctx, mailService, args[1:], stdout, stderr)
-	case "send":
-		return runSend(args[1:], stdout, stderr)
-	case "sync":
-		return runSync(ctx, mailService, args[1:], stdout, stderr)
-	default:
+	spec, ok := commandRegistry[args[0]]
+	if !ok {
 		writeFormat(stderr, "unknown command %q\nRun 'mailcli help' to list available commands.\n", args[0])
 		return 2
 	}
+	return spec.run(ctx, mailService, args[1:], stdout, stderr)
 }
 
 func normalizeGlobalJSON(args []string) ([]string, bool) {
 	requested := false
-	for _, argument := range args {
-		if argument == "--json" {
-			requested = true
-			break
+	moved := false
+	normalized := make([]string, 0, len(args)+1)
+	for index, argument := range args {
+		if argument != "--json" {
+			normalized = append(normalized, argument)
+			continue
 		}
+		requested = true
+		if index > 0 && strings.HasPrefix(args[index-1], "-") {
+			normalized = append(normalized, argument)
+			continue
+		}
+		moved = true
 	}
-	if len(args) == 0 || args[0] != "--json" {
-		return args, requested
+	if !requested {
+		return args, false
 	}
-
-	normalized := make([]string, 0, len(args)-1)
-	normalized = append(normalized, args[1:]...)
-	if len(normalized) > 0 {
+	if moved || len(normalized) == 0 || normalized[len(normalized)-1] != "--json" {
 		normalized = append(normalized, "--json")
+	}
+	if len(normalized) == 1 && normalized[0] == "--json" {
+		return nil, true
 	}
 	return normalized, true
 }

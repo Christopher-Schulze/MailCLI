@@ -15,7 +15,7 @@ const (
 	DefaultSearchMaxBytes    = int64(4 * 1024 * 1024 * 1024)
 	MaximumSearchMaxMessages = 100_000
 	MaximumSearchMaxBytes    = int64(8 * 1024 * 1024 * 1024)
-	searchCursorVersion      = 1
+	searchCursorVersion      = 2
 )
 
 type Query struct {
@@ -68,11 +68,12 @@ type PreparedQuery struct {
 }
 
 type SearchCursor struct {
-	Version     int    `json:"version"`
-	Fingerprint string `json:"fingerprint"`
-	StoreUUID   string `json:"store_uuid"`
-	ReceivedAt  int64  `json:"received_at"`
-	RowID       int64  `json:"row_id"`
+	Version        int    `json:"version"`
+	Fingerprint    string `json:"fingerprint"`
+	StoreUUID      string `json:"store_uuid"`
+	ReceivedAt     int64  `json:"received_at"`
+	ReceivedAtNull bool   `json:"received_at_null"`
+	RowID          int64  `json:"row_id"`
 }
 
 type Searcher interface {
@@ -142,10 +143,10 @@ func PrepareQuery(query Query) (PreparedQuery, error) {
 	return prepared, nil
 }
 
-func EncodeSearchCursor(fingerprint string, storeUUID string, receivedAt int64, rowID int64) (string, error) {
+func EncodeSearchCursor(fingerprint string, storeUUID string, receivedAt int64, receivedAtNull bool, rowID int64) (string, error) {
 	payload, err := json.Marshal(SearchCursor{
 		Version: searchCursorVersion, Fingerprint: fingerprint, StoreUUID: storeUUID,
-		ReceivedAt: receivedAt, RowID: rowID,
+		ReceivedAt: receivedAt, ReceivedAtNull: receivedAtNull, RowID: rowID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode search cursor: %w", err)
@@ -186,6 +187,7 @@ func parseQueryTime(value string) (int64, error) {
 
 func queryFingerprint(query Query) (string, error) {
 	query.Cursor = ""
+	query.Limit = 0
 	payload, err := json.Marshal(query)
 	if err != nil {
 		return "", fmt.Errorf("encode search query fingerprint: %w", err)

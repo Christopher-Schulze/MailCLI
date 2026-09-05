@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/mail"
 	"net/smtp"
@@ -64,7 +65,16 @@ func New(opts ...Option) *Client {
 // Submit sends msg from from to rcpts (deduplicated, order-stable) over
 // SMTP with STARTTLS and AUTH PLAIN.
 func (c *Client) Submit(ctx context.Context, cfg transport.SubmitConfig, from string, rcpts []string, msg []byte) (transport.SubmitEvidence, error) {
+	return c.SubmitReader(ctx, cfg, from, rcpts, messageID(msg), bytes.NewReader(msg), int64(len(msg)))
+}
+
+// SubmitReader streams a replayable RFC 5322 source through SMTP without
+// retaining the complete message in memory.
+func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, from string, rcpts []string, messageID string, msg io.Reader, size int64) (transport.SubmitEvidence, error) {
 	var evidence transport.SubmitEvidence
+	if size < 0 {
+		return evidence, &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "message size cannot be negative"}
+	}
 	if len(rcpts) == 0 {
 		return evidence, &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "no recipients"}
 	}
@@ -90,10 +100,13 @@ func (c *Client) Submit(ctx context.Context, cfg transport.SubmitConfig, from st
 		}
 	}()
 
+	if err := bumpDeadline(conn, ctx); err != nil {
+		return evidence, sessionError(ctx, "greeting", err)
+	}
 	client, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
 		closeConn()
-		return evidence, dialError(ctx, addr, err)
+		return evidence, sessionError(ctx, "greeting", err)
 	}
 	defer func() { _ = client.Close() }()
 
@@ -150,19 +163,19 @@ func (c *Client) Submit(ctx context.Context, cfg transport.SubmitConfig, from st
 		}
 	}
 
-	resp, err := sendData(conn, ctx, client, msg)
+	resp, err := sendData(conn, ctx, client, msg, size)
 	if err != nil {
 		return evidence, err
 	}
 
 	evidence.ServerResponse = resp
-	evidence.MessageID = messageID(msg)
+	evidence.MessageID = messageID
 	return evidence, nil
 }
 
 // sendData runs the DATA phase and returns the server's final response line.
 // It bypasses smtp.Client.Data because that discards the final reply text.
-func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg []byte) (string, error) {
+func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg io.Reader, size int64) (string, error) {
 	if err := bumpDeadline(conn, ctx); err != nil {
 		return "", sessionError(ctx, "DATA", err)
 	}
@@ -179,24 +192,28 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg []byt
 
 	// The payload (body plus attachments) gets a size-aware budget instead
 	// of the flat command budget: large sends legitimately outlast 30 s.
-	if err := bumpTransferDeadline(conn, ctx, int64(len(msg))); err != nil {
-		return "", sessionError(ctx, "DATA", err)
+	if err := bumpTransferDeadline(conn, ctx, size); err != nil {
+		return "", submissionUnknownError(ctx, "DATA", sessionError(ctx, "DATA", err))
 	}
 
 	w := client.Text.DotWriter()
-	if _, err := w.Write(msg); err != nil {
-		return "", transferError(ctx, err)
+	written, err := io.Copy(w, msg)
+	if err != nil {
+		return "", submissionUnknownError(ctx, "DATA", transferError(ctx, err))
+	}
+	if size >= 0 && written != size {
+		return "", submissionUnknownError(ctx, "DATA", fmt.Errorf("message source ended after %d of %d bytes", written, size))
 	}
 	if err := w.Close(); err != nil {
-		return "", transferError(ctx, err)
+		return "", submissionUnknownError(ctx, "DATA", transferError(ctx, err))
 	}
 
 	if err := bumpDeadline(conn, ctx); err != nil {
-		return "", sessionError(ctx, "final reply", err)
+		return "", submissionUnknownError(ctx, "final reply", sessionError(ctx, "final reply", err))
 	}
 	code, text, err := client.Text.ReadResponse(250)
 	if err != nil {
-		return "", sessionError(ctx, "final reply", err)
+		return "", submissionUnknownError(ctx, "final reply", sessionError(ctx, "final reply", err))
 	}
 	return fmt.Sprintf("%d %s", code, text), nil
 }
@@ -254,12 +271,27 @@ func transferError(ctx context.Context, err error) error {
 	return sessionError(ctx, "DATA", err)
 }
 
+func submissionUnknownError(ctx context.Context, stage string, err error) error {
+	if err == nil {
+		err = timeoutError(ctx, stage)
+	}
+	return &transport.SubmissionError{Stage: stage, Err: err}
+}
+
 // sessionError classifies an in-session failure: server rejections become
 // CodeSMTPRejected including the server text, a done context becomes
 // CodeSMTPTimeout, everything else is a wrapped connection error.
 func sessionError(ctx context.Context, stage string, err error) error {
 	if ctx.Err() != nil {
 		return timeoutError(ctx, stage)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return &transport.TransportError{
+			Code:    transport.CodeSMTPTimeout,
+			Message: "submission command timed out during " + stage,
+			Err:     err,
+		}
 	}
 	var tpErr *textproto.Error
 	if errors.As(err, &tpErr) {

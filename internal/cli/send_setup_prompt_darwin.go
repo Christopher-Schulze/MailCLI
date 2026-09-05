@@ -23,7 +23,7 @@ const (
 // settings; on a pipe it reads a plain line so scripts and tests can supply
 // the secret. The prompt goes to stderr so stdout stays machine-readable.
 func readPasswordLine(prompt string) (string, error) {
-	fd := int(os.Stdin.Fd())
+	fd := int(osStdin.Fd())
 	if !isTerminal(fd) {
 		fmt.Fprint(os.Stderr, prompt)
 		line, err := bufio.NewReader(sendSetupStdin).ReadString('\n')
@@ -52,7 +52,7 @@ func readPasswordLine(prompt string) (string, error) {
 		)
 	}()
 	fmt.Fprint(os.Stderr, prompt)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := bufio.NewReader(sendSetupStdin).ReadString('\n')
 	fmt.Fprintln(os.Stderr)
 	if err != nil && line == "" {
 		return "", err

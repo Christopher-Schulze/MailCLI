@@ -2,7 +2,10 @@ package mailstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -153,6 +156,73 @@ func BenchmarkSkipVsFullAttachment1MiB(b *testing.B) {
 		for b.Loop() {
 			if _, err := parseMIMEDocument(bytes.NewReader(fixture), false, false, false); err != nil {
 				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkAttachmentCatalogShortcut compares the catalog-proven attachment
+// path with the source-scan path it replaces. It uses a deterministic local
+// fixture so it runs on macOS without Mail.app, a configured account, or a
+// live mailbox corpus.
+func BenchmarkAttachmentCatalogShortcut(b *testing.B) {
+	fixture := skipBenchFixture(b, 1024*1024)
+	sourcePath := filepath.Join(b.TempDir(), "message.emlx")
+	sourceBytes := append([]byte("0000000000\n"), fixture...)
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		b.Fatalf("write benchmark source: %v", err)
+	}
+
+	const messageCount = 256
+	items := make([]messageRecord, messageCount)
+	for index := range items {
+		items[index] = messageRecord{RowID: int64(index + 1), AttachmentCount: 1}
+	}
+	hasAttachment := true
+	logicalCorpusBytes := int64(messageCount) * int64(len(fixture))
+
+	b.Run("catalog_proven", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(logicalCorpusBytes)
+		store := &Store{}
+		for b.Loop() {
+			reservedBytes := int64(0)
+			results, limited, err := store.scanSearchBatch(
+				context.Background(), items, nil, &hasAttachment, 1<<62, &reservedBytes,
+			)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if limited || len(results) != len(items) {
+				b.Fatalf("scanSearchBatch() limited=%v results=%d, want all catalog-proven candidates", limited, len(results))
+			}
+			for index, result := range results {
+				if !result.match || !result.catalogProven || result.bytes != 0 {
+					b.Fatalf("result[%d] = %#v, want catalog-proven match without source bytes", index, result)
+				}
+			}
+		}
+	})
+
+	b.Run("mime_scan_baseline", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(logicalCorpusBytes)
+		for b.Loop() {
+			for index, item := range items {
+				file, err := os.Open(sourcePath)
+				if err != nil {
+					b.Fatal(err)
+				}
+				result, scanErr := scanCandidate(
+					context.Background(), item, nil, &hasAttachment,
+					&emlxSource{file: file, length: int64(len(fixture)), path: sourcePath},
+				)
+				if scanErr != nil {
+					b.Fatalf("scanCandidate(%d): %v", index, scanErr)
+				}
+				if !result.match || result.catalogProven || result.bytes == 0 {
+					b.Fatalf("result[%d] = %#v, want MIME-scanned match", index, result)
+				}
 			}
 		}
 	})

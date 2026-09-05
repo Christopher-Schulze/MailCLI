@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode"
 
 	"mailcli/internal/mail"
 )
@@ -512,5 +513,10 @@ func formatRecipients(recipients []mail.Recipient) string {
 }
 
 func oneLine(value string) string {
-	return strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(value)
+	return strings.Map(func(char rune) rune {
+		if unicode.IsControl(char) || unicode.Is(unicode.Zl, char) || unicode.Is(unicode.Zp, char) {
+			return ' '
+		}
+		return char
+	}, value)
 }

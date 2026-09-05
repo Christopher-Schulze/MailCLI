@@ -35,6 +35,7 @@ type fakeServerConfig struct {
 	uidExpungeSupported bool
 	initialDeletedUIDs  []uint32
 	fetchPayload        []byte
+	fetchResponseUID    uint32
 	selectFailBox       string
 	dropAfterCommands   int
 	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
@@ -431,7 +432,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 				if len(payload) == 0 {
 					payload = []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody\r\n")
 				}
-				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", uid, len(payload)))
+				responseUID := s.config.fetchResponseUID
+				if responseUID == 0 {
+					responseUID = uint32(uid)
+				}
+				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", responseUID, len(payload)))
 				if _, err := bw.Write(payload); err != nil {
 					return
 				}

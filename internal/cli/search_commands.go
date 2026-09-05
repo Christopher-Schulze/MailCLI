@@ -53,7 +53,6 @@ func runMessagesQuery(
 	if err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
-	normalizeSearchCoverage(&page)
 	if *jsonOutput {
 		return writeSuccess(stdout, command, responseData{Page: searchResponsePage(&page)})
 	}
@@ -95,9 +94,10 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
 		}
 		writeFormat(
-			stdout, "Coverage: %s, complete=%t, scanned=%d/%d, bytes=%d\n",
+			stdout, "Coverage: %s, complete=%t, scanned=%d/%d, catalog_proven=%d, bytes=%d\n",
 			page.Coverage.Backend, page.Coverage.Complete,
-			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages, page.Coverage.ScannedBytes,
+			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
+			page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 		)
 		return
 	}
@@ -112,17 +112,11 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
 	writeFormat(
-		stdout, "coverage\t%s\tcorpus_complete=%t\tscanned=%d/%d\tbytes=%d\n",
+		stdout, "coverage\t%s\tcorpus_complete=%t\tscanned=%d/%d\tcatalog_proven=%d\tbytes=%d\n",
 		page.Coverage.Backend, page.Coverage.Complete,
-		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages, page.Coverage.ScannedBytes,
+		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
+		page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 	)
-}
-
-func normalizeSearchCoverage(page *mail.SearchPage) {
-	if page.Coverage.Backend == "emlx_stream" &&
-		page.Coverage.ScannedMessages+page.Coverage.CatalogProvenMessages < page.Coverage.CandidateMessages {
-		page.Coverage.Complete = false
-	}
 }
 
 func addOptionalBoolFlag(flags flagDefiner, name string, usage string, destination **bool) {

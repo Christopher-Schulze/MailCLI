@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
-	"sync"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -26,10 +27,12 @@ type imapTarget struct {
 	summary          mail.MessageSummary
 }
 
-var (
-	mailboxCacheMu  sync.Mutex
-	cachedMailboxes = make(map[string][]transport.MailboxInfo) // key: email
-)
+const mailboxCacheTTL = 5 * time.Minute
+
+type mailboxCacheEntry struct {
+	boxes     []transport.MailboxInfo
+	expiresAt time.Time
+}
 
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
 	return c.resolveImapTargetWithOptions(ctx, messageRef, false)
@@ -199,22 +202,52 @@ func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (str
 }
 
 func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperator, cfg transport.ImapConfig, email string) ([]transport.MailboxInfo, error) {
-	mailboxCacheMu.Lock()
-	cached, ok := cachedMailboxes[email]
-	mailboxCacheMu.Unlock()
-	if ok && len(cached) > 0 {
-		return cached, nil
+	key := mailboxCacheKey(cfg, email)
+	now := time.Now()
+	c.mailboxCacheMu.Lock()
+	if entry, ok := c.mailboxCache[key]; ok && now.Before(entry.expiresAt) {
+		boxes := cloneMailboxInfos(entry.boxes)
+		c.mailboxCacheMu.Unlock()
+		return boxes, nil
 	}
+	if c.mailboxCache != nil {
+		delete(c.mailboxCache, key)
+	}
+	c.mailboxCacheMu.Unlock()
 
 	boxes, err := op.ListMailboxes(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-
-	mailboxCacheMu.Lock()
-	cachedMailboxes[email] = boxes
-	mailboxCacheMu.Unlock()
+	c.mailboxCacheMu.Lock()
+	if c.mailboxCache == nil {
+		c.mailboxCache = make(map[string]mailboxCacheEntry)
+	}
+	c.mailboxCache[key] = mailboxCacheEntry{
+		boxes:     cloneMailboxInfos(boxes),
+		expiresAt: time.Now().Add(mailboxCacheTTL),
+	}
+	c.mailboxCacheMu.Unlock()
 	return boxes, nil
+}
+
+func mailboxCacheKey(cfg transport.ImapConfig, email string) string {
+	return fmt.Sprintf("%s:%d:%s:%s", cfg.Host, cfg.Port, cfg.Username, email)
+}
+
+func cloneMailboxInfos(boxes []transport.MailboxInfo) []transport.MailboxInfo {
+	clone := make([]transport.MailboxInfo, len(boxes))
+	for index, box := range boxes {
+		clone[index] = box
+		clone[index].Flags = append([]string(nil), box.Flags...)
+	}
+	return clone
+}
+
+func (c *Client) invalidateMailboxCache() {
+	c.mailboxCacheMu.Lock()
+	c.mailboxCache = nil
+	c.mailboxCacheMu.Unlock()
 }
 
 func mapPathToIMAP(boxes []transport.MailboxInfo, path []string) string {
@@ -535,7 +568,7 @@ func (c *Client) hydrateMessage(ctx context.Context, messageRef string, enforceR
 		}
 	}
 
-	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid, rawFetchBound(enforceRawCap))
+	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, rawFetchBound(enforceRawCap))
 	return raw, target.summary, err
 }
 
@@ -545,17 +578,48 @@ func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string, enf
 	return raw, err
 }
 
-// rawFetchBound returns the raw-source cap for capped fetches (parity with
-// the local store limit) and uncapped for content hydration, which has no
-// local size limit either.
-func rawFetchBound(enforceRawCap bool) int64 {
-	if !enforceRawCap {
-		return 0
-	}
+// rawFetchBound applies the same in-memory bound to both raw-source and
+// content hydration so an IMAP literal cannot bypass the local size limit.
+func rawFetchBound(_ bool) int64 {
 	return mail.MaximumRawSourceBytes
 }
 
 // SyncCheck inspects server-vs-local message counts across mailboxes without launching Mail.app.
+func syncIdentity(account mail.Account, credentials transport.CredentialStore) (string, string, int, string, error) {
+	if len(account.EmailAddresses) == 0 {
+		return "", "", 0, "", operationError("account_no_email", "account has no email addresses; cannot resolve provider endpoints")
+	}
+	if credentials == nil {
+		return "", "", 0, "", operationError("imap_credentials_missing", "no credential store configured; run 'mailcli send setup --from "+account.EmailAddresses[0]+"'")
+	}
+	candidates := append([]string(nil), account.EmailAddresses...)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return strings.ToLower(candidates[i]) < strings.ToLower(candidates[j])
+	})
+	var lastErr error
+	for _, candidate := range candidates {
+		_, _, imapHost, imapPort, err := transport.ProviderHosts(candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		password, err := credentials.Load(candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if password == "" {
+			lastErr = operationError("imap_credentials_missing", "no stored password; run 'mailcli send setup --from "+candidate+"'")
+			continue
+		}
+		return candidate, imapHost, imapPort, password, nil
+	}
+	if lastErr == nil {
+		lastErr = operationError("imap_credentials_missing", "no usable account identity is configured")
+	}
+	return "", "", 0, "", lastErr
+}
+
 func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncCheckResult, error) {
 	var result mail.SyncCheckResult
 	result.AccountRef = accountRef
@@ -615,42 +679,16 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			})
 			continue
 		}
-		email := acct.EmailAddresses[0]
-		_, _, imapHost, imapPort, err := transport.ProviderHosts(email)
+		email, imapHost, imapPort, password, err := syncIdentity(acct, credStore)
 		if err != nil {
-			result.Failures = append(result.Failures, mail.SyncCheckFailure{
-				Account: email,
-				Code:    failureCode(ctx, err),
-				Message: err.Error(),
-			})
-			continue
-		}
-		if credStore == nil {
-			result.Failures = append(result.Failures, mail.SyncCheckFailure{
-				Account: email,
-				Code:    "imap_credentials_missing",
-				Message: "no credential store configured; run 'mailcli send setup --from " + email + "'",
-			})
-			continue
-		}
-		password, err := credStore.Load(email)
-		if err != nil {
-			result.Failures = append(result.Failures, mail.SyncCheckFailure{
-				Account: email,
-				Code:    failureCode(ctx, err),
-				Message: err.Error(),
-			})
-			continue
-		}
-		if password == "" {
-			code := "imap_credentials_missing"
-			if ctx.Err() != nil {
-				code = "sync_check_timeout"
+			code := failureCode(ctx, err)
+			if code == "" {
+				code = "imap_credentials_missing"
 			}
 			result.Failures = append(result.Failures, mail.SyncCheckFailure{
-				Account: email,
+				Account: acct.Ref,
 				Code:    code,
-				Message: "no stored password; run 'mailcli send setup --from " + email + "'",
+				Message: err.Error(),
 			})
 			continue
 		}

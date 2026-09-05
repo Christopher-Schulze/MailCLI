@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"mailcli/internal/mail"
 )
 
 func TestMutationCommandsJSONTable(t *testing.T) {
@@ -59,6 +61,19 @@ func TestMutationMarkMoveCarryServerTruth(t *testing.T) {
 			!strings.Contains(stdout.String(), `"server_truth":{"command":"MOVE"`) {
 			t.Fatalf("output for %v lacks server truth: %q", args, stdout.String())
 		}
+	}
+}
+
+func TestMutationHumanOutputIncludesDuplicateEvidence(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(duplicateEvidenceGateway{}),
+		[]string{"messages", "mark", "--ref", "msg_ref", "--read", "true"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); got != "msg_ref\tread=false\tflagged=false\tjunk=false\tduplicate_matches=2\n" {
+		t.Fatalf("stdout = %q", got)
 	}
 }
 

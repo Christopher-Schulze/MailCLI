@@ -106,9 +106,10 @@ type DraftInput struct {
 }
 
 type DraftAttachment struct {
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
+	Path         string `json:"path"`
+	Size         int64  `json:"size"`
+	SHA256       string `json:"sha256"`
+	ModTimeNanos int64  `json:"mod_time_nanos,omitempty"`
 }
 
 type Draft struct {
@@ -217,10 +218,11 @@ type SendAttempt struct {
 // mailbox holding the message, and MirrorAppended false when the provider had
 // already filed the message itself.
 type TransportEvidence struct {
-	ServerResponse string `json:"server_response,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	MirrorMailbox  string `json:"mirror_mailbox,omitempty"`
-	MirrorAppended bool   `json:"mirror_appended,omitempty"`
+	ServerResponse  string `json:"server_response,omitempty"`
+	MessageID       string `json:"message_id,omitempty"`
+	SubmissionStage string `json:"submission_stage,omitempty"`
+	MirrorMailbox   string `json:"mirror_mailbox,omitempty"`
+	MirrorAppended  bool   `json:"mirror_appended,omitempty"`
 }
 
 type SendMaterialization struct {
@@ -409,5 +411,12 @@ type Gateway interface {
 	MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error)
 	TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error)
 	DeleteMessage(ctx context.Context, request DeleteMessageRequest) (DeleteResult, error)
+	Sync(ctx context.Context, accountRef string) error
+}
+
+type FallbackGateway interface {
+	Probe(ctx context.Context, live bool) DiagnosticReport
+	ListAccounts(ctx context.Context) ([]Account, error)
+	ListMessages(ctx context.Context, request ListMessagesRequest) (MessagePage, error)
 	Sync(ctx context.Context, accountRef string) error
 }
