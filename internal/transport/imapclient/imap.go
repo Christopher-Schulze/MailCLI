@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"mailcli/internal/transport"
 )
@@ -162,6 +163,11 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 			Message: "message size cannot be negative",
 		}
 	}
+	normalizedMessageID, err := normalizeMessageID(messageID)
+	if err != nil {
+		return empty, err
+	}
+	messageID = normalizedMessageID
 
 	if cfg.Host == "" {
 		return empty, &transport.TransportError{
@@ -368,10 +374,14 @@ func (c *Client) doSelect(ctx context.Context, sess *session, tag, mbox string) 
 }
 
 func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID string) (bool, error) {
+	normalizedMessageID, err := normalizeMessageID(messageID)
+	if err != nil {
+		return false, err
+	}
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
 	}
-	quotedMessageID, err := safeQuoteIMAP(messageID)
+	quotedMessageID, err := safeQuoteIMAP(normalizedMessageID)
 	if err != nil {
 		return false, err
 	}
@@ -1052,6 +1062,10 @@ func (c *Client) listMailboxes(ctx context.Context, ps *pooledSession) ([]transp
 // SearchUID resolves a Message-ID to its last IMAP UID in the specified
 // mailbox and returns the total number of matching UIDs.
 func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
+	normalizedMessageID, err := normalizeMessageID(messageID)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return 0, 0, 0, err
@@ -1063,7 +1077,7 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 		return 0, 0, 0, err
 	}
 
-	uids, err := c.doUIDSearch(ctx, ps.sess, ps.sess.nextTag(), messageID)
+	uids, err := c.doUIDSearch(ctx, ps.sess, ps.sess.nextTag(), normalizedMessageID)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -1104,15 +1118,73 @@ func (c *Client) ensureSelectedFresh(ctx context.Context, ps *pooledSession, mai
 }
 
 func (c *Client) doUIDSearch(ctx context.Context, sess *session, tag, messageID string) ([]uint32, error) {
-	searchID := messageID
-	if !strings.HasPrefix(searchID, "<") && !strings.HasSuffix(searchID, ">") {
-		searchID = "<" + searchID + ">"
+	searchID, err := normalizeMessageID(messageID)
+	if err != nil {
+		return nil, err
 	}
 	quotedMessageID, err := safeQuoteIMAP(searchID)
 	if err != nil {
 		return nil, err
 	}
 	return c.doUIDSearchCriteria(ctx, sess, tag, "HEADER Message-ID "+quotedMessageID)
+}
+
+func normalizeMessageID(messageID string) (string, error) {
+	if messageID == "" {
+		return "", invalidMessageID("Message-ID is empty")
+	}
+	if strings.TrimSpace(messageID) != messageID {
+		return "", invalidMessageID("Message-ID must not have surrounding whitespace")
+	}
+	hasOpening := strings.HasPrefix(messageID, "<")
+	hasClosing := strings.HasSuffix(messageID, ">")
+	if hasOpening != hasClosing {
+		return "", invalidMessageID("Message-ID must have both angle brackets or neither")
+	}
+
+	inner := messageID
+	if hasOpening {
+		if len(messageID) <= 2 {
+			return "", invalidMessageID("Message-ID is empty inside angle brackets")
+		}
+		inner = messageID[1 : len(messageID)-1]
+	}
+	quoted := false
+	escaped := false
+	for _, r := range inner {
+		if unicode.IsControl(r) {
+			return "", invalidMessageID("Message-ID contains a control character")
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			quoted = !quoted
+			continue
+		}
+		if r == '<' || r == '>' {
+			return "", invalidMessageID("Message-ID contains an embedded angle bracket")
+		}
+		if unicode.IsSpace(r) && !quoted {
+			return "", invalidMessageID("Message-ID contains unquoted whitespace")
+		}
+	}
+	if escaped || quoted {
+		return "", invalidMessageID("Message-ID has an unterminated escape or quote")
+	}
+	return "<" + inner + ">", nil
+}
+
+func invalidMessageID(message string) error {
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPInvalidValue,
+		Message: message,
+	}
 }
 
 func (c *Client) doUIDSearchDeleted(ctx context.Context, sess *session, tag string) ([]uint32, error) {

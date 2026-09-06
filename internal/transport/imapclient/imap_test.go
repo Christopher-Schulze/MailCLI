@@ -584,7 +584,7 @@ func TestSearchUID(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	uid, uidval, matchCount, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
+	uid, uidval, matchCount, err := client.SearchUID(context.Background(), cfg, "INBOX", "found@example.com")
 	if err != nil {
 		t.Fatalf("SearchUID: %v", err)
 	}
@@ -604,6 +604,63 @@ func TestSearchUID(t *testing.T) {
 	}
 	if code := transport.ErrorCode(err); code != transport.CodeIMAPMessageNotFound {
 		t.Fatalf("expected code %s, got %s", transport.CodeIMAPMessageNotFound, code)
+	}
+}
+
+func TestNormalizeMessageID(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "unbracketed", input: "abc@example.com", want: "<abc@example.com>"},
+		{name: "bracketed", input: "<abc@example.com>", want: "<abc@example.com>"},
+		{name: "unicode", input: "über@例え.テスト", want: "<über@例え.テスト>"},
+		{name: "quoted and escaped", input: `abc"quoted"\id@example.com`, want: `<abc"quoted"\id@example.com>`},
+		{name: "opening delimiter only", input: "<abc@example.com", wantErr: true},
+		{name: "closing delimiter only", input: "abc@example.com>", wantErr: true},
+		{name: "empty", input: "", wantErr: true},
+		{name: "empty brackets", input: "<>", wantErr: true},
+		{name: "leading whitespace", input: " <abc@example.com>", wantErr: true},
+		{name: "trailing whitespace", input: "<abc@example.com> ", wantErr: true},
+		{name: "unquoted whitespace", input: "abc def@example.com", wantErr: true},
+		{name: "embedded delimiters", input: "<abc><example.com>", wantErr: true},
+		{name: "control byte", input: "abc@example.com\r\nX", wantErr: true},
+		{name: "unterminated quote", input: `abc"example.com`, wantErr: true},
+		{name: "unterminated escape", input: `abc@example.com\`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := normalizeMessageID(test.input)
+			if test.wantErr {
+				if transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
+					t.Fatalf("normalizeMessageID() error = %v, want %s", err, transport.CodeIMAPInvalidValue)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeMessageID() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("normalizeMessageID() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSearchUIDRejectsMalformedMessageIDBeforeConnection(t *testing.T) {
+	client := New()
+	for _, messageID := range []string{"<abc@example.com", "abc@example.com>", "", "abc\r\nX"} {
+		t.Run(messageID, func(t *testing.T) {
+			_, _, _, err := client.SearchUID(
+				context.Background(), transport.ImapConfig{}, "INBOX", messageID,
+			)
+			if code := transport.ErrorCode(err); code != transport.CodeIMAPInvalidValue {
+				t.Fatalf("SearchUID(%q) code = %s, want %s: %v",
+					messageID, code, transport.CodeIMAPInvalidValue, err)
+			}
+		})
 	}
 }
 
