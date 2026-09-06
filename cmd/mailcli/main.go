@@ -26,6 +26,12 @@ func main() {
 }
 
 func run() int {
+	return runWithFallbackFactory(func() mail.FallbackGateway {
+		return mailapp.NewClient()
+	})
+}
+
+func runWithFallbackFactory(newFallback func() mail.FallbackGateway) int {
 	args := os.Args[1:]
 	ctx := context.Background()
 	stopSignals := func() {}
@@ -41,9 +47,12 @@ func run() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	bridge := mailapp.NewClient()
+	var fallback mail.FallbackGateway
+	if newFallback != nil {
+		fallback = newFallback()
+	}
 	storeCtx, cancelStoreOpen := context.WithTimeout(ctx, 15*time.Second)
-	client := mailstore.NewClient(storeCtx, bridge, config, sendTransport())
+	client := mailstore.NewClient(storeCtx, fallback, config, sendTransport())
 	cancelStoreOpen()
 	mailService := mail.NewServiceWithTransport(client, "", sendTransport())
 	code := cli.Run(ctx, mailService, args, os.Stdout, os.Stderr)

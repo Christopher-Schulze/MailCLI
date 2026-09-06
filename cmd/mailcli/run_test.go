@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -38,13 +39,21 @@ func TestRunUnknownCommandWithoutMailStore(t *testing.T) {
 }
 
 func TestRunStoreCommandReportsMissingStore(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	_, stderr, code := runWithArgsAndStderr(t, []string{"mailcli", "accounts", "list"})
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Mail"), 0o700); err != nil {
+		t.Fatalf("create isolated Mail root: %v", err)
+	}
+	_, stderr, code := runWithArgsAndStderrUsing(
+		t,
+		[]string{"mailcli", "accounts", "list"},
+		func() int { return runWithFallbackFactory(nil) },
+	)
 	if code == 0 {
 		t.Fatal("run() = 0, want missing-store failure")
 	}
-	if !strings.Contains(stderr, "Mail.app") {
-		t.Fatalf("stderr = %q, want Mail.app diagnostic", stderr)
+	if !strings.Contains(stderr, "Mail Envelope Index") {
+		t.Fatalf("stderr = %q, want local Mail store diagnostic", stderr)
 	}
 }
 
@@ -55,6 +64,15 @@ func runWithArgs(t *testing.T, args []string) (string, int) {
 }
 
 func runWithArgsAndStderr(t *testing.T, args []string) (string, string, int) {
+	t.Helper()
+	return runWithArgsAndStderrUsing(t, args, run)
+}
+
+func runWithArgsAndStderrUsing(
+	t *testing.T,
+	args []string,
+	invoke func() int,
+) (string, string, int) {
 	t.Helper()
 	oldArgs, oldStdout, oldStderr := os.Args, os.Stdout, os.Stderr
 	t.Cleanup(func() {
@@ -73,7 +91,7 @@ func runWithArgsAndStderr(t *testing.T, args []string) (string, string, int) {
 	}
 	os.Stdout = stdoutWriter
 	os.Stderr = stderrWriter
-	code := run()
+	code := invoke()
 	if err := stdoutWriter.Close(); err != nil {
 		t.Fatalf("close stdout: %v", err)
 	}
