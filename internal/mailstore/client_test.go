@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,16 +111,17 @@ func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessag
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
 type stubImapOperator struct {
-	boxes         []transport.MailboxInfo
-	uid           uint32
-	uidvalidity   uint32
-	searchMatches int
-	raw           []byte
-	lastCommand   string
-	lastUsername  string
-	lastMailbox   string
-	status        transport.MailboxStatus
-	err           error
+	boxes                  []transport.MailboxInfo
+	uid                    uint32
+	uidvalidity            uint32
+	searchMatches          int
+	searchMatchesByMailbox map[string][]int
+	raw                    []byte
+	lastCommand            string
+	lastUsername           string
+	lastMailbox            string
+	status                 transport.MailboxStatus
+	err                    error
 	// mutationErrs scripts per-call mutation results: each mutation op
 	// consumes the head (nil head = success). mutationCalls counts every
 	// mutation invocation, so retry tests can assert exactly-once retry.
@@ -187,7 +189,19 @@ func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConf
 		val = 12345
 	}
 	matches := s.searchMatches
+	if sequence, ok := s.searchMatchesByMailbox[mailbox]; ok && len(sequence) > 0 {
+		matches = sequence[0]
+		if len(sequence) > 1 {
+			s.searchMatchesByMailbox[mailbox] = sequence[1:]
+		}
+	}
 	if matches == 0 {
+		if _, ok := s.searchMatchesByMailbox[mailbox]; ok {
+			return 0, val, 0, &transport.TransportError{
+				Code:    transport.CodeIMAPMessageNotFound,
+				Message: "message not found in mailbox " + mailbox,
+			}
+		}
 		matches = 1
 	}
 	return uid, val, matches, nil
@@ -765,6 +779,70 @@ func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 	}
 	if fakeImap.mutationCalls != 2 {
 		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
+	}
+}
+
+func TestTransferMoveDoesNotReplayAfterUnknownOutcome(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes:                  []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}},
+		mutationErrs:           []error{errors.New("move response lost")},
+		searchMatchesByMailbox: map[string][]int{"Archive": []int{0, 1}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	request := mail.TransferMessageRequest{
+		Ref: page.Messages[0].Ref, DestinationMailbox: destinationRef,
+	}
+
+	_, err = client.TransferMessage(context.Background(), request)
+	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
+		t.Fatalf("first TransferMessage() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
+	}
+	if fakeImap.mutationCalls != 1 {
+		t.Fatalf("first mutation calls = %d, want 1", fakeImap.mutationCalls)
+	}
+
+	_, err = client.TransferMessage(context.Background(), request)
+	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
+		t.Fatalf("replayed TransferMessage() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
+	}
+	if fakeImap.mutationCalls != 1 {
+		t.Fatalf("replayed mutation calls = %d, want 1", fakeImap.mutationCalls)
+	}
+}
+
+func TestVerifyMoveDestinationFailsClosedAfterMutationError(t *testing.T) {
+	fakeImap := &stubImapOperator{
+		searchMatchesByMailbox: map[string][]int{"Archive": []int{0}},
+	}
+	err := verifyMoveDestination(
+		context.Background(),
+		fakeImap,
+		transport.ImapConfig{},
+		"Archive",
+		"<message@example.com>",
+		errors.New("move response lost"),
+	)
+	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
+		t.Fatalf("verifyMoveDestination() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
 	}
 }
 
@@ -1527,7 +1605,8 @@ func TestClientObservesMoveInDestinationAndSource(t *testing.T) {
 			{Name: "INBOX"},
 			{Name: "Sent", Flags: []string{"\\Sent"}},
 		},
-		uid: 102,
+		uid:                    102,
+		searchMatchesByMailbox: map[string][]int{"Sent": []int{0}},
 	}
 	client := &Client{
 		store: store,
