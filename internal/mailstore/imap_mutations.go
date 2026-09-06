@@ -65,11 +65,23 @@ func (c *Client) resolveImapTargetWithOptions(
 	target.accountID = resolved.Reference.AccountID
 	target.messageID = resolved.Reference.ExpectedMessageID
 	if target.messageID == "" {
-		if _, source, err := c.store.openMessageSource(ctx, messageRef); err == nil {
-			if id, err := messageIDFromSource(source.Reader()); err == nil {
-				target.messageID = id
-			}
-			_ = source.Close()
+		_, source, err := c.store.openMessageSource(ctx, messageRef)
+		if err != nil {
+			return target, fmt.Errorf("resolve IMAP message identity: %w", err)
+		}
+		target.messageID, err = messageIDFromSource(source.Reader())
+		closeErr := source.Close()
+		if err != nil {
+			return target, fmt.Errorf("read IMAP message identity: %w", err)
+		}
+		if closeErr != nil {
+			return target, fmt.Errorf("close IMAP message source: %w", closeErr)
+		}
+	}
+	if target.messageID == "" {
+		return target, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageUIDUnknown,
+			Message: fmt.Sprintf("cannot resolve IMAP UID for %s: message has no Message-ID", messageRef),
 		}
 	}
 	if resolved.PhysicalLocation.Scheme != "imap" || resolved.Reference.AccountID == "local" {
@@ -156,6 +168,9 @@ func (c *Client) resolveImapTargetWithOptions(
 		target.uid = uid
 		target.uidvalidity = uidval
 		target.duplicateMatches = matchCount
+		if err := validateResolvedUID(uid, target.messageID, imapBox); err != nil {
+			return target, err
+		}
 		if rejectDuplicate && matchCount > 1 {
 			return target, &transport.TransportError{
 				Code: transport.CodeIMAPAmbiguousMessageID,
@@ -517,6 +532,19 @@ func duplicateMatchEvidence(matchCount int) int {
 		return 0
 	}
 	return matchCount
+}
+
+func validateResolvedUID(uid uint32, messageID, mailbox string) error {
+	if uid != 0 {
+		return nil
+	}
+	return &transport.TransportError{
+		Code: transport.CodeIMAPMessageUIDUnknown,
+		Message: fmt.Sprintf(
+			"IMAP Message-ID search for %s in %s returned UID zero; refusing the operation",
+			messageID, mailbox,
+		),
+	}
 }
 
 func verifyMoveDestination(

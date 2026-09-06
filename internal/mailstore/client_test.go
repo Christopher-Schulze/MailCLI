@@ -3,6 +3,7 @@ package mailstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,7 @@ type stubImapOperator struct {
 	// mutation invocation, so retry tests can assert exactly-once retry.
 	mutationErrs  []error
 	mutationCalls int
+	searchCalls   int
 	// statusErr scripts per-mailbox CheckStatus failures for sync-check
 	// tests; absent mailboxes report s.status.
 	statusErr map[string]error
@@ -177,6 +179,7 @@ func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.Imap
 }
 
 func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
+	s.searchCalls++
 	if s.err != nil {
 		return 0, 0, 0, s.err
 	}
@@ -454,6 +457,7 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
 	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
 	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", []byte(
 		"From: Alice <alice@example.com>\r\nTo: Christopher <christopher@example.com>\r\n"+
 			"Subject: Quarterly Report\r\nContent-Type: text/plain; charset=x-mailcli-unknown\r\n\r\npartial",
@@ -510,6 +514,7 @@ func TestClientHydrationFallbackKeepsRecordSummary(t *testing.T) {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
 	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
 	// Remove the .emlx source that newSearchFixture created so GetMessage
 	// fails locally with message_source_missing and falls back to IMAP.
 	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
@@ -627,6 +632,55 @@ func TestMarkMessageReportsDuplicateMessageIDMatches(t *testing.T) {
 	}
 	if fakeImap.lastCommand != "" {
 		t.Fatalf("mutation command = %q, want no command for ambiguous target", fakeImap.lastCommand)
+	}
+}
+
+func TestMarkMessageRejectsMissingMessageIDBeforeIMAP(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL WHERE ROWID = 102`)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil || len(page.Messages) != 3 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Status Update")
+	_, source, err := store.openMessageSource(context.Background(), messageRef)
+	if err != nil {
+		t.Fatalf("openMessageSource() error = %v", err)
+	}
+	sourcePath := source.path
+	if err := source.Close(); err != nil {
+		t.Fatalf("closeMessageSource() error = %v", err)
+	}
+	raw := []byte("From: Alice <alice@example.com>\r\nSubject: no identity\r\n\r\nbody\r\n")
+	framed := append([]byte(fmt.Sprintf("%-10d\n", len(raw))), raw...)
+	framed = append(framed, validPlistTrailer()...)
+	if err := os.WriteFile(sourcePath, framed, 0o600); err != nil {
+		t.Fatalf("replace message source: %v", err)
+	}
+
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	read := true
+	_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{
+		Ref: messageRef, Read: &read, AllowDraftMutation: true,
+	})
+	if transport.ErrorCode(err) != transport.CodeIMAPMessageUIDUnknown ||
+		!strings.Contains(err.Error(), "message has no Message-ID") {
+		t.Fatalf("MarkMessage() error = %v, want unresolved Message-ID", err)
+	}
+	if fakeImap.searchCalls != 0 {
+		t.Fatalf("IMAP SearchUID calls = %d, want 0", fakeImap.searchCalls)
 	}
 }
 
@@ -1054,6 +1108,7 @@ func TestGetRawSourcePropagatesOversizedFetch(t *testing.T) {
 		t.Fatal(err)
 	}
 	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
 	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
 	if err != nil {
 		t.Fatalf("parseMailboxURL() error = %v", err)
@@ -1102,6 +1157,7 @@ func TestGetMessageHydrationFetchBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
 	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
 	if err != nil {
 		t.Fatalf("parseMailboxURL() error = %v", err)
@@ -1349,6 +1405,7 @@ func TestSaveAttachmentHydrationHonorsCapAndFailsTyped(t *testing.T) {
 				t.Fatal(err)
 			}
 			messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+			messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
 			location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
 			if err != nil {
 				t.Fatalf("parseMailboxURL() error = %v", err)
@@ -1673,6 +1730,7 @@ func TestDeleteMessageRejectsTrashTarget(t *testing.T) {
 			if err != nil || len(page.Messages) != 1 {
 				t.Fatalf("ListMessages() = %+v, error = %v", page, err)
 			}
+			messageRef := messageRefWithExpectedID(t, page.Messages[0].Ref, "<102@example.com>")
 			fakeImap := &stubImapOperator{boxes: tt.boxes, uid: 102}
 			client := &Client{
 				store: store,
@@ -1681,7 +1739,7 @@ func TestDeleteMessageRejectsTrashTarget(t *testing.T) {
 				},
 			}
 			_, err = client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{
-				Ref: page.Messages[0].Ref, AllowDraftMutation: true,
+				Ref: messageRef, AllowDraftMutation: true,
 			})
 			if transport.ErrorCode(err) != transport.CodeMessageAlreadyTrashed {
 				t.Fatalf("DeleteMessage() error = %v, want %s", err, transport.CodeMessageAlreadyTrashed)
@@ -1847,6 +1905,20 @@ func messageRefWithSubject(t *testing.T, messages []mail.MessageSummary, subject
 	}
 	t.Fatalf("message subject %q not found", subject)
 	return ""
+}
+
+func messageRefWithExpectedID(t *testing.T, value, messageID string) string {
+	t.Helper()
+	ref, err := mailref.DecodeMessage(value)
+	if err != nil {
+		t.Fatalf("DecodeMessage() error = %v", err)
+	}
+	ref.ExpectedMessageID = messageID
+	encoded, err := mailref.EncodeMessage(ref)
+	if err != nil {
+		t.Fatalf("EncodeMessage() error = %v", err)
+	}
+	return encoded
 }
 
 func TestSyncIdentityUsesCredentialBackedAlias(t *testing.T) {

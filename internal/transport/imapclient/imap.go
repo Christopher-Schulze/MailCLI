@@ -1164,6 +1164,9 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 // SetFlags adds and removes IMAP flags on a message.
 func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
+	if err := validateMessageUID(uid); err != nil {
+		return ev, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return ev, err
@@ -1232,6 +1235,16 @@ func checkUIDValidity(expected, observed uint32) error {
 	return nil
 }
 
+func validateMessageUID(uid uint32) error {
+	if uid != 0 {
+		return nil
+	}
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPMessageUIDUnknown,
+		Message: "message UID is unresolved; refusing the IMAP operation",
+	}
+}
+
 func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (string, error) {
 	status, text, err := c.doCommandResponse(ctx, sess, cmd)
 	if err != nil {
@@ -1266,6 +1279,9 @@ func (c *Client) doCommandResponse(ctx context.Context, sess *session, cmd strin
 
 func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
+	if err := validateMessageUID(uid); err != nil {
+		return ev, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return ev, err
@@ -1302,6 +1318,9 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 // MoveMessage moves a message by UID to dstMailbox using native UID MOVE with COPY+EXPUNGE fallback.
 func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return transport.MutationEvidence{}, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
@@ -1312,6 +1331,9 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 
 func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
 	var ev transport.MutationEvidence
+	if err := validateMessageUID(uid); err != nil {
+		return ev, err
+	}
 	info, err := c.ensureSelectedFresh(ctx, ps, srcMailbox)
 	if err != nil {
 		return ev, err
@@ -1416,6 +1438,9 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 
 // DeleteMessage moves a message by UID to the Trash mailbox discovered via special-use flags.
 func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return transport.MutationEvidence{}, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
@@ -1452,6 +1477,9 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
 // maxBytes bounds the announced literal.
 func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return nil, err
+	}
 	ps, release, err := c.acquire(ctx, cfg)
 	if err != nil {
 		return nil, err

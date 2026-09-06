@@ -73,6 +73,7 @@ const (
 	CodeIMAPMessageUIDMismatch  = "imap_message_uid_mismatch"
 	CodeIMAPAmbiguousMessageID  = "imap_ambiguous_message_id"
 	CodeIMAPMoveOutcomeUnknown  = "imap_move_outcome_unknown"
+	CodeIMAPMessageUIDUnknown   = "imap_message_uid_unknown"
 	CodeIMAPUIDValidityUnknown  = "mailbox_uidvalidity_unknown"
 	CodeIMAPRawSourceTooLarge   = "raw_source_too_large"
 	CodeLocalOnlyMailbox        = "local_only_mailbox"

@@ -157,6 +157,58 @@ func TestAppendToSentReaderRejectsNegativeSize(t *testing.T) {
 	}
 }
 
+func TestMessageOperationsRejectZeroUIDBeforeConnection(t *testing.T) {
+	client := New()
+	cfg := transport.ImapConfig{}
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "flags",
+			call: func() error {
+				_, err := client.SetFlags(context.Background(), cfg, "INBOX", 0, 12345, []string{"\\Seen"}, nil)
+				return err
+			},
+		},
+		{
+			name: "copy",
+			call: func() error {
+				_, err := client.CopyMessage(context.Background(), cfg, "INBOX", 0, 12345, "Archive")
+				return err
+			},
+		},
+		{
+			name: "move",
+			call: func() error {
+				_, err := client.MoveMessage(context.Background(), cfg, "INBOX", 0, 12345, "Archive")
+				return err
+			},
+		},
+		{
+			name: "delete",
+			call: func() error {
+				_, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 0, 12345)
+				return err
+			},
+		},
+		{
+			name: "fetch",
+			call: func() error {
+				_, err := client.FetchMessage(context.Background(), cfg, "INBOX", 0, 12345, 1024)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); transport.ErrorCode(err) != transport.CodeIMAPMessageUIDUnknown {
+				t.Fatalf("zero-UID operation error = %v, want %s", err, transport.CodeIMAPMessageUIDUnknown)
+			}
+		})
+	}
+}
+
 func TestAppendToSentContextCancel(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:     true,
