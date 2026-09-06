@@ -71,6 +71,7 @@ const (
 	CodeIMAPResponseMalformed   = "imap_response_malformed"
 	CodeIMAPInvalidValue        = "invalid_imap_value"
 	CodeIMAPMessageUIDMismatch  = "imap_message_uid_mismatch"
+	CodeIMAPAmbiguousMessageID  = "imap_ambiguous_message_id"
 	CodeIMAPUIDValidityUnknown  = "mailbox_uidvalidity_unknown"
 	CodeIMAPRawSourceTooLarge   = "raw_source_too_large"
 	CodeLocalOnlyMailbox        = "local_only_mailbox"

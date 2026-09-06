@@ -605,11 +605,14 @@ func TestMarkMessageReportsDuplicateMessageIDMatches(t *testing.T) {
 	result, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{
 		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
 	})
-	if err != nil {
-		t.Fatalf("MarkMessage() error = %v", err)
+	if transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID {
+		t.Fatalf("MarkMessage() error = %v, want %s", err, transport.CodeIMAPAmbiguousMessageID)
 	}
-	if result.ServerTruth == nil || result.ServerTruth.DuplicateMatches != 2 || result.ServerTruth.UID != 101 {
-		t.Fatalf("duplicate server truth = %+v, want matches 2 and UID 101", result.ServerTruth)
+	if result != (mail.MessageSummary{}) {
+		t.Fatalf("MarkMessage() result = %+v, want empty result", result)
+	}
+	if fakeImap.lastCommand != "" {
+		t.Fatalf("mutation command = %q, want no command for ambiguous target", fakeImap.lastCommand)
 	}
 }
 

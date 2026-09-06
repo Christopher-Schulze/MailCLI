@@ -35,17 +35,22 @@ type mailboxCacheEntry struct {
 }
 
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false, false)
+}
+
+func (c *Client) resolveImapTargetForMutation(ctx context.Context, messageRef string) (imapTarget, error) {
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true)
 }
 
 func (c *Client) resolveImapTargetForDelete(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, true, true)
 }
 
 func (c *Client) resolveImapTargetWithOptions(
 	ctx context.Context,
 	messageRef string,
 	rejectTrash bool,
+	rejectDuplicate bool,
 ) (imapTarget, error) {
 	var target imapTarget
 	if c.store == nil {
@@ -151,6 +156,15 @@ func (c *Client) resolveImapTargetWithOptions(
 		target.uid = uid
 		target.uidvalidity = uidval
 		target.duplicateMatches = matchCount
+		if rejectDuplicate && matchCount > 1 {
+			return target, &transport.TransportError{
+				Code: transport.CodeIMAPAmbiguousMessageID,
+				Message: fmt.Sprintf(
+					"message ID %s matched %d messages in mailbox %s; refusing mutation because the target is ambiguous; resolve the duplicate messages and rerun the command",
+					target.messageID, matchCount, imapBox,
+				),
+			}
+		}
 	}
 
 	// Build base summary
@@ -324,7 +338,7 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 		return mail.MessageSummary{}, err
 	}
 
-	target, err := c.resolveImapTarget(ctx, request.Ref)
+	target, err := c.resolveImapTargetForMutation(ctx, request.Ref)
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
@@ -364,7 +378,7 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 
 	ev, err := imapOp.SetFlags(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, addFlags, removeFlags)
 	if isUIDValidityChangedError(err) {
-		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		retried, retryErr := c.resolveImapTargetForMutation(ctx, request.Ref)
 		if retryErr != nil {
 			return mail.MessageSummary{}, retryErr
 		}
@@ -410,7 +424,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		}
 	}
 
-	target, err := c.resolveImapTarget(ctx, request.Ref)
+	target, err := c.resolveImapTargetForMutation(ctx, request.Ref)
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
@@ -447,7 +461,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
 	}
 	if isUIDValidityChangedError(err) {
-		retried, retryErr := c.resolveImapTarget(ctx, request.Ref)
+		retried, retryErr := c.resolveImapTargetForMutation(ctx, request.Ref)
 		if retryErr != nil {
 			return mail.MessageSummary{}, retryErr
 		}
