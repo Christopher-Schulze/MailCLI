@@ -424,7 +424,6 @@ func (s *Store) scanSearchRecordsChunked(
 	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: true}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
-	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
 	var reservedBytes int64
 	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
 	loaded := 0
@@ -446,9 +445,10 @@ chunkLoop:
 		}
 		chunkStart := loaded
 		loaded += len(items)
-		for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
+		for start := 0; start < len(items) && len(results) < prepared.Query.Limit; {
 			matchesBefore := len(results)
-			end := min(start+batchSize, len(items))
+			remaining := prepared.Query.Limit - len(results)
+			end := min(start+min(batchSize, remaining), len(items))
 			scans, budgetLimited, err := s.scanSearchBatch(
 				ctx, items[start:end], terms, prepared.Query.HasAttachment,
 				prepared.Query.MaxBytes, &reservedBytes,
@@ -477,17 +477,12 @@ chunkLoop:
 				}
 				summary.AttachmentCount = scan.attachments
 				results = append(results, mail.SearchMessage{Summary: summary, Snippet: scan.snippet})
-				resultItems = append(resultItems, items[start+index])
-				if len(results) > prepared.Query.Limit {
-					break
-				}
 			}
 			start = end
-			remaining := prepared.Query.Limit + 1 - len(results)
 			if len(results) == matchesBefore {
 				batchSize = min(searchBatchSize, batchSize*2)
 			} else {
-				batchSize = min(searchBatchSize, max(searchWorkerCount, remaining))
+				batchSize = min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit-len(results)))
 			}
 			if budgetLimited {
 				break chunkLoop
@@ -496,20 +491,13 @@ chunkLoop:
 	}
 	limitedByCount := total > maximum
 	coverage.Complete = coverage.Complete && !limitedByCount
-	hasMore := len(results) > prepared.Query.Limit
-	if hasMore {
-		results = results[:prepared.Query.Limit]
-		resultItems = resultItems[:prepared.Query.Limit]
-	}
 	if coverage.ScannedMessages+coverage.CatalogProvenMessages != coverage.CandidateMessages {
 		coverage.Complete = false
 	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
 	var cursorItem *messageRecord
 	cursorInclusive := false
-	if hasMore && len(resultItems) > 0 {
-		cursorItem = &resultItems[len(resultItems)-1]
-	} else if total > progressCount {
+	if total > progressCount {
 		cursorItem = lastScanned
 		if cursorItem == nil {
 			cursorItem = budgetCandidate

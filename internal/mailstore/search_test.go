@@ -61,6 +61,13 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 		bodyPage.NextCursor == "" || bodyPage.Coverage.Complete {
 		t.Fatalf("body search page = %#v", bodyPage)
 	}
+	firstCursor, err := mail.DecodeSearchCursor(bodyPage.NextCursor, bodyQuery.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor(first) error = %v", err)
+	}
+	if firstCursor.RowID != 101 {
+		t.Fatalf("first body cursor row = %d, want last examined row 101", firstCursor.RowID)
+	}
 
 	nextQuery, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 1, Cursor: bodyPage.NextCursor,
@@ -74,6 +81,13 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 	}
 	if len(nextPage.Messages) != 1 || nextPage.Messages[0].Summary.Subject != "Status Update" {
 		t.Fatalf("next body search page = %#v", nextPage)
+	}
+	nextCursor, err := mail.DecodeSearchCursor(nextPage.NextCursor, nextQuery.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor(next) error = %v", err)
+	}
+	if nextCursor.RowID != 102 {
+		t.Fatalf("next body cursor row = %d, want last examined row 102", nextCursor.RowID)
 	}
 }
 
