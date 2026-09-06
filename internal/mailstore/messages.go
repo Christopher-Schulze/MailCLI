@@ -247,13 +247,7 @@ func mapMessageSummary(
 	mailboxPath []string,
 	storeUUID string,
 ) (mail.MessageSummary, error) {
-	messageRef, err := mailref.EncodeMessage(mailref.Message{
-		AccountID: accountID, MailboxPath: mailboxPath, LibraryID: strconv.FormatInt(item.RowID, 10),
-		ExpectedSubject: item.Subject, ExpectedStoreUUID: storeUUID,
-		ExpectedStoreMailboxID: item.StoreMailboxID,
-		ExpectedStoreMessageID: item.StoreMessageID,
-		ExpectedStoreGlobalID:  item.StoreGlobalID,
-	})
+	messageRef, err := encodeMessageReference(item, accountID, mailboxPath, storeUUID)
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
@@ -264,6 +258,21 @@ func mapMessageSummary(
 		Read: item.Read, Flagged: item.Flagged, Junk: item.Junk, Deleted: item.Deleted,
 		Size: item.Size, AttachmentCount: item.AttachmentCount,
 	}, nil
+}
+
+func encodeMessageReference(
+	item messageRecord,
+	accountID string,
+	mailboxPath []string,
+	storeUUID string,
+) (string, error) {
+	return mailref.EncodeMessage(mailref.Message{
+		AccountID: accountID, MailboxPath: mailboxPath, LibraryID: strconv.FormatInt(item.RowID, 10),
+		ExpectedSubject: item.Subject, ExpectedStoreUUID: storeUUID,
+		ExpectedStoreMailboxID: item.StoreMailboxID,
+		ExpectedStoreMessageID: item.StoreMessageID,
+		ExpectedStoreGlobalID:  item.StoreGlobalID,
+	})
 }
 
 func formatSender(name string, address string) string {

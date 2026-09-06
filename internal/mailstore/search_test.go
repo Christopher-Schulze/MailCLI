@@ -77,6 +77,57 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 	}
 }
 
+func TestOpenSearchCandidateRejectsStaleStoreIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		update string
+	}{
+		{
+			name:   "message identity replaced",
+			update: `UPDATE messages SET message_id = 9001 WHERE ROWID = 101`,
+		},
+		{
+			name:   "mailbox moved",
+			update: `UPDATE messages SET mailbox = 1 WHERE ROWID = 101`,
+		},
+		{
+			name:   "subject replaced",
+			update: `UPDATE subjects SET subject = 'Replaced' WHERE ROWID = 1`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+				MailboxRef: inboxRef, Limit: 3,
+			})
+			if err != nil {
+				t.Fatalf("ListMessages() error = %v", err)
+			}
+			messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+			resolved, err := store.resolveMessage(context.Background(), messageRef)
+			if err != nil {
+				t.Fatalf("resolveMessage() error = %v", err)
+			}
+			updateFixtureMessage(t, store, test.update)
+			source, unavailable, err := store.openSearchCandidate(context.Background(), resolved.Record)
+			if source != nil {
+				if closeErr := source.Close(); closeErr != nil {
+					t.Fatalf("close unexpected source: %v", closeErr)
+				}
+				t.Fatal("openSearchCandidate() returned source for stale identity")
+			}
+			if unavailable.missing {
+				t.Fatal("openSearchCandidate() marked stale identity as missing source")
+			}
+			if errorCodeForTest(err) != "stale_reference" {
+				t.Fatalf("openSearchCandidate() error = %v, want stale_reference", err)
+			}
+		})
+	}
+}
+
 func TestBodySearchReportsByteLimit(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)

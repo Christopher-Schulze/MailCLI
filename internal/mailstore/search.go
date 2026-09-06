@@ -650,7 +650,7 @@ func (s *Store) dispatchSearchJobs(
 				continue
 			}
 		}
-		source, unavailable, err := s.openSearchCandidate(item)
+		source, unavailable, err := s.openSearchCandidate(ctx, item)
 		if err != nil {
 			return false, err
 		}
@@ -680,13 +680,18 @@ func (s *Store) dispatchSearchJobs(
 	return false, nil
 }
 
-func (s *Store) openSearchCandidate(item messageRecord) (*emlxSource, candidateScan, error) {
+func (s *Store) openSearchCandidate(ctx context.Context, item messageRecord) (*emlxSource, candidateScan, error) {
 	location, err := parseMailboxURL(item.PhysicalURL)
 	if err != nil {
 		return nil, candidateScan{}, operationError("unsupported_mail_store_schema", err.Error())
 	}
-	resolved := resolvedMessage{Record: item, PhysicalLocation: location}
-	source, err := s.openResolvedSource(resolved)
+	messageRef, err := encodeMessageReference(item, location.AccountID, location.VisiblePath, s.storeUUID)
+	if err != nil {
+		return nil, candidateScan{}, fmt.Errorf("encode search candidate reference: %w", err)
+	}
+	// Re-resolve and revalidate the store-bound identity before opening the
+	// source so a moved or replaced Envelope Index row cannot become a hit.
+	_, source, err := s.openMessageSource(ctx, messageRef)
 	if err != nil {
 		if isUnavailableSearchSourceError(err) {
 			return nil, candidateScan{missing: true}, nil
