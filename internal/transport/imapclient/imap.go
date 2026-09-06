@@ -1360,7 +1360,8 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	}
 
 	// Fallback for servers without UID MOVE: COPY + STORE \\Deleted, then
-	// prefer UID EXPUNGE so unrelated deleted messages cannot be removed.
+	// prefer UID EXPUNGE. If it is unavailable, leave cleanup deferred so an
+	// unscoped EXPUNGE cannot remove another client's deleted message.
 	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quotedDestination)
 	copyStatus, err := c.doCommand(ctx, sess, copyCmd)
 	if err != nil {
@@ -1400,34 +1401,16 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 			foreignDeleted++
 		}
 	}
-	if foreignDeleted > 0 {
-		return transport.MutationEvidence{
-			Command:             "MOVE",
-			ServerResponse:      fmt.Sprintf("%s (moved + flagged deleted; expunge deferred (other deleted messages present: %d))", copyStatus, foreignDeleted),
-			Mailbox:             srcMailbox,
-			TargetMailbox:       dstMailbox,
-			UID:                 uid,
-			UIDValidity:         info.uidvalidity,
-			ExpectedUIDValidity: expectedUIDValidity,
-			ExpungeBranch:       "deferred",
-			ForeignDeletedCount: foreignDeleted,
-		}, nil
-	}
-
-	expungeCmd := fmt.Sprintf("%s EXPUNGE", sess.nextTag())
-	if _, err := c.doCommand(ctx, sess, expungeCmd); err != nil {
-		return ev, err
-	}
-
 	return transport.MutationEvidence{
 		Command:             "MOVE",
-		ServerResponse:      copyStatus + " (fallback plain EXPUNGE)",
+		ServerResponse:      fmt.Sprintf("%s (moved + flagged deleted; expunge deferred because UID EXPUNGE is unsupported; other deleted messages present: %d)", copyStatus, foreignDeleted),
 		Mailbox:             srcMailbox,
 		TargetMailbox:       dstMailbox,
 		UID:                 uid,
 		UIDValidity:         info.uidvalidity,
 		ExpectedUIDValidity: expectedUIDValidity,
-		ExpungeBranch:       "plain_expunge",
+		ExpungeBranch:       "deferred",
+		ForeignDeletedCount: foreignDeleted,
 	}, nil
 }
 

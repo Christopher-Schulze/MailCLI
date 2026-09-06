@@ -669,17 +669,18 @@ func TestMoveMessageFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveMessage fallback: %v", err)
 	}
-	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" || ev.ExpungeBranch != "plain_expunge" {
+	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" ||
+		ev.ExpungeBranch != "deferred" || ev.ForeignDeletedCount != 0 {
 		t.Fatalf("unexpected evidence: %+v", ev)
 	}
 	srv.mu.Lock()
 	copyCalled, storeCalled, expungeCalled := srv.copyCalled, srv.storeCalled, srv.expungeCalled
 	srv.mu.Unlock()
-	if !copyCalled || !storeCalled || !expungeCalled {
+	if !copyCalled || !storeCalled || expungeCalled {
 		t.Fatalf("fallback chain incomplete: copy=%v, store=%v, expunge=%v", copyCalled, storeCalled, expungeCalled)
 	}
-	if deleted := srv.DeletedUIDs(); len(deleted) != 0 {
-		t.Fatalf("plain EXPUNGE left deleted UIDs: %v", deleted)
+	if deleted := srv.DeletedUIDs(); len(deleted) != 1 || deleted[0] != 42 {
+		t.Fatalf("deferred cleanup lost deleted UID state: %v", deleted)
 	}
 }
 
@@ -722,7 +723,7 @@ func TestMoveMessageFallbackDefersWithForeignDeleted(t *testing.T) {
 	if ev.ExpungeBranch != "deferred" || ev.ForeignDeletedCount != 1 {
 		t.Fatalf("unexpected deferred evidence: %+v", ev)
 	}
-	if !strings.Contains(ev.ServerResponse, "expunge deferred (other deleted messages present") {
+	if !strings.Contains(ev.ServerResponse, "expunge deferred because UID EXPUNGE is unsupported") {
 		t.Fatalf("deferred response = %q", ev.ServerResponse)
 	}
 	srv.mu.Lock()
