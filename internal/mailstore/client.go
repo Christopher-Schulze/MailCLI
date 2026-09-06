@@ -173,10 +173,10 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		if rawErr == nil && len(rawBytes) > 0 {
 			return messageFromRawFallback(local, summary, string(rawBytes))
 		}
-		// IMAP fallback failed. If we also have a local error, join both
-		// so the caller sees the full picture.
+		// IMAP fallback failed. Preserve both local and remote causes so the
+		// caller sees the full picture.
 		if rawErr != nil && localErr != nil {
-			return mail.Message{}, errors.Join(localErr, rawErr)
+			return mail.Message{}, newHydrationError("read message", localErr, rawErr)
 		}
 	}
 	if hasLocal {
@@ -247,7 +247,7 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
 		if rawErr != nil {
-			return "", rawErr
+			return "", newHydrationError("read raw source", localErr, rawErr)
 		}
 		if len(rawBytes) > 0 {
 			return string(rawBytes), nil
@@ -274,7 +274,7 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
 		if rawErr != nil {
-			return rawErr
+			return newHydrationError("write raw source", localErr, rawErr)
 		}
 		if len(rawBytes) > 0 {
 			_, werr := writer.Write(rawBytes)
@@ -317,7 +317,7 @@ func (c *Client) SaveAttachmentTo(
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, true)
 		if rawErr != nil {
-			return rawErr
+			return newHydrationError("save attachment", localErr, rawErr)
 		}
 		if len(rawBytes) > 0 {
 			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)

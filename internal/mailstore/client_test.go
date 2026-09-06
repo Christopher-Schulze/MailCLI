@@ -1139,8 +1139,78 @@ func TestGetRawSourcePropagatesOversizedFetch(t *testing.T) {
 	if transport.ErrorCode(err) != transport.CodeIMAPRawSourceTooLarge {
 		t.Fatalf("GetRawSource() error = %v, want raw_source_too_large (not the masked local error)", err)
 	}
+	var combined *hydrationError
+	if !errors.As(err, &combined) {
+		t.Fatalf("GetRawSource() error type = %T, want hydrationError", err)
+	}
+	var localErr *Error
+	if !errors.As(err, &localErr) || localErr.Code != "message_source_missing" {
+		t.Fatalf("GetRawSource() local cause = %v, want message_source_missing", err)
+	}
+	var remoteErr *transport.TransportError
+	if !errors.As(err, &remoteErr) || remoteErr.Code != transport.CodeIMAPRawSourceTooLarge {
+		t.Fatalf("GetRawSource() remote cause = %v, want raw_source_too_large", err)
+	}
 	if fakeImap.lastFetchMax != mail.MaximumRawSourceBytes {
 		t.Fatalf("fetch bound = %d, want shared cap %d", fakeImap.lastFetchMax, mail.MaximumRawSourceBytes)
+	}
+}
+
+func TestWriteRawSourcePreservesBothHydrationFailures(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "writecap@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	messageRef = messageRefWithExpectedID(t, messageRef, "<101@example.com>")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove .emlx source: %v", err)
+	}
+	remoteErr := &transport.TransportError{
+		Code:    transport.CodeIMAPTimeout,
+		Message: "FETCH timed out",
+	}
+	fakeImap := &stubImapOperator{
+		boxes:    []transport.MailboxInfo{{Name: "INBOX"}},
+		uid:      101,
+		fetchErr: remoteErr,
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"writecap@gmail.com": "secret"},
+		},
+	}
+	var output strings.Builder
+	err = client.WriteRawSource(context.Background(), messageRef, &output)
+	if transport.ErrorCode(err) != transport.CodeIMAPTimeout {
+		t.Fatalf("WriteRawSource() error = %v, want %s", err, transport.CodeIMAPTimeout)
+	}
+	var combined *hydrationError
+	if !errors.As(err, &combined) {
+		t.Fatalf("WriteRawSource() error type = %T, want hydrationError", err)
+	}
+	var localErr *Error
+	if !errors.As(err, &localErr) || localErr.Code != "message_source_missing" {
+		t.Fatalf("WriteRawSource() local cause = %v, want message_source_missing", err)
+	}
+	var fetchedErr *transport.TransportError
+	if !errors.As(err, &fetchedErr) || fetchedErr.Code != transport.CodeIMAPTimeout {
+		t.Fatalf("WriteRawSource() remote cause = %v, want %s", err, transport.CodeIMAPTimeout)
 	}
 }
 
@@ -1442,6 +1512,11 @@ func TestSaveAttachmentHydrationHonorsCapAndFailsTyped(t *testing.T) {
 				}
 			} else if transport.ErrorCode(err) != test.wantCode {
 				t.Fatalf("SaveAttachmentTo() error = %v, want %s (not the masked local error)", err, test.wantCode)
+			} else {
+				var combined *hydrationError
+				if !errors.As(err, &combined) {
+					t.Fatalf("SaveAttachmentTo() error type = %T, want hydrationError", err)
+				}
 			}
 			if fakeImap.lastFetchMax != mail.MaximumRawSourceBytes {
 				t.Fatalf("fetch bound = %d, want the shared cap %d", fakeImap.lastFetchMax, mail.MaximumRawSourceBytes)

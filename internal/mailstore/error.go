@@ -1,5 +1,10 @@
 package mailstore
 
+import (
+	"errors"
+	"fmt"
+)
+
 type Error struct {
 	Code    string
 	Message string
@@ -15,4 +20,52 @@ func (e *Error) ErrorCode() string {
 
 func operationError(code string, message string) error {
 	return &Error{Code: code, Message: message}
+}
+
+type hydrationError struct {
+	operation string
+	local     error
+	remote    error
+}
+
+func newHydrationError(operation string, local, remote error) error {
+	if local == nil {
+		return remote
+	}
+	if remote == nil {
+		return local
+	}
+	return &hydrationError{operation: operation, local: local, remote: remote}
+}
+
+func (e *hydrationError) Error() string {
+	return fmt.Sprintf(
+		"%s failed: local source: %v; IMAP fallback: %v",
+		e.operation, e.local, e.remote,
+	)
+}
+
+func (e *hydrationError) Unwrap() []error {
+	return []error{e.local, e.remote}
+}
+
+func (e *hydrationError) ErrorCode() string {
+	if code := nestedErrorCode(e.remote); code != "" {
+		return code
+	}
+	if code := nestedErrorCode(e.local); code != "" {
+		return code
+	}
+	return "hydration_failed"
+}
+
+func nestedErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) {
+		return coded.ErrorCode()
+	}
+	return ""
 }
