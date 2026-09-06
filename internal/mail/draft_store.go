@@ -131,8 +131,47 @@ func draftSummaryFrom(draft Draft) DraftSummary {
 		BodyFormat:      draft.BodyFormat,
 		AttachmentCount: len(draft.Attachments),
 		EverSent:        draft.SendAttempt != nil,
-		SendAttempt:     draft.SendAttempt,
-		SaveAttempt:     draft.SaveAttempt,
+		SendAttempt:     draftSendAttemptSummaryFrom(draft.SendAttempt),
+		SaveAttempt:     draftSaveAttemptSummaryFrom(draft.SaveAttempt),
+	}
+}
+
+func draftSendAttemptSummaryFrom(attempt *SendAttempt) *DraftSendAttemptSummary {
+	if attempt == nil {
+		return nil
+	}
+	summary := &DraftSendAttemptSummary{
+		ID:                  attempt.ID,
+		StartedAt:           attempt.StartedAt,
+		UpdatedAt:           attempt.UpdatedAt,
+		MessageID:           attempt.MessageID,
+		EnvelopeFingerprint: attempt.EnvelopeFingerprint,
+		Outcome:             attempt.Outcome,
+		InvocationStarted:   attempt.InvocationStarted,
+		AcceptedByMail:      attempt.AcceptedByMail,
+		SentStoreObserved:   attempt.SentStoreObserved,
+		ObservedMessageRef:  attempt.ObservedMessageRef,
+		ObservationBaseline: cloneSendObservationBaseline(attempt.ObservationBaseline),
+	}
+	if attempt.Transport != nil {
+		transport := *attempt.Transport
+		summary.Transport = &transport
+	}
+	return summary
+}
+
+func draftSaveAttemptSummaryFrom(attempt *DraftSaveAttempt) *DraftSaveAttemptSummary {
+	if attempt == nil {
+		return nil
+	}
+	return &DraftSaveAttemptSummary{
+		ID:                  attempt.ID,
+		StartedAt:           attempt.StartedAt,
+		UpdatedAt:           attempt.UpdatedAt,
+		InvocationStarted:   attempt.InvocationStarted,
+		AcceptedByMail:      attempt.AcceptedByMail,
+		ObservedMessageRef:  attempt.ObservedMessageRef,
+		ObservationBaseline: cloneSendObservationBaseline(attempt.ObservationBaseline),
 	}
 }
 

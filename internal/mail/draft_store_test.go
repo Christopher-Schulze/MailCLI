@@ -378,19 +378,116 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	}
 }
 
-// The summary carries send-attempt state and derives EverSent from it.
+// The summary carries attempt metadata and derives EverSent from send state,
+// while materialized content stays out of the list projection.
 func TestDraftSummaryFromKeepsAttemptState(t *testing.T) {
-	attempt := &SendAttempt{ID: "attempt_1", Outcome: SendOutcomeUnknown}
+	body := "secret send body"
+	attempt := &SendAttempt{
+		ID: "attempt_1", Outcome: SendOutcomeUnknown,
+		Materialized: &SendMaterialization{Subject: "secret subject", Body: &body},
+	}
+	saveAttempt := &DraftSaveAttempt{
+		ID: "save_1", ObservationBaseline: &SendObservationBaseline{StoreUUID: "store"},
+		Materialized: &SendMaterialization{Subject: "secret save subject", Body: &body},
+	}
 	summary := draftSummaryFrom(Draft{
 		Ref: "draft_ref", Subject: "S", BodyFormat: DraftBodyPlain,
-		SendAttempt: attempt,
+		SendAttempt: attempt, SaveAttempt: saveAttempt,
 	})
-	if !summary.EverSent || summary.SendAttempt != attempt {
+	if !summary.EverSent || summary.SendAttempt == nil || summary.SendAttempt.ID != attempt.ID ||
+		summary.SaveAttempt == nil || summary.SaveAttempt.ID != saveAttempt.ID {
 		t.Fatalf("summary = %+v, want attempt state with EverSent", summary)
+	}
+	payload, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal(summary) error = %v", err)
+	}
+	output := string(payload)
+	for _, leaked := range []string{"secret send body", "secret subject", "secret save subject", `"materialized"`} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("summary JSON contains %q: attempt content leaked: %s", leaked, output)
+		}
 	}
 	plain := draftSummaryFrom(Draft{Ref: "draft_other"})
 	if plain.EverSent || plain.SendAttempt != nil {
 		t.Fatalf("summary = %+v, want pristine state", plain)
+	}
+}
+
+func TestListDraftsRedactsLegacySaveAttemptMaterializedBody(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Listed", Body: "draft body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	attempt, err := beginDraftSaveAttempt(root, draft.Ref, &SendObservationBaseline{
+		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
+	})
+	if err != nil {
+		t.Fatalf("beginDraftSaveAttempt() error = %v", err)
+	}
+	body := "legacy save body"
+	attempt.Materialized = &SendMaterialization{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "legacy save subject", Body: &body,
+	}
+	if err := replaceDraftSaveAttempt(root, draft.Ref, attempt); err != nil {
+		t.Fatalf("replaceDraftSaveAttempt() error = %v", err)
+	}
+
+	summaries, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	payload, err := json.Marshal(summaries)
+	if err != nil {
+		t.Fatalf("json.Marshal(summaries) error = %v", err)
+	}
+	output := string(payload)
+	for _, leaked := range []string{"legacy save body", "legacy save subject", `"materialized"`} {
+		if strings.Contains(output, leaked) {
+			t.Fatalf("ListDrafts() JSON contains %q: save content leaked: %s", leaked, output)
+		}
+	}
+	if !strings.Contains(output, `"save_attempt"`) {
+		t.Fatalf("ListDrafts() JSON = %s, want redacted save-attempt metadata", output)
+	}
+}
+
+func TestListDraftsBoundsOversizedLegacySaveAttempt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Listed", Body: "draft body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	path, err := saveClaimPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("saveClaimPath() error = %v", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if err := file.Truncate(maximumDraftStateBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("Truncate() error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	summaries, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].StateError == "" {
+		t.Fatalf("ListDrafts() = %+v, want bounded save-claim state error", summaries)
 	}
 }
 

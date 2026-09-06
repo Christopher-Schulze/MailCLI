@@ -146,23 +146,53 @@ type SavedDraft struct {
 }
 
 // DraftSummary is the list-view of a draft: envelope metadata plus
-// send/save attempt state, never body content. Lists must stay cheap:
-// building a summary never re-renders Markdown/HTML bodies.
+// metadata-only send/save attempt state, never body, HTML, raw MIME, or
+// attachment content. Lists must stay cheap: building a summary never
+// re-renders Markdown/HTML bodies.
 type DraftSummary struct {
-	Ref             string            `json:"ref"`
-	Kind            DraftKind         `json:"kind"`
-	Subject         string            `json:"subject,omitempty"`
-	From            string            `json:"from,omitempty"`
-	To              []Recipient       `json:"to"`
-	CC              []Recipient       `json:"cc"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	BodyFormat      DraftBodyFormat   `json:"body_format"`
-	AttachmentCount int               `json:"attachment_count"`
-	EverSent        bool              `json:"ever_sent"`
-	SendAttempt     *SendAttempt      `json:"send_attempt,omitempty"`
-	SaveAttempt     *DraftSaveAttempt `json:"save_attempt,omitempty"`
-	StateError      string            `json:"state_error,omitempty"`
+	Ref             string                   `json:"ref"`
+	Kind            DraftKind                `json:"kind"`
+	Subject         string                   `json:"subject,omitempty"`
+	From            string                   `json:"from,omitempty"`
+	To              []Recipient              `json:"to"`
+	CC              []Recipient              `json:"cc"`
+	CreatedAt       time.Time                `json:"created_at"`
+	UpdatedAt       time.Time                `json:"updated_at"`
+	BodyFormat      DraftBodyFormat          `json:"body_format"`
+	AttachmentCount int                      `json:"attachment_count"`
+	EverSent        bool                     `json:"ever_sent"`
+	SendAttempt     *DraftSendAttemptSummary `json:"send_attempt,omitempty"`
+	SaveAttempt     *DraftSaveAttemptSummary `json:"save_attempt,omitempty"`
+	StateError      string                   `json:"state_error,omitempty"`
+}
+
+// DraftSendAttemptSummary is the metadata-only list projection of SendAttempt.
+// Materialized content is intentionally excluded.
+type DraftSendAttemptSummary struct {
+	ID                  string                   `json:"id"`
+	StartedAt           time.Time                `json:"started_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	MessageID           string                   `json:"message_id,omitempty"`
+	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
+	Outcome             SendOutcome              `json:"outcome"`
+	InvocationStarted   bool                     `json:"invocation_started"`
+	AcceptedByMail      bool                     `json:"accepted_by_mail"`
+	SentStoreObserved   bool                     `json:"sent_store_observed"`
+	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
+	ObservationBaseline *SendObservationBaseline `json:"observation_baseline,omitempty"`
+	Transport           *TransportEvidence       `json:"transport,omitempty"`
+}
+
+// DraftSaveAttemptSummary is the metadata-only list projection of
+// DraftSaveAttempt. Materialized content is intentionally excluded.
+type DraftSaveAttemptSummary struct {
+	ID                  string                   `json:"id"`
+	StartedAt           time.Time                `json:"started_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	InvocationStarted   bool                     `json:"invocation_started"`
+	AcceptedByMail      bool                     `json:"accepted_by_mail"`
+	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
+	ObservationBaseline *SendObservationBaseline `json:"observation_baseline"`
 }
 
 type CreateDraftRequest struct {
