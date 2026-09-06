@@ -464,8 +464,10 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
 	attempt.Transport = &TransportEvidence{
-		ServerResponse: submitEvidence.ServerResponse,
-		MessageID:      attempt.MessageID,
+		ServerResponse:       submitEvidence.ServerResponse,
+		MessageID:            attempt.MessageID,
+		MirrorAttempted:      true,
+		MirrorOutcomeUnknown: true,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
 	attempt.UpdatedAt = time.Now().UTC()
@@ -484,6 +486,17 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		attempt.MessageID,
 	)
 	if err != nil {
+		attempt.Transport.MirrorOutcomeUnknown = transport.ErrorCode(err) == transport.CodeIMAPAppendOutcomeUnknown ||
+			transport.ErrorCode(err) == transport.CodeIMAPAmbiguousMessageID
+		attempt.UpdatedAt = time.Now().UTC()
+		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+			result = resultForAttempt(ref, attempt, true)
+			return result, &OperationError{
+				Code:    "send_state_unknown",
+				Message: fmt.Sprintf("Sent mirroring failed, but its local outcome could not be recorded safely: %v", stateErr),
+			}
+		}
+		result = resultForAttempt(ref, attempt, true)
 		// The submission was accepted, so the send itself is never retried;
 		// the claim stays reconcilable and only the mirror may be retried.
 		return result, mirrorPendingError(err)
@@ -491,6 +504,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
 	attempt.Transport.MirrorAppended = appendEvidence.Appended
+	attempt.Transport.MirrorOutcomeUnknown = false
 	attempt.Outcome = SendOutcomeSent
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForAttempt(ref, attempt, true)
@@ -508,6 +522,71 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	}
 	result.DraftRetained = false
 	return result, nil
+}
+
+func (s *Service) adoptObservedSentMessage(
+	ctx context.Context,
+	root string,
+	ref string,
+	draft Draft,
+	attempt SendAttempt,
+	imap transport.ImapOperator,
+	cfg transport.ImapConfig,
+	sentBox string,
+	uid uint32,
+	uidValidity uint32,
+	matchCount int,
+) (SendResult, error) {
+	result := resultForReconcile(ref, attempt)
+	if matchCount > 1 {
+		return result, unverifiableSendError(attempt, draft,
+			fmt.Sprintf("the Sent mailbox contains %d messages with the claimed Message-ID", matchCount))
+	}
+	if uid == 0 || matchCount != 1 {
+		return result, &OperationError{
+			Code:    "send_reconcile_unavailable",
+			Message: "the Sent Message-ID match did not include a usable UID",
+		}
+	}
+	raw, fetchErr := imap.FetchMessage(ctx, cfg, sentBox, uid, uidValidity, MaximumRawSourceBytes)
+	if fetchErr != nil {
+		return result, mirrorPendingError(fetchErr)
+	}
+	if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
+		return result, identityErr
+	}
+	attempt.SentStoreObserved = true
+	attempt.Transport.MirrorMailbox = sentBox
+	attempt.Transport.MirrorAppended = false
+	attempt.Transport.MirrorAttempted = true
+	attempt.Transport.MirrorOutcomeUnknown = false
+	attempt.Outcome = SendOutcomeSent
+	attempt.UpdatedAt = time.Now().UTC()
+	result = resultForReconcile(ref, attempt)
+	if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+		return result, &OperationError{
+			Code:    "send_reconcile_state_failed",
+			Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
+		}
+	}
+	if cleanupErr := discardDraftFiles(root, ref); cleanupErr != nil {
+		return result, &OperationError{
+			Code:    "send_cleanup_failed",
+			Message: fmt.Sprintf("the existing Sent message was verified, but local draft cleanup failed: %v", cleanupErr),
+		}
+	}
+	result.DraftRetained = false
+	return result, nil
+}
+
+func mirrorOutcomeUnknownError(attempt SendAttempt) error {
+	return &OperationError{
+		Code: "send_mirror_outcome_unknown",
+		Message: fmt.Sprintf(
+			"the Sent APPEND outcome for %s is unknown and no matching message is currently provable; automatic APPEND retry is forbidden",
+			attempt.MessageID,
+		),
+	}
 }
 
 type ComposeWriteGate interface {
@@ -737,8 +816,9 @@ func resultForReconcile(ref string, attempt SendAttempt) SendResult {
 }
 
 // reconcileMirrorPending finishes a direct send whose SMTP submission was
-// accepted but whose Sent-mailbox mirror did not complete. It retries only
-// the idempotent IMAP mirror; the SMTP submission is never sent again.
+// accepted but whose Sent-mailbox mirror did not complete. It retries only a
+// mirror with a known failed APPEND; an unknown APPEND outcome is searched and
+// verified but never replayed.
 func (s *Service) reconcileMirrorPending(
 	ctx context.Context,
 	root string,
@@ -753,6 +833,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: "the send attempt carries no Message-ID; the Sent mirror cannot be completed safely",
 		}
 	}
+	mirrorOutcomeUnknown := attempt.Transport.MirrorOutcomeUnknown
 	if s.send.Mirror == nil || s.send.Credentials == nil {
 		return result, &OperationError{
 			Code:    "send_transport_unavailable",
@@ -774,18 +855,21 @@ func (s *Service) reconcileMirrorPending(
 	if err != nil || password == "" {
 		return result, missingCredentialsError(sender)
 	}
-	if imap := s.send.ImapClient(); imap != nil {
-		mailboxes, listErr := imap.ListMailboxes(ctx, transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password})
+	imap := s.send.ImapClient()
+	sentConfig := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password}
+	sentBox := ""
+	if imap != nil {
+		mailboxes, listErr := imap.ListMailboxes(ctx, sentConfig)
 		if listErr != nil {
 			return result, mirrorPendingError(listErr)
 		}
-		sentBox := transport.PickSentMailbox(mailboxes)
+		sentBox = transport.PickSentMailbox(mailboxes)
 		if sentBox == "" {
 			return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
 		}
 		uid, uidValidity, matchCount, searchErr := imap.SearchUID(
 			ctx,
-			transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+			sentConfig,
 			sentBox,
 			attempt.MessageID,
 		)
@@ -800,36 +884,23 @@ func (s *Service) reconcileMirrorPending(
 				fmt.Sprintf("the Sent mailbox contains %d messages with the claimed Message-ID", matchCount))
 		}
 		if uid != 0 && matchCount == 1 {
-			raw, fetchErr := imap.FetchMessage(ctx,
-				transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
-				sentBox, uid, uidValidity, MaximumRawSourceBytes)
-			if fetchErr != nil {
-				return result, mirrorPendingError(fetchErr)
-			}
-			if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
-				return result, identityErr
-			}
-			attempt.SentStoreObserved = true
-			attempt.Transport.MirrorMailbox = sentBox
-			attempt.Transport.MirrorAppended = false
-			attempt.Outcome = SendOutcomeSent
-			attempt.UpdatedAt = time.Now().UTC()
-			result = resultForReconcile(ref, attempt)
-			if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
-				return result, &OperationError{
-					Code:    "send_reconcile_state_failed",
-					Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
-				}
-			}
-			if cleanupErr := discardDraftFiles(root, ref); cleanupErr != nil {
-				return result, &OperationError{
-					Code:    "send_cleanup_failed",
-					Message: fmt.Sprintf("the existing Sent message was verified, but local draft cleanup failed: %v", cleanupErr),
-				}
-			}
-			result.DraftRetained = false
-			return result, nil
+			return s.adoptObservedSentMessage(
+				ctx,
+				root,
+				ref,
+				draft,
+				attempt,
+				imap,
+				sentConfig,
+				sentBox,
+				uid,
+				uidValidity,
+				matchCount,
+			)
 		}
+	}
+	if mirrorOutcomeUnknown {
+		return result, mirrorOutcomeUnknownError(attempt)
 	}
 	message, err := composeDraftSpool(ctx, draft, attempt.MessageID)
 	if err != nil {
@@ -843,16 +914,47 @@ func (s *Service) reconcileMirrorPending(
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,
 		s.send.Mirror,
-		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		sentConfig,
 		message,
 		attempt.MessageID,
 	)
 	if err != nil {
 		return result, mirrorPendingError(err)
 	}
+	if imap != nil {
+		uid, uidValidity, matchCount, searchErr := imap.SearchUID(
+			ctx,
+			sentConfig,
+			sentBox,
+			attempt.MessageID,
+		)
+		if searchErr != nil {
+			var transportErr *transport.TransportError
+			if !errors.As(searchErr, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
+				return result, mirrorPendingError(searchErr)
+			}
+		}
+		if matchCount > 0 {
+			return s.adoptObservedSentMessage(
+				ctx,
+				root,
+				ref,
+				draft,
+				attempt,
+				imap,
+				sentConfig,
+				sentBox,
+				uid,
+				uidValidity,
+				matchCount,
+			)
+		}
+		return result, mirrorOutcomeUnknownError(attempt)
+	}
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
 	attempt.Transport.MirrorAppended = appendEvidence.Appended
+	attempt.Transport.MirrorOutcomeUnknown = false
 	attempt.Outcome = SendOutcomeSent
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForReconcile(ref, attempt)

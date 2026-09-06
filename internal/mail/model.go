@@ -215,14 +215,16 @@ type SendAttempt struct {
 // TransportEvidence records the deterministic proof of a direct SMTP
 // submission and its Sent-mailbox mirror. ServerResponse is the final SMTP
 // response line, MessageID the submitted Message-ID, MirrorMailbox the Sent
-// mailbox holding the message, and MirrorAppended false when the provider had
-// already filed the message itself.
+// mailbox holding the message, MirrorAttempted records the durable mirror
+// boundary, and MirrorOutcomeUnknown forbids replay after an ambiguous APPEND.
 type TransportEvidence struct {
-	ServerResponse  string `json:"server_response,omitempty"`
-	MessageID       string `json:"message_id,omitempty"`
-	SubmissionStage string `json:"submission_stage,omitempty"`
-	MirrorMailbox   string `json:"mirror_mailbox,omitempty"`
-	MirrorAppended  bool   `json:"mirror_appended,omitempty"`
+	ServerResponse       string `json:"server_response,omitempty"`
+	MessageID            string `json:"message_id,omitempty"`
+	SubmissionStage      string `json:"submission_stage,omitempty"`
+	MirrorMailbox        string `json:"mirror_mailbox,omitempty"`
+	MirrorAppended       bool   `json:"mirror_appended,omitempty"`
+	MirrorAttempted      bool   `json:"mirror_attempted,omitempty"`
+	MirrorOutcomeUnknown bool   `json:"mirror_outcome_unknown,omitempty"`
 }
 
 type SendMaterialization struct {

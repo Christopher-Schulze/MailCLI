@@ -21,25 +21,27 @@ import (
 )
 
 type fakeServerConfig struct {
-	authOK              bool
-	sentMboxes          []string
-	trashMboxes         []string
-	otherMboxes         []string
-	listResponse        []byte
-	searchMatchID       string
-	searchUID           uint32
-	searchUIDs          []uint32
-	uidSearchResponse   []string
-	appendOK            bool
-	searchDelay         time.Duration
-	moveSupported       bool
-	uidExpungeSupported bool
-	initialDeletedUIDs  []uint32
-	fetchPayload        []byte
-	fetchResponseUID    uint32
-	selectFailBox       string
-	dropAfterCommands   int
-	omitUIDValidity     bool
+	authOK                  bool
+	sentMboxes              []string
+	trashMboxes             []string
+	otherMboxes             []string
+	listResponse            []byte
+	searchMatchID           string
+	searchUID               uint32
+	searchUIDs              []uint32
+	uidSearchResponse       []string
+	appendOK                bool
+	dropAppendResponse      bool
+	searchDelay             time.Duration
+	deliverAfterFirstSearch bool
+	moveSupported           bool
+	uidExpungeSupported     bool
+	initialDeletedUIDs      []uint32
+	fetchPayload            []byte
+	fetchResponseUID        uint32
+	selectFailBox           string
+	dropAfterCommands       int
+	omitUIDValidity         bool
 	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
 	// first report this UIDVALIDITY instead of 12345, simulating a mailbox
 	// rebuild between resolution and mutation.
@@ -59,26 +61,30 @@ type fakeServer struct {
 	cert     tls.Certificate
 	config   fakeServerConfig
 
-	mu               sync.Mutex
-	selectCalls      int
-	appendCalled     bool
-	appendMbox       string
-	appendFlags      []string
-	appendData       []byte
-	storeCalled      bool
-	storeUID         uint32
-	storeFlags       string
-	copyCalled       bool
-	copyUID          uint32
-	copyDst          string
-	moveCalled       bool
-	moveUID          uint32
-	moveDst          string
-	expungeCalled    bool
-	uidExpungeCalled bool
-	uidExpungeUID    uint32
-	deletedUIDs      map[uint32]struct{}
-	connections      int
+	mu                   sync.Mutex
+	selectCalls          int
+	appendCalled         bool
+	appendMbox           string
+	appendFlags          []string
+	appendData           []byte
+	appendedMessageID    string
+	appendedMessageCount int
+	lastSearchMessageID  string
+	searchCalls          int
+	storeCalled          bool
+	storeUID             uint32
+	storeFlags           string
+	copyCalled           bool
+	copyUID              uint32
+	copyDst              string
+	moveCalled           bool
+	moveUID              uint32
+	moveDst              string
+	expungeCalled        bool
+	uidExpungeCalled     bool
+	uidExpungeUID        uint32
+	deletedUIDs          map[uint32]struct{}
+	connections          int
 }
 
 func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
@@ -138,6 +144,12 @@ func (s *fakeServer) ConnectionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.connections
+}
+
+func (s *fakeServer) SearchCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.searchCalls
 }
 
 func (s *fakeServer) DeletedUIDs() []uint32 {
@@ -241,20 +253,45 @@ func (s *fakeServer) handle(conn net.Conn) {
 				time.Sleep(s.config.searchDelay)
 			}
 
-			match := false
-			if s.config.searchMatchID != "" && len(args) >= 3 {
-				if strings.EqualFold(args[0], "HEADER") && strings.EqualFold(args[1], "Message-ID") {
-					if args[2] == s.config.searchMatchID {
-						match = true
-					}
-				}
+			queryMessageID := ""
+			s.mu.Lock()
+			searchMatchID := s.config.searchMatchID
+			appendedMessageID := s.appendedMessageID
+			if len(args) >= 3 && strings.EqualFold(args[0], "HEADER") &&
+				strings.EqualFold(args[1], "Message-ID") {
+				queryMessageID = args[2]
+				s.lastSearchMessageID = queryMessageID
 			}
-			if match {
-				s.writeLine(bw, "* SEARCH 1")
+			s.searchCalls++
+			searchCall := s.searchCalls
+			appendedMessageCount := s.appendedMessageCount
+			s.mu.Unlock()
+			matchCount := 0
+			if queryMessageID != "" && queryMessageID == searchMatchID {
+				matchCount++
+			}
+			if queryMessageID != "" && queryMessageID == appendedMessageID {
+				if appendedMessageCount == 0 {
+					appendedMessageCount = 1
+				}
+				matchCount += appendedMessageCount
+			}
+			if matchCount > 0 {
+				values := make([]string, matchCount)
+				for index := range values {
+					values[index] = strconv.Itoa(index + 1)
+				}
+				s.writeLine(bw, "* SEARCH "+strings.Join(values, " "))
 			} else {
 				s.writeLine(bw, "* SEARCH")
 			}
 			s.writeLine(bw, tag+" OK SEARCH completed")
+			if s.config.deliverAfterFirstSearch && searchCall == 1 && queryMessageID != "" && matchCount == 0 {
+				s.mu.Lock()
+				s.appendedMessageID = queryMessageID
+				s.appendedMessageCount = 1
+				s.mu.Unlock()
+			}
 		case "APPEND":
 			if len(args) < 3 {
 				s.writeLine(bw, tag+" BAD APPEND syntax")
@@ -287,7 +324,22 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.appendMbox = mbox
 			s.appendFlags = flags
 			s.appendData = data
+			if s.config.appendOK {
+				messageID := messageIDFromMessage(data)
+				if messageID == "" {
+					messageID = s.lastSearchMessageID
+				}
+				if s.appendedMessageID == messageID {
+					s.appendedMessageCount++
+				} else {
+					s.appendedMessageID = messageID
+					s.appendedMessageCount = 1
+				}
+			}
 			s.mu.Unlock()
+			if s.config.dropAppendResponse {
+				return
+			}
 			if s.config.appendOK {
 				s.writeLine(bw, tag+" OK [APPENDUID 1 100] APPEND completed")
 			} else {
@@ -342,9 +394,17 @@ func (s *fakeServer) handle(conn net.Conn) {
 					continue
 				}
 				match := false
-				if s.config.searchMatchID != "" && len(args) >= 4 {
+				s.mu.Lock()
+				searchMatchID := s.config.searchMatchID
+				appendedMessageID := s.appendedMessageID
+				if len(args) >= 4 && strings.EqualFold(args[1], "HEADER") &&
+					strings.EqualFold(args[2], "Message-ID") {
+					s.lastSearchMessageID = args[3]
+				}
+				s.mu.Unlock()
+				if (searchMatchID != "" || appendedMessageID != "") && len(args) >= 4 {
 					if strings.EqualFold(args[1], "HEADER") && strings.EqualFold(args[2], "Message-ID") {
-						if args[3] == s.config.searchMatchID {
+						if args[3] == searchMatchID || args[3] == appendedMessageID {
 							match = true
 						}
 					}
@@ -598,4 +658,13 @@ func parseFlagList(s string) []string {
 		}
 	}
 	return flags
+}
+
+func messageIDFromMessage(data []byte) string {
+	for _, line := range strings.Split(string(data), "\r\n") {
+		if strings.HasPrefix(line, "Message-ID: ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Message-ID: "))
+		}
+	}
+	return ""
 }

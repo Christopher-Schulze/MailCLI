@@ -269,22 +269,41 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return empty, err
 	}
 
-	found, err := c.doSearch(ctx, sess, sess.nextTag(), messageID)
+	matchCount, err := c.doSearch(ctx, sess, sess.nextTag(), messageID)
 	if err != nil {
 		return empty, err
 	}
 
-	if found {
+	if matchCount > 0 {
 		_ = c.doLogout(ctx, sess, sess.nextTag())
-		return transport.AppendEvidence{Mailbox: sentBox, Appended: false}, nil
+		return transport.AppendEvidence{
+			Mailbox: sentBox, Appended: false, MatchCount: matchCount,
+		}, nil
 	}
 
 	if err := c.doAppend(ctx, sess, sess.nextTag(), sentBox, msg, size); err != nil {
 		return empty, err
 	}
+	matchCount, err = c.doSearch(ctx, sess, sess.nextTag(), messageID)
+	if err != nil {
+		return empty, appendOutcomeUnknown(err)
+	}
+	if matchCount == 0 {
+		return empty, appendOutcomeUnknown(
+			fmt.Errorf("Message-ID %s was not visible after APPEND", messageID),
+		)
+	}
+	if matchCount > 1 {
+		return empty, &transport.TransportError{
+			Code:    transport.CodeIMAPAmbiguousMessageID,
+			Message: fmt.Sprintf("Sent mailbox contains %d messages with Message-ID %s after APPEND", matchCount, messageID),
+		}
+	}
 
 	_ = c.doLogout(ctx, sess, sess.nextTag())
-	return transport.AppendEvidence{Mailbox: sentBox, Appended: true}, nil
+	return transport.AppendEvidence{
+		Mailbox: sentBox, Appended: true, MatchCount: matchCount,
+	}, nil
 }
 
 // mailbox carries the parsed name and special-use flags for a LIST response.
@@ -419,44 +438,50 @@ func (c *Client) doSelect(ctx context.Context, sess *session, tag, mbox string) 
 	}
 }
 
-func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID string) (bool, error) {
+func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID string) (int, error) {
 	normalizedMessageID, err := normalizeMessageID(messageID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return false, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
+		return 0, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
 	}
 	quotedMessageID, err := safeQuoteIMAP(normalizedMessageID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if err := c.writeLine(sess, tag+" SEARCH HEADER Message-ID "+quotedMessageID); err != nil {
-		return false, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH write")
+		return 0, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH write")
 	}
 
-	found := false
+	matchCount := 0
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
-			return false, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH read")
+			return 0, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			status := parseStatus(line, tag)
 			if status == "OK" {
-				return found, nil
+				return matchCount, nil
 			}
-			return false, &transport.TransportError{
+			return 0, &transport.TransportError{
 				Code:    transport.CodeIMAPAppendFailed,
 				Message: "IMAP SEARCH failed: " + status,
 			}
 		}
-		if !strings.HasPrefix(line, "* SEARCH") {
+		if strings.HasPrefix(line, "* SEARCHING") {
+			return 0, &transport.TransportError{
+				Code:    transport.CodeIMAPResponseMalformed,
+				Message: "IMAP SEARCH returned invalid SEARCHING response",
+			}
+		}
+		if line != "* SEARCH" && !strings.HasPrefix(line, "* SEARCH ") {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) > 2 {
-			found = true
+			matchCount += len(fields) - 2
 		}
 	}
 }
@@ -489,26 +514,26 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 	written, err := io.Copy(sess.bw, msg)
 	if err != nil {
 		sess.dirty = true
-		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write")
+		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write"))
 	}
 	if size >= 0 && written != size {
 		sess.dirty = true
-		return &transport.TransportError{
+		return appendOutcomeUnknown(&transport.TransportError{
 			Code:    transport.CodeIMAPAppendFailed,
 			Message: fmt.Sprintf("message source ended after %d of %d bytes", written, size),
-		}
+		})
 	}
 	if err := sess.bw.Flush(); err != nil {
 		sess.dirty = true
-		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal flush")
+		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal flush"))
 	}
 	if err := c.writeLine(sess, ""); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF")
+		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF"))
 	}
 
 	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
-		return err
+		return appendOutcomeUnknown(err)
 	}
 	if status == "OK" {
 		return nil
@@ -517,6 +542,14 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		Code:    transport.CodeIMAPAppendFailed,
 		Message: "IMAP APPEND failed",
 		Err:     fmt.Errorf("server returned %s", status),
+	}
+}
+
+func appendOutcomeUnknown(err error) error {
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPAppendOutcomeUnknown,
+		Message: "IMAP APPEND outcome is unknown after message data was sent",
+		Err:     err,
 	}
 }
 

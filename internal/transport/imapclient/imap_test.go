@@ -149,6 +149,93 @@ func TestAppendToSent(t *testing.T) {
 	}
 }
 
+func TestAppendToSentConfirmsPostAppendSearch(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	evidence, err := client.AppendToSent(context.Background(), cfg, []byte("message"), "<confirm@example.com>")
+	if err != nil {
+		t.Fatalf("AppendToSent() error = %v", err)
+	}
+	if !evidence.Appended || evidence.MatchCount != 1 {
+		t.Fatalf("AppendToSent() evidence = %+v, want one confirmed append", evidence)
+	}
+	if got := srv.SearchCalls(); got != 2 {
+		t.Fatalf("SEARCH calls = %d, want pre- and post-append confirmation", got)
+	}
+}
+
+func TestAppendToSentRejectsDeliveryRaceAfterNegativeSearch(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+		deliverAfterFirstSearch: true,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	_, err = client.AppendToSent(
+		context.Background(),
+		cfg,
+		[]byte("Message-ID: <race@example.com>\r\n\r\nmessage"),
+		"<race@example.com>",
+	)
+	if transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID {
+		t.Fatalf("AppendToSent() error = %v, want duplicate evidence", err)
+	}
+	if got := srv.SearchCalls(); got != 2 {
+		t.Fatalf("SEARCH calls = %d, want pre- and post-append confirmation", got)
+	}
+}
+
+func TestAppendToSentClassifiesLostAppendResponseAsUnknown(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+		dropAppendResponse: true,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	_, err = client.AppendToSent(
+		context.Background(),
+		cfg,
+		[]byte("Message-ID: <lost@example.com>\r\n\r\nmessage"),
+		"<lost@example.com>",
+	)
+	if transport.ErrorCode(err) != transport.CodeIMAPAppendOutcomeUnknown {
+		t.Fatalf("AppendToSent() error = %v, want %s", err, transport.CodeIMAPAppendOutcomeUnknown)
+	}
+}
+
 func TestAppendToSentReaderRejectsNegativeSize(t *testing.T) {
 	client := New()
 	_, err := client.AppendToSentReader(context.Background(), transport.ImapConfig{}, strings.NewReader("message"), -1, "<x@example.com>")

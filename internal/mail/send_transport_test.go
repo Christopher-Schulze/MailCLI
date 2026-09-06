@@ -255,6 +255,39 @@ func TestSendDraftRetainsClaimWhenContextIsCanceledDuringUnknownSubmission(t *te
 	}
 }
 
+func TestReconcileDoesNotReplayUnknownSentAppend(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{
+		Code:    transport.CodeIMAPAppendOutcomeUnknown,
+		Message: "IMAP APPEND final response timed out",
+	}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	result, err := service.SendDraft(context.Background(), draft.Ref)
+	if errorCode(err) != transport.CodeIMAPAppendOutcomeUnknown ||
+		result.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
+		t.Fatalf("SendDraft() = %+v, error = %v, mirror calls = %d", result, err, mirror.calls)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil ||
+		!retained.SendAttempt.Transport.MirrorOutcomeUnknown {
+		t.Fatalf("retained attempt = %+v, error = %v", retained.SendAttempt, err)
+	}
+
+	reconciled, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "send_mirror_outcome_unknown" ||
+		reconciled.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v, mirror calls = %d", reconciled, err, mirror.calls)
+	}
+	reconciled, err = service.ReconcileDraft(context.Background(), draft.Ref)
+	if errorCode(err) != "send_mirror_outcome_unknown" ||
+		reconciled.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
+		t.Fatalf("second ReconcileDraft() = %+v, error = %v, mirror calls = %d", reconciled, err, mirror.calls)
+	}
+}
+
 func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()
