@@ -800,6 +800,43 @@ func TestBuildLoweredSearchTextMatchesCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestSearchTextRepresentationsShareAttachmentOrderAndOffsets(t *testing.T) {
+	t.Parallel()
+	item := messageRecord{}
+	document := mimeDocument{
+		Parts: map[string]mimePart{
+			"2": {Name: "zeta.txt"},
+			"1": {Name: "alpha.txt"},
+		},
+	}
+	representations := buildSearchTextRepresentations(item, document)
+	if representations.original != "alpha.txt zeta.txt" {
+		t.Fatalf("original search text = %q, want sorted attachment names", representations.original)
+	}
+	if representations.folded != representations.original {
+		t.Fatalf("folded search text = %q, want same order as original", representations.folded)
+	}
+	matched, term := containsAllFoldedSearchTerms(representations.folded, []string{"zeta"})
+	if !matched || term != "zeta" {
+		t.Fatalf("containsAllFoldedSearchTerms() = %v, %q; want true, zeta", matched, term)
+	}
+	if got := snippetForSearchText(representations, term); got != representations.original {
+		t.Fatalf("attachment snippet = %q, want %q", got, representations.original)
+	}
+}
+
+func TestSnippetForMapsNormalizedRuneOffsets(t *testing.T) {
+	t.Parallel()
+	value := strings.Repeat("x", 100) + " Cafe\u0301 target " + strings.Repeat("z", 300)
+	got := snippetFor(value, "TARGET")
+	if !strings.Contains(got, "Cafe\u0301 target") && !strings.Contains(got, "Café target") {
+		t.Fatalf("snippetFor() = %q, want normalized target context", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("snippetFor() returned invalid UTF-8: %q", got)
+	}
+}
+
 func TestSearchPlanUsesUnicodeFoldFunction(t *testing.T) {
 	t.Parallel()
 	store, _ := newSearchFixture(t)

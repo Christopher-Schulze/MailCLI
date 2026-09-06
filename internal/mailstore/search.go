@@ -741,16 +741,15 @@ func scanCandidate(
 	}
 	snippet := ""
 	if match {
-		folded := buildLoweredSearchText(item, document)
+		representations := buildSearchTextRepresentations(item, document)
 		firstTerm := ""
 		if len(terms) > 0 {
-			match, firstTerm = containsAllFoldedSearchTerms(folded, terms)
+			match, firstTerm = containsAllFoldedSearchTerms(representations.folded, terms)
 		}
 		if match {
 			// Build original-case text only for the snippet to preserve
 			// readable case in search results.
-			haystack := buildSearchText(item, document)
-			snippet = snippetForFolded(haystack, folded, firstTerm)
+			snippet = snippetForSearchText(representations, firstTerm)
 		}
 	}
 	return candidateScan{
@@ -827,6 +826,61 @@ func foldSearchText(value string) string {
 	return folded.String()
 }
 
+type searchTextRepresentations struct {
+	original             string
+	folded               string
+	foldedRuneBoundaries []int
+}
+
+func buildSearchTextRepresentations(item messageRecord, document mimeDocument) searchTextRepresentations {
+	original := buildSearchText(item, document)
+	return newSearchTextRepresentations(original)
+}
+
+func newSearchTextRepresentations(original string) searchTextRepresentations {
+	folded := foldSearchText(original)
+	return searchTextRepresentations{
+		original:             original,
+		folded:               folded,
+		foldedRuneBoundaries: foldedRuneBoundaries(original, folded),
+	}
+}
+
+func foldedRuneBoundaries(original, folded string) []int {
+	originalRunes := utf8.RuneCountInString(original)
+	foldedRunes := utf8.RuneCountInString(folded)
+	// NFC-normalized search text and simple lowercasing keep rune counts equal;
+	// build that common mapping without per-rune transformed strings.
+	if originalRunes == foldedRunes {
+		boundaries := make([]int, foldedRunes+1)
+		for index := range boundaries {
+			boundaries[index] = index
+		}
+		return boundaries
+	}
+	boundaries := []int{0}
+	originalRune := 0
+	for offset := 0; offset < len(original); {
+		size := norm.NFC.NextBoundaryInString(original[offset:], true)
+		if size <= 0 || size > len(original)-offset {
+			size = len(original) - offset
+		}
+		segment := original[offset : offset+size]
+		originalRune += utf8.RuneCountInString(segment)
+		for range utf8.RuneCountInString(foldSearchText(segment)) {
+			boundaries = append(boundaries, originalRune)
+		}
+		offset += size
+	}
+	if len(boundaries) != utf8.RuneCountInString(folded)+1 {
+		boundaries = make([]int, foldedRunes+1)
+		for index := range boundaries {
+			boundaries[index] = min(index, originalRunes)
+		}
+	}
+	return boundaries
+}
+
 func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) {
 	first := ""
 	for _, term := range terms {
@@ -842,35 +896,58 @@ func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) 
 
 func snippetFor(value string, term string) string {
 	value = collapseSearchText(value)
-	return snippetForFolded(value, foldSearchText(value), foldSearchText(term))
+	return snippetForSearchText(newSearchTextRepresentations(value), term)
 }
 
 func snippetForFolded(value string, folded string, term string) string {
+	representations := searchTextRepresentations{
+		original:             value,
+		folded:               folded,
+		foldedRuneBoundaries: foldedRuneBoundaries(value, folded),
+	}
+	return snippetForSearchText(representations, term)
+}
+
+func snippetForSearchText(representations searchTextRepresentations, term string) string {
+	value := representations.original
 	if value == "" {
 		return ""
 	}
 	runeCount := utf8.RuneCountInString(value)
+	foldedRuneCount := utf8.RuneCountInString(representations.folded)
 	start := 0
 	if term != "" {
-		byteIndex := strings.Index(folded, term)
+		byteIndex := strings.Index(representations.folded, foldSearchText(term))
 		if byteIndex > 0 {
-			start = utf8.RuneCountInString(folded[:byteIndex]) - maximumSnippetRunes/3
+			start = utf8.RuneCountInString(representations.folded[:byteIndex]) - maximumSnippetRunes/3
 			if start < 0 {
 				start = 0
 			}
 		}
 	}
-	end := min(start+maximumSnippetRunes, runeCount)
+	end := min(start+maximumSnippetRunes, foldedRuneCount)
 	prefix := ""
 	suffix := ""
-	if start > 0 {
+	originalStart := originalRuneBoundary(representations.foldedRuneBoundaries, start)
+	originalEnd := originalRuneBoundary(representations.foldedRuneBoundaries, end)
+	if originalStart > 0 {
 		prefix = "…"
 	}
-	if end < runeCount {
+	if originalEnd < runeCount {
 		suffix = "…"
 	}
-	startByte, endByte := runeByteRangeFast(value, start, end)
+	startByte, endByte := runeByteRangeFast(value, originalStart, originalEnd)
 	return prefix + value[startByte:endByte] + suffix
+}
+
+func originalRuneBoundary(boundaries []int, foldedBoundary int) int {
+	if foldedBoundary < 0 {
+		return 0
+	}
+	if foldedBoundary >= len(boundaries) {
+		return boundaries[len(boundaries)-1]
+	}
+	return boundaries[foldedBoundary]
 }
 
 // runeByteRangeFast converts rune indices to byte indices in value.
@@ -920,28 +997,10 @@ func buildSearchText(item messageRecord, document mimeDocument) string {
 	return builder.String()
 }
 
-// buildLoweredSearchText builds the same collapsed search text as
-// buildSearchText with the shared Unicode search policy.
-// Part names are not sorted (not needed for matching, only for display).
+// buildLoweredSearchText builds the folded form from the exact original
+// representation used for snippets, including attachment-name ordering.
 func buildLoweredSearchText(item messageRecord, document mimeDocument) string {
-	var builder collapsedSearchTextBuilder
-	builder.Grow(searchTextCapacity(item, document))
-	for _, value := range []string{
-		item.Subject, item.SenderName, item.SenderAddress, item.SummaryText,
-	} {
-		builder.AddLowered(value)
-	}
-	for _, recipients := range [][]mail.Recipient{document.To, document.CC, document.BCC} {
-		for _, recipient := range recipients {
-			builder.AddLowered(recipient.Name)
-			builder.AddLowered(recipient.Address)
-		}
-	}
-	for _, part := range document.Parts {
-		builder.AddLowered(part.Name)
-	}
-	builder.AddLowered(document.Content)
-	return builder.String()
+	return buildSearchTextRepresentations(item, document).folded
 }
 
 func searchTextCapacity(item messageRecord, document mimeDocument) int {
