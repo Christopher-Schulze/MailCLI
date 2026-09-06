@@ -87,6 +87,106 @@ func TestSessionReuseDeleteSingleConnection(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestAcquireRejectsCanceledContextBeforeConnection(t *testing.T) {
+	client := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := client.acquire(ctx, transport.ImapConfig{})
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
+		t.Fatalf("acquire() code = %s, want %s: %v", code, transport.CodeIMAPTimeout, err)
+	}
+}
+
+func TestAcquireCancellationDuringContention(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+	client, cfg := newFakeClient(t, srv)
+	_, release, err := client.acquire(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("initial acquire: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, err = client.acquire(ctx, cfg)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
+		t.Fatalf("contended acquire() code = %s, want %s: %v", code, transport.CodeIMAPTimeout, err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("contended acquire() took %v after its deadline", elapsed)
+	}
+	release()
+}
+
+func TestAcquireCancellationAfterAcquisitionReleasesSession(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+	client, cfg := newFakeClient(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, release, err := client.acquire(ctx, cfg)
+	if err != nil {
+		t.Fatalf("initial acquire: %v", err)
+	}
+	cancel()
+	release()
+
+	nextCtx, nextCancel := context.WithTimeout(context.Background(), time.Second)
+	defer nextCancel()
+	_, nextRelease, err := client.acquire(nextCtx, cfg)
+	if err != nil {
+		t.Fatalf("acquire after canceled session: %v", err)
+	}
+	nextRelease()
+	if got := srv.ConnectionCount(); got != 2 {
+		t.Fatalf("connection count after canceled session = %d, want 2", got)
+	}
+}
+
+func TestCloseWaitsForAcquiredSession(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+	})
+	client, cfg := newFakeClient(t, srv)
+	_, release, err := client.acquire(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("initial acquire: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.Close() }()
+	select {
+	case err := <-closeDone:
+		release()
+		released = true
+		t.Fatalf("Close returned before session release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	released = true
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not complete after session release")
+	}
+}
+
 // sync --check style usage: N mailbox checks over one connection.
 func TestSessionReuseCheckStatusSingleConnection(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{

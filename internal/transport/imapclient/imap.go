@@ -60,11 +60,41 @@ type Client struct {
 
 	mu       sync.Mutex
 	sessions map[string]*pooledSession
+	gateOnce sync.Once
+	gate     chan struct{}
 }
 
 // New returns a new Client.
 func New() *Client {
 	return &Client{}
+}
+
+func (c *Client) initializeGate() {
+	c.gateOnce.Do(func() {
+		c.gate = make(chan struct{}, 1)
+		c.gate <- struct{}{}
+	})
+}
+
+func (c *Client) acquireGate(ctx context.Context) error {
+	c.initializeGate()
+	if err := ctx.Err(); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP pool acquisition")
+	}
+	select {
+	case <-ctx.Done():
+		return wrapIOError(ctx, ctx.Err(), transport.CodeIMAPTimeout, "IMAP pool acquisition")
+	case <-c.gate:
+		if err := ctx.Err(); err != nil {
+			c.releaseGate()
+			return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP pool acquisition")
+		}
+		return nil
+	}
+}
+
+func (c *Client) releaseGate() {
+	c.gate <- struct{}{}
 }
 
 // pooledSession wraps one authenticated connection with its selected mailbox
@@ -82,27 +112,33 @@ func sessionKey(cfg transport.ImapConfig) string {
 	return fmt.Sprintf("%s:%d/%s", cfg.Host, cfg.Port, cfg.Username)
 }
 
-// acquire returns the pooled session for cfg with the client mutex held.
-// Operations on one client are therefore serialized (CLI invocations are
-// sequential; library callers get safe sharing). The caller MUST call the
+// acquire returns the pooled session for cfg with the client operation gate
+// held. Operations on one client are therefore serialized (CLI invocations
+// are sequential; library callers get safe sharing). The caller MUST call the
 // returned release exactly once; it discards the session when the command
 // context expired (the watcher force-closed the connection) or the session is
-// dirty, and always unlocks.
+// dirty, and always releases the gate.
 func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooledSession, func(), error) {
-	c.mu.Lock()
+	if err := c.acquireGate(ctx); err != nil {
+		return nil, nil, err
+	}
 	key := sessionKey(cfg)
+	c.mu.Lock()
 	ps, ok := c.sessions[key]
+	c.mu.Unlock()
 	if !ok {
 		sess, err := c.connect(ctx, cfg)
 		if err != nil {
-			c.mu.Unlock()
+			c.releaseGate()
 			return nil, nil, err
 		}
 		ps = &pooledSession{sess: sess, key: key}
+		c.mu.Lock()
 		if c.sessions == nil {
 			c.sessions = make(map[string]*pooledSession)
 		}
 		c.sessions[key] = ps
+		c.mu.Unlock()
 	}
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	ps.cancelWatch = cancelWatch
@@ -114,19 +150,29 @@ func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooled
 		case <-watchCtx.Done():
 		}
 	}()
+	var releaseOnce sync.Once
 	release := func() {
-		cancelWatch()
-		if ctx.Err() != nil || ps.sess.dirty {
-			delete(c.sessions, ps.key)
-			_ = ps.sess.conn.Close()
-		}
-		c.mu.Unlock()
+		releaseOnce.Do(func() {
+			cancelWatch()
+			c.mu.Lock()
+			if ctx.Err() != nil || ps.sess.dirty {
+				delete(c.sessions, ps.key)
+				_ = ps.sess.conn.Close()
+			}
+			c.mu.Unlock()
+			c.releaseGate()
+		})
 	}
 	return ps, release, nil
 }
 
 // Close logs out of and closes every pooled session. Safe to call repeatedly.
 func (c *Client) Close() error {
+	if err := c.acquireGate(context.Background()); err != nil {
+		return err
+	}
+	defer c.releaseGate()
+
 	c.mu.Lock()
 	pooled := make([]*pooledSession, 0, len(c.sessions))
 	for _, ps := range c.sessions {
