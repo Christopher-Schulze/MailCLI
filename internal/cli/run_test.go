@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -750,6 +751,35 @@ func TestDraftsPruneRejectsSubDayOlderThan(t *testing.T) {
 	code = Run(context.Background(), service, []string{"drafts", "prune"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("default prune code = %d, stderr = %s", code, stderr.String())
+	}
+}
+
+func TestDraftsPruneRejectsDurationOverflow(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	tooLarge := strconv.FormatInt(maxPruneAgeDays+1, 10)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(context.Background(), service, []string{
+		"drafts", "prune", "--older-than", tooLarge, "--confirm", "--json",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("overflowing prune code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"code":"invalid_argument"`) ||
+		!strings.Contains(stdout.String(), tooLarge) ||
+		!strings.Contains(stdout.String(), strconv.FormatInt(maxPruneAgeDays, 10)) {
+		t.Fatalf("overflowing prune response = %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	maximum := strconv.FormatInt(maxPruneAgeDays, 10)
+	code = Run(context.Background(), service, []string{
+		"drafts", "prune", "--older-than", maximum, "--confirm", "--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("maximum prune code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 

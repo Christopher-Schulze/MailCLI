@@ -12,6 +12,8 @@ import (
 const (
 	maximumDraftInputBytes = 16 * 1024 * 1024
 	draftSendTimeout       = 15 * time.Minute
+	pruneDayDuration       = 24 * time.Hour
+	maxPruneAgeDays        = int64((1<<63 - 1) / int64(pruneDayDuration))
 )
 
 type commandError struct {
@@ -225,8 +227,17 @@ func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stder
 			),
 		}, stdout, stderr)
 	}
+	if int64(*olderThan) > maxPruneAgeDays {
+		return failCommand("drafts.prune", *jsonOutput, &commandError{
+			code: "invalid_argument",
+			message: fmt.Sprintf(
+				"--older-than must be at most %d days to fit the supported duration (got %d)",
+				maxPruneAgeDays, *olderThan,
+			),
+		}, stdout, stderr)
+	}
 	result, err := service.PruneDrafts(mail.PruneDraftsRequest{
-		OlderThan: time.Duration(*olderThan) * 24 * time.Hour,
+		OlderThan: time.Duration(*olderThan) * pruneDayDuration,
 		Confirm:   *confirm,
 	})
 	if err != nil {

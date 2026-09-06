@@ -151,6 +151,8 @@ The native release is linker ad-hoc signed but not Apple-notarized because the r
 
 ## Scope
 
+`drafts prune --older-than` accepts 1 through 106,751 days, the largest whole-day value representable by a positive `time.Duration`; larger values fail as `invalid_argument` before scanning or deleting drafts.
+
 The supported scope is every active account and every mailbox represented consistently by Mail's Envelope Index and mailbox catalog, including Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested Gmail labels. `mailboxes resolve` accepts one exact `--path` segment per hierarchy level, so localized folders such as `Gesendet` and `Entwürfe` require no guessed identifier. Full and partial local message sources are reported truthfully. A targeted IMAP FETCH may hydrate one uncached body or a missing attachment without launching Mail.app; attachment hydration uses the capped full-message fallback until a part-scoped fetch is proven safe.
 
 The implemented surface includes account and mailbox discovery, paginated listing, normalized and streamed raw reading, received-attachment inspection and saving, cross-mailbox search, local plain/Markdown/HTML draft creation, preview, editor-based update, visible new-draft handoff, reply, reply-all, forward, native-draft inspection, autonomous SMTP/IMAP draft sending with IMAP Sent mirroring, copy, move, delete, read/unread, flag/unflag, junk state, and account synchronization. Mail 16 scripted draft export remains explicitly unavailable.
