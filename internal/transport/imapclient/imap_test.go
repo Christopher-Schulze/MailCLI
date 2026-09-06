@@ -625,6 +625,87 @@ func TestSearchUIDReportsDuplicateMatches(t *testing.T) {
 	}
 }
 
+func TestSearchUIDRejectsMalformedResponses(t *testing.T) {
+	tests := []struct {
+		name     string
+		response []string
+		wantCode string
+		dirty    bool
+	}{
+		{
+			name:     "mixed invalid token",
+			response: []string{"* SEARCH 41 invalid", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "overflow",
+			response: []string{"* SEARCH 18446744073709551616", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "zero UID",
+			response: []string{"* SEARCH 0", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "duplicate UID",
+			response: []string{"* SEARCH 41 41", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "multiple SEARCH responses",
+			response: []string{"* SEARCH 41", "* SEARCH 77", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "invalid SEARCH prefix",
+			response: []string{"* SEARCHING 41", "<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "missing SEARCH response",
+			response: []string{"<tag> OK completed"},
+			wantCode: transport.CodeIMAPResponseMalformed,
+			dirty:    true,
+		},
+		{
+			name:     "tagged failure",
+			response: []string{"<tag> BAD invalid search"},
+			wantCode: transport.CodeIMAPMutationFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newFakeServer(t, fakeServerConfig{
+				authOK:            true,
+				otherMboxes:       []string{"INBOX"},
+				uidSearchResponse: test.response,
+			})
+			client, cfg := newFakeClient(t, srv)
+			_, _, _, err := client.SearchUID(
+				context.Background(), cfg, "INBOX", "<malformed@example.com>",
+			)
+			if code := transport.ErrorCode(err); code != test.wantCode {
+				t.Fatalf("SearchUID() code = %s, want %s: %v", code, test.wantCode, err)
+			}
+			if test.dirty {
+				if _, err := client.ListMailboxes(context.Background(), cfg); err != nil {
+					t.Fatalf("ListMailboxes after malformed SEARCH: %v", err)
+				}
+				if got := srv.ConnectionCount(); got < 2 {
+					t.Fatalf("connection count after malformed SEARCH = %d, want reconnect", got)
+				}
+			}
+		})
+	}
+}
+
 func TestSetFlags(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,

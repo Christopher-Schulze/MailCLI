@@ -29,6 +29,7 @@ type fakeServerConfig struct {
 	searchMatchID       string
 	searchUID           uint32
 	searchUIDs          []uint32
+	uidSearchResponse   []string
 	appendOK            bool
 	searchDelay         time.Duration
 	moveSupported       bool
@@ -314,6 +315,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 			subCmd := strings.ToUpper(args[0])
 			switch subCmd {
 			case "SEARCH":
+				if len(s.config.uidSearchResponse) > 0 {
+					for _, responseLine := range s.config.uidSearchResponse {
+						s.writeLine(bw, strings.ReplaceAll(responseLine, "<tag>", tag))
+					}
+					continue
+				}
 				if len(args) == 2 && strings.EqualFold(args[1], "DELETED") {
 					uids := s.DeletedUIDs()
 					values := make([]string, len(uids))

@@ -1128,6 +1128,8 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 	}
 
 	var uids []uint32
+	seenSearch := false
+	seenUIDs := make(map[uint32]struct{})
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
@@ -1136,6 +1138,9 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 		if strings.HasPrefix(line, tag+" ") {
 			status := parseStatus(line, tag)
 			if status == "OK" {
+				if !seenSearch {
+					return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH completed without a SEARCH response")
+				}
 				return uids, nil
 			}
 			return nil, &transport.TransportError{
@@ -1144,20 +1149,44 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 			}
 		}
 		if strings.HasPrefix(line, "* SEARCH") {
+			if line != "* SEARCH" && !strings.HasPrefix(line, "* SEARCH ") {
+				return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH response has an invalid SEARCH prefix")
+			}
+			if seenSearch {
+				return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH returned multiple SEARCH responses")
+			}
+			seenSearch = true
 			fields := strings.Fields(line)
 			for _, field := range fields[2:] {
-				if uid, err := strconv.ParseUint(field, 10, 32); err == nil {
-					if len(uids) >= maxUIDSearchResults {
-						sess.dirty = true
-						return nil, &transport.TransportError{
-							Code:    transport.CodeIMAPResponseMalformed,
-							Message: fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
-						}
-					}
-					uids = append(uids, uint32(uid))
+				uid, parseErr := strconv.ParseUint(field, 10, 32)
+				if parseErr != nil || uid == 0 {
+					return nil, malformedUIDSearchResponse(
+						sess, fmt.Sprintf("IMAP UID SEARCH returned invalid UID %q", field),
+					)
 				}
+				if len(uids) >= maxUIDSearchResults {
+					return nil, malformedUIDSearchResponse(
+						sess, fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
+					)
+				}
+				parsedUID := uint32(uid)
+				if _, duplicate := seenUIDs[parsedUID]; duplicate {
+					return nil, malformedUIDSearchResponse(
+						sess, fmt.Sprintf("IMAP UID SEARCH returned duplicate UID %d", parsedUID),
+					)
+				}
+				seenUIDs[parsedUID] = struct{}{}
+				uids = append(uids, parsedUID)
 			}
 		}
+	}
+}
+
+func malformedUIDSearchResponse(sess *session, message string) error {
+	sess.dirty = true
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPResponseMalformed,
+		Message: message,
 	}
 }
 
