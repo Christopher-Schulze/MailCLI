@@ -1207,10 +1207,19 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}, nil
 }
 
-// checkUIDValidity rejects a mutation before it runs when the mailbox was
-// rebuilt between the SEARCH that resolved the UID and this SELECT: the
-// stored UID would address a different message.
+// checkUIDValidity rejects an identity-sensitive operation before it runs when
+// the mailbox was rebuilt or UIDVALIDITY is unknown: the stored UID may
+// address a different message.
 func checkUIDValidity(expected, observed uint32) error {
+	if expected == 0 || observed == 0 {
+		return &transport.TransportError{
+			Code: transport.CodeIMAPUIDValidityUnknown,
+			Message: fmt.Sprintf(
+				"mailbox UIDVALIDITY is unknown (expected %d, observed %d); refusing the operation; refresh mailbox state and rerun the command",
+				expected, observed,
+			),
+		}
+	}
 	if expected != 0 && observed != 0 && expected != observed {
 		return &transport.TransportError{
 			Code: "mailbox_uidvalidity_changed",

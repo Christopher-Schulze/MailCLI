@@ -924,6 +924,50 @@ func TestMutationFailsClosedOnUIDValidityChange(t *testing.T) {
 	}
 }
 
+func TestCheckUIDValidityRejectsUnknown(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected uint32
+		observed uint32
+	}{
+		{name: "both unknown", expected: 0, observed: 0},
+		{name: "expected unknown", expected: 0, observed: 12345},
+		{name: "observed unknown", expected: 12345, observed: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := checkUIDValidity(test.expected, test.observed)
+			if transport.ErrorCode(err) != transport.CodeIMAPUIDValidityUnknown {
+				t.Fatalf("checkUIDValidity(%d, %d) = %v, want %s", test.expected, test.observed, err, transport.CodeIMAPUIDValidityUnknown)
+			}
+		})
+	}
+}
+
+func TestMutationFailsClosedOnUnknownUIDValidity(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:          true,
+		otherMboxes:     []string{"INBOX"},
+		omitUIDValidity: true,
+	})
+	host, portStr, _ := net.SplitHostPort(srv.Addr())
+	port, _ := strconv.Atoi(portStr)
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	_, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil)
+	if transport.ErrorCode(err) != transport.CodeIMAPUIDValidityUnknown {
+		t.Fatalf("SetFlags error = %v, want %s", err, transport.CodeIMAPUIDValidityUnknown)
+	}
+	srv.mu.Lock()
+	storeCalled := srv.storeCalled
+	srv.mu.Unlock()
+	if storeCalled {
+		t.Fatal("STORE ran despite unknown UIDVALIDITY")
+	}
+}
+
 func TestMutationMatchingUIDValidityProceeds(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,

@@ -38,6 +38,7 @@ type fakeServerConfig struct {
 	fetchResponseUID    uint32
 	selectFailBox       string
 	dropAfterCommands   int
+	omitUIDValidity     bool
 	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
 	// first report this UIDVALIDITY instead of 12345, simulating a mailbox
 	// rebuild between resolution and mutation.
@@ -227,7 +228,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				uidvalidity = s.config.changedUIDValidityValue
 			}
 			s.writeLine(bw, "* FLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)")
-			s.writeLine(bw, fmt.Sprintf("* OK [UIDVALIDITY %d] UIDs valid", uidvalidity))
+			if !s.config.omitUIDValidity {
+				s.writeLine(bw, fmt.Sprintf("* OK [UIDVALIDITY %d] UIDs valid", uidvalidity))
+			}
 			s.writeLine(bw, "* 0 EXISTS")
 			s.writeLine(bw, "* 0 RECENT")
 			s.writeLine(bw, tag+" OK [READ-WRITE] SELECT completed")
