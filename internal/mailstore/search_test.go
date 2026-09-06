@@ -685,6 +685,154 @@ func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	}
 }
 
+func TestBudgetLimitedBodySearchResumesAtLastClassifiedCandidate(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	_, source, err := store.openMessageSource(context.Background(), messageRef)
+	if err != nil {
+		t.Fatalf("openMessageSource() error = %v", err)
+	}
+	maxBytes := source.length
+	if err := source.Close(); err != nil {
+		t.Fatalf("closeMessageSource() error = %v", err)
+	}
+	first, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: maxBytes,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	firstPage, err := store.SearchMessages(context.Background(), first)
+	if err != nil {
+		t.Fatalf("SearchMessages(first) error = %v", err)
+	}
+	if len(firstPage.Messages) != 1 || firstPage.Messages[0].Summary.Subject != "Quarterly Report" {
+		t.Fatalf("first page = %#v, want only the first match", firstPage)
+	}
+	if firstPage.Coverage.Complete || firstPage.NextCursor == "" {
+		t.Fatalf("first page = %#v, want incomplete continuation", firstPage)
+	}
+	cursor, err := mail.DecodeSearchCursor(firstPage.NextCursor, first.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	if cursor.RowID != 101 {
+		t.Fatalf("cursor row = %d, want last fully classified row 101", cursor.RowID)
+	}
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: maxBytes,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	nextPage, err := store.SearchMessages(context.Background(), next)
+	if err != nil {
+		t.Fatalf("SearchMessages(next) error = %v", err)
+	}
+	if len(nextPage.Messages) != 1 || nextPage.Messages[0].Summary.Subject != "Status Update" {
+		t.Fatalf("next page = %#v, want the previously budget-blocked match", nextPage)
+	}
+	if !nextPage.Coverage.Complete || nextPage.NextCursor != "" {
+		t.Fatalf("next page = %#v, want complete final page", nextPage)
+	}
+}
+
+func TestCandidateLimitedBodySearchResumesWithoutMatches(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	first, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "does-not-exist", Limit: 10, MaxMessages: 2,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	firstPage, err := store.SearchMessages(context.Background(), first)
+	if err != nil {
+		t.Fatalf("SearchMessages(first) error = %v", err)
+	}
+	if len(firstPage.Messages) != 0 || firstPage.Coverage.Complete || firstPage.NextCursor == "" {
+		t.Fatalf("first page = %#v, want incomplete cursor with zero matches", firstPage)
+	}
+	cursor, err := mail.DecodeSearchCursor(firstPage.NextCursor, first.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	if cursor.RowID != 102 {
+		t.Fatalf("cursor row = %d, want candidate-limit boundary row 102", cursor.RowID)
+	}
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "does-not-exist", Limit: 10, MaxMessages: 2,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	nextPage, err := store.SearchMessages(context.Background(), next)
+	if err != nil {
+		t.Fatalf("SearchMessages(next) error = %v", err)
+	}
+	if len(nextPage.Messages) != 0 || !nextPage.Coverage.Complete || nextPage.NextCursor != "" {
+		t.Fatalf("next page = %#v, want complete empty final page", nextPage)
+	}
+}
+
+func TestByteLimitedBodySearchRetriesFirstCandidateInclusively(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	first, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	firstPage, err := store.SearchMessages(context.Background(), first)
+	if err != nil {
+		t.Fatalf("SearchMessages(first) error = %v", err)
+	}
+	if len(firstPage.Messages) != 0 || firstPage.Coverage.Complete || firstPage.NextCursor == "" {
+		t.Fatalf("first page = %#v, want incomplete inclusive cursor", firstPage)
+	}
+	cursor, err := mail.DecodeSearchCursor(firstPage.NextCursor, first.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	if !cursor.Inclusive || cursor.RowID != 101 {
+		t.Fatalf("cursor = %+v, want inclusive row 101", cursor)
+	}
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	nextPage, err := store.SearchMessages(context.Background(), next)
+	if err != nil {
+		t.Fatalf("SearchMessages(next) error = %v", err)
+	}
+	if len(nextPage.Messages) != 0 || nextPage.NextCursor == "" {
+		t.Fatalf("next page = %#v, want the same blocked candidate to remain resumable", nextPage)
+	}
+	nextCursor, err := mail.DecodeSearchCursor(nextPage.NextCursor, next.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor(next) error = %v", err)
+	}
+	if !nextCursor.Inclusive || nextCursor.RowID != cursor.RowID {
+		t.Fatalf("next cursor = %+v, want unchanged inclusive boundary", nextCursor)
+	}
+}
+
 // The candidate stream yields strictly-descending (date_received, ROWID)
 // tuples: a max-messages bound that cuts mid-corpus keeps the covered
 // prefix and reports incomplete, and the exact boundary

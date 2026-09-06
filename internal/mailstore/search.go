@@ -43,6 +43,8 @@ type candidateScan struct {
 	// catalogProven marks an attachment-only match decided by the
 	// AttachmentCount catalog without opening the source.
 	catalogProven bool
+	processed     bool
+	budgetLimited bool
 }
 
 type searchJob struct {
@@ -208,10 +210,20 @@ func appendScalarFilters(where *[]string, arguments *[]any, prepared mail.Prepar
 	}
 	if prepared.Cursor != nil {
 		if prepared.Cursor.ReceivedAtNull {
-			*where = append(*where, "m.date_received IS NULL AND m.ROWID < ?")
+			rowOperator := "<"
+			if prepared.Cursor.Inclusive {
+				rowOperator = "<="
+			}
+			*where = append(*where, "m.date_received IS NULL AND m.ROWID "+rowOperator+" ?")
 			*arguments = append(*arguments, prepared.Cursor.RowID)
 		} else {
-			*where = append(*where, "((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)")
+			rowOperator := "<"
+			if prepared.Cursor.Inclusive {
+				rowOperator = "<="
+			}
+			*where = append(*where,
+				"((m.date_received < ? OR (m.date_received = ? AND m.ROWID "+rowOperator+" ?)) OR m.date_received IS NULL)",
+			)
 			*arguments = append(*arguments, prepared.Cursor.ReceivedAt, prepared.Cursor.ReceivedAt, prepared.Cursor.RowID)
 		}
 	}
@@ -416,6 +428,12 @@ func (s *Store) scanSearchRecordsChunked(
 	var reservedBytes int64
 	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
 	loaded := 0
+	// progressCount tracks candidates fully classified by the scan. A
+	// candidate that exceeds the byte budget is deliberately not advanced:
+	// the next page gets a fresh budget and can retry it.
+	progressCount := 0
+	var lastScanned *messageRecord
+	var budgetCandidate *messageRecord
 chunkLoop:
 	for loaded < maximum && len(results) <= prepared.Query.Limit {
 		chunkWant := min(candidateChunkSize, maximum-loaded)
@@ -426,6 +444,7 @@ chunkLoop:
 		if len(items) == 0 {
 			break
 		}
+		chunkStart := loaded
 		loaded += len(items)
 		for start := 0; start < len(items) && len(results) <= prepared.Query.Limit; {
 			matchesBefore := len(results)
@@ -441,6 +460,13 @@ chunkLoop:
 				coverage.Complete = false
 			}
 			for index, scan := range scans {
+				if scan.processed && chunkStart+start+index+1 > progressCount {
+					progressCount = chunkStart + start + index + 1
+					lastScanned = &items[start+index]
+				}
+				if scan.budgetLimited {
+					budgetCandidate = &items[start+index]
+				}
 				mergeSearchCoverage(&coverage, scan)
 				if !scan.match {
 					continue
@@ -479,11 +505,26 @@ chunkLoop:
 		coverage.Complete = false
 	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
-	if hasMore && len(results) > 0 {
+	var cursorItem *messageRecord
+	cursorInclusive := false
+	if hasMore && len(resultItems) > 0 {
+		cursorItem = &resultItems[len(resultItems)-1]
+	} else if total > progressCount {
+		cursorItem = lastScanned
+		if cursorItem == nil {
+			cursorItem = budgetCandidate
+			cursorInclusive = cursorItem != nil
+		}
+	}
+	if cursorItem != nil {
 		var err error
-		page.NextCursor, err = searchCursorFor(
-			resultItems[len(resultItems)-1], prepared.Fingerprint, s.storeUUID,
-		)
+		if cursorInclusive {
+			page.NextCursor, err = searchCursorForInclusive(
+				*cursorItem, prepared.Fingerprint, s.storeUUID,
+			)
+		} else {
+			page.NextCursor, err = searchCursorFor(*cursorItem, prepared.Fingerprint, s.storeUUID)
+		}
 		return page, err
 	}
 	return page, nil
@@ -637,14 +678,14 @@ func (s *Store) dispatchSearchJobs(
 		if len(terms) == 0 && hasAttachment != nil {
 			if *hasAttachment && item.AttachmentCount > 0 {
 				results[index] = candidateScan{
-					match: true, attachments: item.AttachmentCount,
+					match: true, attachments: item.AttachmentCount, processed: true,
 					contentWhole: true, catalogProven: true,
 				}
 				continue
 			}
 			if !*hasAttachment && item.AttachmentCount > 0 {
 				results[index] = candidateScan{
-					match: false, attachments: item.AttachmentCount,
+					match: false, attachments: item.AttachmentCount, processed: true,
 					contentWhole: true, catalogProven: true,
 				}
 				continue
@@ -655,6 +696,7 @@ func (s *Store) dispatchSearchJobs(
 			return false, err
 		}
 		if source == nil {
+			unavailable.processed = true
 			unavailable.attachments = item.AttachmentCount
 			unavailable.match = len(terms) == 0 && hasAttachment != nil &&
 				*hasAttachment && item.AttachmentCount > 0
@@ -665,6 +707,7 @@ func (s *Store) dispatchSearchJobs(
 			if err := source.Close(); err != nil {
 				return false, fmt.Errorf("close byte-limited search source: %w", err)
 			}
+			results[index] = candidateScan{budgetLimited: true}
 			return true, nil
 		}
 		select {
@@ -732,7 +775,8 @@ func scanCandidate(
 			*hasAttachment && item.AttachmentCount > 0
 		return candidateScan{
 			match: knownAttachmentMatch, attachments: item.AttachmentCount,
-			bytes: source.length, partial: source.partial, full: !source.partial, contentWhole: false,
+			bytes: source.length, partial: source.partial, full: !source.partial,
+			contentWhole: false, processed: true,
 		}, nil
 	}
 	match := true
@@ -761,6 +805,7 @@ func scanCandidate(
 		match: match, snippet: snippet, bytes: source.length,
 		attachments: attachmentCount,
 		partial:     source.partial, full: !source.partial, contentWhole: document.Complete,
+		processed: true,
 	}, nil
 }
 
@@ -974,6 +1019,12 @@ func runeByteRangeFast(value string, startRune int, endRune int) (int, int) {
 
 func searchCursorFor(item messageRecord, fingerprint string, storeUUID string) (string, error) {
 	return mail.EncodeSearchCursor(fingerprint, storeUUID, item.DateReceived, item.DateReceivedNull, item.RowID)
+}
+
+func searchCursorForInclusive(item messageRecord, fingerprint string, storeUUID string) (string, error) {
+	return mail.EncodeSearchCursorInclusive(
+		fingerprint, storeUUID, item.DateReceived, item.DateReceivedNull, item.RowID,
+	)
 }
 
 func buildSearchText(item messageRecord, document mimeDocument) string {

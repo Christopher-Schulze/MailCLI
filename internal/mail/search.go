@@ -74,6 +74,7 @@ type SearchCursor struct {
 	ReceivedAt     int64  `json:"received_at"`
 	ReceivedAtNull bool   `json:"received_at_null"`
 	RowID          int64  `json:"row_id"`
+	Inclusive      bool   `json:"inclusive,omitempty"`
 }
 
 type Searcher interface {
@@ -144,9 +145,31 @@ func PrepareQuery(query Query) (PreparedQuery, error) {
 }
 
 func EncodeSearchCursor(fingerprint string, storeUUID string, receivedAt int64, receivedAtNull bool, rowID int64) (string, error) {
+	return encodeSearchCursor(fingerprint, storeUUID, receivedAt, receivedAtNull, rowID, false)
+}
+
+func EncodeSearchCursorInclusive(
+	fingerprint string,
+	storeUUID string,
+	receivedAt int64,
+	receivedAtNull bool,
+	rowID int64,
+) (string, error) {
+	return encodeSearchCursor(fingerprint, storeUUID, receivedAt, receivedAtNull, rowID, true)
+}
+
+func encodeSearchCursor(
+	fingerprint string,
+	storeUUID string,
+	receivedAt int64,
+	receivedAtNull bool,
+	rowID int64,
+	inclusive bool,
+) (string, error) {
 	payload, err := json.Marshal(SearchCursor{
 		Version: searchCursorVersion, Fingerprint: fingerprint, StoreUUID: storeUUID,
 		ReceivedAt: receivedAt, ReceivedAtNull: receivedAtNull, RowID: rowID,
+		Inclusive: inclusive,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode search cursor: %w", err)

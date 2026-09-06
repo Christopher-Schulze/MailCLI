@@ -34,6 +34,20 @@ func TestEncodeSearchCursorRoundtrip(t *testing.T) {
 	}
 }
 
+func TestEncodeSearchCursorInclusiveRoundtrip(t *testing.T) {
+	encoded, err := EncodeSearchCursorInclusive("fp", "store", 1700000000, false, 42)
+	if err != nil {
+		t.Fatalf("EncodeSearchCursorInclusive error = %v", err)
+	}
+	cursor, err := DecodeSearchCursor(encoded, "fp")
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor error = %v", err)
+	}
+	if !cursor.Inclusive {
+		t.Fatal("Inclusive = false, want true")
+	}
+}
+
 func TestDecodeSearchCursorRejectsMissingPrefix(t *testing.T) {
 	_, err := DecodeSearchCursor("no-prefix-here", "abc")
 	if err == nil {
