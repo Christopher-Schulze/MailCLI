@@ -50,6 +50,7 @@ type fakeServerConfig struct {
 	// payload bytes, simulating an oversized message.
 	hugeFetchBytes int
 	hugeFetchDone  bool
+	statusResponse string
 }
 
 type fakeServer struct {
@@ -296,6 +297,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 			mbox := ""
 			if len(args) > 0 {
 				mbox = args[0]
+			}
+			if s.config.statusResponse != "" {
+				_, _ = bw.WriteString(strings.ReplaceAll(s.config.statusResponse, "<tag>", tag))
+				_ = bw.Flush()
+				continue
 			}
 			s.writeLine(bw, fmt.Sprintf(`* STATUS %s (MESSAGES 42 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345)`, quoteIMAP(mbox)))
 			s.writeLine(bw, tag+" OK STATUS completed")

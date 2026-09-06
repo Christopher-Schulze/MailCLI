@@ -1237,6 +1237,112 @@ func TestCheckStatus(t *testing.T) {
 	}
 }
 
+func TestCheckStatusStrictResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		mailbox   string
+		response  string
+		wantError string
+		dirty     bool
+	}{
+		{
+			name:    "reordered escaped mailbox",
+			mailbox: `IN\BOX`,
+			response: "* STATUS \"IN\\\\BOX\" (UIDVALIDITY 12345 MESSAGES 42 UIDNEXT 100 UNSEEN 3)\r\n" +
+				"<tag> OK STATUS completed\r\n",
+		},
+		{
+			name: "literal mailbox",
+			response: "* STATUS {5}\r\nINBOX (UIDNEXT 100 UIDVALIDITY 12345 MESSAGES 42 UNSEEN 3)\r\n" +
+				"<tag> OK STATUS completed\r\n",
+		},
+		{
+			name:      "missing field",
+			response:  "* STATUS INBOX (MESSAGES 42 UNSEEN 3 UIDNEXT 100)\r\n<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name: "duplicate field",
+			response: "* STATUS INBOX (MESSAGES 42 MESSAGES 42 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345)\r\n" +
+				"<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name: "unknown field",
+			response: "* STATUS INBOX (MESSAGES 42 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345 HIGHESTMODSEQ 9)\r\n" +
+				"<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name:      "overflow",
+			response:  "* STATUS INBOX (MESSAGES 18446744073709551616 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345)\r\n<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name:      "malformed item list",
+			response:  "* STATUS INBOX MESSAGES 42\r\n<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name: "mailbox mismatch",
+			response: "* STATUS Archive (MESSAGES 42 UNSEEN 3 UIDNEXT 100 UIDVALIDITY 12345)\r\n" +
+				"<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name:      "missing status response",
+			response:  "<tag> OK STATUS completed\r\n",
+			wantError: transport.CodeIMAPResponseMalformed,
+			dirty:     true,
+		},
+		{
+			name:      "tagged failure",
+			response:  "<tag> NO STATUS failed\r\n",
+			wantError: transport.CodeIMAPMailboxNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newFakeServer(t, fakeServerConfig{
+				authOK:         true,
+				otherMboxes:    []string{"INBOX"},
+				statusResponse: test.response,
+			})
+			client, cfg := newFakeClient(t, srv)
+			mailbox := test.mailbox
+			if mailbox == "" {
+				mailbox = "INBOX"
+			}
+			status, err := client.CheckStatus(context.Background(), cfg, mailbox)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("CheckStatus() error = %v", err)
+				}
+				if status.Messages != 42 || status.Unseen != 3 ||
+					status.UIDNext != 100 || status.UIDValidity != 12345 {
+					t.Fatalf("CheckStatus() = %+v", status)
+				}
+			} else if code := transport.ErrorCode(err); code != test.wantError {
+				t.Fatalf("CheckStatus() code = %s, want %s: %v", code, test.wantError, err)
+			}
+			if test.dirty {
+				if _, err := client.ListMailboxes(context.Background(), cfg); err != nil {
+					t.Fatalf("ListMailboxes after malformed STATUS: %v", err)
+				}
+				if got := srv.ConnectionCount(); got < 2 {
+					t.Fatalf("connection count after malformed STATUS = %d, want reconnect", got)
+				}
+			}
+		})
+	}
+}
+
 func TestAppendToSentNoDoubleCloseOnCancel(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:     true,
