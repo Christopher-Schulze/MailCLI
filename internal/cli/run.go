@@ -187,7 +187,9 @@ func draftCommandRequired(args []string) bool {
 }
 
 func draftSignalRequired(args []string) bool {
-	return len(args) > 0 && (args[0] == "edit" || args[0] == "handoff") && !helpOnly(args[1:])
+	return len(args) > 0 &&
+		(args[0] == "edit" || args[0] == "handoff" || args[0] == "save" || args[0] == "send") &&
+		!helpOnly(args[1:])
 }
 
 func draftHandoffRequired(args []string) bool {

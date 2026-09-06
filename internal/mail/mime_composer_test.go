@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -8,6 +9,16 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestComposeMessageSpoolContextStopsCanceledWork(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ComposeMessageSpoolContext(ctx, Draft{}, "<canceled@example.com>")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ComposeMessageSpoolContext() error = %v, want context.Canceled", err)
+	}
+}
 
 func TestComposerErrorErrorWithInner(t *testing.T) {
 	inner := errors.New("disk full")

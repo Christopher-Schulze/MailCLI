@@ -113,6 +113,49 @@ func TestMissingGatewayRejectsComposeWithoutPanicking(t *testing.T) {
 	}
 }
 
+func TestSendDraftStopsWhenContextIsCanceledBeforeStart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := service.SendDraft(ctx, draft.Ref); errorCode(err) != "draft_operation_canceled" {
+		t.Fatalf("SendDraft() error = %v, want draft_operation_canceled", err)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("transport calls = submitter %d, mirror %d, want zero", submitter.calls, mirror.calls)
+	}
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("GetDraft() after canceled send = %v", err)
+	}
+}
+
+func TestSaveDraftStopsWhenContextIsCanceledBeforeStart(t *testing.T) {
+	gateway := &draftGateway{}
+	service := NewServiceWithDraftRoot(gateway, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "mail@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Canceled save", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := service.SaveDraft(ctx, draft.Ref); errorCode(err) != "draft_operation_canceled" {
+		t.Fatalf("SaveDraft() error = %v, want draft_operation_canceled", err)
+	}
+	if gateway.saves != 0 {
+		t.Fatalf("gateway saves = %d, want zero", gateway.saves)
+	}
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("GetDraft() after canceled save = %v", err)
+	}
+}
+
 func TestPrepareDraftHandoffRejectsUnsupportedSemantics(t *testing.T) {
 	tests := []struct {
 		name  string

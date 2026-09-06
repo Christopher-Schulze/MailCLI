@@ -21,10 +21,11 @@ type stubSubmitter struct {
 	lastMessage []byte
 	evidence    transport.SubmitEvidence
 	err         error
+	submitHook  func(context.Context)
 }
 
 func (s *stubSubmitter) Submit(
-	_ context.Context,
+	ctx context.Context,
 	cfg transport.SubmitConfig,
 	from string,
 	rcpts []string,
@@ -38,6 +39,9 @@ func (s *stubSubmitter) Submit(
 		if end := strings.IndexByte(line, '\r'); end >= 0 {
 			s.evidence.MessageID = strings.TrimSpace(line[:end])
 		}
+	}
+	if s.submitHook != nil {
+		s.submitHook(ctx)
 	}
 	return s.evidence, s.err
 }
@@ -65,20 +69,24 @@ func (s *streamingSubmitter) SubmitReader(
 }
 
 type stubMirror struct {
-	calls    int
-	lastID   string
-	evidence transport.AppendEvidence
-	err      error
+	calls      int
+	lastID     string
+	evidence   transport.AppendEvidence
+	err        error
+	appendHook func(context.Context)
 }
 
 func (s *stubMirror) AppendToSent(
-	_ context.Context,
+	ctx context.Context,
 	_ transport.ImapConfig,
 	_ []byte,
 	messageID string,
 ) (transport.AppendEvidence, error) {
 	s.calls++
 	s.lastID = messageID
+	if s.appendHook != nil {
+		s.appendHook(ctx)
+	}
 	return s.evidence, s.err
 }
 
@@ -222,6 +230,31 @@ func TestSendDraftRetainsUnknownSMTPOutcome(t *testing.T) {
 	}
 }
 
+func TestSendDraftRetainsClaimWhenContextIsCanceledDuringUnknownSubmission(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	ctx, cancel := context.WithCancel(context.Background())
+	submitter.submitHook = func(context.Context) {
+		cancel()
+	}
+	submitter.err = &transport.SubmissionError{
+		Stage: "final_reply",
+		Err:   &transport.TransportError{Code: transport.CodeSMTPTimeout, Message: "SMTP final reply timed out"},
+	}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	result, err := service.SendDraft(ctx, draft.Ref)
+	if errorCode(err) != transport.CodeSMTPSubmissionUnknown ||
+		result.Outcome != SendOutcomeUnknown || !result.DraftRetained {
+		t.Fatalf("SendDraft() = %+v, error = %v, want retained unknown outcome", result, err)
+	}
+	retained, getErr := service.GetDraft(draft.Ref)
+	if getErr != nil || retained.SendAttempt == nil {
+		t.Fatalf("retained draft = %+v, error = %v", retained, getErr)
+	}
+}
+
 func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()
@@ -247,6 +280,29 @@ func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 		t.Fatal("sent draft still exists")
 	}
 	assertNoSendClaim(t, root, draft.Ref)
+}
+
+func TestSendDraftRetainsClaimWhenContextIsCanceledDuringMirror(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	ctx, cancel := context.WithCancel(context.Background())
+	mirror.appendHook = func(context.Context) {
+		cancel()
+	}
+	mirror.err = errors.New("mirror canceled")
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	result, err := service.SendDraft(ctx, draft.Ref)
+	if errorCode(err) != "send_mirror_pending" ||
+		result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained {
+		t.Fatalf("SendDraft() = %+v, error = %v, want retained mirror-pending outcome", result, err)
+	}
+	retained, getErr := service.GetDraft(draft.Ref)
+	if getErr != nil || retained.SendAttempt == nil ||
+		retained.SendAttempt.Outcome != SendOutcomeMirrorPending {
+		t.Fatalf("retained draft = %+v, error = %v", retained, getErr)
+	}
 }
 
 func TestSendDraftWithoutTransportIsRejected(t *testing.T) {

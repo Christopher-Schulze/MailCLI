@@ -347,15 +347,20 @@ func (s *Service) DiscardDraft(ref string) (resultErr error) {
 }
 
 func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult, resultErr error) {
+	if err := draftContextError(ctx, "send"); err != nil {
+		return SendResult{}, err
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return SendResult{}, err
 	}
 	lease, err := acquireDraftLease(ctx, root, ref)
 	if err != nil {
-		return SendResult{}, err
+		return SendResult{}, classifyDraftContextError(ctx, err, "send")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+	defer func() {
+		resultErr = errors.Join(classifyDraftContextError(ctx, resultErr, "send"), lease.release())
+	}()
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SendResult{}, err
@@ -381,7 +386,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if draft.Kind == DraftKindForward && len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
 		return SendResult{}, validationError("sending a forward draft requires at least one explicit recipient")
 	}
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return SendResult{}, err
 	}
 	if err := s.send.available(); err != nil {
@@ -403,7 +408,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	message, err := composeDraftSpool(draft, messageID)
+	message, err := composeDraftSpool(ctx, draft, messageID)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -826,7 +831,7 @@ func (s *Service) reconcileMirrorPending(
 			return result, nil
 		}
 	}
-	message, err := composeDraftSpool(draft, attempt.MessageID)
+	message, err := composeDraftSpool(ctx, draft, attempt.MessageID)
 	if err != nil {
 		return result, err
 	}
@@ -879,11 +884,35 @@ func (t SendTransport) available() error {
 	return nil
 }
 
-func composeDraftSpool(draft Draft, messageID string) (*ComposedMessage, error) {
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+func draftContextError(ctx context.Context, operation string) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	return &OperationError{
+		Code:    "draft_operation_canceled",
+		Message: fmt.Sprintf("draft %s canceled before completion", operation),
+	}
+}
+
+func classifyDraftContextError(ctx context.Context, err error, operation string) error {
+	if err == nil || ctx.Err() == nil {
+		return err
+	}
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) && coded.ErrorCode() != "" {
+		return err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return draftContextError(ctx, operation)
+	}
+	return err
+}
+
+func composeDraftSpool(ctx context.Context, draft Draft, messageID string) (*ComposedMessage, error) {
+	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return nil, err
 	}
-	return ComposeMessageSpool(draft, messageID)
+	return ComposeMessageSpoolContext(ctx, draft, messageID)
 }
 
 func submitComposedMessage(
@@ -1295,7 +1324,7 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	message, err := composeDraftSpool(draft, messageID)
+	message, err := composeDraftSpool(ctx, draft, messageID)
 	if err != nil {
 		return TransportEvidence{}, err
 	}
@@ -1361,15 +1390,20 @@ type DraftSaveBackend interface {
 }
 
 func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft, resultErr error) {
+	if err := draftContextError(ctx, "save"); err != nil {
+		return SavedDraft{}, err
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return SavedDraft{}, err
 	}
 	lease, err := acquireDraftLease(ctx, root, ref)
 	if err != nil {
-		return SavedDraft{}, err
+		return SavedDraft{}, classifyDraftContextError(ctx, err, "save")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+	defer func() {
+		resultErr = errors.Join(classifyDraftContextError(ctx, resultErr, "save"), lease.release())
+	}()
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SavedDraft{}, err
@@ -1399,7 +1433,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := s.validateDraftSender(ctx, draft.From); err != nil {
 		return SavedDraft{}, err
 	}
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return SavedDraft{}, err
 	}
 	return s.saveDraftLegacy(ctx, root, ref, draft)
@@ -1675,6 +1709,14 @@ func reuseAttachmentFingerprint(path string, previous []DraftAttachment) (DraftA
 }
 
 func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, error) {
+	return fingerprintAttachmentContext(context.Background(), path, maximumSize)
+}
+
+func fingerprintAttachmentContext(
+	ctx context.Context,
+	path string,
+	maximumSize int64,
+) (DraftAttachment, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return DraftAttachment{}, fmt.Errorf("open draft attachment: %w", err)
@@ -1694,8 +1736,11 @@ func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, err
 		)
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, contextReader{ctx: ctx, reader: file}); err != nil {
 		return DraftAttachment{}, errors.Join(fmt.Errorf("hash draft attachment: %w", err), file.Close())
+	}
+	if err := ctx.Err(); err != nil {
+		return DraftAttachment{}, errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
 		return DraftAttachment{}, fmt.Errorf("close draft attachment: %w", err)
@@ -1707,16 +1752,26 @@ func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, err
 }
 
 func verifyDraftAttachments(attachments []DraftAttachment) error {
+	return verifyDraftAttachmentsContext(context.Background(), attachments)
+}
+
+func verifyDraftAttachmentsContext(ctx context.Context, attachments []DraftAttachment) error {
 	if len(attachments) > MaximumDraftAttachments {
 		return validationError("draft exceeds 100 attachments")
 	}
 	remaining := MaximumDraftAttachmentBytes
 	for _, expected := range attachments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if expected.Size < 0 || expected.Size > remaining {
 			return validationError("draft attachments exceed 512 MiB total")
 		}
-		actual, err := fingerprintAttachment(expected.Path, remaining)
+		actual, err := fingerprintAttachmentContext(ctx, expected.Path, remaining)
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if actual.Size != expected.Size || actual.SHA256 != expected.SHA256 {

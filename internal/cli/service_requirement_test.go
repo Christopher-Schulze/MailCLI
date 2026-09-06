@@ -64,6 +64,8 @@ func TestRequiresSignalContext(t *testing.T) {
 		{args: []string{"messages", "reply", "--message", "ref"}, want: true},
 		{args: []string{"messages", "forward", "--message", "ref"}, want: true},
 		{args: []string{"drafts", "handoff", "--ref", "draft"}, want: true},
+		{args: []string{"drafts", "save", "--ref", "draft"}, want: true},
+		{args: []string{"drafts", "send", "--ref", "draft", "--confirm"}, want: true},
 		{args: []string{"update"}, want: true},
 		{args: []string{"--json", "update"}, want: true},
 		{args: []string{"messages", "search", "--query", "text"}, want: true},

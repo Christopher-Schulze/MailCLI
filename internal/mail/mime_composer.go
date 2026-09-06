@@ -3,6 +3,7 @@ package mail
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -68,6 +69,13 @@ type ComposedMessage struct {
 }
 
 func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error) {
+	return ComposeMessageSpoolContext(context.Background(), draft, messageID)
+}
+
+func ComposeMessageSpoolContext(ctx context.Context, draft Draft, messageID string) (*ComposedMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if messageID == "" {
 		return nil, &ComposerError{Message: "message id is required"}
 	}
@@ -134,6 +142,10 @@ func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error
 			return nil, &ComposerError{Message: "write multipart body", Err: err}
 		}
 		for _, attachment := range draft.Attachments {
+			if err := ctx.Err(); err != nil {
+				cleanup()
+				return nil, err
+			}
 			if err := write("--" + mixedBoundary + composerCRLF); err != nil {
 				cleanup()
 				return nil, &ComposerError{Message: "write attachment boundary", Err: err}
@@ -148,7 +160,7 @@ func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error
 				cleanup()
 				return nil, &ComposerError{Message: "write attachment separator", Err: err}
 			}
-			if err := streamAttachmentBase64(writer, attachment); err != nil {
+			if err := streamAttachmentBase64Context(ctx, writer, attachment); err != nil {
 				cleanup()
 				return nil, err
 			}
@@ -201,6 +213,14 @@ func composerAttachmentHeaders(path string) []string {
 }
 
 func streamAttachmentBase64(writer io.Writer, attachment DraftAttachment) (resultErr error) {
+	return streamAttachmentBase64Context(context.Background(), writer, attachment)
+}
+
+func streamAttachmentBase64Context(
+	ctx context.Context,
+	writer io.Writer,
+	attachment DraftAttachment,
+) (resultErr error) {
 	file, err := os.Open(attachment.Path)
 	if err != nil {
 		return &ComposerError{Message: "read draft attachment " + filepath.Base(attachment.Path), Err: err}
@@ -213,7 +233,7 @@ func streamAttachmentBase64(writer io.Writer, attachment DraftAttachment) (resul
 	encoder := base64.NewEncoder(base64.StdEncoding, &base64LineWriter{w: writer})
 	hash := sha256.New()
 	limited := io.LimitReader(file, attachment.Size+1)
-	written, copyErr := io.Copy(encoder, io.TeeReader(limited, hash))
+	written, copyErr := io.Copy(encoder, io.TeeReader(contextReader{ctx: ctx, reader: limited}, hash))
 	closeErr := encoder.Close()
 	if copyErr != nil {
 		return &ComposerError{Message: "encode draft attachment " + filepath.Base(attachment.Path), Err: copyErr}
@@ -221,11 +241,26 @@ func streamAttachmentBase64(writer io.Writer, attachment DraftAttachment) (resul
 	if closeErr != nil {
 		return &ComposerError{Message: "encode draft attachment " + filepath.Base(attachment.Path), Err: closeErr}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	actualHash := hex.EncodeToString(hash.Sum(nil))
 	if written != attachment.Size || !strings.EqualFold(actualHash, attachment.SHA256) {
 		return validationError("draft attachment " + filepath.Base(attachment.Path) + " changed after review; update the draft before sending")
 	}
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func buildMessageWithAttachments(draft Draft, messageID string, attachments []composerAttachment) ([]byte, error) {
