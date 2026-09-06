@@ -1477,6 +1477,9 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
 // maxBytes bounds the announced literal.
 func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
+	if err := validateFetchLimit(maxBytes); err != nil {
+		return nil, err
+	}
 	if err := validateMessageUID(uid); err != nil {
 		return nil, err
 	}
@@ -1510,7 +1513,20 @@ func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 	return payload, nil
 }
 
+func validateFetchLimit(maxBytes int64) error {
+	if maxBytes > 0 {
+		return nil
+	}
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPInvalidValue,
+		Message: fmt.Sprintf("IMAP FETCH byte limit must be positive, got %d", maxBytes),
+	}
+}
+
 func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64) ([]byte, error) {
+	if err := validateFetchLimit(maxBytes); err != nil {
+		return nil, err
+	}
 	var payload []byte
 	found := false
 	for {
@@ -1546,29 +1562,35 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 			idx := strings.LastIndex(line, "{")
 			if idx != -1 && strings.HasSuffix(line, "}") {
 				lenStr := line[idx+1 : len(line)-1]
-				length, perr := strconv.Atoi(lenStr)
-				if perr == nil && length >= 0 {
-					if maxBytes > 0 && int64(length) > maxBytes {
-						// Refuse before buffering: the session is dirty
-						// (release discards it) and the unread literal is
-						// never parsed. Do not attempt to skip it.
-						sess.dirty = true
-						return nil, &transport.TransportError{
-							Code: transport.CodeIMAPRawSourceTooLarge,
-							Message: fmt.Sprintf(
-								"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
-								length, maxBytes,
-							),
-						}
+				length, perr := strconv.ParseInt(lenStr, 10, 64)
+				maxInt := int64(^uint(0) >> 1)
+				if perr != nil || length < 0 || length > maxInt {
+					sess.dirty = true
+					return nil, &transport.TransportError{
+						Code:    transport.CodeIMAPResponseMalformed,
+						Message: fmt.Sprintf("invalid IMAP FETCH literal length %q", lenStr),
 					}
-					buf := make([]byte, length)
-					if _, rerr := io.ReadFull(sess.br, buf); rerr != nil {
-						sess.dirty = true
-						return nil, wrapIOError(ctx, rerr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
-					}
-					payload = buf
-					found = true
 				}
+				if length > maxBytes {
+					// Refuse before buffering: the session is dirty
+					// (release discards it) and the unread literal is
+					// never parsed. Do not attempt to skip it.
+					sess.dirty = true
+					return nil, &transport.TransportError{
+						Code: transport.CodeIMAPRawSourceTooLarge,
+						Message: fmt.Sprintf(
+							"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
+							length, maxBytes,
+						),
+					}
+				}
+				buf := make([]byte, int(length))
+				if _, rerr := io.ReadFull(sess.br, buf); rerr != nil {
+					sess.dirty = true
+					return nil, wrapIOError(ctx, rerr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
+				}
+				payload = buf
+				found = true
 			}
 		}
 	}

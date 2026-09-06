@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -45,7 +46,7 @@ func TestSessionReuseSingleConnection(t *testing.T) {
 	if _, err := client.CheckStatus(ctx, cfg, "INBOX"); err != nil {
 		t.Fatalf("CheckStatus: %v", err)
 	}
-	if _, err := client.FetchMessage(ctx, cfg, "INBOX", 42, 12345, 0); err != nil {
+	if _, err := client.FetchMessage(ctx, cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes); err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
 	if got := srv.ConnectionCount(); got != 1 {

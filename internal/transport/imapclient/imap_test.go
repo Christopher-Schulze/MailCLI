@@ -841,12 +841,68 @@ func TestFetchMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, mail.MaximumRawSourceBytes)
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, int64(len(expectedBody)))
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
 	if !bytes.Equal(payload, expectedBody) {
 		t.Fatalf("expected payload %q, got %q", expectedBody, payload)
+	}
+}
+
+func TestFetchRejectsNonPositiveLimitBeforeConnection(t *testing.T) {
+	client := New()
+	for _, limit := range []int64{0, -1} {
+		t.Run(strconv.FormatInt(limit, 10), func(t *testing.T) {
+			_, err := client.FetchMessage(
+				context.Background(), transport.ImapConfig{}, "INBOX", 42, 12345, limit,
+			)
+			if code := transport.ErrorCode(err); code != transport.CodeIMAPInvalidValue {
+				t.Fatalf("FetchMessage(%d) error code = %s, want %s: %v",
+					limit, code, transport.CodeIMAPInvalidValue, err)
+			}
+		})
+	}
+}
+
+func TestReadFetchLiteralRejectsInvalidAnnouncedLength(t *testing.T) {
+	tests := []struct {
+		name   string
+		length string
+	}{
+		{name: "negative", length: "-1"},
+		{name: "integer overflow", length: "9223372036854775808"},
+		{name: "unusually large", length: "999999999999999999999999999999"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := "* 1 FETCH (UID 42 BODY[] {" + test.length + "}\r\n"
+			sess := &session{br: bufio.NewReader(strings.NewReader(response))}
+			_, err := New().readFetchLiteral(
+				context.Background(), sess, "A001", 42, 1024,
+			)
+			if code := transport.ErrorCode(err); code != transport.CodeIMAPResponseMalformed {
+				t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
+					code, transport.CodeIMAPResponseMalformed, err)
+			}
+			if !sess.dirty {
+				t.Fatal("malformed literal did not dirty the session")
+			}
+		})
+	}
+}
+
+func TestReadFetchLiteralRejectsTruncatedPayload(t *testing.T) {
+	response := "* 1 FETCH (UID 42 BODY[] {5}\r\nabc"
+	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
+
+	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPFetchFailed {
+		t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
+			code, transport.CodeIMAPFetchFailed, err)
+	}
+	if !sess.dirty {
+		t.Fatal("truncated literal did not dirty the session")
 	}
 }
 
