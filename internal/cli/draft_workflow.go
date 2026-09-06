@@ -71,21 +71,40 @@ func runDraftHandoffWith(
 	for _, recipient := range draft.To {
 		recipients = append(recipients, recipient.Address)
 	}
-	attachments := make([]string, 0, len(draft.Attachments))
-	for _, attachment := range draft.Attachments {
-		attachments = append(attachments, attachment.Path)
-	}
-	if err := validateHandoffAttachments(draft.Attachments); err != nil {
-		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
-	}
 	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	attachments, cleanup, err := mail.StageDraftAttachments(operationCtx, draft.Attachments)
+	if err != nil {
+		if cleanup != nil {
+			err = errors.Join(err, cleanup())
+		}
+		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
+	}
 	result, err := handoff(operationCtx, compose.Request{
 		Recipients: recipients, Subject: draft.Subject, PlainBody: draft.Body,
 		HTMLBody: draft.BodyHTML, Attachments: attachments,
 	})
+	var cleanupErr error
+	if cleanup != nil {
+		cleanupErr = cleanup()
+	}
 	if err != nil {
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
 		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
+	}
+	if cleanupErr != nil {
+		return failCommand(
+			"drafts.handoff",
+			*jsonOutput,
+			&commandError{
+				code:    "handoff_attachment_cleanup_failed",
+				message: fmt.Sprintf("visible compose opened, but private attachment cleanup failed: %v", cleanupErr),
+			},
+			stdout,
+			stderr,
+		)
 	}
 	response := draftHandoffResult{
 		DraftRef: draft.Ref, Opened: result.Opened, MailApplication: result.MailApplication,
@@ -96,36 +115,6 @@ func runDraftHandoffWith(
 	}
 	writeFormat(stdout, "Opened visible draft in Mail.app\nDraft: %s (retained locally)\n", draft.Ref)
 	return 0
-}
-
-func validateHandoffAttachments(attachments []mail.DraftAttachment) error {
-	for _, attachment := range attachments {
-		info, err := os.Stat(attachment.Path)
-		if err != nil {
-			code := "handoff_attachment_unreadable"
-			if os.IsNotExist(err) {
-				code = "handoff_attachment_missing"
-			}
-			return &commandError{
-				code: code,
-				message: fmt.Sprintf(
-					"attachment %s is unavailable: %v; it may have been moved or deleted after the draft was created; update the draft attachments",
-					attachment.Path, err,
-				),
-			}
-		}
-		if !info.Mode().IsRegular() {
-			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " is not a regular file; update the draft attachments"}
-		}
-		file, err := os.Open(attachment.Path)
-		if err != nil {
-			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " cannot be opened; update the draft attachments"}
-		}
-		if err := file.Close(); err != nil {
-			return &commandError{code: "handoff_attachment_unreadable", message: "attachment " + attachment.Path + " cannot be closed cleanly; update the draft attachments"}
-		}
-	}
-	return nil
 }
 
 func runDraftPreview(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

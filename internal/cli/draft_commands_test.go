@@ -124,16 +124,31 @@ func TestDraftEditorHelperProcess(t *testing.T) {
 
 func TestDraftHandoffUsesValidatedVisibleComposeRequest(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	attachmentPath := filepath.Join(t.TempDir(), "report.pdf")
+	attachmentBytes := []byte("approved handoff bytes")
+	if err := os.WriteFile(attachmentPath, attachmentBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
 		To:      []mail.Recipient{{Name: "Ada", Address: "ada@example.com"}},
 		Subject: "Visible", Body: "**Hello**", BodyFormat: mail.DraftBodyMarkdown,
+		Attachments: []string{attachmentPath},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var request compose.Request
+	var stagedBytes []byte
 	handoff := func(_ context.Context, value compose.Request) (compose.Result, error) {
 		request = value
+		if len(value.Attachments) != 1 {
+			t.Fatalf("handoff attachments = %v, want one staged attachment", value.Attachments)
+		}
+		var err error
+		stagedBytes, err = os.ReadFile(value.Attachments[0])
+		if err != nil {
+			t.Fatalf("ReadFile(staged attachment) error = %v", err)
+		}
 		return compose.Result{Opened: true, MailApplication: "com.apple.mail"}, nil
 	}
 	var stdout bytes.Buffer
@@ -144,8 +159,13 @@ func TestDraftHandoffUsesValidatedVisibleComposeRequest(t *testing.T) {
 	)
 	if code != 0 || stderr.Len() != 0 || request.Subject != "Visible" ||
 		request.PlainBody != "Hello" || request.HTMLBody == "" ||
-		len(request.Recipients) != 1 || request.Recipients[0] != "ada@example.com" {
+		len(request.Recipients) != 1 || request.Recipients[0] != "ada@example.com" ||
+		len(stagedBytes) != len(attachmentBytes) || string(stagedBytes) != string(attachmentBytes) ||
+		request.Attachments[0] == attachmentPath {
 		t.Fatalf("code = %d, request = %+v, stdout = %q, stderr = %q", code, request, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(request.Attachments[0]); !os.IsNotExist(err) {
+		t.Fatalf("staged attachment still exists after handoff: %v", err)
 	}
 	if _, err := service.GetDraft(draft.Ref); err != nil {
 		t.Fatalf("local draft was not retained: %v", err)
