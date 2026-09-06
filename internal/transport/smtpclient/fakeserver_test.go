@@ -42,6 +42,8 @@ type fakeSMTPServer struct {
 	rejectRcpt    string
 	stallGreeting bool
 	noStartTLS    bool
+	startTLSDelay time.Duration
+	stallStartTLS bool
 	// stallFinalReply withholds the 250 reply after DATA until the server
 	// closes, simulating a hung server for ctx-cancel tests.
 	stallFinalReply bool
@@ -138,7 +140,17 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 				}
 				continue
 			}
+			if s.startTLSDelay > 0 {
+				time.Sleep(s.startTLSDelay)
+			}
 			if !writeLine(conn, "220 2.0.0 Ready to start TLS") {
+				return
+			}
+			if s.stallStartTLS {
+				select {
+				case <-s.closed:
+				case <-time.After(30 * time.Second):
+				}
 				return
 			}
 			tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{s.tlsCert}})

@@ -128,7 +128,7 @@ func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, f
 		return evidence, sessionError(ctx, "STARTTLS", err)
 	}
 	if err := client.StartTLS(tlsCfg); err != nil {
-		return evidence, &transport.TransportError{Code: transport.CodeSMTPTLSFailed, Message: "STARTTLS handshake failed", Err: err}
+		return evidence, startTLSError(ctx, err)
 	}
 
 	if err := bumpDeadline(conn, ctx); err != nil {
@@ -298,6 +298,32 @@ func sessionError(ctx context.Context, stage string, err error) error {
 		return &transport.TransportError{Code: transport.CodeSMTPRejected, Message: fmt.Sprintf("%s rejected: %d %s", stage, tpErr.Code, tpErr.Msg), Err: err}
 	}
 	return fmt.Errorf("smtp %s: %w", stage, err)
+}
+
+func startTLSError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return timeoutError(ctx, "STARTTLS")
+	}
+	var netErr net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return &transport.TransportError{
+			Code:    transport.CodeSMTPTimeout,
+			Message: "submission command timed out during STARTTLS",
+			Err:     err,
+		}
+	}
+	var protocolErr *textproto.Error
+	if errors.As(err, &protocolErr) {
+		return &transport.TransportError{
+			Code:    transport.CodeSMTPTLSFailed,
+			Message: "STARTTLS protocol negotiation failed",
+		}
+	}
+	return &transport.TransportError{
+		Code:    transport.CodeSMTPTLSFailed,
+		Message: "STARTTLS handshake failed",
+		Err:     err,
+	}
 }
 
 func timeoutError(ctx context.Context, stage string) error {

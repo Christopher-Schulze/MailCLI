@@ -186,6 +186,68 @@ func TestSubmitContextDeadlineDuringGreeting(t *testing.T) {
 	}
 }
 
+func TestSubmitContextDeadlineBeforeStartTLSHandshake(t *testing.T) {
+	srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) {
+		s.startTLSDelay = 300 * time.Millisecond
+	})
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := testClient().Submit(ctx, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	if err == nil {
+		t.Fatal("Submit: want STARTTLS timeout, got nil")
+	}
+	if got := transport.ErrorCode(err); got != transport.CodeSMTPTimeout {
+		t.Fatalf("error code = %q, want %s: %v", got, transport.CodeSMTPTimeout, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Submit took %v, want abort within ~100ms", elapsed)
+	}
+}
+
+func TestSubmitContextDeadlineDuringStartTLSHandshake(t *testing.T) {
+	srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) { s.stallStartTLS = true })
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := testClient().Submit(ctx, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	if err == nil {
+		t.Fatal("Submit: want STARTTLS handshake timeout, got nil")
+	}
+	if got := transport.ErrorCode(err); got != transport.CodeSMTPTimeout {
+		t.Fatalf("error code = %q, want %s: %v", got, transport.CodeSMTPTimeout, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Submit took %v, want abort within ~150ms", elapsed)
+	}
+}
+
+func TestSubmitCancellationDuringStartTLSHandshake(t *testing.T) {
+	srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) { s.stallStartTLS = true })
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := testClient().Submit(ctx, cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	if err == nil {
+		t.Fatal("Submit: want STARTTLS cancellation, got nil")
+	}
+	if got := transport.ErrorCode(err); got != transport.CodeSMTPTimeout {
+		t.Fatalf("error code = %q, want %s: %v", got, transport.CodeSMTPTimeout, err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Submit took %v, want abort within ~50ms", elapsed)
+	}
+}
+
 func TestSubmitNoDoubleCloseOnCancel(t *testing.T) {
 	srv := newFakeSMTPServer(t)
 	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
@@ -330,6 +392,19 @@ func TestTransferErrorClassifiesTimeout(t *testing.T) {
 	}
 	if err := transferError(ctx, errors.New("boom")); errors.As(err, &typed) && typed.Code == transport.CodeSMTPTransferTimeout {
 		t.Fatalf("transferError = %v, plain errors must not map to transfer timeout", err)
+	}
+}
+
+func TestStartTLSErrorPreservesNetworkCause(t *testing.T) {
+	timeoutOp := &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	err := startTLSError(context.Background(), timeoutOp)
+	var typed *transport.TransportError
+	var networkErr *net.OpError
+	if !errors.As(err, &typed) || typed.Code != transport.CodeSMTPTimeout {
+		t.Fatalf("startTLSError = %v, want smtp_timeout", err)
+	}
+	if !errors.As(err, &networkErr) {
+		t.Fatalf("startTLSError = %v, want wrapped network cause", err)
 	}
 }
 
