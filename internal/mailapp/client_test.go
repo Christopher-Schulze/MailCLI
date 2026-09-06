@@ -242,6 +242,55 @@ func TestClientDoesNotMarkCompletedBridgeErrorUncertainAfterConcurrentCancel(t *
 	}
 }
 
+func TestOperationCanLeaveUncertainMailState(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		want      bool
+	}{
+		{name: "sync", operation: mailSyncOperation, want: true},
+		{name: "accounts list", operation: "accounts.list", want: false},
+		{name: "messages list", operation: "messages.list", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := operationCanLeaveUncertainMailState(test.operation); got != test.want {
+				t.Fatalf("operationCanLeaveUncertainMailState(%q) = %t, want %t", test.operation, got, test.want)
+			}
+		})
+	}
+}
+
+func TestClientMarksIncompleteSyncUncertain(t *testing.T) {
+	lease := &accessLeaseRecorder{}
+	client := &Client{
+		runner: &runnerStub{err: errors.New("bridge interrupted")},
+		gate:   accessGateStub{lease: lease},
+	}
+
+	if err := client.Sync(context.Background(), ""); err == nil {
+		t.Fatal("Sync() error = nil, want interrupted bridge error")
+	}
+	if !lease.uncertain || lease.armCalls == 0 {
+		t.Fatalf("Sync() lease uncertain = %t, arm calls = %d, want uncertain state", lease.uncertain, lease.armCalls)
+	}
+}
+
+func TestClientDoesNotMarkCompletedSyncUncertain(t *testing.T) {
+	lease := &accessLeaseRecorder{}
+	client := &Client{
+		runner: &runnerStub{response: `{"ok":true,"error":null}`},
+		gate:   accessGateStub{lease: lease},
+	}
+
+	if err := client.Sync(context.Background(), ""); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if lease.uncertain {
+		t.Fatal("completed Sync() marked Mail state uncertain")
+	}
+}
+
 func TestClientLatchesBridgeRequestedRecovery(t *testing.T) {
 	lease := &accessLeaseRecorder{}
 	client := &Client{

@@ -23,6 +23,7 @@ var bridgeScript string
 const (
 	osaCancellationGrace        = 15 * time.Second
 	processGroupTerminationWait = time.Second
+	mailSyncOperation           = "mail.sync"
 )
 
 type scriptRunner interface {
@@ -66,7 +67,7 @@ func (c *Client) ComposeWriteSupportError() error {
 }
 
 func (c *Client) Sync(ctx context.Context, accountRef string) error {
-	request := bridgeRequest{Operation: "mail.sync"}
+	request := bridgeRequest{Operation: mailSyncOperation}
 	if accountRef != "" {
 		account, err := decodeAccountReference(accountRef)
 		if err != nil {
@@ -393,8 +394,8 @@ func (c *Client) invokeWithState(
 	return response, started, invokeErr
 }
 
-func operationCanLeaveUncertainMailState(string) bool {
-	return false
+func operationCanLeaveUncertainMailState(operation string) bool {
+	return operation == mailSyncOperation
 }
 
 func isAutomationDenial(err error) bool {
