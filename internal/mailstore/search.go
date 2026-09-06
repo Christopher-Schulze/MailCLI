@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/unicode/norm"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -20,6 +21,7 @@ const (
 	searchWorkerCount   = 2
 	searchBatchSize     = 64
 	maximumSnippetRunes = 240
+	searchFoldSQLName   = "mailcli_search_fold"
 )
 
 type searchPlan struct {
@@ -157,7 +159,10 @@ func (s *Store) resolveSearchScope(
 func appendMetadataFilters(where *[]string, arguments *[]any, prepared mail.PreparedQuery) {
 	query := prepared.Query
 	if query.Sender != "" {
-		*where = append(*where, "(sender.address LIKE ? ESCAPE '\\' OR sender.comment LIKE ? ESCAPE '\\')")
+		*where = append(*where,
+			"("+searchFoldSQL("sender.address")+" LIKE "+searchFoldSQL("?")+" ESCAPE '\\' OR "+
+				searchFoldSQL("sender.comment")+" LIKE "+searchFoldSQL("?")+" ESCAPE '\\')",
+		)
 		value := containsLike(query.Sender)
 		*arguments = append(*arguments, value, value)
 	}
@@ -166,16 +171,21 @@ func appendMetadataFilters(where *[]string, arguments *[]any, prepared mail.Prep
 			SELECT 1 FROM recipients recipient
 			JOIN addresses recipient_address ON recipient_address.ROWID = recipient.address
 			WHERE recipient.message = m.ROWID
-			AND (recipient_address.address LIKE ? ESCAPE '\' OR recipient_address.comment LIKE ? ESCAPE '\')
+			AND (`+searchFoldSQL("recipient_address.address")+` LIKE `+searchFoldSQL("?")+` ESCAPE '\' OR `+
+			searchFoldSQL("recipient_address.comment")+` LIKE `+searchFoldSQL("?")+` ESCAPE '\')
 		)`)
 		value := containsLike(query.Recipient)
 		*arguments = append(*arguments, value, value)
 	}
 	if query.Subject != "" {
-		*where = append(*where, "subject.subject LIKE ? ESCAPE '\\'")
+		*where = append(*where, searchFoldSQL("subject.subject")+" LIKE "+searchFoldSQL("?")+" ESCAPE '\\'")
 		*arguments = append(*arguments, containsLike(query.Subject))
 	}
 	appendScalarFilters(where, arguments, prepared)
+}
+
+func searchFoldSQL(value string) string {
+	return searchFoldSQLName + "(" + value + ")"
 }
 
 func appendScalarFilters(where *[]string, arguments *[]any, prepared mail.PreparedQuery) {
@@ -773,7 +783,7 @@ func mergeSearchCoverage(coverage *mail.SearchCoverage, scan candidateScan) {
 }
 
 func normalizedSearchTerms(value string) []string {
-	// Fold+tokenize in one pass, avoiding strings.ToLower allocation.
+	value = foldSearchText(value)
 	var terms []string
 	var current []byte
 	flush := func() {
@@ -792,33 +802,29 @@ func normalizedSearchTerms(value string) []string {
 			}
 		}
 	}
-	for i := 0; i < len(value); {
-		c := value[i]
-		if c < utf8.RuneSelf {
-			if c <= ' ' || isASCIIWhitespace(c) {
-				flush()
-				i++
-				continue
-			}
-			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			current = append(current, c)
-			i++
-			continue
-		}
-		// Multi-byte: lowercase via unicode
-		r, size := utf8.DecodeRuneInString(value[i:])
+	for _, r := range value {
 		if unicode.IsSpace(r) {
 			flush()
 		} else {
-			r = unicode.ToLower(r)
-			current = append(current, string(r)...)
+			current = utf8.AppendRune(current, r)
 		}
-		i += size
 	}
 	flush()
 	return terms
+}
+
+// foldSearchText defines the local search policy: canonical NFC normalization
+// followed by Unicode simple lowercasing. Simple lowercasing keeps one rune
+// per input rune, which preserves snippet rune offsets; full case-fold
+// expansions such as ß -> ss require a separate offset map.
+func foldSearchText(value string) string {
+	value = norm.NFC.String(value)
+	var folded strings.Builder
+	folded.Grow(len(value))
+	for _, r := range value {
+		folded.WriteRune(unicode.ToLower(r))
+	}
+	return folded.String()
 }
 
 func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) {
@@ -836,7 +842,7 @@ func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) 
 
 func snippetFor(value string, term string) string {
 	value = collapseSearchText(value)
-	return snippetForFolded(value, strings.ToLower(value), strings.ToLower(term))
+	return snippetForFolded(value, foldSearchText(value), foldSearchText(term))
 }
 
 func snippetForFolded(value string, folded string, term string) string {
@@ -915,8 +921,7 @@ func buildSearchText(item messageRecord, document mimeDocument) string {
 }
 
 // buildLoweredSearchText builds the same collapsed search text as
-// buildSearchText but with ASCII bytes lowercased, eliminating the
-// strings.ToLower allocation that the previous approach required.
+// buildSearchText with the shared Unicode search policy.
 // Part names are not sorted (not needed for matching, only for display).
 func buildLoweredSearchText(item messageRecord, document mimeDocument) string {
 	var builder collapsedSearchTextBuilder
@@ -964,16 +969,15 @@ func (b *collapsedSearchTextBuilder) Grow(size int) {
 }
 
 func (b *collapsedSearchTextBuilder) Add(value string) {
+	b.add(norm.NFC.String(value))
+}
+
+func (b *collapsedSearchTextBuilder) add(value string) {
 	if value != "" && b.output.Len() > 0 {
 		b.pendingSpace = true
 	}
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		// ASCII whitespace (0x00-0x20) and UTF-8 non-breaking space (0xC2 0xA0)
-		if c <= ' ' || (c == 0xC2 && i+1 < len(value) && value[i+1] == 0xA0) {
-			if c == 0xC2 {
-				i++ // skip the 0xA0 byte too
-			}
+	for _, r := range value {
+		if unicode.IsSpace(r) {
 			b.pendingSpace = b.output.Len() > 0
 			continue
 		}
@@ -981,34 +985,14 @@ func (b *collapsedSearchTextBuilder) Add(value string) {
 			b.output.WriteByte(' ')
 			b.pendingSpace = false
 		}
-		b.output.WriteByte(c)
+		b.output.WriteRune(r)
 	}
 }
 
-// AddLowered adds value with ASCII bytes lowercased (A-Z → a-z) and whitespace
-// collapsed, avoiding a separate strings.ToLower allocation on the full haystack.
+// AddLowered adds value with the shared Unicode search policy and collapsed
+// whitespace.
 func (b *collapsedSearchTextBuilder) AddLowered(value string) {
-	if value != "" && b.output.Len() > 0 {
-		b.pendingSpace = true
-	}
-	for i := 0; i < len(value); i++ {
-		c := value[i]
-		if c <= ' ' || (c == 0xC2 && i+1 < len(value) && value[i+1] == 0xA0) {
-			if c == 0xC2 {
-				i++
-			}
-			b.pendingSpace = b.output.Len() > 0
-			continue
-		}
-		if b.pendingSpace {
-			b.output.WriteByte(' ')
-			b.pendingSpace = false
-		}
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b.output.WriteByte(c)
-	}
+	b.add(foldSearchText(value))
 }
 
 func (b *collapsedSearchTextBuilder) String() string {

@@ -744,6 +744,10 @@ func TestNormalizedSearchTermsOnePassTokenization(t *testing.T) {
 	}{
 		{name: "ascii lowercase", input: "Hello WORLD", want: []string{"hello", "world"}},
 		{name: "unicode lowercase", input: "Café Ünïcode", want: []string{"café", "ünïcode"}},
+		{name: "decomposed accent", input: "Cafe\u0301", want: []string{"café"}},
+		{name: "german casing", input: "ÜBERTRAGUNG", want: []string{"übertragung"}},
+		{name: "greek casing", input: "ΜΗΝΥΜΑ", want: []string{"μηνυμα"}},
+		{name: "non-latin text", input: "ПРИВЕТ 世界", want: []string{"привет", "世界"}},
 		{name: "tabs and newlines", input: "alpha\tbeta\ngamma", want: []string{"alpha", "beta", "gamma"}},
 		{name: "multiple whitespace", input: "  a   b  ", want: []string{"a", "b"}},
 		{name: "empty", input: "", want: []string{}},
@@ -763,12 +767,21 @@ func TestNormalizedSearchTermsOnePassTokenization(t *testing.T) {
 func TestBuildLoweredSearchTextMatchesCaseInsensitive(t *testing.T) {
 	t.Parallel()
 	item := messageRecord{
-		Subject: "Quarterly REPORT", SenderName: "Alice", SenderAddress: "ALICE@EXAMPLE.COM",
+		Subject: "Cafe\u0301 Übertragung Quarterly REPORT", SenderName: "Alice", SenderAddress: "ALICE@EXAMPLE.COM",
 	}
 	document := mimeDocument{
 		Content: "Body TEXT Here",
+		Parts: map[string]mimePart{
+			"1": {Name: "ÜBER.PDF"},
+		},
 	}
 	lowered := buildLoweredSearchText(item, document)
+	if !strings.Contains(lowered, "café übertragung") {
+		t.Fatalf("lowered text missing normalized accent: %q", lowered)
+	}
+	if !strings.Contains(lowered, "übertragung quarterly report") {
+		t.Fatalf("lowered text missing Unicode-folded subject: %q", lowered)
+	}
 	if !strings.Contains(lowered, "quarterly report") {
 		t.Fatalf("lowered text missing folded subject: %q", lowered)
 	}
@@ -778,9 +791,66 @@ func TestBuildLoweredSearchTextMatchesCaseInsensitive(t *testing.T) {
 	if !strings.Contains(lowered, "body text here") {
 		t.Fatalf("lowered text missing folded body: %q", lowered)
 	}
+	if !strings.Contains(lowered, "über.pdf") {
+		t.Fatalf("lowered text missing Unicode-folded attachment name: %q", lowered)
+	}
 	// Verify it's actually lowered, not original case.
 	if strings.Contains(lowered, "REPORT") || strings.Contains(lowered, "ALICE") {
 		t.Fatalf("lowered text still contains uppercase: %q", lowered)
+	}
+}
+
+func TestSearchPlanUsesUnicodeFoldFunction(t *testing.T) {
+	t.Parallel()
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	prepared, err := mail.PrepareQuery(mail.Query{
+		Subject: "ÜBER", Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	plan, empty, err := store.prepareSearchPlan(context.Background(), prepared)
+	if err != nil || empty {
+		t.Fatalf("prepareSearchPlan() = empty %v, error %v", empty, err)
+	}
+	if !strings.Contains(plan.fromWhereSQL, searchFoldSQLName) {
+		t.Fatalf("search plan = %q, want %s SQL function", plan.fromWhereSQL, searchFoldSQLName)
+	}
+	var matched bool
+	err = store.database.QueryRowContext(
+		context.Background(),
+		"SELECT "+searchFoldSQL("?")+" LIKE "+searchFoldSQL("?")+" ESCAPE '\\'",
+		"%über%", "%ÜBER%",
+	).Scan(&matched)
+	if err != nil {
+		t.Fatalf("Unicode fold SQL query error = %v", err)
+	}
+	if !matched {
+		t.Fatal("Unicode fold SQL query = false, want true")
+	}
+}
+
+func TestBodySearchUsesUnicodeFoldedMetadataAndContent(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", []byte(
+		"From: Alice <alice@example.com>\r\n"+
+			"Subject: Cafe\u0301\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nÜbertragung\r\n",
+	))
+	query, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "ÜBER", Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), query)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if len(page.Messages) != 1 || page.Messages[0].Summary.Subject != "Quarterly Report" {
+		t.Fatalf("SearchMessages() = %#v, want message 101", page)
 	}
 }
 

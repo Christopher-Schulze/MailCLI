@@ -38,7 +38,12 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 	query.Set("_txlock", "deferred")
 	uri.RawQuery = query.Encode()
 	database := sql.OpenDB(&sqliteConnector{
-		driver: &sqlite3.SQLiteDriver{}, dsn: uri.String(),
+		driver: &sqlite3.SQLiteDriver{
+			ConnectHook: func(connection *sqlite3.SQLiteConn) error {
+				return connection.RegisterFunc(searchFoldSQLName, foldSearchText, true)
+			},
+		},
+		dsn: uri.String(),
 	})
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
