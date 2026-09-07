@@ -73,23 +73,106 @@ func closeMailboxCache(resultErr *error, file *os.File) {
 }
 
 func parseMailboxCacheXML(reader io.Reader) (mailboxCache, error) {
-	decoder := xml.NewDecoder(reader)
+	limited := &io.LimitedReader{R: reader, N: maximumMailboxCacheBytes + 1}
+	decoder := xml.NewDecoder(limited)
 	root, err := nextPlistStart(decoder)
-	if err != nil || root.Name.Local != "plist" {
-		return mailboxCache{}, fmt.Errorf("parse mailbox cache: expected plist root")
+	if err != nil {
+		return mailboxCache{}, normalizeMailboxCacheParseError(err)
+	}
+	if root.Name.Local != "plist" {
+		return mailboxCache{}, mailboxCacheMalformedError("parse mailbox cache: expected plist root", nil)
 	}
 	dictionary, err := nextPlistStart(decoder)
-	if err != nil || dictionary.Name.Local != "dict" {
-		return mailboxCache{}, fmt.Errorf("parse mailbox cache: expected root dictionary")
+	if err != nil {
+		return mailboxCache{}, normalizeMailboxCacheParseError(err)
+	}
+	if dictionary.Name.Local != "dict" {
+		return mailboxCache{}, mailboxCacheMalformedError("parse mailbox cache: expected root dictionary", nil)
 	}
 	cache, err := parseMailboxCacheRoot(decoder)
 	if err != nil {
-		return mailboxCache{}, fmt.Errorf("parse mailbox cache: %w", err)
+		return mailboxCache{}, normalizeMailboxCacheParseError(err)
 	}
 	if len(cache.Mailboxes) == 0 {
-		return mailboxCache{}, fmt.Errorf("mailbox cache contains no mailbox catalog")
+		return mailboxCache{}, mailboxCacheMalformedError("mailbox cache contains no mailbox catalog", nil)
+	}
+	if err := consumeMailboxCacheEnd(decoder, "plist"); err != nil {
+		return mailboxCache{}, normalizeMailboxCacheParseError(err)
+	}
+	if err := requireMailboxCacheEOF(decoder); err != nil {
+		return mailboxCache{}, normalizeMailboxCacheParseError(err)
+	}
+	if limited.N == 0 {
+		return mailboxCache{}, mailboxCacheMalformedError(
+			fmt.Sprintf("mailbox cache exceeds %d bytes", maximumMailboxCacheBytes), nil,
+		)
 	}
 	return cache, nil
+}
+
+func mailboxCacheMalformedError(message string, cause error) error {
+	return operationErrorWithCause("mailbox_cache_malformed", message, cause)
+}
+
+func normalizeMailboxCacheParseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var typed *Error
+	if errors.As(err, &typed) && typed.Code == "mailbox_cache_malformed" {
+		return err
+	}
+	return mailboxCacheMalformedError("parse mailbox cache: "+err.Error(), err)
+}
+
+func consumeMailboxCacheEnd(decoder *xml.Decoder, expected string) error {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return fmt.Errorf("unexpected plist text before </%s>", expected)
+			}
+		case xml.Comment, xml.ProcInst:
+			continue
+		case xml.EndElement:
+			if value.Name.Local != expected {
+				return fmt.Errorf("expected </%s>, got </%s>", expected, value.Name.Local)
+			}
+			return nil
+		default:
+			return fmt.Errorf("expected </%s>", expected)
+		}
+	}
+}
+
+func requireMailboxCacheEOF(decoder *xml.Decoder) error {
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return fmt.Errorf("trailing non-whitespace plist content")
+			}
+		case xml.Comment, xml.ProcInst:
+			continue
+		case xml.StartElement:
+			return fmt.Errorf("trailing plist element <%s>", value.Name.Local)
+		case xml.EndElement:
+			return fmt.Errorf("trailing plist end element </%s>", value.Name.Local)
+		default:
+			return fmt.Errorf("trailing plist content")
+		}
+	}
 }
 
 func parseMailboxCacheRoot(decoder *xml.Decoder) (mailboxCache, error) {
@@ -194,15 +277,14 @@ func nextPlistPair(decoder *xml.Decoder) (string, xml.StartElement, bool, error)
 }
 
 func nextPlistStart(decoder *xml.Decoder) (xml.StartElement, error) {
-	for {
-		start, done, err := nextPlistElement(decoder)
-		if err != nil {
-			return xml.StartElement{}, err
-		}
-		if !done {
-			return start, nil
-		}
+	start, done, err := nextPlistElement(decoder)
+	if err != nil {
+		return xml.StartElement{}, err
 	}
+	if done {
+		return xml.StartElement{}, fmt.Errorf("unexpected plist end element")
+	}
+	return start, nil
 }
 
 func nextPlistElement(decoder *xml.Decoder) (xml.StartElement, bool, error) {

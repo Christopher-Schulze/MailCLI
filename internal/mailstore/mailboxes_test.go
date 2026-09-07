@@ -97,9 +97,10 @@ func TestLoadMailboxCacheBoundsUseTypedMalformedError(t *testing.T) {
 func TestParseMailboxCacheXML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		source  string
-		wantErr bool
+		name     string
+		source   string
+		wantErr  bool
+		wantCode string
 	}{
 		{
 			name: "nested catalog",
@@ -110,13 +111,30 @@ func TestParseMailboxCacheXML(t *testing.T) {
 				`<key>MailboxPathComponent</key><string>Nested</string><key>IMAPMailboxChildren</key><dict/>` +
 				`</dict></dict></dict></dict></dict></plist>`,
 		},
+		{
+			name: "whitespace around document",
+			source: " \n\t" + `<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>` +
+				`<key>root</key><dict><key>MailboxPathComponent</key><string>Inbox</string>` +
+				`<key>MailboxUnreadCount</key><integer>3</integer><key>IMAPMailboxAttributes</key><integer>8</integer>` +
+				`<key>IMAPMailboxChildren</key><dict><key>child</key><dict>` +
+				`<key>MailboxPathComponent</key><string>Nested</string><key>IMAPMailboxChildren</key><dict/>` +
+				`</dict></dict></dict></dict></dict></plist>` + "\n \t",
+		},
 		{name: "wrong integer type", source: `<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>` +
 			`<key>root</key><dict><key>MailboxUnreadCount</key><string>3</string></dict>` +
-			`</dict></dict></plist>`, wantErr: true},
+			`</dict></dict></plist>`, wantErr: true, wantCode: "mailbox_cache_malformed"},
 		{name: "duplicate root", source: `<?xml version="1.0"?><plist><dict>` +
 			`<key>mboxes</key><dict><key>a</key><dict/></dict>` +
 			`<key>mboxes</key><dict><key>b</key><dict/></dict>` +
-			`</dict></plist>`, wantErr: true},
+			`</dict></plist>`, wantErr: true, wantCode: "mailbox_cache_malformed"},
+		{name: "trailing text", source: `<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>` +
+			`<key>root</key><dict/></dict></dict></plist>trailing`, wantErr: true, wantCode: "mailbox_cache_malformed"},
+		{name: "trailing element", source: `<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>` +
+			`<key>root</key><dict/></dict></dict></plist><plist/>`, wantErr: true, wantCode: "mailbox_cache_malformed"},
+		{name: "malformed nesting", source: `<?xml version="1.0"?><plist><dict><key>mboxes</key><dict>` +
+			`<key>root</key><dict/></dict></plist>`, wantErr: true, wantCode: "mailbox_cache_malformed"},
+		{name: "invalid encoding", source: `<?xml version="1.0" encoding="ISO-8859-1"?><plist><dict>` +
+			`<key>mboxes</key><dict><key>root</key><dict/></dict></dict></plist>`, wantErr: true, wantCode: "mailbox_cache_malformed"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,6 +143,9 @@ func TestParseMailboxCacheXML(t *testing.T) {
 			if test.wantErr {
 				if err == nil {
 					t.Fatalf("parseMailboxCacheXML() = %+v, want error", cache)
+				}
+				if test.wantCode != "" && errorCodeForTest(err) != test.wantCode {
+					t.Fatalf("parseMailboxCacheXML() error = %v, want %s", err, test.wantCode)
 				}
 				return
 			}
@@ -135,6 +156,33 @@ func TestParseMailboxCacheXML(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseMailboxCacheXMLSizeLimit(t *testing.T) {
+	t.Parallel()
+	source := nestedMailboxCacheXML(1) + strings.Repeat(" ", maximumMailboxCacheBytes)
+	_, err := parseMailboxCacheXML(strings.NewReader(source))
+	if errorCodeForTest(err) != "mailbox_cache_malformed" {
+		t.Fatalf("parseMailboxCacheXML() error = %v, want mailbox_cache_malformed", err)
+	}
+}
+
+func FuzzParseMailboxCacheXML(f *testing.F) {
+	f.Add(nestedMailboxCacheXML(1))
+	f.Add(nestedMailboxCacheXML(1) + " trailing")
+	f.Add("<plist><dict>")
+	f.Fuzz(func(t *testing.T, source string) {
+		cache, err := parseMailboxCacheXML(strings.NewReader(source))
+		if err == nil {
+			if len(cache.Mailboxes) == 0 {
+				t.Fatal("successful parse returned an empty mailbox catalog")
+			}
+			return
+		}
+		if errorCodeForTest(err) != "mailbox_cache_malformed" {
+			t.Fatalf("parseMailboxCacheXML() error = %v, want mailbox_cache_malformed", err)
+		}
+	})
 }
 
 func TestMailboxCacheDepthLimit(t *testing.T) {
