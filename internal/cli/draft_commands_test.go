@@ -172,6 +172,52 @@ func TestDraftHandoffUsesValidatedVisibleComposeRequest(t *testing.T) {
 	}
 }
 
+func TestDraftHandoffUnknownOutcomeCleansSnapshotAndRetainsDraft(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	attachmentPath := filepath.Join(t.TempDir(), "report.pdf")
+	if err := os.WriteFile(attachmentPath, []byte("unknown outcome bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To:          []mail.Recipient{{Address: "ada@example.com"}},
+		Subject:     "Unknown outcome",
+		Body:        "Body",
+		Attachments: []string{attachmentPath},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stagedPath string
+	handoff := func(_ context.Context, request compose.Request) (compose.Result, error) {
+		if len(request.Attachments) != 1 {
+			t.Fatalf("handoff attachments = %v, want one staged attachment", request.Attachments)
+		}
+		stagedPath = request.Attachments[0]
+		if _, err := os.Stat(stagedPath); err != nil {
+			t.Fatalf("Stat(staged attachment) error = %v", err)
+		}
+		return compose.Result{}, &compose.Error{
+			Code: "handoff_outcome_unknown", Message: "macOS did not confirm that the compose window opened",
+		}
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftHandoffWith(
+		context.Background(), service, []string{"--ref", draft.Ref, "--json"},
+		&stdout, &stderr, handoff,
+	)
+	if code != 1 || stderr.Len() != 0 ||
+		!strings.Contains(stdout.String(), `"code":"handoff_outcome_unknown"`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
+		t.Fatalf("staged attachment still exists after unknown outcome: %v", err)
+	}
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("local draft was not retained: %v", err)
+	}
+}
+
 func TestDraftSendRequiresConfirmation(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

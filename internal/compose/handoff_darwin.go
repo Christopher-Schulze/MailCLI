@@ -68,6 +68,12 @@ func Handoff(ctx context.Context, request Request) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if request.Recipients == nil {
+		request.Recipients = []string{}
+	}
+	if request.Attachments == nil {
+		request.Attachments = []string{}
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return Result{}, fmt.Errorf("encode compose handoff: %w", err)
