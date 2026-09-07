@@ -102,13 +102,15 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		t.Fatalf("sender identity coverage capability = %+v", manifest.Limits)
 	}
 	if manifest.Limits.SearchPaginationConsistency != mail.SearchConsistencyBestEffort ||
-		!manifest.Limits.SearchCursorDetectsIndexDrift {
+		!manifest.Limits.SearchCursorDetectsIndexDrift ||
+		manifest.Limits.SearchCandidateCountDefault != "observed_lower_bound" ||
+		!manifest.Limits.SearchExactCountBounded {
 		t.Fatalf("search pagination capability = %+v", manifest.Limits)
 	}
 	for _, id := range []string{"messages.filter", "messages.search"} {
 		command := manifest.Commands[slices.Index(got, id)]
 		if !slices.Equal(command.ResultStates, []string{
-			"complete", "partial", "search_cursor_stale", "search_index_changed",
+			"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded",
 		}) {
 			t.Fatalf("%s result states = %+v", id, command.ResultStates)
 		}

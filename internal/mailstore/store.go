@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 type Store struct {
@@ -28,6 +29,10 @@ type Store struct {
 	mailboxCatalog        []mailboxRecord
 	mailboxCatalogErr     error
 	mailboxCatalogQueries int
+
+	// searchCandidateCountQueries is per-store test instrumentation. Normal
+	// searches never touch it; bounded explicit exact-count requests increment it.
+	searchCandidateCountQueries atomic.Int64
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {

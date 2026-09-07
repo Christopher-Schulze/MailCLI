@@ -73,6 +73,7 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.StringVar(&query.MailboxRef, "mailbox", "", "mailbox ref")
 	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size")
 	flags.StringVar(&query.Cursor, "cursor", "", "pagination cursor")
+	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total for source scans")
 	if allowText {
 		flags.IntVar(&query.MaxMessages, "max-messages", mail.DefaultSearchMaxMessages, "maximum messages for body search")
 		flags.Int64Var(&query.MaxBytes, "max-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body search")
@@ -94,9 +95,10 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
 		}
 		writeFormat(
-			stdout, "Coverage: %s, consistency=%s, revision=%s, complete=%t, scanned=%d/%d, catalog_proven=%d, bytes=%d\n",
+			stdout, "Coverage: %s, consistency=%s, revision=%s, complete=%t, scanned=%d, candidates=%d, candidates_exact=%t, catalog_proven=%d, bytes=%d\n",
 			page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
 			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
+			page.Coverage.CandidateMessagesExact,
 			page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 		)
 		return
@@ -112,9 +114,10 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
 	writeFormat(
-		stdout, "coverage\t%s\tconsistency=%s\trevision=%s\tcorpus_complete=%t\tscanned=%d/%d\tcatalog_proven=%d\tbytes=%d\n",
+		stdout, "coverage\t%s\tconsistency=%s\trevision=%s\tcorpus_complete=%t\tscanned=%d\tcandidates=%d\tcandidates_exact=%t\tcatalog_proven=%d\tbytes=%d\n",
 		page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
 		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
+		page.Coverage.CandidateMessagesExact,
 		page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 	)
 }

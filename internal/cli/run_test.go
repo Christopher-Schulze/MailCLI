@@ -160,7 +160,7 @@ func (testGateway) SearchMessages(context.Context, mail.PreparedQuery) (mail.Sea
 			Summary: mail.MessageSummary{Ref: "msg_ref", Subject: "Searchable"},
 			Snippet: "Needle body",
 		}},
-		Coverage: mail.SearchCoverage{Backend: "test", Complete: true},
+		Coverage: mail.SearchCoverage{Backend: "test", CandidateMessagesExact: true, Complete: true},
 	}, nil
 }
 

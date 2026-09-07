@@ -43,7 +43,8 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 		t.Fatalf("SearchMessages(metadata) error = %v", err)
 	}
 	if len(metadata.Messages) != 1 || metadata.Coverage.Backend != "envelope_sql" ||
-		metadata.Coverage.CandidateMessages != 1 || !metadata.Coverage.Complete ||
+		metadata.Coverage.CandidateMessages != 1 || !metadata.Coverage.CandidateMessagesExact ||
+		!metadata.Coverage.Complete ||
 		metadata.Coverage.Consistency != mail.SearchConsistencyBestEffort ||
 		metadata.Coverage.IndexRevision == "" {
 		t.Fatalf("metadata search = %#v", metadata)
@@ -684,7 +685,8 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 
 	coverage := mail.SearchCoverage{
 		Consistency: mail.SearchConsistencyBestEffort, IndexRevision: indexRevision,
-		Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount,
+		Backend: "emlx_stream", CandidateMessages: total, CandidateMessagesExact: true,
+		Complete: !limitedByCount,
 	}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
@@ -991,9 +993,8 @@ func TestByteLimitedBodySearchRetriesFirstCandidateInclusively(t *testing.T) {
 
 // The candidate stream yields strictly-descending (date_received, ROWID)
 // tuples: a max-messages bound that cuts mid-corpus keeps the covered
-// prefix and reports incomplete, and the exact boundary
-// (MaxMessages == CandidateMessages) stays complete - the count query
-// knows the total, so a full final chunk must not read as truncated.
+// prefix and reports incomplete, while a one-row lookahead proves an exact
+// boundary without running the optional candidate-count query.
 func TestBodySearchChunkRespectsMaxMessagesBound(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
@@ -1009,7 +1010,7 @@ func TestBodySearchChunkRespectsMaxMessagesBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchMessages() error = %v", err)
 	}
-	if page.Coverage.CandidateMessages != 3 {
+	if page.Coverage.CandidateMessages != 3 || !page.Coverage.CandidateMessagesExact {
 		t.Fatalf("candidates = %d, want 3", page.Coverage.CandidateMessages)
 	}
 	if !page.Coverage.Complete {
@@ -1030,8 +1031,62 @@ func TestBodySearchChunkRespectsMaxMessagesBound(t *testing.T) {
 	if cutPage.Coverage.CandidateMessages < cutPage.Coverage.ScannedMessages+cutPage.Coverage.CatalogProvenMessages {
 		t.Fatalf("coverage counts exceed candidates: %#v", cutPage.Coverage)
 	}
-	if cutPage.Coverage.Complete {
+	if cutPage.Coverage.CandidateMessagesExact || cutPage.Coverage.Complete {
 		t.Fatalf("bound of 2 over 3 candidates must be incomplete: %#v", cutPage.Coverage)
+	}
+}
+
+func TestBodySearchCandidateCountIsExplicitAndBounded(t *testing.T) {
+	tests := []struct {
+		name           string
+		exactCount     bool
+		maxMessages    int
+		wantCode       string
+		wantQueries    int64
+		wantCandidates int
+		wantExact      bool
+	}{
+		{
+			name: "default derives a lower bound", maxMessages: 2,
+			wantCandidates: 3,
+		},
+		{
+			name: "explicit exact count succeeds within bound", exactCount: true, maxMessages: 3,
+			wantQueries: 1, wantCandidates: 3, wantExact: true,
+		},
+		{
+			name: "explicit exact count fails above bound", exactCount: true, maxMessages: 2,
+			wantCode: "search_count_limit_exceeded", wantQueries: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			prepared, err := mail.PrepareQuery(mail.Query{
+				MailboxRef: inboxRef, Text: "needle", Limit: 25,
+				MaxMessages: test.maxMessages, ExactCount: test.exactCount,
+			})
+			if err != nil {
+				t.Fatalf("PrepareQuery() error = %v", err)
+			}
+			page, err := store.SearchMessages(context.Background(), prepared)
+			if test.wantCode != "" {
+				if errorCodeForTest(err) != test.wantCode {
+					t.Fatalf("SearchMessages() error = %v, want %s", err, test.wantCode)
+				}
+			} else if err != nil {
+				t.Fatalf("SearchMessages() error = %v", err)
+			}
+			if got := store.searchCandidateCountQueries.Load(); got != test.wantQueries {
+				t.Fatalf("candidate count queries = %d, want %d", got, test.wantQueries)
+			}
+			if test.wantCode == "" &&
+				(page.Coverage.CandidateMessages != test.wantCandidates ||
+					page.Coverage.CandidateMessagesExact != test.wantExact) {
+				t.Fatalf("coverage = %+v, want candidates=%d exact=%t", page.Coverage, test.wantCandidates, test.wantExact)
+			}
+		})
 	}
 }
 

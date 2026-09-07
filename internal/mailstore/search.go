@@ -293,7 +293,7 @@ func (s *Store) searchMetadata(
 		return mail.SearchPage{}, err
 	}
 	page.Coverage = mail.SearchCoverage{
-		Backend: "envelope_sql", CandidateMessages: total, Complete: true,
+		Backend: "envelope_sql", CandidateMessages: total, CandidateMessagesExact: true, Complete: true,
 	}
 	if hasMore && len(items) > 0 {
 		page.NextCursor, err = searchCursorFor(
@@ -326,8 +326,8 @@ func (s *Store) newSearchCandidateStream(ctx context.Context, plan searchPlan) *
 	return &searchCandidateStream{store: s, ctx: ctx, plan: plan}
 }
 
-// next returns the next chunk of candidates. The caller supplies the
-// candidate total from countSearchCandidates; chunk queries stay keyset-only.
+// next returns the next chunk of candidates. Chunk queries stay keyset-only;
+// callers derive default coverage from observed rows and stream exhaustion.
 func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultErr error) {
 	if st.done {
 		return nil, nil
@@ -407,12 +407,15 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 	return items, nil
 }
 
-// countSearchCandidates runs one count(*) over the same filters as the
-// candidate stream so coverage keeps the true candidate total.
-func (s *Store) countSearchCandidates(ctx context.Context, plan searchPlan) (int, error) {
-	query := "SELECT count(*) " + plan.fromWhereSQL
+// countSearchCandidates returns an exact total only when the candidate set is
+// within limit. The inner LIMIT bounds explicit exact-count work and lets the
+// caller fail closed instead of presenting a truncated value as exact.
+func (s *Store) countSearchCandidates(ctx context.Context, plan searchPlan, limit int) (int, error) {
+	query := "SELECT count(*) FROM (SELECT 1 " + plan.fromWhereSQL + " LIMIT ?)"
 	query = plan.prefixSQL + query
-	rows, err := s.database.QueryContext(ctx, query, plan.arguments...)
+	arguments := append(append([]any(nil), plan.arguments...), limit+1)
+	s.searchCandidateCountQueries.Add(1)
+	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return 0, fmt.Errorf("count Envelope Index search candidates: %w", err)
 	}
@@ -424,7 +427,16 @@ func (s *Store) countSearchCandidates(ctx context.Context, plan searchPlan) (int
 	if err := rows.Scan(&total); err != nil {
 		return 0, fmt.Errorf("scan Envelope Index candidate count: %w", err)
 	}
-	return total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate Envelope Index candidate count: %w", err)
+	}
+	if total > limit {
+		return 0, operationError(
+			"search_count_limit_exceeded",
+			fmt.Sprintf("exact candidate count exceeds max-messages %d; narrow the search or raise the bounded limit", limit),
+		)
+	}
+	return total, nil
 }
 
 func (s *Store) searchBodies(
@@ -432,13 +444,19 @@ func (s *Store) searchBodies(
 	prepared mail.PreparedQuery,
 	plan searchPlan,
 ) (mail.SearchPage, error) {
-	total, err := s.countSearchCandidates(ctx, plan)
-	if err != nil {
-		return mail.SearchPage{}, err
+	total := 0
+	totalExact := false
+	if prepared.Query.ExactCount {
+		var err error
+		total, err = s.countSearchCandidates(ctx, plan, prepared.Query.MaxMessages)
+		if err != nil {
+			return mail.SearchPage{}, err
+		}
+		totalExact = true
 	}
 	maximum := prepared.Query.MaxMessages
 	stream := s.newSearchCandidateStream(ctx, plan)
-	return s.scanSearchRecordsChunked(ctx, prepared, plan.mailbox, stream, total, maximum)
+	return s.scanSearchRecordsChunked(ctx, prepared, plan.mailbox, stream, total, totalExact, maximum)
 }
 
 // scanSearchRecordsChunked pulls body-search candidates in chunks and
@@ -449,9 +467,12 @@ func (s *Store) scanSearchRecordsChunked(
 	mailbox *mailref.Mailbox,
 	stream *searchCandidateStream,
 	total int,
+	totalExact bool,
 	maximum int,
 ) (mail.SearchPage, error) {
-	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: true}
+	coverage := mail.SearchCoverage{
+		Backend: "emlx_stream", CandidateMessages: total, CandidateMessagesExact: totalExact, Complete: true,
+	}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
 	var reservedBytes int64
@@ -519,15 +540,24 @@ chunkLoop:
 			}
 		}
 	}
-	limitedByCount := total > maximum
-	coverage.Complete = coverage.Complete && !limitedByCount
-	if coverage.ScannedMessages+coverage.CatalogProvenMessages != coverage.CandidateMessages {
-		coverage.Complete = false
+	if !totalExact {
+		observed := loaded
+		if loaded == progressCount && !stream.done {
+			lookahead, err := stream.next(1)
+			if err != nil {
+				return mail.SearchPage{}, err
+			}
+			observed += len(lookahead)
+		}
+		coverage.CandidateMessages = observed
+		coverage.CandidateMessagesExact = stream.done
 	}
+	coverage.Complete = coverage.Complete && coverage.CandidateMessagesExact &&
+		progressCount == coverage.CandidateMessages
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
 	var cursorItem *messageRecord
 	cursorInclusive := false
-	if total > progressCount {
+	if coverage.CandidateMessages > progressCount || !coverage.CandidateMessagesExact {
 		cursorItem = lastScanned
 		if cursorItem == nil {
 			cursorItem = budgetCandidate
@@ -1161,6 +1191,6 @@ func emptySearchPage(sourceScan bool) mail.SearchPage {
 	}
 	return mail.SearchPage{
 		Messages: []mail.SearchMessage{},
-		Coverage: mail.SearchCoverage{Backend: backend, Complete: true},
+		Coverage: mail.SearchCoverage{Backend: backend, CandidateMessagesExact: true, Complete: true},
 	}
 }

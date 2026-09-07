@@ -64,6 +64,8 @@ type capabilityLimits struct {
 	SenderIdentityCoverageStates   []string                    `json:"sender_identity_coverage_states"`
 	SearchPaginationConsistency    string                      `json:"search_pagination_consistency"`
 	SearchCursorDetectsIndexDrift  bool                        `json:"search_cursor_detects_index_drift"`
+	SearchCandidateCountDefault    string                      `json:"search_candidate_count_default"`
+	SearchExactCountBounded        bool                        `json:"search_exact_count_bounded"`
 }
 
 func capabilities() capabilityManifest {
@@ -92,8 +94,8 @@ func capabilities() capabilityManifest {
 			read("mailboxes.list", "mail-store", "none", "complete"),
 			read("mailboxes.resolve", "mail-store", "none", "resolved"),
 			read("messages.list", "mail-store", "fallback-automation", "complete"),
-			read("messages.filter", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed"),
-			read("messages.search", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed"),
+			read("messages.filter", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"),
+			read("messages.search", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"),
 			read("messages.get", "mail-store", "none", "complete", "partial"),
 			read("messages.raw", "mail-store", "none", "complete"),
 			read("attachments.list", "mail-store", "none", "complete", "partial"),
@@ -145,6 +147,8 @@ func capabilities() capabilityManifest {
 			MaximumSenderIdentityScanLimit: mail.MaximumSenderIdentityScanLimit,
 			SearchPaginationConsistency:    mail.SearchConsistencyBestEffort,
 			SearchCursorDetectsIndexDrift:  true,
+			SearchCandidateCountDefault:    "observed_lower_bound",
+			SearchExactCountBounded:        true,
 			SenderIdentityCoverageStates: []string{
 				string(mail.SenderIdentityCoverageStateComplete),
 				string(mail.SenderIdentityCoverageStateBounded),

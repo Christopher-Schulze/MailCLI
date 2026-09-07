@@ -13,6 +13,16 @@ type partialSearchGateway struct {
 	testGateway
 }
 
+type searchQueryCaptureGateway struct {
+	testGateway
+	query mail.PreparedQuery
+}
+
+func (g *searchQueryCaptureGateway) SearchMessages(_ context.Context, query mail.PreparedQuery) (mail.SearchPage, error) {
+	g.query = query
+	return mail.SearchPage{Coverage: mail.SearchCoverage{CandidateMessagesExact: true, Complete: true}}, nil
+}
+
 func (partialSearchGateway) SearchMessages(context.Context, mail.PreparedQuery) (mail.SearchPage, error) {
 	return mail.SearchPage{
 		Coverage: mail.SearchCoverage{
@@ -58,6 +68,28 @@ func TestSearchRejectsInvalidOptionalBoolean(t *testing.T) {
 	}
 }
 
+func TestSearchExactCountFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "body search", args: []string{"messages", "search", "--query", "needle", "--exact-count", "--json"}},
+		{name: "attachment filter", args: []string{"messages", "filter", "--attachment", "true", "--exact-count", "--json"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := &searchQueryCaptureGateway{}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(context.Background(), mail.NewService(gateway), test.args, &stdout, &stderr)
+			if code != 0 || stderr.Len() != 0 || !gateway.query.Query.ExactCount {
+				t.Fatalf("code = %d, exact_count = %t, stdout = %q, stderr = %q",
+					code, gateway.query.Query.ExactCount, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 	page := mail.SearchPage{
 		Messages: []mail.SearchMessage{{
@@ -78,6 +110,7 @@ func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 		!strings.Contains(output.String(), "consistency=best_effort") ||
 		!strings.Contains(output.String(), "revision=revision-1") ||
 		!strings.Contains(output.String(), "corpus_complete=false") ||
+		!strings.Contains(output.String(), "candidates_exact=false") ||
 		strings.Contains(output.String(), "matching\ncontext") {
 		t.Fatalf("output = %q", output.String())
 	}
@@ -92,6 +125,7 @@ func TestSearchJSONReportsIncompleteCorpus(t *testing.T) {
 		&stdout, &stderr,
 	)
 	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"complete":false`) ||
+		!strings.Contains(stdout.String(), `"candidate_messages_exact":false`) ||
 		!strings.Contains(stdout.String(), `"consistency":"best_effort"`) ||
 		!strings.Contains(stdout.String(), `"index_revision":"revision-1"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())

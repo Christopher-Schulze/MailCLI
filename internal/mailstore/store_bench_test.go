@@ -373,6 +373,28 @@ func BenchmarkSearchBodySmallINBOX(b *testing.B) {
 	}
 }
 
+// BenchmarkSearchBodySmallINBOXExactCount measures the explicit bounded
+// candidate-count probe separately from the default stream-derived path.
+func BenchmarkSearchBodySmallINBOXExactCount(b *testing.B) {
+	store := openBenchmarkStore(b)
+	_, mailboxRef := resolveGmailINBOX(b, store)
+	ctx := context.Background()
+	prepared, err := mail.PrepareQuery(mail.Query{
+		Text: "invoice", MailboxRef: mailboxRef, Limit: 25,
+		MaxMessages: mail.MaximumSearchMaxMessages, ExactCount: true,
+	})
+	if err != nil {
+		b.Fatalf("prepare query: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.SearchMessages(ctx, prepared); err != nil {
+			b.Fatalf("search bodies with exact count: %v", err)
+		}
+	}
+}
+
 // BenchmarkSearchBodyLargeStore measures a multi-term body search across all
 // active accounts and mailboxes (no scope restriction), the heaviest query
 // shape the CLI offers.

@@ -46,3 +46,17 @@ func TestPrepareQueryRejectsInvalidDateRangesTable(t *testing.T) {
 		})
 	}
 }
+
+func TestPrepareQueryBindsExactCountToCursorFingerprint(t *testing.T) {
+	defaultQuery, err := PrepareQuery(Query{Text: "needle"})
+	if err != nil {
+		t.Fatalf("PrepareQuery(default) error = %v", err)
+	}
+	exactQuery, err := PrepareQuery(Query{Text: "needle", ExactCount: true})
+	if err != nil {
+		t.Fatalf("PrepareQuery(exact) error = %v", err)
+	}
+	if defaultQuery.Fingerprint == exactQuery.Fingerprint {
+		t.Fatal("exact-count mode must be bound to the search cursor fingerprint")
+	}
+}

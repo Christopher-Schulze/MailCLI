@@ -35,6 +35,7 @@ type Query struct {
 	Cursor        string
 	MaxMessages   int
 	MaxBytes      int64
+	ExactCount    bool
 }
 
 type SearchMessage struct {
@@ -43,17 +44,18 @@ type SearchMessage struct {
 }
 
 type SearchCoverage struct {
-	Consistency           string `json:"consistency"`
-	IndexRevision         string `json:"index_revision"`
-	Backend               string `json:"backend"`
-	CandidateMessages     int    `json:"candidate_messages"`
-	ScannedMessages       int    `json:"scanned_messages"`
-	ScannedBytes          int64  `json:"scanned_bytes"`
-	FullSources           int    `json:"full_sources"`
-	PartialSources        int    `json:"partial_sources"`
-	MissingSources        int    `json:"missing_sources"`
-	Complete              bool   `json:"complete"`
-	CatalogProvenMessages int    `json:"catalog_proven_messages,omitempty"`
+	Consistency            string `json:"consistency"`
+	IndexRevision          string `json:"index_revision"`
+	Backend                string `json:"backend"`
+	CandidateMessages      int    `json:"candidate_messages"`
+	CandidateMessagesExact bool   `json:"candidate_messages_exact"`
+	ScannedMessages        int    `json:"scanned_messages"`
+	ScannedBytes           int64  `json:"scanned_bytes"`
+	FullSources            int    `json:"full_sources"`
+	PartialSources         int    `json:"partial_sources"`
+	MissingSources         int    `json:"missing_sources"`
+	Complete               bool   `json:"complete"`
+	CatalogProvenMessages  int    `json:"catalog_proven_messages,omitempty"`
 }
 
 type SearchPage struct {
