@@ -135,7 +135,7 @@ List and search cursors bind the store UUID, query or mailbox fingerprint, sort 
 
 ## Local security and permissions
 
-MailCLI reuses Mail.app's configured accounts and Keychain-backed authentication for reads and mutations. It does not request, read, log, or transmit account passwords, OAuth tokens, or cookies. The one stored secret is the per-account app-specific SMTP password that `mailcli send setup` writes to the macOS Keychain (`mailcli-smtp` service) at the user's no-echo prompt; MailCLI never displays it, includes it in output or logs, or sends it anywhere except the provider's SMTP submission and IMAP endpoints.
+MailCLI reuses Mail.app's configured accounts and Keychain-backed authentication for reads and mutations. It does not request, read, log, or transmit account passwords, OAuth tokens, or cookies. The one stored secret is the per-account app-specific SMTP password that `mailcli send setup` writes to the macOS Keychain (`mailcli-smtp` service) at the user's no-echo prompt; MailCLI never displays it, includes it in output or logs, or sends it anywhere except the provider's SMTP submission and IMAP endpoints. Account identifiers containing an embedded NUL byte are rejected with `keychain_invalid_identifier` before any platform keychain or CoreFoundation bridge call; valid Unicode identifiers remain supported.
 
 macOS may show a one-time Automation consent prompt when `mailcli doctor --live`, targeted fallback listing, `drafts open`, or `sync` (without `--check`) first sends an Apple Event. The calling host, such as Terminal or Codex, must be allowed to control Mail in System Settings for those operations.
 

@@ -25,6 +25,24 @@ func TestHandoffSuccessWithoutAppKit(t *testing.T) {
 	}
 }
 
+func TestHandoffEscapesEmbeddedNULBeforeNativeCall(t *testing.T) {
+	original := invokeNativeCompose
+	t.Cleanup(func() { invokeNativeCompose = original })
+	invokeNativeCompose = func(payload string) (string, error) {
+		if strings.Contains(payload, "\x00") {
+			t.Fatal("native payload contains an embedded NUL")
+		}
+		if !strings.Contains(payload, `\u0000`) {
+			t.Fatalf("payload = %s, want JSON NUL escape", payload)
+		}
+		return `{"ok":true,"opened":true}`, nil
+	}
+
+	if _, err := Handoff(context.Background(), Request{Subject: "before\x00after"}); err != nil {
+		t.Fatalf("Handoff() error = %v", err)
+	}
+}
+
 func TestHandoffNativeErrorWithoutAppKit(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })

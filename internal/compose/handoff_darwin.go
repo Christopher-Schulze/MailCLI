@@ -52,6 +52,8 @@ func (e *Error) ErrorCode() string {
 var invokeNativeCompose = nativeComposeEmail
 
 func nativeComposeEmail(payload string) (string, error) {
+	// json.Marshal escapes embedded NUL bytes as \u0000 before this C string
+	// boundary, so request data cannot truncate the native payload.
 	input := C.CString(payload)
 	defer C.free(unsafe.Pointer(input))
 	output := C.mailcli_compose_email(input)

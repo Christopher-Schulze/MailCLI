@@ -130,6 +130,10 @@ func TestSendSetupRejectsInvalidInput(t *testing.T) {
 			wantCode: "invalid_argument",
 		},
 		{
+			name: "embedded NUL address", args: []string{"setup", "--from", "alice\x00@example.com", "--json"},
+			wantCode: "invalid_argument",
+		},
+		{
 			name: "unsupported provider", args: []string{"setup", "--from", "alice@unknown.example", "--json"},
 			wantCode: "transport_unsupported_provider",
 		},

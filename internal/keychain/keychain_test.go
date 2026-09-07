@@ -244,6 +244,50 @@ func TestNewReturnsCredentialStore(t *testing.T) {
 	}
 }
 
+func TestCredentialStoreRejectsNULIdentifiers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		account string
+	}{
+		{name: "beginning", account: "\x00alice@example.com"},
+		{name: "middle", account: "alice\x00@example.com"},
+		{name: "end", account: "alice@example.com\x00"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			backend := newFakeStore()
+			kc := newForTest(backend)
+			if err := kc.Store(test.account, "secret"); transport.ErrorCode(err) != CodeInvalidIdentifier {
+				t.Fatalf("Store() error = %v, want %s", err, CodeInvalidIdentifier)
+			}
+			if _, err := kc.Load(test.account); transport.ErrorCode(err) != CodeInvalidIdentifier {
+				t.Fatalf("Load() error = %v, want %s", err, CodeInvalidIdentifier)
+			}
+			if err := kc.Delete(test.account); transport.ErrorCode(err) != CodeInvalidIdentifier {
+				t.Fatalf("Delete() error = %v, want %s", err, CodeInvalidIdentifier)
+			}
+			if len(backend.items) != 0 {
+				t.Fatalf("backend items = %#v, want empty", backend.items)
+			}
+		})
+	}
+}
+
+func TestCredentialStoreAcceptsUnicodeIdentifier(t *testing.T) {
+	t.Parallel()
+	const account = "müller@example.com"
+	kc := newForTest(newFakeStore())
+	if err := kc.Store(account, "secret"); err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	password, err := kc.Load(account)
+	if err != nil || password != "secret" {
+		t.Fatalf("Load() = %q, %v; want secret, nil", password, err)
+	}
+}
+
 // failingFakeStore is a store backend that returns configurable errors for
 // testing error-handling paths in the keychain wrapper.
 type failingFakeStore struct {

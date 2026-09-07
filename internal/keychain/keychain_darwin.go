@@ -23,6 +23,9 @@ type osStore struct{}
 func newOSStore() store { return osStore{} }
 
 func (osStore) add(account, password string) error {
+	if err := validateIdentifier(account); err != nil {
+		return err
+	}
 	serviceCF, err := cfString(serviceName)
 	if err != nil {
 		return err
@@ -56,6 +59,9 @@ func (osStore) add(account, password string) error {
 }
 
 func (osStore) update(account, password string) error {
+	if err := validateIdentifier(account); err != nil {
+		return err
+	}
 	serviceCF, err := cfString(serviceName)
 	if err != nil {
 		return err
@@ -96,6 +102,9 @@ func (osStore) update(account, password string) error {
 }
 
 func (osStore) find(account string) (string, error) {
+	if err := validateIdentifier(account); err != nil {
+		return "", err
+	}
 	serviceCF, err := cfString(serviceName)
 	if err != nil {
 		return "", err
@@ -143,6 +152,9 @@ func (osStore) find(account string) (string, error) {
 }
 
 func (osStore) remove(account string) error {
+	if err := validateIdentifier(account); err != nil {
+		return err
+	}
 	serviceCF, err := cfString(serviceName)
 	if err != nil {
 		return err
@@ -169,6 +181,9 @@ func (osStore) remove(account string) error {
 }
 
 func cfString(s string) (C.CFStringRef, error) {
+	if err := validateIdentifier(s); err != nil {
+		return 0, err
+	}
 	cstr := C.CString(s)
 	defer C.free(unsafe.Pointer(cstr))
 

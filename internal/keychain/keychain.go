@@ -3,6 +3,7 @@ package keychain
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"mailcli/internal/transport"
 )
@@ -37,12 +38,13 @@ func (e *KeychainError) Is(target error) bool {
 
 // Typed error codes.
 const (
-	CodeNotFound     = "keychain_item_not_found"
-	CodeDuplicate    = "keychain_item_duplicate"
-	CodeUnsupported  = "keychain_unsupported"
-	CodeStoreFailed  = "keychain_store_failed"
-	CodeLoadFailed   = "keychain_load_failed"
-	CodeDeleteFailed = "keychain_delete_failed"
+	CodeNotFound          = "keychain_item_not_found"
+	CodeDuplicate         = "keychain_item_duplicate"
+	CodeUnsupported       = "keychain_unsupported"
+	CodeStoreFailed       = "keychain_store_failed"
+	CodeLoadFailed        = "keychain_load_failed"
+	CodeDeleteFailed      = "keychain_delete_failed"
+	CodeInvalidIdentifier = "keychain_invalid_identifier"
 )
 
 // ErrItemExists is returned by a backend when an item already exists.
@@ -65,11 +67,17 @@ type keychain struct {
 
 // Load returns the stored password for the account.
 func (k *keychain) Load(account string) (string, error) {
+	if err := validateIdentifier(account); err != nil {
+		return "", err
+	}
 	return k.backend.find(account)
 }
 
 // Store stores the password for the account, replacing an existing item.
 func (k *keychain) Store(account, password string) error {
+	if err := validateIdentifier(account); err != nil {
+		return err
+	}
 	if err := k.backend.add(account, password); err != nil {
 		if errors.Is(err, ErrItemExists) {
 			return k.backend.update(account, password)
@@ -81,7 +89,22 @@ func (k *keychain) Store(account, password string) error {
 
 // Delete removes the stored password for the account.
 func (k *keychain) Delete(account string) error {
+	if err := validateIdentifier(account); err != nil {
+		return err
+	}
 	return k.backend.remove(account)
+}
+
+// validateIdentifier enforces the platform bridge invariant that an account
+// identifier contains no embedded NUL byte before a backend sees it.
+func validateIdentifier(value string) error {
+	if strings.IndexByte(value, 0) >= 0 {
+		return &KeychainError{
+			Code:    CodeInvalidIdentifier,
+			Message: "keychain identifier contains an embedded NUL byte",
+		}
+	}
+	return nil
 }
 
 // New returns a transport.CredentialStore backed by the platform keychain.
