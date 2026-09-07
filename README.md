@@ -99,7 +99,7 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The release archive for `v1.3.0` installs both the native CLI and its companion agent skill:
+The published `v1.3.0` archive installs both the native CLI and its companion agent skill:
 
 ```bash
 VERSION=1.3.0
@@ -134,7 +134,7 @@ cd MailCLI
 
 The source installer builds a native `darwin/arm64` executable and copies only the binary to `~/.local/bin/mailcli` by default. Pass an explicit destination as the first argument to install elsewhere, then install or link [`skills/mailcli`](skills/mailcli) separately when agent support is needed.
 
-The current release binary is ad-hoc signed but not Apple-notarized because no Developer ID identity is available. A browser download can therefore be quarantined by Gatekeeper. Verify `SHA256SUMS` first; if macOS still blocks the verified binary, explicitly remove only that binary's quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`. The installer never performs this bypass automatically.
+The published release binary is ad-hoc signed but not Apple-notarized because no Developer ID identity is available. A browser download can therefore be quarantined by Gatekeeper. Verify `SHA256SUMS` first; if macOS still blocks the verified binary, explicitly remove only that binary's quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`. The installer never performs this bypass automatically.
 
 ### Grant permissions
 
@@ -242,7 +242,7 @@ Markdown is rendered with Goldmark. HTML uses a strict allowlist, removes active
 
 Every draft JSON object must contain an explicit `body` field; an intentionally empty string is valid. Duplicate addresses across To, CC, and BCC are rejected. Hard limits are 64 KiB of subject text, 4 MiB of reviewed body text, 200 total recipients, 100 attachments, and 512 MiB of attachment bytes. MailCLI records attachment size and SHA-256 when it creates or updates a local draft.
 
-On the verified Mail 16 build, `drafts save` returns `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore keeps scripted `compose_write:false` and `compose_attachment_write:false`, advertises `send_transport:"smtp"` with `raw_mime_send:true`, and separately advertises visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
+On the verified Mail 16 build, `drafts save` returns `compose_automation_unsupported` before acquiring the Apple Events gate. Historical controlled live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. That evidence applies to unsupported native composition, not autonomous delivery: `mailcli capabilities --json` keeps scripted `compose_write:false` and `compose_attachment_write:false`, advertises `send_transport:"smtp"` with `raw_mime_send:true`, and separately advertises visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
 
 Draft-save state matrix: a new local draft without a historical `save_attempt` is rejected before Mail contact. A valid historical `save_attempt` is reconcile-only; the exact safe agent command is `mailcli drafts save --ref <DRAFT_REF> --json`, which never starts a new compose. If exact observation fails, retain the claim and draft and do not retry as a new native save.
 
