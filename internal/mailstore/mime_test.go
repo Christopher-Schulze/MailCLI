@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"mailcli/internal/mail"
 )
 
 func TestParseMIMEDocument(t *testing.T) {
@@ -17,6 +19,7 @@ func TestParseMIMEDocument(t *testing.T) {
 	source := []byte("From: Sender <sender@example.com>\r\n" +
 		"To: Receiver <receiver@example.com>\r\n" +
 		"Cc: Copy <copy@example.com>\r\n" +
+		"Bcc: Hidden <hidden@example.com>\r\n" +
 		"Reply-To: Reply <reply@example.com>\r\n" +
 		"Message-ID: <message@example.com>\r\n" +
 		"Content-Type: multipart/mixed; boundary=test-boundary\r\n\r\n" +
@@ -32,8 +35,10 @@ func TestParseMIMEDocument(t *testing.T) {
 	if !document.Complete || document.MessageID != "message@example.com" || document.Content != "Hello, world." {
 		t.Fatalf("parseMIMEDocument() = %#v", document)
 	}
-	if len(document.To) != 1 || document.To[0].Address != "receiver@example.com" || len(document.CC) != 1 {
-		t.Fatalf("recipients = %#v, %#v", document.To, document.CC)
+	if !reflect.DeepEqual(document.To, []mail.Recipient{{Name: "Receiver", Address: "receiver@example.com"}}) ||
+		!reflect.DeepEqual(document.CC, []mail.Recipient{{Name: "Copy", Address: "copy@example.com"}}) ||
+		!reflect.DeepEqual(document.BCC, []mail.Recipient{{Name: "Hidden", Address: "hidden@example.com"}}) {
+		t.Fatalf("recipients = to %#v, cc %#v, bcc %#v", document.To, document.CC, document.BCC)
 	}
 	part, exists := document.Parts["2"]
 	digest := sha256.Sum256([]byte("pdf-bytes"))
