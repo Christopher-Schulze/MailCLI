@@ -62,6 +62,8 @@ type capabilityLimits struct {
 	SenderIdentityScanLimit        int                         `json:"sender_identity_scan_limit"`
 	MaximumSenderIdentityScanLimit int                         `json:"maximum_sender_identity_scan_limit"`
 	SenderIdentityCoverageStates   []string                    `json:"sender_identity_coverage_states"`
+	SearchPaginationConsistency    string                      `json:"search_pagination_consistency"`
+	SearchCursorDetectsIndexDrift  bool                        `json:"search_cursor_detects_index_drift"`
 }
 
 func capabilities() capabilityManifest {
@@ -90,8 +92,8 @@ func capabilities() capabilityManifest {
 			read("mailboxes.list", "mail-store", "none", "complete"),
 			read("mailboxes.resolve", "mail-store", "none", "resolved"),
 			read("messages.list", "mail-store", "fallback-automation", "complete"),
-			read("messages.filter", "mail-store", "none", "complete"),
-			read("messages.search", "mail-store", "none", "complete"),
+			read("messages.filter", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed"),
+			read("messages.search", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed"),
 			read("messages.get", "mail-store", "none", "complete", "partial"),
 			read("messages.raw", "mail-store", "none", "complete"),
 			read("attachments.list", "mail-store", "none", "complete", "partial"),
@@ -141,6 +143,8 @@ func capabilities() capabilityManifest {
 			MaximumRawSourceBytes:          mail.MaximumRawSourceBytes,
 			SenderIdentityScanLimit:        mail.DefaultSenderIdentityScanLimit,
 			MaximumSenderIdentityScanLimit: mail.MaximumSenderIdentityScanLimit,
+			SearchPaginationConsistency:    mail.SearchConsistencyBestEffort,
+			SearchCursorDetectsIndexDrift:  true,
 			SenderIdentityCoverageStates: []string{
 				string(mail.SenderIdentityCoverageStateComplete),
 				string(mail.SenderIdentityCoverageStateBounded),

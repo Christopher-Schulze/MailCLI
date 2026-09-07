@@ -57,18 +57,46 @@ func (s *Store) SearchMessages(ctx context.Context, prepared mail.PreparedQuery)
 	if prepared.Cursor != nil && prepared.Cursor.StoreUUID != s.storeUUID {
 		return mail.SearchPage{}, operationError("invalid_cursor", "search cursor belongs to a different Mail store")
 	}
+	indexRevision, err := s.searchIndexRevision(ctx)
+	if err != nil {
+		return mail.SearchPage{}, err
+	}
+	if prepared.Cursor != nil && prepared.Cursor.IndexRevision != indexRevision {
+		return mail.SearchPage{}, operationError(
+			"search_cursor_stale",
+			"Mail's Envelope Index changed after the previous search page; restart the search without a cursor",
+		)
+	}
+	prepared.IndexRevision = indexRevision
 	plan, empty, err := s.prepareSearchPlan(ctx, prepared)
 	if err != nil {
 		return mail.SearchPage{}, err
 	}
 	sourceScan := requiresSourceScan(prepared.Query)
+	var page mail.SearchPage
 	if empty {
-		return emptySearchPage(sourceScan), nil
+		page = emptySearchPage(sourceScan)
+	} else if !sourceScan {
+		page, err = s.searchMetadata(ctx, prepared, plan)
+	} else {
+		page, err = s.searchBodies(ctx, prepared, plan)
 	}
-	if !sourceScan {
-		return s.searchMetadata(ctx, prepared, plan)
+	if err != nil {
+		return mail.SearchPage{}, err
 	}
-	return s.searchBodies(ctx, prepared, plan)
+	currentRevision, err := s.searchIndexRevision(ctx)
+	if err != nil {
+		return mail.SearchPage{}, err
+	}
+	if currentRevision != indexRevision {
+		return mail.SearchPage{}, operationError(
+			"search_index_changed",
+			"Mail's Envelope Index changed during the search; retry the page",
+		)
+	}
+	page.Coverage.Consistency = mail.SearchConsistencyBestEffort
+	page.Coverage.IndexRevision = indexRevision
+	return page, nil
 }
 
 func requiresSourceScan(query mail.Query) bool {
@@ -268,7 +296,9 @@ func (s *Store) searchMetadata(
 		Backend: "envelope_sql", CandidateMessages: total, Complete: true,
 	}
 	if hasMore && len(items) > 0 {
-		page.NextCursor, err = searchCursorFor(items[len(items)-1], prepared.Fingerprint, s.storeUUID)
+		page.NextCursor, err = searchCursorFor(
+			items[len(items)-1], prepared.Fingerprint, s.storeUUID, prepared.IndexRevision,
+		)
 	}
 	return page, err
 }
@@ -508,10 +538,12 @@ chunkLoop:
 		var err error
 		if cursorInclusive {
 			page.NextCursor, err = searchCursorForInclusive(
-				*cursorItem, prepared.Fingerprint, s.storeUUID,
+				*cursorItem, prepared.Fingerprint, s.storeUUID, prepared.IndexRevision,
 			)
 		} else {
-			page.NextCursor, err = searchCursorFor(*cursorItem, prepared.Fingerprint, s.storeUUID)
+			page.NextCursor, err = searchCursorFor(
+				*cursorItem, prepared.Fingerprint, s.storeUUID, prepared.IndexRevision,
+			)
 		}
 		return page, err
 	}
@@ -996,13 +1028,20 @@ func runeByteRangeFast(value string, startRune int, endRune int) (int, int) {
 	return startByte, index
 }
 
-func searchCursorFor(item messageRecord, fingerprint string, storeUUID string) (string, error) {
-	return mail.EncodeSearchCursor(fingerprint, storeUUID, item.DateReceived, item.DateReceivedNull, item.RowID)
+func searchCursorFor(item messageRecord, fingerprint string, storeUUID string, indexRevision string) (string, error) {
+	return mail.EncodeSearchCursorWithRevision(
+		fingerprint, storeUUID, indexRevision, item.DateReceived, item.DateReceivedNull, item.RowID,
+	)
 }
 
-func searchCursorForInclusive(item messageRecord, fingerprint string, storeUUID string) (string, error) {
-	return mail.EncodeSearchCursorInclusive(
-		fingerprint, storeUUID, item.DateReceived, item.DateReceivedNull, item.RowID,
+func searchCursorForInclusive(
+	item messageRecord,
+	fingerprint string,
+	storeUUID string,
+	indexRevision string,
+) (string, error) {
+	return mail.EncodeSearchCursorInclusiveWithRevision(
+		fingerprint, storeUUID, indexRevision, item.DateReceived, item.DateReceivedNull, item.RowID,
 	)
 }
 

@@ -16,6 +16,7 @@ type partialSearchGateway struct {
 func (partialSearchGateway) SearchMessages(context.Context, mail.PreparedQuery) (mail.SearchPage, error) {
 	return mail.SearchPage{
 		Coverage: mail.SearchCoverage{
+			Consistency: mail.SearchConsistencyBestEffort, IndexRevision: "revision-1",
 			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: false,
 		},
 	}, nil
@@ -67,12 +68,15 @@ func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 			Snippet: "matching\ncontext",
 		}},
 		Coverage: mail.SearchCoverage{
+			Consistency: mail.SearchConsistencyBestEffort, IndexRevision: "revision-1",
 			Backend: "emlx_stream", CandidateMessages: 20, ScannedMessages: 10, Complete: false,
 		},
 	}
 	var output bytes.Buffer
 	writeSearchResults(&output, page)
 	if !strings.Contains(output.String(), "matching context") ||
+		!strings.Contains(output.String(), "consistency=best_effort") ||
+		!strings.Contains(output.String(), "revision=revision-1") ||
 		!strings.Contains(output.String(), "corpus_complete=false") ||
 		strings.Contains(output.String(), "matching\ncontext") {
 		t.Fatalf("output = %q", output.String())
@@ -87,7 +91,9 @@ func TestSearchJSONReportsIncompleteCorpus(t *testing.T) {
 		[]string{"messages", "search", "--query", "needle", "--json"},
 		&stdout, &stderr,
 	)
-	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"complete":false`) {
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"complete":false`) ||
+		!strings.Contains(stdout.String(), `"consistency":"best_effort"`) ||
+		!strings.Contains(stdout.String(), `"index_revision":"revision-1"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }

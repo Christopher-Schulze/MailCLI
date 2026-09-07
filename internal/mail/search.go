@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	DefaultSearchMaxMessages = 50_000
-	DefaultSearchMaxBytes    = int64(4 * 1024 * 1024 * 1024)
-	MaximumSearchMaxMessages = 100_000
-	MaximumSearchMaxBytes    = int64(8 * 1024 * 1024 * 1024)
-	searchCursorVersion      = 2
+	DefaultSearchMaxMessages    = 50_000
+	DefaultSearchMaxBytes       = int64(4 * 1024 * 1024 * 1024)
+	MaximumSearchMaxMessages    = 100_000
+	MaximumSearchMaxBytes       = int64(8 * 1024 * 1024 * 1024)
+	SearchConsistencyBestEffort = "best_effort"
+	searchCursorVersion         = 3
 )
 
 type Query struct {
@@ -42,6 +43,8 @@ type SearchMessage struct {
 }
 
 type SearchCoverage struct {
+	Consistency           string `json:"consistency"`
+	IndexRevision         string `json:"index_revision"`
 	Backend               string `json:"backend"`
 	CandidateMessages     int    `json:"candidate_messages"`
 	ScannedMessages       int    `json:"scanned_messages"`
@@ -60,17 +63,19 @@ type SearchPage struct {
 }
 
 type PreparedQuery struct {
-	Query       Query
-	AfterUnix   int64
-	BeforeUnix  int64
-	Fingerprint string
-	Cursor      *SearchCursor
+	Query         Query
+	AfterUnix     int64
+	BeforeUnix    int64
+	Fingerprint   string
+	Cursor        *SearchCursor
+	IndexRevision string
 }
 
 type SearchCursor struct {
 	Version        int    `json:"version"`
 	Fingerprint    string `json:"fingerprint"`
 	StoreUUID      string `json:"store_uuid"`
+	IndexRevision  string `json:"index_revision"`
 	ReceivedAt     int64  `json:"received_at"`
 	ReceivedAtNull bool   `json:"received_at_null"`
 	RowID          int64  `json:"row_id"`
@@ -145,7 +150,18 @@ func PrepareQuery(query Query) (PreparedQuery, error) {
 }
 
 func EncodeSearchCursor(fingerprint string, storeUUID string, receivedAt int64, receivedAtNull bool, rowID int64) (string, error) {
-	return encodeSearchCursor(fingerprint, storeUUID, receivedAt, receivedAtNull, rowID, false)
+	return EncodeSearchCursorWithRevision(fingerprint, storeUUID, "legacy", receivedAt, receivedAtNull, rowID)
+}
+
+func EncodeSearchCursorWithRevision(
+	fingerprint string,
+	storeUUID string,
+	indexRevision string,
+	receivedAt int64,
+	receivedAtNull bool,
+	rowID int64,
+) (string, error) {
+	return encodeSearchCursor(fingerprint, storeUUID, indexRevision, receivedAt, receivedAtNull, rowID, false)
 }
 
 func EncodeSearchCursorInclusive(
@@ -155,12 +171,26 @@ func EncodeSearchCursorInclusive(
 	receivedAtNull bool,
 	rowID int64,
 ) (string, error) {
-	return encodeSearchCursor(fingerprint, storeUUID, receivedAt, receivedAtNull, rowID, true)
+	return EncodeSearchCursorInclusiveWithRevision(
+		fingerprint, storeUUID, "legacy", receivedAt, receivedAtNull, rowID,
+	)
+}
+
+func EncodeSearchCursorInclusiveWithRevision(
+	fingerprint string,
+	storeUUID string,
+	indexRevision string,
+	receivedAt int64,
+	receivedAtNull bool,
+	rowID int64,
+) (string, error) {
+	return encodeSearchCursor(fingerprint, storeUUID, indexRevision, receivedAt, receivedAtNull, rowID, true)
 }
 
 func encodeSearchCursor(
 	fingerprint string,
 	storeUUID string,
+	indexRevision string,
 	receivedAt int64,
 	receivedAtNull bool,
 	rowID int64,
@@ -168,7 +198,8 @@ func encodeSearchCursor(
 ) (string, error) {
 	payload, err := json.Marshal(SearchCursor{
 		Version: searchCursorVersion, Fingerprint: fingerprint, StoreUUID: storeUUID,
-		ReceivedAt: receivedAt, ReceivedAtNull: receivedAtNull, RowID: rowID,
+		IndexRevision: indexRevision,
+		ReceivedAt:    receivedAt, ReceivedAtNull: receivedAtNull, RowID: rowID,
 		Inclusive: inclusive,
 	})
 	if err != nil {
@@ -189,7 +220,8 @@ func DecodeSearchCursor(value string, fingerprint string) (*SearchCursor, error)
 	if err := json.Unmarshal(payload, &cursor); err != nil {
 		return nil, fmt.Errorf("parse search cursor: %w", err)
 	}
-	if cursor.Version != searchCursorVersion || cursor.StoreUUID == "" || cursor.RowID < 1 || cursor.Fingerprint != fingerprint {
+	if cursor.Version != searchCursorVersion || cursor.StoreUUID == "" || cursor.IndexRevision == "" ||
+		cursor.RowID < 1 || cursor.Fingerprint != fingerprint {
 		return nil, fmt.Errorf("search cursor does not match this query")
 	}
 	return &cursor, nil

@@ -43,7 +43,9 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 		t.Fatalf("SearchMessages(metadata) error = %v", err)
 	}
 	if len(metadata.Messages) != 1 || metadata.Coverage.Backend != "envelope_sql" ||
-		metadata.Coverage.CandidateMessages != 1 || !metadata.Coverage.Complete {
+		metadata.Coverage.CandidateMessages != 1 || !metadata.Coverage.Complete ||
+		metadata.Coverage.Consistency != mail.SearchConsistencyBestEffort ||
+		metadata.Coverage.IndexRevision == "" {
 		t.Fatalf("metadata search = %#v", metadata)
 	}
 
@@ -65,8 +67,8 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeSearchCursor(first) error = %v", err)
 	}
-	if firstCursor.RowID != 101 {
-		t.Fatalf("first body cursor row = %d, want last examined row 101", firstCursor.RowID)
+	if firstCursor.RowID != 101 || firstCursor.IndexRevision != bodyPage.Coverage.IndexRevision {
+		t.Fatalf("first body cursor = %+v, coverage = %+v", firstCursor, bodyPage.Coverage)
 	}
 
 	nextQuery, err := mail.PrepareQuery(mail.Query{
@@ -480,6 +482,138 @@ func TestSearchCursorIsBoundToMailStore(t *testing.T) {
 	}
 }
 
+func TestSearchCursorRejectsIndexMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		statement string
+	}{
+		{
+			name: "insert",
+			statement: `INSERT INTO messages(ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color)
+				VALUES (104,1004,2004,1,2,2,250,250,1,0,1,0,0,100,4,0,250,0)`,
+		},
+		{name: "delete", statement: `DELETE FROM messages WHERE ROWID = 103`},
+		{name: "move", statement: `UPDATE messages SET mailbox = 2 WHERE ROWID = 102`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			first, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Limit: 1})
+			if err != nil {
+				t.Fatalf("PrepareQuery(first) error = %v", err)
+			}
+			page, err := store.SearchMessages(context.Background(), first)
+			if err != nil || page.NextCursor == "" {
+				t.Fatalf("SearchMessages(first) = %#v, error = %v", page, err)
+			}
+			mutateSearchIndex(t, store, test.statement)
+			next, err := mail.PrepareQuery(mail.Query{
+				MailboxRef: inboxRef, Limit: 1, Cursor: page.NextCursor,
+			})
+			if err != nil {
+				t.Fatalf("PrepareQuery(next) error = %v", err)
+			}
+			if _, err := store.SearchMessages(context.Background(), next); errorCodeForTest(err) != "search_cursor_stale" {
+				t.Fatalf("SearchMessages(next) error = %v, want search_cursor_stale", err)
+			}
+		})
+	}
+}
+
+func TestSearchCursorReplaysAcrossUnchangedStoreReopen(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	mailRoot := filepath.Dir(store.versionRoot)
+	first, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Limit: 1})
+	if err != nil {
+		closeTestResourceNow(t, store, "test store")
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), first)
+	if err != nil || page.NextCursor == "" {
+		closeTestResourceNow(t, store, "test store")
+		t.Fatalf("SearchMessages(first) = %#v, error = %v", page, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+	reopened, err := Open(context.Background(), Config{
+		MailRoot: mailRoot, ActiveAccountURLs: []string{"imap://" + testAccountID + "/"},
+	})
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	closeTestResource(t, reopened, "reopened store")
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Limit: 1, Cursor: page.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	if _, err := reopened.SearchMessages(context.Background(), next); err != nil {
+		t.Fatalf("SearchMessages(next) after reopen error = %v", err)
+	}
+}
+
+func TestBodySearchSourceReplacementReportsIncompleteCoverage(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	first, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Text: "needle", Limit: 1})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), first)
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("SearchMessages(first) = %#v, error = %v", page, err)
+	}
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	base, err := store.messageBasePath(location, 102)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.WriteFile(base+".emlx", []byte("invalid replacement"), 0o600); err != nil {
+		t.Fatalf("replace fixture source: %v", err)
+	}
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 1, Cursor: page.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	nextPage, err := store.SearchMessages(context.Background(), next)
+	if err != nil {
+		t.Fatalf("SearchMessages(next) error = %v", err)
+	}
+	if nextPage.Coverage.Complete || nextPage.Coverage.MissingSources == 0 {
+		t.Fatalf("next coverage = %#v, want detectable incomplete replacement", nextPage.Coverage)
+	}
+}
+
+func mutateSearchIndex(t *testing.T, store *Store, statement string) {
+	t.Helper()
+	writer := openTestWriter(t, store.databasePath)
+	if _, err := writer.Exec(statement); err != nil {
+		closeTestResourceNow(t, writer, "search mutation writer")
+		t.Fatalf("mutate search index: %v", err)
+	}
+	if _, err := writer.Exec(
+		`UPDATE properties SET value = CAST(value AS INTEGER) + 1 WHERE key = ?`,
+		writeTransactionGenerationKey,
+	); err != nil {
+		closeTestResourceNow(t, writer, "search mutation writer")
+		t.Fatalf("advance search index generation: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close search mutation writer: %v", err)
+	}
+}
+
 // Body-search candidate loading is chunked: resident records stay bounded
 // while results, cursors, and coverage stay identical to a monolithic load
 // of the same fixture. The baseline reproduces the pre-057 shape inside the
@@ -529,6 +663,11 @@ func TestBodySearchChunkedCandidatesMatchMonolithic(t *testing.T) {
 // original windowed scan loop, kept as the equality baseline for the
 // chunked path.
 func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.PreparedQuery) (mail.SearchPage, error) {
+	indexRevision, err := store.searchIndexRevision(ctx)
+	if err != nil {
+		return mail.SearchPage{}, err
+	}
+	prepared.IndexRevision = indexRevision
 	plan, empty, err := store.prepareSearchPlan(ctx, prepared)
 	if err != nil || empty {
 		return mail.SearchPage{}, err
@@ -543,7 +682,10 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 		items = items[:maximum]
 	}
 
-	coverage := mail.SearchCoverage{Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount}
+	coverage := mail.SearchCoverage{
+		Consistency: mail.SearchConsistencyBestEffort, IndexRevision: indexRevision,
+		Backend: "emlx_stream", CandidateMessages: total, Complete: !limitedByCount,
+	}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
 	resultItems := make([]messageRecord, 0, prepared.Query.Limit+1)
@@ -600,7 +742,7 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
 	if hasMore && len(results) > 0 {
 		page.NextCursor, err = searchCursorFor(
-			resultItems[len(resultItems)-1], prepared.Fingerprint, store.storeUUID,
+			resultItems[len(resultItems)-1], prepared.Fingerprint, store.storeUUID, indexRevision,
 		)
 		return page, err
 	}

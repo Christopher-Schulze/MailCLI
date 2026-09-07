@@ -34,6 +34,20 @@ func TestEncodeSearchCursorRoundtrip(t *testing.T) {
 	}
 }
 
+func TestEncodeSearchCursorWithRevisionRoundtrip(t *testing.T) {
+	encoded, err := EncodeSearchCursorWithRevision("fp", "store", "revision-42", 1700000000, false, 42)
+	if err != nil {
+		t.Fatalf("EncodeSearchCursorWithRevision error = %v", err)
+	}
+	cursor, err := DecodeSearchCursor(encoded, "fp")
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor error = %v", err)
+	}
+	if cursor.IndexRevision != "revision-42" {
+		t.Fatalf("IndexRevision = %q, want revision-42", cursor.IndexRevision)
+	}
+}
+
 func TestEncodeSearchCursorInclusiveRoundtrip(t *testing.T) {
 	encoded, err := EncodeSearchCursorInclusive("fp", "store", 1700000000, false, 42)
 	if err != nil {

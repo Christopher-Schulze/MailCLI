@@ -182,7 +182,7 @@ mailcli messages search --sender example.com --after 2026-01-01 --json
 mailcli messages search --query "invoice tracking number" --max-messages 50000 --json
 ```
 
-List, filter, and search commands accept page sizes from 1 through 25. Continue with `data.page.next_cursor` until it is absent. Body search starts with the smallest result window needed for the requested page and grows its two-worker scan window only while candidates do not match. It reports candidate counts, scanned messages and bytes, partial sources, missing sources, bounds, and `data.page.coverage.complete`.
+List, filter, and search commands accept page sizes from 1 through 25. Continue with `data.page.next_cursor` until it is absent. Search pagination is bounded best-effort rather than a cross-process SQLite snapshot: every page reports `coverage.consistency:"best_effort"` and a compact `coverage.index_revision`, and cursor replay fails with `search_cursor_stale` if Mail's Envelope Index changed. A change during one page fails with `search_index_changed`; restart that page without its cursor. Body search starts with the smallest result window needed for the requested page and grows its two-worker scan window only while candidates do not match. It reports candidate counts, scanned messages and bytes, partial sources, missing sources, bounds, and `data.page.coverage.complete`.
 
 ### Read messages and attachments
 

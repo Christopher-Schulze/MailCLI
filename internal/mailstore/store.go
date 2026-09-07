@@ -13,6 +13,7 @@ import (
 type Store struct {
 	database                *sql.DB
 	versionRoot             string
+	databasePath            string
 	versionDirectory        *os.File
 	storeUUID               string
 	activeAccounts          []mailboxLocation
@@ -84,7 +85,7 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		return nil, resultErr
 	}
 	return &Store{
-		database: database, versionRoot: versionRoot, storeUUID: capability.StoreUUID,
+		database: database, versionRoot: versionRoot, databasePath: databasePath, storeUUID: capability.StoreUUID,
 		versionDirectory: versionDirectory,
 		activeAccounts:   activeAccounts, activeAccountKeys: activeKeys, capability: capability,
 		senderIdentityScanLimit: senderIdentityScanLimit,

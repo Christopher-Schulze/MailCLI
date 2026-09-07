@@ -94,8 +94,8 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
 		}
 		writeFormat(
-			stdout, "Coverage: %s, complete=%t, scanned=%d/%d, catalog_proven=%d, bytes=%d\n",
-			page.Coverage.Backend, page.Coverage.Complete,
+			stdout, "Coverage: %s, consistency=%s, revision=%s, complete=%t, scanned=%d/%d, catalog_proven=%d, bytes=%d\n",
+			page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
 			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
 			page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 		)
@@ -112,8 +112,8 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
 	writeFormat(
-		stdout, "coverage\t%s\tcorpus_complete=%t\tscanned=%d/%d\tcatalog_proven=%d\tbytes=%d\n",
-		page.Coverage.Backend, page.Coverage.Complete,
+		stdout, "coverage\t%s\tconsistency=%s\trevision=%s\tcorpus_complete=%t\tscanned=%d/%d\tcatalog_proven=%d\tbytes=%d\n",
+		page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
 		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
 		page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
 	)

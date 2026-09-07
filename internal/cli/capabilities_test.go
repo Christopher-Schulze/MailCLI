@@ -101,6 +101,18 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		!slices.Contains(manifest.Limits.SenderIdentityCoverageStates, string(mail.SenderIdentityCoverageStateBounded)) {
 		t.Fatalf("sender identity coverage capability = %+v", manifest.Limits)
 	}
+	if manifest.Limits.SearchPaginationConsistency != mail.SearchConsistencyBestEffort ||
+		!manifest.Limits.SearchCursorDetectsIndexDrift {
+		t.Fatalf("search pagination capability = %+v", manifest.Limits)
+	}
+	for _, id := range []string{"messages.filter", "messages.search"} {
+		command := manifest.Commands[slices.Index(got, id)]
+		if !slices.Equal(command.ResultStates, []string{
+			"complete", "partial", "search_cursor_stale", "search_index_changed",
+		}) {
+			t.Fatalf("%s result states = %+v", id, command.ResultStates)
+		}
+	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]
 	if send.EffectClass != "smtp-send" || send.Confirmation != "required-flag" ||
 		send.StoreDependency != "draft-store" || send.MailAppDependency != "none" ||

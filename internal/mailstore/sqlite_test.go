@@ -311,6 +311,7 @@ func createTestSchema(t *testing.T, database *sql.DB, omit string) {
 		`INSERT INTO properties(key, value) VALUES ('version', '4')`,
 		`INSERT INTO properties(key, value) VALUES ('minor_version', '74003')`,
 		`INSERT INTO properties(key, value) VALUES ('last_write_framework_version', '3826.700.81')`,
+		`INSERT INTO properties(key, value) VALUES ('WriteTransactionGeneration', '1')`,
 	)
 	for _, statement := range statements {
 		if _, err := database.Exec(statement); err != nil {
