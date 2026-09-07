@@ -118,6 +118,7 @@ fi
 
 go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
   -parallel "${MAILCLI_TEST_CPUS}" ./...
+"${MAILCLI_ROOT}/scripts/tests/test-write-coordination.sh"
 "${MAILCLI_ROOT}/scripts/tests/test-commit-authority.sh"
 "${MAILCLI_ROOT}/scripts/tests/test-release-authority.sh"
 RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
