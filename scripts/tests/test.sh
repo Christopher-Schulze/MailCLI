@@ -118,4 +118,14 @@ fi
 
 go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
   -parallel "${MAILCLI_TEST_CPUS}" ./...
+"${MAILCLI_ROOT}/scripts/tests/test-release-authority.sh"
+RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
+  refs/heads refs/remotes refs/tags)"
 "${MAILCLI_ROOT}/scripts/tests/test-release.sh"
+RELEASE_REFS_AFTER="$(git for-each-ref --format='%(refname) %(objectname)' \
+  refs/heads refs/remotes refs/tags)"
+if [[ "${RELEASE_REFS_AFTER}" != "${RELEASE_REFS_BEFORE}" ]]; then
+  printf 'Local release verification changed branch, remote-tracking, or tag refs\n' >&2
+  exit 1
+fi
+printf 'Local release verification preserved branch, remote-tracking, and tag refs\n'
