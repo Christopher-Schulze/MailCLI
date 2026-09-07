@@ -336,6 +336,44 @@ func BenchmarkListMessagesGmailINBOX25(b *testing.B) {
 	}
 }
 
+// BenchmarkSearchFixture603 measures the first result page over a generated
+// 603-message store. It keeps metadata, body, and explicit-count comparisons
+// reproducible without opening Mail.app or reading the user's Mail store.
+func BenchmarkSearchFixture603(b *testing.B) {
+	benchmarks := []struct {
+		name  string
+		query mail.Query
+	}{
+		{name: "metadata_subject", query: mail.Query{Subject: "Status", Limit: 25}},
+		{name: "body_default", query: mail.Query{Text: "needle", Limit: 25, MaxMessages: 1000}},
+		{name: "body_exact_count", query: mail.Query{Text: "needle", Limit: 25, MaxMessages: 1000, ExactCount: true}},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			store, mailboxRef := newSearchFixture(b, 600)
+			closeTestResource(b, store, "benchmark store")
+			query := benchmark.query
+			query.MailboxRef = mailboxRef
+			prepared, err := mail.PrepareQuery(query)
+			if err != nil {
+				b.Fatalf("prepare search query: %v", err)
+			}
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				page, err := store.SearchMessages(ctx, prepared)
+				if err != nil {
+					b.Fatalf("search fixture: %v", err)
+				}
+				if len(page.Messages) != 25 {
+					b.Fatalf("search fixture returned %d messages, want 25", len(page.Messages))
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkSearchMetadataSubject measures the pure SQL metadata path
 // (`messages filter --subject ...` equivalent) without any .emlx body scan.
 func BenchmarkSearchMetadataSubject(b *testing.B) {
