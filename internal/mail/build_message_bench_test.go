@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -142,6 +143,26 @@ func BenchmarkSendAttachmentSingleRead64MiB(b *testing.B) {
 		}
 		if _, err := buildMessageWithAttachments(draft, "<benchmark@mailcli>", loaded); err != nil {
 			b.Fatalf("build message: %v", err)
+		}
+	}
+}
+
+// BenchmarkSendAttachmentStreaming64MiB measures the production send
+// composition path: metadata preflight, one source read, final hashing, and
+// bounded MIME spooling without buffering the attachment in memory.
+func BenchmarkSendAttachmentStreaming64MiB(b *testing.B) {
+	attachment, cleanup := benchmarkAttachmentFile(b, 64*1024*1024)
+	defer cleanup()
+	draft := benchmarkDraft(benchmarkBody(4*1024), attachment)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		message, err := composeDraftSpool(context.Background(), draft, "<benchmark@mailcli>")
+		if err != nil {
+			b.Fatalf("compose draft spool: %v", err)
+		}
+		if err := message.Remove(); err != nil {
+			b.Fatalf("remove message spool: %v", err)
 		}
 	}
 }

@@ -425,9 +425,6 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if draft.Kind == DraftKindForward && len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
 		return SendResult{}, validationError("sending a forward draft requires at least one explicit recipient")
 	}
-	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
-		return SendResult{}, err
-	}
 	if err := s.send.available(); err != nil {
 		return SendResult{}, err
 	}
@@ -1050,7 +1047,7 @@ func classifyDraftContextError(ctx context.Context, err error, operation string)
 }
 
 func composeDraftSpool(ctx context.Context, draft Draft, messageID string) (*ComposedMessage, error) {
-	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
+	if err := preflightDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return nil, err
 	}
 	return ComposeMessageSpoolContext(ctx, draft, messageID)
@@ -1444,9 +1441,6 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	}
 	envelopeRecipients, err := draftEnvelopeRecipients(draft)
 	if err != nil {
-		return TransportEvidence{}, err
-	}
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return TransportEvidence{}, err
 	}
 	sender, err := sendSender(draft.From)
@@ -1919,6 +1913,33 @@ func verifyDraftAttachmentsContext(ctx context.Context, attachments []DraftAttac
 			return validationError("draft attachment " + filepath.Base(expected.Path) + " changed after review; update the draft before sending")
 		}
 		remaining -= actual.Size
+	}
+	return nil
+}
+
+func preflightDraftAttachmentsContext(ctx context.Context, attachments []DraftAttachment) error {
+	if len(attachments) > MaximumDraftAttachments {
+		return validationError("draft exceeds 100 attachments")
+	}
+	remaining := MaximumDraftAttachmentBytes
+	for _, expected := range attachments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if expected.Size < 0 || expected.Size > remaining {
+			return validationError("draft attachments exceed 512 MiB total")
+		}
+		info, err := os.Stat(expected.Path)
+		if err != nil {
+			return fmt.Errorf("stat draft attachment: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return validationError("draft attachment must be a regular file")
+		}
+		if info.Size() != expected.Size {
+			return validationError("draft attachment " + filepath.Base(expected.Path) + " changed after review; update the draft before sending")
+		}
+		remaining -= info.Size()
 	}
 	return nil
 }

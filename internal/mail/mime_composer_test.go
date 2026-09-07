@@ -2,6 +2,8 @@ package mail
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -10,6 +12,29 @@ import (
 	"testing"
 )
 
+type scriptedAttachmentReader struct {
+	chunks [][]byte
+	index  int
+	bytes  int
+}
+
+func (r *scriptedAttachmentReader) Read(buffer []byte) (int, error) {
+	if r.index == len(r.chunks) {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[r.index]
+	read := copy(buffer, chunk)
+	r.bytes += read
+	if read == len(chunk) {
+		r.index++
+	} else {
+		r.chunks[r.index] = chunk[read:]
+	}
+	return read, nil
+}
+
+func (r *scriptedAttachmentReader) Close() error { return nil }
+
 func TestComposeMessageSpoolContextStopsCanceledWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -17,6 +42,56 @@ func TestComposeMessageSpoolContextStopsCanceledWork(t *testing.T) {
 	_, err := ComposeMessageSpoolContext(ctx, Draft{}, "<canceled@example.com>")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("ComposeMessageSpoolContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestComposeMessageSpoolReadsAttachmentOnceAndChecksFinalHash(t *testing.T) {
+	payload := []byte("final attachment bytes")
+	sum := sha256.Sum256(payload)
+	reader := &scriptedAttachmentReader{chunks: [][]byte{payload}}
+	opens := 0
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Attachment", Body: "Body", Attachments: []DraftAttachment{{
+			Path: "brief.txt", Size: int64(len(payload)), SHA256: hex.EncodeToString(sum[:]),
+		}},
+	}
+	message, err := composeMessageSpoolContext(context.Background(), draft, "<once@example.com>", func(string) (io.ReadCloser, error) {
+		opens++
+		return reader, nil
+	})
+	if err != nil {
+		t.Fatalf("composeMessageSpoolContext() error = %v", err)
+	}
+	defer func() { _ = message.Remove() }()
+	if opens != 1 || reader.bytes != len(payload) {
+		t.Fatalf("attachment reads = opens %d, bytes %d; want one open and %d bytes", opens, reader.bytes, len(payload))
+	}
+}
+
+func TestComposeMessageSpoolRejectsMutationDuringFinalRead(t *testing.T) {
+	first := []byte("original-")
+	originalTail := []byte("content")
+	changedTail := []byte("CHANGED")
+	original := append(append([]byte(nil), first...), originalTail...)
+	sum := sha256.Sum256(original)
+	reader := &scriptedAttachmentReader{chunks: [][]byte{first, changedTail}}
+	opens := 0
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Attachment", Body: "Body", Attachments: []DraftAttachment{{
+			Path: "brief.txt", Size: int64(len(original)), SHA256: hex.EncodeToString(sum[:]),
+		}},
+	}
+	_, err := composeMessageSpoolContext(context.Background(), draft, "<changed@example.com>", func(string) (io.ReadCloser, error) {
+		opens++
+		return reader, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed after review") {
+		t.Fatalf("composeMessageSpoolContext() error = %v, want mutation rejection", err)
+	}
+	if opens != 1 || reader.bytes != len(original) {
+		t.Fatalf("mutation read = opens %d, bytes %d; want one open and %d bytes", opens, reader.bytes, len(original))
 	}
 }
 

@@ -73,6 +73,19 @@ func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error
 }
 
 func ComposeMessageSpoolContext(ctx context.Context, draft Draft, messageID string) (*ComposedMessage, error) {
+	return composeMessageSpoolContext(ctx, draft, messageID, func(path string) (io.ReadCloser, error) {
+		return os.Open(path)
+	})
+}
+
+type attachmentOpener func(string) (io.ReadCloser, error)
+
+func composeMessageSpoolContext(
+	ctx context.Context,
+	draft Draft,
+	messageID string,
+	openAttachment attachmentOpener,
+) (*ComposedMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -160,7 +173,7 @@ func ComposeMessageSpoolContext(ctx context.Context, draft Draft, messageID stri
 				cleanup()
 				return nil, &ComposerError{Message: "write attachment separator", Err: err}
 			}
-			if err := streamAttachmentBase64Context(ctx, writer, attachment); err != nil {
+			if err := streamAttachmentBase64Context(ctx, writer, attachment, openAttachment); err != nil {
 				cleanup()
 				return nil, err
 			}
@@ -216,8 +229,9 @@ func streamAttachmentBase64Context(
 	ctx context.Context,
 	writer io.Writer,
 	attachment DraftAttachment,
+	openAttachment attachmentOpener,
 ) (resultErr error) {
-	file, err := os.Open(attachment.Path)
+	file, err := openAttachment(attachment.Path)
 	if err != nil {
 		return &ComposerError{Message: "read draft attachment " + filepath.Base(attachment.Path), Err: err}
 	}
