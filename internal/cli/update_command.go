@@ -40,6 +40,7 @@ const (
 	maximumReleaseArchive     = 64 * 1024 * 1024
 	maximumExtractedPackage   = 192 * 1024 * 1024
 	maximumExtractedFileCount = 256
+	maximumUpdateRedirects    = 10
 	updateTimeout             = 5 * time.Minute
 )
 
@@ -54,6 +55,47 @@ type updateResult struct {
 type updateAsset struct {
 	Name        string `json:"name"`
 	DownloadURL string `json:"browser_download_url"`
+}
+
+type updateURLPolicy struct {
+	trustedHosts        map[string]struct{}
+	allowHTTP           bool
+	allowNonDefaultPort bool
+}
+
+func githubUpdateURLPolicy() updateURLPolicy {
+	return updateURLPolicy{trustedHosts: map[string]struct{}{
+		"api.github.com":                       {},
+		"github.com":                           {},
+		"objects.githubusercontent.com":        {},
+		"release-assets.githubusercontent.com": {},
+	}}
+}
+
+func (policy updateURLPolicy) validate(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" ||
+		strings.ContainsAny(value, "\x00\r\n") {
+		return updateFailure("update_url_invalid", "release URL is malformed or contains disallowed components")
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && !(scheme == "http" && policy.allowHTTP) {
+		return updateFailure("update_url_insecure", "release URL must use HTTPS")
+	}
+	if !policy.allowNonDefaultPort {
+		expectedPort := "443"
+		if scheme == "http" {
+			expectedPort = "80"
+		}
+		if port := parsed.Port(); port != "" && port != expectedPort {
+			return updateFailure("update_url_invalid_port", "release URL uses a non-default port")
+		}
+	}
+	if _, ok := policy.trustedHosts[strings.ToLower(parsed.Hostname())]; !ok {
+		return updateFailure("update_host_untrusted", "release URL host is outside the trusted update host policy")
+	}
+	return nil
 }
 
 type updateRelease struct {
@@ -73,7 +115,7 @@ type updateEnvironment struct {
 	verifyPackage      func(context.Context, string, string) error
 	installPackage     func(context.Context, string, string, string) error
 	verifyInstallation func(context.Context, string, string) error
-	allowInsecureURLs  bool
+	urlPolicy          updateURLPolicy
 	releasePublicKey   ed25519.PublicKey
 }
 
@@ -144,18 +186,27 @@ func defaultUpdateEnvironment() (updateEnvironment, error) {
 		operatingSystem: runtime.GOOS, architecture: runtime.GOARCH,
 		verifyPackage: verifyReleaseBinary, installPackage: runReleaseInstaller,
 		verifyInstallation: verifyInstalledBinary,
+		urlPolicy:          githubUpdateURLPolicy(),
 		releasePublicKey:   publicKey,
 	}, nil
 }
 
 func secureUpdateRedirect(request *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return fmt.Errorf("too many release download redirects")
+	return secureUpdateRedirectWithPolicy(request, via, githubUpdateURLPolicy())
+}
+
+func secureUpdateRedirectWithPolicy(
+	request *http.Request,
+	via []*http.Request,
+	policy updateURLPolicy,
+) error {
+	if len(via) >= maximumUpdateRedirects {
+		return updateFailure("update_redirect_limit", "release download exceeded the maximum redirect count")
 	}
-	if err := validateUpdateURL(request.URL.String(), false); err != nil {
-		return fmt.Errorf("invalid release download redirect: %w", err)
+	if request == nil || request.URL == nil {
+		return updateFailure("update_redirect_invalid", "release download redirect is malformed")
 	}
-	return nil
+	return policy.validate(request.URL.String())
 }
 
 func performUpdate(
@@ -200,14 +251,14 @@ func performUpdate(
 }
 
 func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (updateRelease, error) {
-	if err := validateUpdateURL(environment.metadataURL, environment.allowInsecureURLs); err != nil {
-		return updateRelease{}, updateFailure("update_check_failed", "invalid release metadata URL: %v", err)
+	if err := environment.urlPolicy.validate(environment.metadataURL); err != nil {
+		return updateRelease{}, contextualUpdateFailure("update_check_failed", "invalid release metadata URL", err)
 	}
 	payload, err := downloadUpdateResource(
 		ctx, environment.client, environment.metadataURL, maximumReleaseMetadata,
 	)
 	if err != nil {
-		return updateRelease{}, updateFailure("update_check_failed", "check latest GitHub release: %v", err)
+		return updateRelease{}, contextualUpdateFailure("update_check_failed", "check latest GitHub release", err)
 	}
 	var release updateRelease
 	if err := json.Unmarshal(payload, &release); err != nil {
@@ -216,8 +267,8 @@ func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (upd
 	if release.TagName == "" || release.HTMLURL == "" {
 		return updateRelease{}, updateFailure("update_check_failed", "latest GitHub release metadata is incomplete")
 	}
-	if err := validateUpdateURL(release.HTMLURL, environment.allowInsecureURLs); err != nil {
-		return updateRelease{}, updateFailure("update_check_failed", "invalid release page URL: %v", err)
+	if err := environment.urlPolicy.validate(release.HTMLURL); err != nil {
+		return updateRelease{}, contextualUpdateFailure("update_check_failed", "invalid release page URL", err)
 	}
 	return release, nil
 }
@@ -274,22 +325,22 @@ func downloadAndInstallUpdate(
 	if err != nil {
 		return err
 	}
-	if err := validateUpdateURL(archiveURL, environment.allowInsecureURLs); err != nil {
-		return updateFailure("update_package_invalid", "invalid release archive URL: %v", err)
+	if err := environment.urlPolicy.validate(archiveURL); err != nil {
+		return contextualUpdateFailure("update_package_invalid", "invalid release archive URL", err)
 	}
-	if err := validateUpdateURL(checksumURL, environment.allowInsecureURLs); err != nil {
-		return updateFailure("update_package_invalid", "invalid release checksum URL: %v", err)
+	if err := environment.urlPolicy.validate(checksumURL); err != nil {
+		return contextualUpdateFailure("update_package_invalid", "invalid release checksum URL", err)
 	}
-	if err := validateUpdateURL(signatureURL, environment.allowInsecureURLs); err != nil {
-		return updateFailure("update_package_invalid", "invalid release signature URL: %v", err)
+	if err := environment.urlPolicy.validate(signatureURL); err != nil {
+		return contextualUpdateFailure("update_package_invalid", "invalid release signature URL", err)
 	}
 	checksums, err := downloadUpdateResource(ctx, environment.client, checksumURL, maximumChecksumFile)
 	if err != nil {
-		return updateFailure("update_download_failed", "download release checksums: %v", err)
+		return contextualUpdateFailure("update_download_failed", "download release checksums", err)
 	}
 	signature, err := downloadUpdateResource(ctx, environment.client, signatureURL, maximumSignatureFile)
 	if err != nil {
-		return updateFailure("update_download_failed", "download release signature: %v", err)
+		return contextualUpdateFailure("update_download_failed", "download release signature", err)
 	}
 	if err := reporter.step("Verifying release signature", func() error {
 		return verifyReleaseSignature(checksums, signature, environment.releasePublicKey)
@@ -304,7 +355,7 @@ func downloadAndInstallUpdate(
 		)
 		return downloadErr
 	}); err != nil {
-		return updateFailure("update_download_failed", "download release archive: %v", err)
+		return contextualUpdateFailure("update_download_failed", "download release archive", err)
 	}
 	if err := reporter.step("Verifying release checksum", func() error {
 		return verifyReleaseChecksum(archiveName, archive, checksums)
@@ -315,17 +366,31 @@ func downloadAndInstallUpdate(
 }
 
 func validateUpdateURL(value string, allowInsecure bool) error {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return err
+	policy := githubUpdateURLPolicy()
+	policy.allowHTTP = allowInsecure
+	return policy.validate(value)
+}
+
+func contextualUpdateFailure(fallbackCode string, context string, err error) error {
+	var typed *updateError
+	if errors.As(err, &typed) {
+		return updateFailure(typed.code, "%s: %s", context, typed.message)
 	}
-	if parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-		return fmt.Errorf("URL must have a host and no credentials or fragment")
+	return updateFailure(fallbackCode, "%s: %v", context, err)
+}
+
+func sanitizeUpdateRequestError(err error) error {
+	var typed *updateError
+	if errors.As(err, &typed) {
+		return typed
 	}
-	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !allowInsecure) {
-		return fmt.Errorf("URL must use HTTPS")
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
 	}
-	return nil
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return errors.New("release request failed")
 }
 
 func acquireUpdateLock(ctx context.Context, homeDirectory string) (func() error, error) {
@@ -429,7 +494,7 @@ func downloadUpdateResource(
 	request.Header.Set("User-Agent", "MailCLI/"+version)
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return nil, sanitizeUpdateRequestError(err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		closeErr := response.Body.Close()

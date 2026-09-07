@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,6 +191,45 @@ func TestUpdateRejectsInsecureReleaseURLs(t *testing.T) {
 	}
 }
 
+func TestUpdateURLPolicyAcceptsTrustedHosts(t *testing.T) {
+	for _, value := range []string{
+		"https://api.github.com/repos/Christopher-Schulze/MailCLI/releases/latest",
+		"https://github.com/Christopher-Schulze/MailCLI/releases/download/v1.3.0/archive",
+		"https://objects.githubusercontent.com/release/archive",
+		"https://release-assets.githubusercontent.com/release/archive?signature=redacted",
+		"https://github.com:443/release",
+	} {
+		if err := validateUpdateURL(value, false); err != nil {
+			t.Errorf("validateUpdateURL(%q) error = %v", value, err)
+		}
+	}
+}
+
+func TestUpdateURLPolicyRejectsUnsafeURLs(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		code  string
+	}{
+		{name: "untrusted host", value: "https://updates.example/release", code: "update_host_untrusted"},
+		{name: "alternate port", value: "https://github.com:444/release", code: "update_url_invalid_port"},
+		{name: "downgrade", value: "http://github.com/release", code: "update_url_insecure"},
+		{name: "malformed", value: "https://github.com:bad/release", code: "update_url_invalid"},
+		{name: "credentials", value: "https://user:secret@github.com/release", code: "update_url_invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateUpdateURL(test.value, false)
+			if updateErrorCodeForTest(err) != test.code {
+				t.Fatalf("validateUpdateURL() error = %v, want %s", err, test.code)
+			}
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), test.value) {
+				t.Fatalf("validateUpdateURL() leaked URL data: %v", err)
+			}
+		})
+	}
+}
+
 func TestUpdateRedirectRejectsCredentials(t *testing.T) {
 	request, err := http.NewRequest(http.MethodGet, "https://user@example.com/release", nil)
 	if err != nil {
@@ -197,6 +237,59 @@ func TestUpdateRedirectRejectsCredentials(t *testing.T) {
 	}
 	if err := secureUpdateRedirect(request, []*http.Request{{}}); err == nil {
 		t.Fatal("secureUpdateRedirect(credentials) error = nil")
+	}
+}
+
+func TestUpdateRedirectRejectsUntrustedHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "https://updates.example/release", http.StatusFound)
+	}))
+	defer server.Close()
+	policy := testUpdateURLPolicy(t, server.URL)
+	client := server.Client()
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		return secureUpdateRedirectWithPolicy(request, via, policy)
+	}
+	_, err := downloadUpdateResource(
+		context.Background(), client, server.URL, maximumChecksumFile,
+	)
+	if updateErrorCodeForTest(err) != "update_host_untrusted" {
+		t.Fatalf("downloadUpdateResource() error = %v", err)
+	}
+	if strings.Contains(err.Error(), "updates.example") {
+		t.Fatalf("redirect error leaked untrusted URL: %v", err)
+	}
+}
+
+func TestUpdateRedirectRejectsDowngrade(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "http://github.com/release", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secureUpdateRedirect(request, nil); updateErrorCodeForTest(err) != "update_url_insecure" {
+		t.Fatalf("secureUpdateRedirect(downgrade) error = %v", err)
+	}
+}
+
+func TestUpdateRedirectLoopIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		target := "/a"
+		if request.URL.Path == "/a" {
+			target = "/b"
+		}
+		http.Redirect(writer, request, target, http.StatusFound)
+	}))
+	defer server.Close()
+	policy := testUpdateURLPolicy(t, server.URL)
+	client := server.Client()
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		return secureUpdateRedirectWithPolicy(request, via, policy)
+	}
+	_, err := downloadUpdateResource(
+		context.Background(), client, server.URL+"/a", maximumChecksumFile,
+	)
+	if updateErrorCodeForTest(err) != "update_redirect_limit" {
+		t.Fatalf("downloadUpdateResource() error = %v", err)
 	}
 }
 
@@ -318,12 +411,17 @@ func newUpdateTestServerWithSignature(
 func updateTestEnvironment(t *testing.T, server *updateTestServer, currentVersion string) updateEnvironment {
 	t.Helper()
 	testRoot := t.TempDir()
+	policy := testUpdateURLPolicy(t, server.URL)
+	client := server.Client()
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		return secureUpdateRedirectWithPolicy(request, via, policy)
+	}
 	environment := updateEnvironment{
-		client: server.Client(), metadataURL: server.URL + "/latest", currentVersion: currentVersion,
+		client: client, metadataURL: server.URL + "/latest", currentVersion: currentVersion,
 		executablePath: filepath.Join(testRoot, "bin", "mailcli"), homeDirectory: filepath.Join(testRoot, "home"),
 		operatingSystem: "darwin", architecture: "arm64",
-		allowInsecureURLs: true,
-		verifyPackage:     verifyBinaryVersion, installPackage: runReleaseInstaller,
+		urlPolicy:     policy,
+		verifyPackage: verifyBinaryVersion, installPackage: runReleaseInstaller,
 		verifyInstallation: verifyBinaryVersion,
 		releasePublicKey:   server.publicKey,
 	}
@@ -331,6 +429,19 @@ func updateTestEnvironment(t *testing.T, server *updateTestServer, currentVersio
 		t.Fatal(err)
 	}
 	return environment
+}
+
+func testUpdateURLPolicy(t *testing.T, serverURL string) updateURLPolicy {
+	t.Helper()
+	parsed, err := url.Parse(serverURL)
+	if err != nil || parsed.Hostname() == "" {
+		t.Fatalf("parse update test server URL: %v", err)
+	}
+	return updateURLPolicy{
+		trustedHosts:        map[string]struct{}{strings.ToLower(parsed.Hostname()): {}},
+		allowHTTP:           true,
+		allowNonDefaultPort: true,
+	}
 }
 
 func createInstalledUpdateFixture(
