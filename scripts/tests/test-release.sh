@@ -2,6 +2,41 @@
 set -euo pipefail
 
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'Release verification requires command: %s\n' "$1" >&2
+    exit 2
+  fi
+}
+
+for command_name in go shasum tar file size codesign diff grep wc; do
+  require_command "${command_name}"
+done
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+  printf 'Release verification requires macOS on darwin/arm64; found %s/%s\n' \
+    "$(uname -s)" "$(uname -m)" >&2
+  exit 2
+fi
+GO_VERSION="$(go env GOVERSION)"
+if [[ ! "${GO_VERSION}" =~ ^go1\.([0-9]+)\. ]]; then
+  printf 'Release verification could not parse Go version: %s\n' "${GO_VERSION}" >&2
+  exit 2
+fi
+GO_MINOR="${BASH_REMATCH[1]}"
+if ((GO_MINOR < 27)); then
+  printf 'Release verification requires Go 1.27 or newer: %s\n' "${GO_VERSION}" >&2
+  exit 2
+fi
+if ! (cd "${MAILCLI_ROOT}" && go mod verify); then
+  printf 'Go module verification failed before release work began\n' >&2
+  exit 1
+fi
+if ! (cd "${MAILCLI_ROOT}" && go build -mod=readonly ./...); then
+  printf 'Source build failed before native release packaging\n' >&2
+  exit 1
+fi
+
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-release-test.XXXXXX")"
 cleanup_test_root() {
   if [[ "${TEST_ROOT}" == *"/mailcli-release-test."* && -d "${TEST_ROOT}" ]]; then
@@ -81,13 +116,23 @@ INSTALLED_SKILL="${TEST_HOME}/.agents/skills/mailcli"
 cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${INSTALLED_BINARY}"
 diff -qr "${PACKAGE_ROOT}/skills/mailcli" "${INSTALLED_SKILL}" >/dev/null
 [[ "$("${INSTALLED_BINARY}" version)" == "mailcli ${TEST_VERSION}" ]]
-"${INSTALLED_BINARY}" capabilities --json | grep -q '"raw_mime_send":true'
-file "${INSTALLED_BINARY}" | grep -q 'Mach-O 64-bit executable arm64'
-if size -m "${INSTALLED_BINARY}" | grep -q 'Segment __DWARF:'; then
+CAPABILITIES_JSON="$("${INSTALLED_BINARY}" capabilities --json)"
+if ! grep -Fq '"raw_mime_send":true' <<<"${CAPABILITIES_JSON}"; then
+  printf 'Release binary does not advertise raw_mime_send=true\n' >&2
+  exit 1
+fi
+FILE_DESCRIPTION="$(file "${INSTALLED_BINARY}")"
+if [[ "${FILE_DESCRIPTION}" != *'Mach-O 64-bit executable arm64'* ]]; then
+  printf 'Installed release binary is not native darwin/arm64: %s\n' "${FILE_DESCRIPTION}" >&2
+  exit 1
+fi
+DWARF_DESCRIPTION="$(size -m "${INSTALLED_BINARY}")"
+if grep -Fq 'Segment __DWARF:' <<<"${DWARF_DESCRIPTION}"; then
   printf 'Release binary contains DWARF debug sections\n' >&2
   exit 1
 fi
-BINARY_BYTES="$(wc -c <"${INSTALLED_BINARY}" | tr -d '[:space:]')"
+BINARY_BYTES="$(wc -c <"${INSTALLED_BINARY}")"
+BINARY_BYTES="${BINARY_BYTES//[[:space:]]/}"
 if ((BINARY_BYTES > 11 * 1024 * 1024)); then
   printf 'Release binary exceeds the 11 MiB size budget: %s bytes\n' "${BINARY_BYTES}" >&2
   exit 1
