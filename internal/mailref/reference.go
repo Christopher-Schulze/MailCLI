@@ -9,6 +9,37 @@ import (
 
 const FormatVersion = 1
 
+type AccountReferenceErrorKind string
+
+const (
+	AccountReferenceCorrupt            AccountReferenceErrorKind = "account_reference_corrupt"
+	AccountReferenceVersionUnsupported AccountReferenceErrorKind = "account_reference_version_unsupported"
+)
+
+type AccountReferenceError struct {
+	Kind    AccountReferenceErrorKind
+	Version int
+	Err     error
+}
+
+func (e *AccountReferenceError) Error() string {
+	if e.Kind == AccountReferenceVersionUnsupported {
+		return fmt.Sprintf("unsupported account reference version %d (expected %d)", e.Version, FormatVersion)
+	}
+	if e.Err != nil {
+		return "corrupt account reference: " + e.Err.Error()
+	}
+	return "corrupt account reference"
+}
+
+func (e *AccountReferenceError) Unwrap() error {
+	return e.Err
+}
+
+func (e *AccountReferenceError) ErrorCode() string {
+	return string(e.Kind)
+}
+
 type Account struct {
 	Version   int    `json:"version"`
 	AccountID string `json:"account_id"`
@@ -51,10 +82,17 @@ func EncodeAccount(accountID string) (string, error) {
 func DecodeAccount(value string) (Account, error) {
 	ref, err := decodeToken[Account]("acct_", value)
 	if err != nil {
-		return Account{}, err
+		return Account{}, &AccountReferenceError{Kind: AccountReferenceCorrupt, Err: err}
 	}
-	if ref.Version != FormatVersion || ref.AccountID == "" {
-		return Account{}, fmt.Errorf("invalid account ref payload")
+	if ref.Version != FormatVersion {
+		return Account{}, &AccountReferenceError{
+			Kind: AccountReferenceVersionUnsupported, Version: ref.Version,
+		}
+	}
+	if ref.AccountID == "" {
+		return Account{}, &AccountReferenceError{
+			Kind: AccountReferenceCorrupt, Err: fmt.Errorf("account ID is empty"),
+		}
 	}
 	return ref, nil
 }

@@ -1,6 +1,9 @@
 package mailref
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestListCursorRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -64,6 +67,40 @@ func TestDecodersRejectForeignTokens(t *testing.T) {
 	}
 	if _, err := DecodeMailbox("cur_b64!!!"); err == nil {
 		t.Error("DecodeMailbox(bad token) error = nil")
+	}
+}
+
+func TestDecodeAccountClassifiesFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		token string
+		kind  AccountReferenceErrorKind
+	}{
+		{name: "corrupt token", token: "acct_!!!", kind: AccountReferenceCorrupt},
+		{
+			name:  "unsupported version",
+			token: encodeToken("acct_", []byte(`{"version":99,"account_id":"account-id"}`)),
+			kind:  AccountReferenceVersionUnsupported,
+		},
+		{
+			name:  "empty account",
+			token: encodeToken("acct_", []byte(`{"version":1,"account_id":""}`)),
+			kind:  AccountReferenceCorrupt,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := DecodeAccount(test.token)
+			var typed *AccountReferenceError
+			if !errors.As(err, &typed) || typed.Kind != test.kind {
+				t.Fatalf("DecodeAccount() error = %v, typed = %+v, want %s", err, typed, test.kind)
+			}
+			if typed.ErrorCode() != string(test.kind) {
+				t.Fatalf("ErrorCode() = %q, want %q", typed.ErrorCode(), test.kind)
+			}
+		})
 	}
 }
 

@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -14,6 +15,14 @@ import (
 )
 
 const stalenessExplanation = "changes applied to IMAP server; local read store updates on next Mail.app sync"
+
+const (
+	accountReferenceInvalidCode            = "account_reference_invalid"
+	accountReferenceCorruptCode            = "account_reference_corrupt"
+	accountReferenceVersionUnsupportedCode = "account_reference_version_unsupported"
+	accountDisabledCode                    = "account_disabled"
+	accountIdentityMissingCode             = "account_identity_missing"
+)
 
 type imapTarget struct {
 	cfg              transport.ImapConfig
@@ -95,8 +104,8 @@ func (c *Client) resolveImapTargetWithOptions(
 	// Apple Events gateway. Mutations are IMAP-only.
 	email, err := c.resolveAccountEmail(ctx, resolved.Reference.AccountID)
 	if err != nil {
-		var catalogErr *Error
-		if errors.As(err, &catalogErr) && catalogErr.Code == "account_catalog_incomplete" {
+		var typed *Error
+		if errors.As(err, &typed) {
 			return target, err
 		}
 		return target, &transport.TransportError{
@@ -209,18 +218,29 @@ func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (str
 			err,
 		)
 	}
-	if c.send.Credentials == nil {
-		return "", fmt.Errorf("no credential store configured; run 'mailcli send setup --from ADDRESS' first")
-	}
-	for _, acct := range accounts {
-		acctRef, _ := mailref.DecodeAccount(acct.Ref)
+	return resolveAccountEmailFromCatalog(accounts, accountID, c.send.Credentials)
+}
+
+func resolveAccountEmailFromCatalog(
+	accounts []mail.Account,
+	accountID string,
+	credentials transport.CredentialStore,
+) (string, error) {
+	decodeFailures := make([]error, 0)
+	for index, acct := range accounts {
+		acctRef, err := mailref.DecodeAccount(acct.Ref)
+		if err != nil {
+			decodeFailures = append(decodeFailures, accountReferenceFailure(index, acct.Ref, err))
+			continue
+		}
 		if acctRef.AccountID != accountID {
 			continue
 		}
-		for _, address := range acct.EmailAddresses {
-			if pw, lerr := c.send.Credentials.Load(address); lerr == nil && pw != "" {
-				return address, nil
-			}
+		if acct.State == "disabled" {
+			return "", operationError(
+				accountDisabledCode,
+				fmt.Sprintf("account %s is disabled in the local Mail catalog; enable it in Mail.app and retry", accountID),
+			)
 		}
 		if acct.State == "degraded" {
 			return "", operationError(
@@ -228,12 +248,76 @@ func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (str
 				fmt.Sprintf("account %s is degraded (%s): %s", accountID, acct.DegradedReason, acct.DegradedRemediation),
 			)
 		}
-		return "", fmt.Errorf(
-			"account %s has no address with stored credentials; run 'mailcli send setup --from ADDRESS' for one of %v",
-			accountID, acct.EmailAddresses,
+		if len(acct.EmailAddresses) == 0 {
+			return "", operationError(
+				accountIdentityMissingCode,
+				fmt.Sprintf("account %s has no provable sender identity; run 'mailcli send setup --from ADDRESS' or complete one successful send", accountID),
+			)
+		}
+		if credentials == nil {
+			return "", operationError(
+				accountIdentityMissingCode,
+				"no credential store configured; run 'mailcli send setup --from ADDRESS' first",
+			)
+		}
+		for _, address := range acct.EmailAddresses {
+			if pw, lerr := credentials.Load(address); lerr == nil && pw != "" {
+				return address, nil
+			}
+		}
+		return "", operationError(
+			accountIdentityMissingCode,
+			fmt.Sprintf("account %s has no address with stored credentials; run 'mailcli send setup --from ADDRESS' for one of %v",
+				accountID, acct.EmailAddresses,
+			),
 		)
 	}
-	return "", fmt.Errorf("no active IMAP sender identity found for account %s", accountID)
+	if len(decodeFailures) > 0 {
+		return "", accountReferenceDecodeError(accountID, decodeFailures)
+	}
+	return "", operationError(
+		accountDisabledCode,
+		fmt.Sprintf("account %s is not enabled in the local Mail catalog; enable it in Mail.app and retry", accountID),
+	)
+}
+
+func accountReferenceFailure(index int, value string, cause error) error {
+	fingerprint := sha256.Sum256([]byte(value))
+	return fmt.Errorf("catalog entry %d (ref sha256:%x): %w", index+1, fingerprint[:6], cause)
+}
+
+func accountReferenceDecodeError(accountID string, failures []error) error {
+	allCorrupt := true
+	allUnsupported := true
+	for _, failure := range failures {
+		var typed *mailref.AccountReferenceError
+		if !errors.As(failure, &typed) {
+			allCorrupt = false
+			allUnsupported = false
+			continue
+		}
+		if typed.Kind != mailref.AccountReferenceCorrupt {
+			allCorrupt = false
+		}
+		if typed.Kind != mailref.AccountReferenceVersionUnsupported {
+			allUnsupported = false
+		}
+	}
+	code := accountReferenceInvalidCode
+	if allCorrupt {
+		code = accountReferenceCorruptCode
+	} else if allUnsupported {
+		code = accountReferenceVersionUnsupportedCode
+	}
+	details := make([]string, len(failures))
+	for index, failure := range failures {
+		details[index] = failure.Error()
+	}
+	return operationErrorWithCause(
+		code,
+		fmt.Sprintf("cannot resolve account %s because the catalog contains invalid account references: %s", accountID, strings.Join(details, "; ")),
+		errors.Join(failures...),
+	)
 }
 
 func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperator, cfg transport.ImapConfig, email string) ([]transport.MailboxInfo, error) {
