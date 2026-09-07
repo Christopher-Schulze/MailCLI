@@ -153,6 +153,27 @@ func TestSendSetupRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestSendSetupRejectsUnsupportedProviderBeforeCredentialStore(t *testing.T) {
+	previous := sendSetupCredentials
+	credentialFactoryCalls := 0
+	sendSetupCredentials = func() transport.CredentialStore {
+		credentialFactoryCalls++
+		return newStubSetupCredentials()
+	}
+	t.Cleanup(func() { sendSetupCredentials = previous })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSend([]string{"setup", "--from", "alice@unknown.example", "--json"}, &stdout, &stderr)
+	if code != 1 || credentialFactoryCalls != 0 {
+		t.Fatalf("runSend() code = %d, credential factory calls = %d, stdout = %q, stderr = %q", code, credentialFactoryCalls, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"code":"transport_unsupported_provider"`) ||
+		!strings.Contains(stdout.String(), transport.ProviderSupportDescription()) {
+		t.Fatalf("stdout = %q, want typed provider remediation", stdout.String())
+	}
+}
+
 func TestSendUnknownSubcommandFails(t *testing.T) {
 	credentials := newStubSetupCredentials()
 	var stdout bytes.Buffer

@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 const capabilitySchemaVersion = 1
@@ -34,27 +35,30 @@ type commandCapability struct {
 }
 
 type capabilityLimits struct {
-	Platform                    string `json:"platform"`
-	Architecture                string `json:"architecture"`
-	OwnsMailIndex               bool   `json:"owns_mail_index"`
-	BackgroundProcess           bool   `json:"background_process"`
-	RawMIMERead                 bool   `json:"raw_mime_read"`
-	RawMIMESend                 bool   `json:"raw_mime_send"`
-	ComposeWrite                bool   `json:"compose_write"`
-	ComposeAttachmentWrite      bool   `json:"compose_attachment_write"`
-	VisibleComposeHandoff       bool   `json:"visible_compose_handoff"`
-	VisibleAttachmentHandoff    bool   `json:"visible_attachment_handoff"`
-	SendTransport               string `json:"send_transport"`
-	MutationTransport           string `json:"mutation_transport"`
-	MaximumPageSize             int    `json:"maximum_page_size"`
-	MaximumDraftInputBytes      int    `json:"maximum_draft_input_bytes"`
-	MaximumDraftSubjectBytes    int    `json:"maximum_draft_subject_bytes"`
-	MaximumDraftBodyBytes       int    `json:"maximum_draft_body_bytes"`
-	MaximumDraftRecipients      int    `json:"maximum_draft_recipients"`
-	MaximumDraftAttachments     int    `json:"maximum_draft_attachments"`
-	MaximumDraftAttachmentBytes int64  `json:"maximum_draft_attachment_bytes"`
-	MaximumComposeBodyBytes     int    `json:"maximum_compose_body_bytes"`
-	MaximumRawSourceBytes       int64  `json:"maximum_raw_source_bytes"`
+	Platform                    string                      `json:"platform"`
+	Architecture                string                      `json:"architecture"`
+	OwnsMailIndex               bool                        `json:"owns_mail_index"`
+	BackgroundProcess           bool                        `json:"background_process"`
+	RawMIMERead                 bool                        `json:"raw_mime_read"`
+	RawMIMESend                 bool                        `json:"raw_mime_send"`
+	ComposeWrite                bool                        `json:"compose_write"`
+	ComposeAttachmentWrite      bool                        `json:"compose_attachment_write"`
+	VisibleComposeHandoff       bool                        `json:"visible_compose_handoff"`
+	VisibleAttachmentHandoff    bool                        `json:"visible_attachment_handoff"`
+	SendTransport               string                      `json:"send_transport"`
+	MutationTransport           string                      `json:"mutation_transport"`
+	SupportedProviders          []transport.ProviderSupport `json:"supported_providers"`
+	UnsupportedProviderCode     string                      `json:"unsupported_provider_code"`
+	ProviderSupportDescription  string                      `json:"provider_support_description"`
+	MaximumPageSize             int                         `json:"maximum_page_size"`
+	MaximumDraftInputBytes      int                         `json:"maximum_draft_input_bytes"`
+	MaximumDraftSubjectBytes    int                         `json:"maximum_draft_subject_bytes"`
+	MaximumDraftBodyBytes       int                         `json:"maximum_draft_body_bytes"`
+	MaximumDraftRecipients      int                         `json:"maximum_draft_recipients"`
+	MaximumDraftAttachments     int                         `json:"maximum_draft_attachments"`
+	MaximumDraftAttachmentBytes int64                       `json:"maximum_draft_attachment_bytes"`
+	MaximumComposeBodyBytes     int                         `json:"maximum_compose_body_bytes"`
+	MaximumRawSourceBytes       int64                       `json:"maximum_raw_source_bytes"`
 }
 
 func capabilities() capabilityManifest {
@@ -120,6 +124,9 @@ func capabilities() capabilityManifest {
 			VisibleAttachmentHandoff:    true,
 			SendTransport:               "smtp",
 			MutationTransport:           "imap",
+			SupportedProviders:          transport.SupportedProviders(),
+			UnsupportedProviderCode:     transport.CodeUnsupportedProvider,
+			ProviderSupportDescription:  transport.ProviderSupportDescription(),
 			MaximumPageSize:             mail.MaximumPageLimit,
 			MaximumDraftInputBytes:      maximumDraftInputBytes,
 			MaximumDraftSubjectBytes:    mail.MaximumDraftSubjectBytes,

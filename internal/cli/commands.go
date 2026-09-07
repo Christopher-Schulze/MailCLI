@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 const readTimeout = 60 * time.Second
@@ -353,6 +354,9 @@ func writeFlagUsage(flags *flag.FlagSet, writer io.Writer) {
 	writeFormat(writer, "Usage:\n  mailcli %s [options]\n\nOptions:\n", flags.Name())
 	for _, option := range options {
 		writeFormat(writer, "  %-*s  %s\n", width, option.synopsis, option.description)
+	}
+	if flags.Name() == "send setup" {
+		writeFormat(writer, "\n%s\n", transport.ProviderSupportDescription())
 	}
 }
 

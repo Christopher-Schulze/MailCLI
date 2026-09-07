@@ -5,6 +5,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"mailcli/internal/transport"
 )
 
 func TestHelpContractTable(t *testing.T) {
@@ -108,6 +110,9 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 	if !strings.Contains(stdout.String(), "send ") {
 		t.Fatalf("help omits the send command: %s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), transport.ProviderSupportDescription()) {
+		t.Fatalf("help omits provider support boundary: %s", stdout.String())
+	}
 }
 
 func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
@@ -132,6 +137,10 @@ func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 		{
 			args: []string{"drafts", "prune", "help"},
 			want: []string{"Options:", "--older-than <int>", "(default: 30)", "--confirm", "--json"},
+		},
+		{
+			args: []string{"send", "setup", "help"},
+			want: []string{transport.ProviderSupportDescription()},
 		},
 	}
 	for _, test := range tests {

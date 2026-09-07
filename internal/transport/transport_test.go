@@ -2,6 +2,7 @@ package transport
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -42,21 +43,52 @@ func TestProviderHostsGmail(t *testing.T) {
 	}
 }
 
-func TestProviderHostsCaseInsensitive(t *testing.T) {
-	smtpH, _, imapH, _, err := ProviderHosts("User@GMAIL.COM")
-	if err != nil {
-		t.Fatalf("ProviderHosts error = %v", err)
+func TestProviderHostsNormalizesDomainAliases(t *testing.T) {
+	tests := []struct {
+		name     string
+		email    string
+		wantSMTP string
+		wantIMAP string
+	}{
+		{name: "gmail uppercase", email: "User@GMAIL.COM", wantSMTP: "smtp.gmail.com", wantIMAP: "imap.gmail.com"},
+		{name: "googlemail uppercase", email: "User@GOOGLEMAIL.COM", wantSMTP: "smtp.gmail.com", wantIMAP: "imap.gmail.com"},
+		{name: "icloud display name", email: "User <user@ME.COM>", wantSMTP: "smtp.mail.me.com", wantIMAP: "imap.mail.me.com"},
 	}
-	if smtpH != "smtp.gmail.com" {
-		t.Errorf("smtpHost = %q, want smtp.gmail.com", smtpH)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			smtpHost, _, imapHost, _, err := ProviderHosts(test.email)
+			if err != nil {
+				t.Fatalf("ProviderHosts(%q) error = %v", test.email, err)
+			}
+			if smtpHost != test.wantSMTP || imapHost != test.wantIMAP {
+				t.Fatalf("ProviderHosts(%q) = %q, %q; want %q, %q", test.email, smtpHost, imapHost, test.wantSMTP, test.wantIMAP)
+			}
+		})
 	}
-	if imapH != "imap.gmail.com" {
-		t.Errorf("imapHost = %q, want imap.gmail.com", imapH)
+}
+
+func TestSupportedProvidersExposeExactAliases(t *testing.T) {
+	providers := SupportedProviders()
+	if len(providers) != 2 {
+		t.Fatalf("SupportedProviders() = %+v, want two providers", providers)
+	}
+	want := []ProviderSupport{
+		{Name: "Gmail", Domains: []string{"gmail.com", "googlemail.com"}},
+		{Name: "iCloud", Domains: []string{"icloud.com", "me.com", "mac.com"}},
+	}
+	for index := range want {
+		if providers[index].Name != want[index].Name || fmt.Sprint(providers[index].Domains) != fmt.Sprint(want[index].Domains) {
+			t.Fatalf("SupportedProviders()[%d] = %+v, want %+v", index, providers[index], want[index])
+		}
+	}
+	providers[0].Domains[0] = "changed.example"
+	if SupportedProviders()[0].Domains[0] != "gmail.com" {
+		t.Fatal("SupportedProviders() returned shared domain storage")
 	}
 }
 
 func TestProviderHostsUnsupportedProvider(t *testing.T) {
-	_, _, _, _, err := ProviderHosts("user@yahoo.com")
+	_, _, _, _, err := ProviderHosts("user@YAHOO.COM")
 	if err == nil {
 		t.Fatal("ProviderHosts error = nil, want unsupported provider error")
 	}
@@ -67,6 +99,12 @@ func TestProviderHostsUnsupportedProvider(t *testing.T) {
 	if te.Code != CodeUnsupportedProvider {
 		t.Errorf("error code = %q, want %q", te.Code, CodeUnsupportedProvider)
 	}
+	if !strings.Contains(te.Message, "domain: yahoo.com") || !strings.Contains(te.Message, ProviderSupportDescription()) {
+		t.Errorf("unsupported provider message = %q", te.Message)
+	}
+	if _, _, _, _, err := ProviderHosts("user@mail.gmail.com"); ErrorCode(err) != CodeUnsupportedProvider {
+		t.Fatalf("subdomain ProviderHosts() error = %v, want %s", err, CodeUnsupportedProvider)
+	}
 }
 
 func TestProviderHostsInvalidAddress(t *testing.T) {
@@ -74,6 +112,8 @@ func TestProviderHostsInvalidAddress(t *testing.T) {
 		"no-at-sign",
 		"@nodomain.com",
 		"user@",
+		"user@@gmail.com",
+		"user gmail.com",
 		"",
 	}
 	for _, email := range tests {

@@ -30,7 +30,7 @@ func runSend(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli send setup --from <email> [--remove] [--json]")
+		writeFormat(stdout, "Usage:\n  mailcli send setup --from <email> [--remove] [--json]\n\n%s\n", transport.ProviderSupportDescription())
 		return 0
 	case "setup":
 		return runSendSetup(args[1:], stdout, stderr)
@@ -69,7 +69,7 @@ func runSendSetup(args []string, stdout io.Writer, stderr io.Writer) int {
 			Account: account, Action: "removed",
 		})
 	}
-	password, err := readPasswordLine("App-specific password for " + account + ": ")
+	password, err := readPasswordLine(transport.ProviderSupportDescription() + "\nApp-specific password for " + account + ": ")
 	if err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}

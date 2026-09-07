@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 const (
@@ -584,6 +585,6 @@ Commands:
 
 Mail 16 scripted draft save remains disabled; visible handoff never sends.
 Direct SMTP send and IMAP mutations work without Mail.app: run 'mailcli send setup' once.
-Run 'mailcli <command> --help' for focused usage and flags.
 `)
+	writeFormat(writer, "%s\nRun 'mailcli <command> --help' for focused usage and flags.\n", transport.ProviderSupportDescription())
 }

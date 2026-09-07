@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"io"
+	stdmail "net/mail"
 	"strings"
 )
 
@@ -114,19 +115,76 @@ type CredentialStore interface {
 	Delete(account string) error
 }
 
+// ProviderSupport describes one provider family supported by direct SMTP and
+// IMAP transport. Domains are exact aliases; subdomains are not included.
+type ProviderSupport struct {
+	Name    string   `json:"name"`
+	Domains []string `json:"domains"`
+}
+
+type providerDefinition struct {
+	ProviderSupport
+	smtpHost string
+	smtpPort int
+	imapHost string
+	imapPort int
+}
+
+var providerDefinitions = []providerDefinition{
+	{
+		ProviderSupport: ProviderSupport{Name: "Gmail", Domains: []string{"gmail.com", "googlemail.com"}},
+		smtpHost:        "smtp.gmail.com", smtpPort: 587, imapHost: "imap.gmail.com", imapPort: 993,
+	},
+	{
+		ProviderSupport: ProviderSupport{Name: "iCloud", Domains: []string{"icloud.com", "me.com", "mac.com"}},
+		smtpHost:        "smtp.mail.me.com", smtpPort: 587, imapHost: "imap.mail.me.com", imapPort: 993,
+	},
+}
+
+// SupportedProviders returns the exact provider families and domain aliases
+// accepted by ProviderHosts. Callers receive independent slices.
+func SupportedProviders() []ProviderSupport {
+	providers := make([]ProviderSupport, len(providerDefinitions))
+	for index, provider := range providerDefinitions {
+		providers[index] = ProviderSupport{
+			Name:    provider.Name,
+			Domains: append([]string(nil), provider.Domains...),
+		}
+	}
+	return providers
+}
+
+// ProviderSupportDescription is the canonical user-facing support boundary.
+func ProviderSupportDescription() string {
+	providers := SupportedProviders()
+	parts := make([]string, len(providers))
+	for index, provider := range providers {
+		parts[index] = provider.Name + " (" + strings.Join(provider.Domains, ", ") + ")"
+	}
+	return "Supported providers: " + strings.Join(parts, "; ") + ". Other domains fail with " + CodeUnsupportedProvider + " before credentials are stored or network connections begin."
+}
+
 // ProviderHosts resolves the SMTP and IMAP endpoints for a sender address domain.
 // It returns host and port separately so callers can build SubmitConfig/ImapConfig directly.
 func ProviderHosts(email string) (smtpHost string, smtpPort int, imapHost string, imapPort int, err error) {
-	at := strings.LastIndex(email, "@")
-	if at <= 0 || at == len(email)-1 {
+	parsed, parseErr := stdmail.ParseAddress(strings.TrimSpace(email))
+	if parseErr != nil || parsed.Address == "" {
 		return "", 0, "", 0, &TransportError{Code: CodeInvalidAddress, Message: "sender address has no domain: " + email}
 	}
-	switch strings.ToLower(email[at+1:]) {
-	case "gmail.com", "googlemail.com":
-		return "smtp.gmail.com", 587, "imap.gmail.com", 993, nil
-	case "icloud.com", "me.com", "mac.com":
-		return "smtp.mail.me.com", 587, "imap.mail.me.com", 993, nil
-	default:
-		return "", 0, "", 0, &TransportError{Code: CodeUnsupportedProvider, Message: "no SMTP/IMAP endpoints known for domain: " + email[at+1:]}
+	at := strings.LastIndex(parsed.Address, "@")
+	if at <= 0 || at == len(parsed.Address)-1 {
+		return "", 0, "", 0, &TransportError{Code: CodeInvalidAddress, Message: "sender address has no domain: " + email}
+	}
+	domain := strings.ToLower(parsed.Address[at+1:])
+	for _, provider := range providerDefinitions {
+		for _, supportedDomain := range provider.Domains {
+			if domain == supportedDomain {
+				return provider.smtpHost, provider.smtpPort, provider.imapHost, provider.imapPort, nil
+			}
+		}
+	}
+	return "", 0, "", 0, &TransportError{
+		Code:    CodeUnsupportedProvider,
+		Message: "no SMTP/IMAP endpoints known for domain: " + domain + "; " + ProviderSupportDescription(),
 	}
 }

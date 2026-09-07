@@ -8,6 +8,7 @@ import (
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 func TestResolveAccountEmailFromCatalog(t *testing.T) {
@@ -33,15 +34,15 @@ func TestResolveAccountEmailFromCatalog(t *testing.T) {
 		},
 		{
 			name:        "successful resolution",
-			accounts:    []mail.Account{{Ref: validRef, EmailAddresses: []string{"target@example.com"}, State: "ok"}},
-			credentials: strictCredentials{"target@example.com": "secret"},
-			wantEmail:   "target@example.com",
+			accounts:    []mail.Account{{Ref: validRef, EmailAddresses: []string{"target@gmail.com"}, State: "ok"}},
+			credentials: strictCredentials{"target@gmail.com": "secret"},
+			wantEmail:   "target@gmail.com",
 		},
 		{
 			name:        "unrelated corrupt reference does not block valid target",
-			accounts:    []mail.Account{{Ref: "acct_not-valid"}, {Ref: validRef, EmailAddresses: []string{"target@example.com"}, State: "ok"}},
-			credentials: strictCredentials{"target@example.com": "secret"},
-			wantEmail:   "target@example.com",
+			accounts:    []mail.Account{{Ref: "acct_not-valid"}, {Ref: validRef, EmailAddresses: []string{"target@gmail.com"}, State: "ok"}},
+			credentials: strictCredentials{"target@gmail.com": "secret"},
+			wantEmail:   "target@gmail.com",
 		},
 		{
 			name:     "all references preserve categories",
@@ -72,6 +73,13 @@ func TestResolveAccountEmailFromCatalog(t *testing.T) {
 			accounts: []mail.Account{{Ref: validRef, State: "ok"}},
 			wantCode: accountIdentityMissingCode,
 			wantText: "no provable sender identity",
+		},
+		{
+			name:        "unsupported provider is typed",
+			accounts:    []mail.Account{{Ref: validRef, EmailAddresses: []string{"target@example.com"}, State: "ok"}},
+			credentials: strictCredentials{"target@example.com": "secret"},
+			wantCode:    transport.CodeUnsupportedProvider,
+			wantText:    "Supported providers:",
 		},
 	}
 	for _, test := range tests {

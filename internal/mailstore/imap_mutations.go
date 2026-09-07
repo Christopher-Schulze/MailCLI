@@ -104,7 +104,7 @@ func (c *Client) resolveImapTargetWithOptions(
 	// Apple Events gateway. Mutations are IMAP-only.
 	email, err := c.resolveAccountEmail(ctx, resolved.Reference.AccountID)
 	if err != nil {
-		var typed *Error
+		var typed interface{ ErrorCode() string }
 		if errors.As(err, &typed) {
 			return target, err
 		}
@@ -254,13 +254,25 @@ func resolveAccountEmailFromCatalog(
 				fmt.Sprintf("account %s has no provable sender identity; run 'mailcli send setup --from ADDRESS' or complete one successful send", accountID),
 			)
 		}
+		usableAddresses := make([]string, 0, len(acct.EmailAddresses))
+		var providerErr error
+		for _, address := range acct.EmailAddresses {
+			if _, _, _, _, err := transport.ProviderHosts(address); err != nil {
+				providerErr = err
+				continue
+			}
+			usableAddresses = append(usableAddresses, address)
+		}
+		if len(usableAddresses) == 0 && providerErr != nil {
+			return "", providerErr
+		}
 		if credentials == nil {
 			return "", operationError(
 				accountIdentityMissingCode,
 				"no credential store configured; run 'mailcli send setup --from ADDRESS' first",
 			)
 		}
-		for _, address := range acct.EmailAddresses {
+		for _, address := range usableAddresses {
 			if pw, lerr := credentials.Load(address); lerr == nil && pw != "" {
 				return address, nil
 			}

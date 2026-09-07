@@ -325,7 +325,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 
 ## Limitations
 
-- Mail 16 scripted save remains disabled. Sending supports providers with known SMTP/IMAP endpoints (Gmail, Google Mail, iCloud); visible handoff supports new drafts only and requires Mail.app as the default email application.
+- Mail 16 scripted save remains disabled. Direct SMTP/IMAP sending supports only Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`); other domains fail with `transport_unsupported_provider` before credentials are stored or network connections begin. Visible handoff supports new drafts only and requires Mail.app as the default email application.
 - Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts capture intent but cannot guarantee Mail-native threading, quoted content, or original forwarded attachments until completed in Mail's UI.
 - `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it.

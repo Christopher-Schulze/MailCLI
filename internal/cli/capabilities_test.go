@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 func TestCapabilitiesJSONContract(t *testing.T) {
@@ -41,6 +43,11 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	}
 	if manifest.Limits.SendTransport != "smtp" {
 		t.Fatalf("send transport = %q, want smtp", manifest.Limits.SendTransport)
+	}
+	if !reflect.DeepEqual(manifest.Limits.SupportedProviders, transport.SupportedProviders()) ||
+		manifest.Limits.UnsupportedProviderCode != transport.CodeUnsupportedProvider ||
+		manifest.Limits.ProviderSupportDescription != transport.ProviderSupportDescription() {
+		t.Fatalf("provider support = %+v", manifest.Limits)
 	}
 	if manifest.Limits.MaximumPageSize != 25 || manifest.Limits.MaximumDraftInputBytes != 16*1024*1024 {
 		t.Fatalf("manifest bounds = %+v", manifest.Limits)
