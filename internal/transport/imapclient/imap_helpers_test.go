@@ -1,9 +1,11 @@
 package imapclient
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"mailcli/internal/transport"
@@ -62,5 +64,56 @@ func TestWrapIOError(t *testing.T) {
 	err = wrapIOError(context.Background(), errors.New("boom"), transport.CodeIMAPConnectFailed, "read")
 	if transport.ErrorCode(err) != transport.CodeIMAPConnectFailed {
 		t.Fatalf("plain wrap code = %q", transport.ErrorCode(err))
+	}
+}
+
+func TestReadLineRejectsOversizedResponseWithTypedCause(t *testing.T) {
+	t.Parallel()
+
+	sess := &session{
+		br: bufio.NewReader(strings.NewReader(
+			strings.Repeat("x", maxIMAPResponseLineBytes+1) + "\r\n",
+		)),
+	}
+	_, err := (&Client{}).readLine(sess)
+	var malformed *malformedResponseError
+	if !errors.As(err, &malformed) {
+		t.Fatalf("readLine() error = %v, want malformedResponseError", err)
+	}
+	if !strings.Contains(err.Error(), "malformed IMAP response") ||
+		!strings.Contains(err.Error(), "exceeds") || errors.Unwrap(malformed) == nil {
+		t.Fatalf("readLine() error = %v, want malformed response with preserved cause", err)
+	}
+	if !sess.dirty {
+		t.Fatal("readLine() left oversized-response session reusable")
+	}
+}
+
+func TestWrapDialErrorClassifiesAndPreservesCause(t *testing.T) {
+	t.Parallel()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cause := errors.New("dial failed")
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		wantCode string
+	}{
+		{name: "canceled", ctx: canceled, err: cause, wantCode: transport.CodeIMAPTimeout},
+		{name: "timeout", ctx: context.Background(), err: context.DeadlineExceeded, wantCode: transport.CodeIMAPTimeout},
+		{name: "connect", ctx: context.Background(), err: cause, wantCode: transport.CodeIMAPConnectFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := wrapDialError(test.ctx, test.err)
+			if transport.ErrorCode(err) != test.wantCode {
+				t.Fatalf("wrapDialError() code = %q, want %q", transport.ErrorCode(err), test.wantCode)
+			}
+			if !errors.Is(err, test.err) {
+				t.Fatalf("wrapDialError() error = %v, want cause %v", err, test.err)
+			}
+		})
 	}
 }

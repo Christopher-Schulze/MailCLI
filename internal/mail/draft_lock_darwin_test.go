@@ -90,6 +90,38 @@ func TestDraftLockCleanupRejectsReplacedPath(t *testing.T) {
 	}
 }
 
+func TestDraftLockCleanupRejectsDifferentRegularFile(t *testing.T) {
+	root := t.TempDir()
+	ref := "draft_abcdefghijklmnopqrstuvwx"
+	lease, err := acquireDraftLease(context.Background(), root, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.release() }()
+
+	path, err := draftLockPath(root, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lease.removeLock(); errorCode(err) != "draft_lock_changed" {
+		t.Fatalf("removeLock() error = %v, want draft_lock_changed", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "replacement" {
+		t.Fatalf("replacement lock content = %q, want unchanged sentinel", content)
+	}
+}
+
 func TestDraftLockCleanupUsesPinnedParentAfterReplacement(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "drafts")

@@ -500,8 +500,9 @@ func TestRunSignAndVerifyRoundtrip(t *testing.T) {
 	outputPath := filepath.Join(dir, "SHA256SUMS.sig")
 
 	var keygenStdout bytes.Buffer
-	if err := runKeygen([]string{"-private", privatePath}, &keygenStdout, os.Stderr); err != nil {
-		t.Fatalf("runKeygen error = %v", err)
+	var stderr bytes.Buffer
+	if code := run([]string{"keygen", "-private", privatePath}, &keygenStdout, &stderr); code != 0 {
+		t.Fatalf("run(keygen) = %d, stderr = %q", code, stderr.String())
 	}
 	publicEncoded := strings.TrimSpace(keygenStdout.String())
 
@@ -510,25 +511,27 @@ func TestRunSignAndVerifyRoundtrip(t *testing.T) {
 		t.Fatalf("WriteFile error = %v", err)
 	}
 
-	if err := runSign([]string{
+	stderr.Reset()
+	if code := run([]string{"sign",
 		"-private", privatePath,
 		"-input", inputPath,
 		"-output", outputPath,
 		"-expected-public", publicEncoded,
-	}, os.Stderr); err != nil {
-		t.Fatalf("runSign error = %v", err)
+	}, &bytes.Buffer{}, &stderr); code != 0 {
+		t.Fatalf("run(sign) = %d, stderr = %q", code, stderr.String())
 	}
 
 	if _, err := os.Lstat(outputPath); err != nil {
 		t.Fatalf("signature not written: %v", err)
 	}
 
-	if err := runVerify([]string{
+	stderr.Reset()
+	if code := run([]string{"verify",
 		"-public", publicEncoded,
 		"-input", inputPath,
 		"-signature", outputPath,
-	}, os.Stderr); err != nil {
-		t.Fatalf("runVerify error = %v", err)
+	}, &bytes.Buffer{}, &stderr); code != 0 {
+		t.Fatalf("run(verify) = %d, stderr = %q", code, stderr.String())
 	}
 }
 

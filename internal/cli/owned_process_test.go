@@ -31,7 +31,7 @@ func TestRunOwnedProcessForceCleansStubbornProcessGroup(t *testing.T) {
 	command := exec.CommandContext(ctx, "/bin/bash", scriptPath)
 	result := make(chan error, 1)
 	go func() { result <- runOwnedProcess(command, 100*time.Millisecond) }()
-	processIDs := waitForTestProcessIDs(t, processFile)
+	processIDs := waitForTestProcessIDs(t, processFile, 2)
 	cancel()
 
 	select {
@@ -73,7 +73,7 @@ func TestRunReleaseInstallerCancellationRunsRollback(t *testing.T) {
 		result <- runReleaseInstaller(ctx, installerPath, filepath.Join(directory, "mailcli"), directory)
 	}()
 	waitForTestFile(t, readyPath)
-	processIDs := waitForTestProcessIDs(t, processFile)
+	processIDs := waitForTestProcessIDs(t, processFile, 1)
 	cancel()
 
 	select {
@@ -117,7 +117,7 @@ func TestDraftEditorCancellationCleansOwnedDescendants(t *testing.T) {
 		)
 		result <- editErr
 	}()
-	processIDs := waitForTestProcessIDs(t, processFile)
+	processIDs := waitForTestProcessIDs(t, processFile, 2)
 	cancel()
 
 	select {
@@ -145,26 +145,34 @@ func writeExecutableTestScript(t *testing.T, path string, content string) {
 	}
 }
 
-func waitForTestProcessIDs(t *testing.T, path string) []int {
+func waitForTestProcessIDs(t *testing.T, path string, expected int) []int {
 	t.Helper()
-	waitForTestFile(t, path)
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fields := strings.Fields(string(payload))
-	processIDs := make([]int, 0, len(fields))
-	for _, field := range fields {
-		processID, parseErr := strconv.Atoi(field)
-		if parseErr != nil || processID <= 1 {
-			t.Fatalf("invalid test process ID %q: %v", field, parseErr)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		payload, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
 		}
-		processIDs = append(processIDs, processID)
+		fields := strings.Fields(string(payload))
+		if len(fields) == expected {
+			processIDs := make([]int, 0, len(fields))
+			for _, field := range fields {
+				processID, parseErr := strconv.Atoi(field)
+				if parseErr != nil || processID <= 1 {
+					t.Fatalf("invalid test process ID %q: %v", field, parseErr)
+				}
+				processIDs = append(processIDs, processID)
+			}
+			return processIDs
+		}
+		if len(fields) > expected {
+			t.Fatalf("test process file contains %d process IDs, want %d", len(fields), expected)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d process IDs in %s", expected, filepath.Base(path))
+		}
+		time.Sleep(ownedProcessPollInterval)
 	}
-	if len(processIDs) == 0 {
-		t.Fatal("test process file contains no process IDs")
-	}
-	return processIDs
 }
 
 func waitForTestFile(t *testing.T, path string) {

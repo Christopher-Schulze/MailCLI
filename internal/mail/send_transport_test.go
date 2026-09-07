@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/transport"
 )
@@ -160,6 +161,24 @@ func sendTransportStubs() (*stubSubmitter, *stubMirror) {
 		evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK", MessageID: "<abc123@icloud.com>"},
 	}, &stubMirror{
 		evidence: transport.AppendEvidence{Mailbox: "Sent", Appended: true},
+	}
+}
+
+func TestDeliverViaTransportExposesDirectSendBoundary(t *testing.T) {
+	submitter, mirror := sendTransportStubs()
+	evidence, err := DeliverViaTransport(context.Background(), SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"},
+	}, Draft{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Boundary", Body: "Body",
+	})
+	if err != nil {
+		t.Fatalf("DeliverViaTransport() error = %v", err)
+	}
+	if submitter.calls != 1 || mirror.calls != 1 ||
+		evidence.ServerResponse != "250 2.0.0 OK" ||
+		evidence.MessageID == "" || evidence.MirrorMailbox != "Sent" || !evidence.MirrorAppended {
+		t.Fatalf("DeliverViaTransport() evidence = %+v, submitter = %+v, mirror = %+v", evidence, submitter, mirror)
 	}
 }
 
@@ -762,6 +781,33 @@ func TestReconcileUnknownClaimNotFoundStaysUnknown(t *testing.T) {
 	retained, getErr := service.GetDraft(draft.Ref)
 	if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Outcome != SendOutcomeUnknown {
 		t.Fatalf("claim after not-found = %+v, error = %v", retained.SendAttempt, getErr)
+	}
+}
+
+func TestUnverifiableSendErrorPreservesInvalidRecipientEvidence(t *testing.T) {
+	attempt := SendAttempt{
+		MessageID: "<claim@example.com>",
+		StartedAt: time.Date(2026, time.September, 7, 10, 30, 0, 0, time.UTC),
+	}
+	draft := Draft{
+		To:  []Recipient{{Address: "not an address"}},
+		CC:  []Recipient{{Address: "cc@example.com"}},
+		BCC: []Recipient{{Address: "hidden@example.com"}},
+	}
+
+	err := unverifiableSendError(attempt, draft, "no matching Sent message")
+	if errorCode(err) != "send_outcome_unverifiable" {
+		t.Fatalf("unverifiableSendError() code = %q, want send_outcome_unverifiable", errorCode(err))
+	}
+	for _, value := range []string{
+		"<claim@example.com>",
+		"2026-09-07T10:30:00Z",
+		"not an address, cc@example.com, hidden@example.com",
+		"discard the draft",
+	} {
+		if !strings.Contains(err.Error(), value) {
+			t.Fatalf("unverifiableSendError() = %q, want %q", err, value)
+		}
 	}
 }
 

@@ -30,7 +30,7 @@ func openDraftLockResourceDarwin(root string, ref string, create bool) (*draftLo
 	}
 	name := filepath.Base(path)
 	flags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW_ANY
-	fileDescriptor := -1
+	var fileDescriptor int
 	if create {
 		fileDescriptor, err = unix.Openat(
 			int(directory.Fd()), name,

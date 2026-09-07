@@ -80,7 +80,7 @@ func (policy updateURLPolicy) validate(value string) error {
 		return updateFailure("update_url_invalid", "release URL is malformed or contains disallowed components")
 	}
 	scheme := strings.ToLower(parsed.Scheme)
-	if scheme != "https" && !(scheme == "http" && policy.allowHTTP) {
+	if scheme != "https" && (scheme != "http" || !policy.allowHTTP) {
 		return updateFailure("update_url_insecure", "release URL must use HTTPS")
 	}
 	if !policy.allowNonDefaultPort {

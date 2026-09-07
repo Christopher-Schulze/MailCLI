@@ -477,11 +477,10 @@ recover_transactions() {
   local requested_skill_destination="${SKILL_DESTINATION}"
   local requested_binary_backup="${BINARY_BACKUP}"
   local requested_skill_backup="${SKILL_BACKUP}"
-  local -a transactions
   shopt -s nullglob
-  transactions=("${INSTALL_STATE_ROOT}"/txn.*)
+  set -- "${INSTALL_STATE_ROOT}"/txn.*
   shopt -u nullglob
-  for transaction in "${transactions[@]}"; do
+  for transaction in "$@"; do
     [[ -d "${transaction}" && ! -L "${transaction}" ]] || {
       printf 'Refusing unsafe installer transaction path: %s\n' "${transaction}" >&2
       return 1
