@@ -9,10 +9,18 @@ import (
 )
 
 func prepareDraft(request CreateDraftRequest) (Draft, error) {
-	return prepareDraftWithAttachments(request, nil)
+	return prepareDraftWithObserver(request, nil)
 }
 
-func prepareDraftWithAttachments(request CreateDraftRequest, previous []DraftAttachment) (Draft, error) {
+func prepareDraftWithObserver(request CreateDraftRequest, observer draftContentObserver) (Draft, error) {
+	return prepareDraftWithAttachmentsObserver(request, nil, observer)
+}
+
+func prepareDraftWithAttachmentsObserver(
+	request CreateDraftRequest,
+	previous []DraftAttachment,
+	observer draftContentObserver,
+) (Draft, error) {
 	if request.Kind == "" {
 		request.Kind = DraftKindNew
 	}
@@ -43,7 +51,7 @@ func prepareDraftWithAttachments(request CreateDraftRequest, previous []DraftAtt
 	if err := validateDraftAddresses(request.Input); err != nil {
 		return Draft{}, err
 	}
-	content, err := prepareDraftContent(request.Input.BodyFormat, request.Input.Body)
+	content, err := prepareDraftContentWithObserver(request.Input.BodyFormat, request.Input.Body, observer)
 	if err != nil {
 		return Draft{}, err
 	}

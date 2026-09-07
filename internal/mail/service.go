@@ -51,6 +51,9 @@ type Service struct {
 	gateway   Gateway
 	draftRoot string
 	send      SendTransport
+	// contentObserver is optional per-service render instrumentation; normal
+	// callers leave it nil.
+	contentObserver draftContentObserver
 }
 
 type ValidationError struct {

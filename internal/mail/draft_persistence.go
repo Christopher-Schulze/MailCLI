@@ -65,11 +65,15 @@ func writePrivateFile(path string, payload []byte) error {
 }
 
 func readDraftFile(root string, ref string) (Draft, error) {
+	return readDraftFileWithObserver(root, ref, nil)
+}
+
+func readDraftFileWithObserver(root string, ref string, observer draftContentObserver) (Draft, error) {
 	draft, err := loadDraftDocument(root, ref)
 	if err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, err)
 	}
-	if err := validateStoredDraftContent(draft); err != nil {
+	if err := validateStoredDraftContentWithObserver(draft, observer); err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, fmt.Errorf("validate draft content: %w", err))
 	}
 	if err := attachDraftAttempts(root, ref, &draft); err != nil {
@@ -96,7 +100,7 @@ func wrapDraftStateError(root, ref string, err error) error {
 // discipline as readDraftFile but no canonical body validation and no
 // Markdown/HTML re-render, so listing stays cheap and a draft with a
 // corrupt body still appears (inspect keeps the full gate).
-func readDraftSummary(root string, ref string) (DraftSummary, error) {
+func readDraftSummary(root string, ref string, observer draftContentObserver) (DraftSummary, error) {
 	draft, err := loadDraftDocument(root, ref)
 	if err != nil {
 		return DraftSummary{}, err

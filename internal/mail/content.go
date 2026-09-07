@@ -17,10 +17,9 @@ import (
 // parser/renderer on every draft body conversion.
 var markdown = goldmark.New()
 
-// prepareDraftContentCalls counts canonical body renders. Tests use it to
-// prove read paths that must stay render-free (draft listing); it has no
-// production meaning.
-var prepareDraftContentCalls int
+type draftContentObserver interface {
+	ContentRendered()
+}
 
 type preparedDraftContent struct {
 	Format DraftBodyFormat
@@ -30,7 +29,17 @@ type preparedDraftContent struct {
 }
 
 func prepareDraftContent(format DraftBodyFormat, source string) (preparedDraftContent, error) {
-	prepareDraftContentCalls++
+	return prepareDraftContentWithObserver(format, source, nil)
+}
+
+func prepareDraftContentWithObserver(
+	format DraftBodyFormat,
+	source string,
+	observer draftContentObserver,
+) (preparedDraftContent, error) {
+	if observer != nil {
+		observer.ContentRendered()
+	}
 	if format == "" {
 		format = DraftBodyPlain
 	}
@@ -50,6 +59,10 @@ func prepareDraftContent(format DraftBodyFormat, source string) (preparedDraftCo
 }
 
 func validateStoredDraftContent(draft Draft) error {
+	return validateStoredDraftContentWithObserver(draft, nil)
+}
+
+func validateStoredDraftContentWithObserver(draft Draft, observer draftContentObserver) error {
 	switch draft.BodyFormat {
 	case DraftBodyPlain:
 		if draft.BodySource != "" || draft.BodyHTML != "" {
@@ -59,7 +72,7 @@ func validateStoredDraftContent(draft Draft) error {
 		if draft.BodySource == "" && (draft.Body != "" || draft.BodyHTML != "") {
 			return validationError("rich draft is missing its source body")
 		}
-		prepared, err := prepareDraftContent(draft.BodyFormat, draft.BodySource)
+		prepared, err := prepareDraftContentWithObserver(draft.BodyFormat, draft.BodySource, observer)
 		if err != nil {
 			return err
 		}

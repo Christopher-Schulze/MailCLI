@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Service) CreateDraft(request CreateDraftRequest) (Draft, error) {
-	draft, err := prepareDraft(request)
+	draft, err := prepareDraftWithObserver(request, s.contentObserver)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -29,7 +29,7 @@ func (s *Service) GetDraft(ref string) (Draft, error) {
 	if err != nil {
 		return Draft{}, err
 	}
-	return readDraftFile(root, ref)
+	return readDraftFileWithObserver(root, ref, s.contentObserver)
 }
 
 func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
@@ -73,7 +73,7 @@ func (s *Service) ListDrafts() ([]DraftSummary, error) {
 			continue
 		}
 		ref := strings.TrimSuffix(entry.Name(), ".json")
-		summary, err := readDraftSummary(root, ref)
+		summary, err := readDraftSummary(root, ref, s.contentObserver)
 		if err != nil {
 			var operation *OperationError
 			if errors.Is(err, os.ErrNotExist) || (errors.As(err, &operation) && operation.Code == "not_found") {
@@ -181,11 +181,11 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	if err := rejectClaimedDraft(current); err != nil {
 		return Draft{}, err
 	}
-	replacement, err := prepareDraftWithAttachments(CreateDraftRequest{
+	replacement, err := prepareDraftWithAttachmentsObserver(CreateDraftRequest{
 		Kind: current.Kind, SourceRef: current.SourceRef,
 		ReplyAll: current.ReplyAll, SourceMessageID: current.SourceMessageID,
 		SourceReferences: current.SourceReferences, Input: request.Input,
-	}, current.Attachments)
+	}, current.Attachments, s.contentObserver)
 	if err != nil {
 		return Draft{}, err
 	}

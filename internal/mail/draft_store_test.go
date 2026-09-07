@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -34,6 +35,14 @@ type durableDraftSaveGateway struct {
 
 type unknownDraftSaveGateway struct {
 	durableDraftSaveGateway
+}
+
+type contentRenderCounter struct {
+	calls atomic.Int64
+}
+
+func (c *contentRenderCounter) ContentRendered() {
+	c.calls.Add(1)
 }
 
 func (g *durableDraftSaveGateway) ReconcileDraftSave(
@@ -305,10 +314,14 @@ func TestSaveDraftReportsPostflightFailureWithoutRetainingLocalDraft(t *testing.
 }
 
 // Listing returns summaries without body content and without canonical
-// re-rendering: the render counter must not move during ListDrafts, even
+// re-rendering: the render observer must not move during ListDrafts, even
 // with Markdown and HTML drafts present.
 func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
+	t.Parallel()
 	service := NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	observer := &contentRenderCounter{}
+	service.contentObserver = observer
+	t.Cleanup(func() { service.contentObserver = nil })
 	plain, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
 		From: "sender@example.com", To: []Recipient{{Address: "a@example.com"}},
 		Subject: "Plain", Body: "Hello\n",
@@ -330,13 +343,16 @@ func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	prepareDraftContentCalls = 0
+	if calls := observer.calls.Load(); calls != 3 {
+		t.Fatalf("CreateDraft() render calls = %d, want 3", calls)
+	}
+	observer.calls.Store(0)
 	summaries, err := service.ListDrafts()
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
-	if prepareDraftContentCalls != 0 {
-		t.Fatalf("ListDrafts() rendered %d bodies, want zero", prepareDraftContentCalls)
+	if calls := observer.calls.Load(); calls != 0 {
+		t.Fatalf("ListDrafts() rendered %d bodies, want zero", calls)
 	}
 	if len(summaries) != 3 {
 		t.Fatalf("ListDrafts() = %d summaries, want 3", len(summaries))
@@ -382,8 +398,12 @@ func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
 // A draft whose body fails canonical validation still appears in the list
 // (inspect keeps the full gate and rejects it).
 func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(nil, root)
+	observer := &contentRenderCounter{}
+	service.contentObserver = observer
+	t.Cleanup(func() { service.contentObserver = nil })
 	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
 		From: "sender@example.com", To: []Recipient{{Address: "a@example.com"}},
 		Subject: "Rich", Body: "# Title\n", BodyFormat: DraftBodyMarkdown,
@@ -411,7 +431,10 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	if _, err := service.GetDraft(draft.Ref); err == nil {
 		t.Fatal("GetDraft() accepted a tampered body; the inspect gate is broken")
 	}
-	prepareDraftContentCalls = 0
+	if calls := observer.calls.Load(); calls != 2 {
+		t.Fatalf("draft preparation and validation render calls = %d, want 2", calls)
+	}
+	observer.calls.Store(0)
 	summaries, err := service.ListDrafts()
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
@@ -419,8 +442,8 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	if len(summaries) != 1 || summaries[0].Ref != draft.Ref || summaries[0].Subject != "Rich" {
 		t.Fatalf("ListDrafts() = %+v, want the tampered draft listed by envelope", summaries)
 	}
-	if prepareDraftContentCalls != 0 {
-		t.Fatalf("ListDrafts() rendered %d bodies, want zero", prepareDraftContentCalls)
+	if calls := observer.calls.Load(); calls != 0 {
+		t.Fatalf("ListDrafts() rendered %d bodies, want zero", calls)
 	}
 }
 
