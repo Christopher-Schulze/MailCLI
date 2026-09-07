@@ -937,15 +937,6 @@ func snippetFor(value string, term string) string {
 	return snippetForSearchText(newSearchTextRepresentations(value), term)
 }
 
-func snippetForFolded(value string, folded string, term string) string {
-	representations := searchTextRepresentations{
-		original:             value,
-		folded:               folded,
-		foldedRuneBoundaries: foldedRuneBoundaries(value, folded),
-	}
-	return snippetForSearchText(representations, term)
-}
-
 func snippetForSearchText(representations searchTextRepresentations, term string) string {
 	value := representations.original
 	if value == "" {

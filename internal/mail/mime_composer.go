@@ -212,10 +212,6 @@ func composerAttachmentHeaders(path string) []string {
 	}
 }
 
-func streamAttachmentBase64(writer io.Writer, attachment DraftAttachment) (resultErr error) {
-	return streamAttachmentBase64Context(context.Background(), writer, attachment)
-}
-
 func streamAttachmentBase64Context(
 	ctx context.Context,
 	writer io.Writer,
