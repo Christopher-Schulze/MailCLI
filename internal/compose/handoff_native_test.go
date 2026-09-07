@@ -2,6 +2,7 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,25 @@ func TestHandoffSuccessWithoutAppKit(t *testing.T) {
 	}
 	if !result.Opened || result.MailApplication != "com.apple.mail" {
 		t.Errorf("Handoff() = %#v", result)
+	}
+}
+
+func TestHandoffNormalizesEmptyCollectionsForNativeContract(t *testing.T) {
+	original := invokeNativeCompose
+	t.Cleanup(func() { invokeNativeCompose = original })
+	invokeNativeCompose = func(payload string) (string, error) {
+		var request Request
+		if err := json.Unmarshal([]byte(payload), &request); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		if request.Recipients == nil || request.Attachments == nil {
+			t.Fatalf("native collections = recipients %#v, attachments %#v; want arrays", request.Recipients, request.Attachments)
+		}
+		return `{"ok":true,"opened":true,"mail_application":"com.apple.mail"}`, nil
+	}
+
+	if _, err := Handoff(context.Background(), Request{}); err != nil {
+		t.Fatalf("Handoff() error = %v", err)
 	}
 }
 
