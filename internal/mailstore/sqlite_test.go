@@ -269,7 +269,7 @@ func TestValidateSchemaPropertyPolicy(t *testing.T) {
 	}
 }
 
-func openTestWriter(t *testing.T, path string) *sql.DB {
+func openTestWriter(t testing.TB, path string) *sql.DB {
 	t.Helper()
 	database := sql.OpenDB(&sqliteConnector{
 		driver: &sqlite3.SQLiteDriver{}, dsn: path,
@@ -281,7 +281,7 @@ func openTestWriter(t *testing.T, path string) *sql.DB {
 	return database
 }
 
-func createTestSchema(t *testing.T, database *sql.DB, omit string) {
+func createTestSchema(t testing.TB, database *sql.DB, omit string) {
 	t.Helper()
 	attachmentID := ", attachment_id TEXT"
 	if omit == "attachment_id" {

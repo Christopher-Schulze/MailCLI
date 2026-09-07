@@ -224,11 +224,11 @@ Every search page includes `data.page.coverage`: backend, candidate messages, ca
 
 Requirements are macOS on Apple silicon, Go 1.27 or newer for development, `/System/Applications/Mail.app`, `/usr/bin/osascript`, and at least one account already configured in Mail.app. Grant Full Disk Access to the calling host for reads. Grant Automation access to Mail only when live diagnostics, `drafts open`, `sync` without `--check`, or fallback listing is needed.
 
-`BenchmarkAttachmentCatalogShortcut` is safe to run on this Mac without Mail.app, credentials, network access, or a live mailbox corpus. It compares the catalog-proven path with the deterministic MIME-scan baseline over a generated 256-message, 1 MiB-per-message fixture.
+`scripts/benchmarks/run-performance-evidence.sh` runs the reproducible performance matrix for MIME composition, attachment verification and streaming, MIME search parsing, generated-store metadata/body search, the catalog shortcut, and loopback IMAP STATUS/FETCH concurrency. It fixes `GOMAXPROCS=4`, input shapes, benchtime, and 20 repetitions; prints the exact environment and raw `ns/op`, `B/op`, and `allocs/op`; and reports nearest-rank p95 across repeated run means. Every path uses generated fixtures or loopback fake servers, so the runner never opens Mail.app, reads the user's Mail store, loads credentials, or contacts a mail provider.
 
 ```bash
 ./scripts/tests/test.sh
-go test ./internal/mailstore -run '^$' -bench '^BenchmarkAttachmentCatalogShortcut$' -benchtime=1x
+./scripts/benchmarks/run-performance-evidence.sh
 ./scripts/build/build.sh
 ./scripts/release/build-release.sh "${VERSION:?set to the release version}"
 ./scripts/tests/test-live-responsiveness.sh

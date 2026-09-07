@@ -1331,7 +1331,7 @@ func TestBodySearchDoesNotOpenCandidatesBeyondSmallResultWindow(t *testing.T) {
 	}
 }
 
-func newSearchFixture(t *testing.T, extraMessages ...int) (*Store, string) {
+func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 	t.Helper()
 	extraCount := 0
 	if len(extraMessages) > 1 || len(extraMessages) == 1 && extraMessages[0] < 0 {
