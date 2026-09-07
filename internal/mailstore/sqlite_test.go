@@ -3,6 +3,7 @@ package mailstore
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,6 +41,75 @@ func TestOpenReadOnlyDatabaseSeesWALAndRejectsWrites(t *testing.T) {
 	}
 	if _, err := reader.ExecContext(ctx, "INSERT INTO values_table(value) VALUES ('forbidden')"); err == nil {
 		t.Fatal("read-only insert error = nil")
+	}
+}
+
+func TestSQLiteIdentityRejectsReplacedPath(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "Envelope Index")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile() original error = %v", err)
+	}
+	pinned, err := pinSQLitePath(path)
+	if err != nil {
+		t.Fatalf("pinSQLitePath() error = %v", err)
+	}
+	closeTestResource(t, pinned.root, "pinned database parent")
+	if err := os.Rename(path, filepath.Join(root, "original.sqlite")); err != nil {
+		t.Fatalf("Rename() original error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile() replacement error = %v", err)
+	}
+	if errorCodeForTest(verifySQLiteIdentity(path, path, pinned)) != "mail_store_path_mismatch" {
+		t.Fatal("verifySQLiteIdentity() accepted a replaced database path")
+	}
+}
+
+func TestSQLiteIdentityRejectsReplacedParent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	parent := filepath.Join(root, "MailData")
+	path := filepath.Join(parent, "Envelope Index")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir() parent error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile() original error = %v", err)
+	}
+	pinned, err := pinSQLitePath(path)
+	if err != nil {
+		t.Fatalf("pinSQLitePath() error = %v", err)
+	}
+	closeTestResource(t, pinned.root, "pinned database parent")
+	if err := os.Rename(parent, filepath.Join(root, "original-MailData")); err != nil {
+		t.Fatalf("Rename() parent error = %v", err)
+	}
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir() replacement parent error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile() replacement error = %v", err)
+	}
+	if errorCodeForTest(verifySQLiteIdentity(path, path, pinned)) != "mail_store_path_mismatch" {
+		t.Fatal("verifySQLiteIdentity() accepted a replaced database parent")
+	}
+}
+
+func TestPinSQLitePathRejectsSymlink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(root, "target.sqlite")
+	path := filepath.Join(root, "Envelope Index")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatalf("WriteFile() target error = %v", err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	if _, err := pinSQLitePath(path); err == nil {
+		t.Fatal("pinSQLitePath() accepted a symlink")
 	}
 }
 

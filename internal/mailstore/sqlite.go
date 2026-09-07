@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 
 	"github.com/mattn/go-sqlite3"
@@ -14,6 +16,12 @@ import (
 type sqliteConnector struct {
 	driver driver.Driver
 	dsn    string
+}
+
+type sqlitePathIdentity struct {
+	root           *os.Root
+	parentIdentity os.FileInfo
+	identity       os.FileInfo
 }
 
 func (c *sqliteConnector) Connect(context.Context) (driver.Conn, error) {
@@ -28,6 +36,10 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Envelope Index path: %w", err)
+	}
+	pinned, err := pinSQLitePath(absolutePath)
+	if err != nil {
+		return nil, err
 	}
 	uri := &url.URL{Scheme: "file", Path: absolutePath}
 	query := uri.Query()
@@ -47,18 +59,65 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 	})
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
-	if err := configureReadConnection(ctx, database, absolutePath); err != nil {
+	if err := configureReadConnection(ctx, database, absolutePath, pinned); err != nil {
 		resultErr := err
+		joinCloseError(&resultErr, database, "Envelope Index database")
+		joinCloseError(&resultErr, pinned.root, "Envelope Index parent directory")
+		return nil, resultErr
+	}
+	if err := pinned.root.Close(); err != nil {
+		resultErr := fmt.Errorf("close Envelope Index parent directory: %w", err)
 		joinCloseError(&resultErr, database, "Envelope Index database")
 		return nil, resultErr
 	}
 	return database, nil
 }
 
+func pinSQLitePath(path string) (sqlitePathIdentity, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return sqlitePathIdentity{}, fmt.Errorf("open Envelope Index parent directory: %w", err)
+	}
+	parentIdentity, err := root.Stat(".")
+	if err != nil {
+		closeErr := root.Close()
+		return sqlitePathIdentity{}, errors.Join(
+			fmt.Errorf("inspect Envelope Index parent directory: %w", err), closeErr,
+		)
+	}
+	name := filepath.Base(path)
+	file, err := root.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		closeErr := root.Close()
+		return sqlitePathIdentity{}, errors.Join(
+			fmt.Errorf("open Envelope Index file: %w", err), closeErr,
+		)
+	}
+	identity, err := file.Stat()
+	closeErr := file.Close()
+	if err != nil {
+		return sqlitePathIdentity{}, errors.Join(
+			fmt.Errorf("inspect Envelope Index file: %w", err), closeErr, root.Close(),
+		)
+	}
+	if closeErr != nil {
+		return sqlitePathIdentity{}, errors.Join(
+			fmt.Errorf("close Envelope Index file: %w", closeErr), root.Close(),
+		)
+	}
+	if !identity.Mode().IsRegular() {
+		return sqlitePathIdentity{}, errors.Join(
+			operationError("unsafe_message_source", "Envelope Index is not a regular file"), root.Close(),
+		)
+	}
+	return sqlitePathIdentity{root: root, parentIdentity: parentIdentity, identity: identity}, nil
+}
+
 func configureReadConnection(
 	ctx context.Context,
 	database *sql.DB,
 	expectedPath string,
+	pinned sqlitePathIdentity,
 ) (resultErr error) {
 	canonicalExpectedPath, err := filepath.EvalSymlinks(expectedPath)
 	if err != nil {
@@ -118,6 +177,28 @@ func configureReadConnection(
 				fmt.Sprintf("SQLite opened %q, expected Envelope Index %q", actualPath, expectedPath),
 			)
 		}
+		if err := verifySQLiteIdentity(expectedPath, actualPath, pinned); err != nil {
+			return err
+		}
 	}
 	return rows.Err()
+}
+
+func verifySQLiteIdentity(expectedPath string, actualPath string, expected sqlitePathIdentity) error {
+	actualInfo, err := os.Stat(actualPath)
+	if err != nil {
+		return fmt.Errorf("inspect opened Envelope Index identity: %w", err)
+	}
+	parentInfo, err := os.Stat(filepath.Dir(actualPath))
+	if err != nil {
+		return fmt.Errorf("inspect opened Envelope Index parent identity: %w", err)
+	}
+	if !actualInfo.Mode().IsRegular() || !os.SameFile(expected.identity, actualInfo) ||
+		!parentInfo.IsDir() || !os.SameFile(expected.parentIdentity, parentInfo) {
+		return operationError(
+			"mail_store_path_mismatch",
+			fmt.Sprintf("SQLite opened a different Envelope Index file at %q, expected %q", actualPath, expectedPath),
+		)
+	}
+	return nil
 }
