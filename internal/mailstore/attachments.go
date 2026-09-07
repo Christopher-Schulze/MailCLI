@@ -359,6 +359,10 @@ func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]
 }
 
 func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath string) (resultErr error) {
+	expectedDigest, err := s.hashStoreFile(selected)
+	if err != nil {
+		return err
+	}
 	source, openedInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, selected.Path)
 	if err != nil {
 		return fmt.Errorf("open external attachment: %w", err)
@@ -368,7 +372,7 @@ func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath s
 		joinCloseError(&resultErr, source, "external attachment")
 		return resultErr
 	}
-	if err := writeExclusiveFile(outputPath, source); err != nil {
+	if err := writeVerifiedExclusiveFile(outputPath, source, selected.Size, expectedDigest); err != nil {
 		resultErr := err
 		joinCloseError(&resultErr, source, "external attachment")
 		return resultErr
@@ -376,17 +380,12 @@ func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath s
 	finalInfo, err := source.Stat()
 	if err != nil || openedInfo.Size() != finalInfo.Size() ||
 		!openedInfo.ModTime().Equal(finalInfo.ModTime()) {
-		removeErr := os.Remove(outputPath)
-		resultErr := errors.Join(
-			operationError("store_changed", "external attachment changed while copying"), removeErr,
-		)
+		resultErr := error(operationError("store_changed", "external attachment changed while copying"))
 		joinCloseError(&resultErr, source, "external attachment")
 		return resultErr
 	}
 	if err := source.Close(); err != nil {
-		return errors.Join(
-			fmt.Errorf("close external attachment: %w", err), os.Remove(outputPath),
-		)
+		return fmt.Errorf("close external attachment: %w", err)
 	}
 	return nil
 }
@@ -425,19 +424,139 @@ func extractMIMEAttachment(reader io.Reader, attachmentID string, outputPath str
 	return operationError("not_found", "MIME attachment part is not present")
 }
 
+type attachmentOutputExpectation struct {
+	size   int64
+	digest [sha256.Size]byte
+}
+
 func writeExclusiveFile(path string, reader io.Reader) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	return writeAttachmentOutput(path, reader, nil)
+}
+
+func writeVerifiedExclusiveFile(
+	path string,
+	reader io.Reader,
+	size int64,
+	digest [sha256.Size]byte,
+) error {
+	return writeAttachmentOutput(path, reader, &attachmentOutputExpectation{size: size, digest: digest})
+}
+
+func writeAttachmentOutput(
+	path string,
+	reader io.Reader,
+	expected *attachmentOutputExpectation,
+) (resultErr error) {
+	file, identity, err := openExclusiveAttachmentOutput(path)
 	if err != nil {
-		return fmt.Errorf("create attachment output: %w", err)
+		return err
 	}
-	_, copyErr := io.Copy(file, reader)
-	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil {
-		removeErr := os.Remove(path)
-		if copyErr != nil {
-			return errors.Join(fmt.Errorf("write attachment output: %w", copyErr), removeErr)
+	defer func() {
+		if err := file.Close(); err != nil {
+			closeErr := fmt.Errorf("close attachment output: %w", err)
+			if resultErr == nil {
+				resultErr = closeErr
+			} else {
+				resultErr = errors.Join(resultErr, closeErr)
+			}
 		}
-		return errors.Join(fmt.Errorf("close attachment output: %w", closeErr), removeErr)
+		if resultErr != nil {
+			if cleanupErr := removeOwnedAttachmentOutput(path, identity); cleanupErr != nil {
+				resultErr = errors.Join(resultErr, cleanupErr)
+			}
+		}
+	}()
+	digest := sha256.New()
+	copied, copyErr := io.Copy(file, io.TeeReader(reader, digest))
+	if copyErr != nil {
+		return fmt.Errorf("write attachment output: %w", copyErr)
+	}
+	actualDigest := [sha256.Size]byte{}
+	copy(actualDigest[:], digest.Sum(nil))
+	if expected == nil {
+		expected = &attachmentOutputExpectation{size: copied, digest: actualDigest}
+	}
+	if copied != expected.size || actualDigest != expected.digest {
+		return operationError("store_changed", "attachment bytes changed while copying")
+	}
+	return verifyAttachmentOutput(path, file, identity, *expected)
+}
+
+func openExclusiveAttachmentOutput(path string) (*os.File, os.FileInfo, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create attachment output: %w", err)
+	}
+	identity, err := file.Stat()
+	if err != nil {
+		closeErr := file.Close()
+		return nil, nil, errors.Join(fmt.Errorf("inspect attachment output: %w", err), closeErr)
+	}
+	if !identity.Mode().IsRegular() {
+		closeErr := file.Close()
+		return nil, nil, errors.Join(
+			operationError("unsafe_message_source", "attachment output is not a regular file"), closeErr,
+		)
+	}
+	return file, identity, nil
+}
+
+func verifyAttachmentOutput(
+	path string,
+	file *os.File,
+	identity os.FileInfo,
+	expected attachmentOutputExpectation,
+) error {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect attachment output after writing: %w", err)
+	}
+	if !pathInfo.Mode().IsRegular() || !os.SameFile(identity, pathInfo) {
+		return operationError("store_changed", "attachment output changed while writing")
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect written attachment output: %w", err)
+	}
+	if fileInfo.Size() != expected.size {
+		return operationError("store_changed", "attachment output size changed while writing")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind attachment output for verification: %w", err)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Errorf("hash attachment output: %w", err)
+	}
+	actualDigest := [sha256.Size]byte{}
+	copy(actualDigest[:], hash.Sum(nil))
+	if actualDigest != expected.digest {
+		return operationError("store_changed", "attachment output bytes changed while writing")
+	}
+	finalInfo, err := file.Stat()
+	if err != nil || finalInfo.Size() != expected.size {
+		return operationError("store_changed", "attachment output changed while verifying")
+	}
+	finalPathInfo, err := os.Lstat(path)
+	if err != nil || !finalPathInfo.Mode().IsRegular() || !os.SameFile(identity, finalPathInfo) {
+		return operationError("store_changed", "attachment output changed while verifying")
+	}
+	return nil
+}
+
+func removeOwnedAttachmentOutput(path string, identity os.FileInfo) error {
+	pathInfo, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect attachment output for cleanup: %w", err)
+	}
+	if !pathInfo.Mode().IsRegular() || !os.SameFile(identity, pathInfo) {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove attachment output: %w", err)
 	}
 	return nil
 }
