@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 )
 
@@ -35,7 +34,10 @@ type fakeServerConfig struct {
 	dropAppendResponse      bool
 	searchDelay             time.Duration
 	searchStarted           chan struct{}
+	searchStartedEvents     chan<- struct{}
 	searchContinue          chan struct{}
+	statusStartedEvents     chan<- struct{}
+	statusContinue          chan struct{}
 	deliverAfterFirstSearch bool
 	moveSupported           bool
 	uidExpungeSupported     bool
@@ -56,10 +58,10 @@ type fakeServerConfig struct {
 	hugeFetchBytes int
 	hugeFetchDone  bool
 	statusResponse string
+	statusDelay    time.Duration
 }
 
 type fakeServer struct {
-	t        *testing.T
 	listener net.Listener
 	cert     tls.Certificate
 	config   fakeServerConfig
@@ -88,10 +90,18 @@ type fakeServer struct {
 	uidExpungeUID        uint32
 	deletedUIDs          map[uint32]struct{}
 	connections          int
+	activeConnections    int
+	maxConnections       int
 	searchStartedOnce    sync.Once
 }
 
-func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
+type testReporter interface {
+	Helper()
+	Fatalf(format string, args ...any)
+	Cleanup(func())
+}
+
+func newFakeServer(t testReporter, cfg fakeServerConfig) *fakeServer {
 	t.Helper()
 	cert := generateTestCert(t)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -100,7 +110,7 @@ func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
 	}
 	tl := tls.NewListener(l, &tls.Config{Certificates: []tls.Certificate{cert}})
 	s := &fakeServer{
-		t: t, listener: tl, cert: cert, config: cfg,
+		listener: tl, cert: cert, config: cfg,
 		deletedUIDs: make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
 	}
 	for _, uid := range cfg.initialDeletedUIDs {
@@ -150,6 +160,12 @@ func (s *fakeServer) ConnectionCount() int {
 	return s.connections
 }
 
+func (s *fakeServer) MaxActiveConnections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxConnections
+}
+
 func (s *fakeServer) SetAuthPassword(password string) {
 	s.mu.Lock()
 	s.config.authPassword = password
@@ -160,6 +176,12 @@ func (s *fakeServer) SearchCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.searchCalls
+}
+
+func (s *fakeServer) StoreCalled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.storeCalled
 }
 
 func (s *fakeServer) DeletedUIDs() []uint32 {
@@ -184,10 +206,17 @@ func (s *fakeServer) run() {
 }
 
 func (s *fakeServer) handle(conn net.Conn) {
-	defer func() { _ = conn.Close() }()
 	s.mu.Lock()
 	s.connections++
+	s.activeConnections++
+	s.maxConnections = max(s.maxConnections, s.activeConnections)
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.activeConnections--
+		s.mu.Unlock()
+		_ = conn.Close()
+	}()
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
 	s.writeLine(bw, "* OK [CAPABILITY IMAP4rev1] fake ready")
@@ -284,6 +313,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 			if searchStarted != nil {
 				s.searchStartedOnce.Do(func() { close(searchStarted) })
 			}
+			if s.config.searchStartedEvents != nil {
+				s.config.searchStartedEvents <- struct{}{}
+			}
 			if searchContinue != nil {
 				<-searchContinue
 			}
@@ -371,6 +403,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 			if len(args) > 0 {
 				mbox = args[0]
 			}
+			if s.config.statusStartedEvents != nil {
+				s.config.statusStartedEvents <- struct{}{}
+			}
+			if s.config.statusContinue != nil {
+				<-s.config.statusContinue
+			}
+			if s.config.statusDelay > 0 {
+				time.Sleep(s.config.statusDelay)
+			}
 			if s.config.statusResponse != "" {
 				_, _ = bw.WriteString(strings.ReplaceAll(s.config.statusResponse, "<tag>", tag))
 				_ = bw.Flush()
@@ -427,6 +468,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.mu.Unlock()
 				if searchStarted != nil {
 					s.searchStartedOnce.Do(func() { close(searchStarted) })
+				}
+				if s.config.searchStartedEvents != nil {
+					s.config.searchStartedEvents <- struct{}{}
 				}
 				if searchContinue != nil {
 					<-searchContinue
@@ -567,7 +611,7 @@ func (s *fakeServer) writeLine(bw *bufio.Writer, line string) {
 	_ = bw.Flush()
 }
 
-func generateTestCert(t *testing.T) tls.Certificate {
+func generateTestCert(t testReporter) tls.Certificate {
 	t.Helper()
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

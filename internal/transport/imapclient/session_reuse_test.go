@@ -104,6 +104,7 @@ func TestAcquireCancellationDuringContention(t *testing.T) {
 		otherMboxes: []string{"INBOX"},
 	})
 	client, cfg := newFakeClient(t, srv)
+	client.maxConnectionsPerAccount = 1
 	_, release, err := client.acquire(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("initial acquire: %v", err)
@@ -120,6 +121,195 @@ func TestAcquireCancellationDuringContention(t *testing.T) {
 		t.Fatalf("contended acquire() took %v after its deadline", elapsed)
 	}
 	release()
+}
+
+func TestClientOptionsValidateConnectionLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		limit     int
+		wantLimit int
+		wantCode  string
+	}{
+		{name: "default", wantLimit: DefaultMaxConnectionsPerAccount},
+		{name: "one", limit: 1, wantLimit: 1},
+		{name: "maximum", limit: MaximumConnectionsPerAccount, wantLimit: MaximumConnectionsPerAccount},
+		{name: "negative", limit: -1, wantCode: transport.CodeIMAPInvalidValue},
+		{name: "above maximum", limit: MaximumConnectionsPerAccount + 1, wantCode: transport.CodeIMAPInvalidValue},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := NewWithOptions(ClientOptions{MaxConnectionsPerAccount: test.limit})
+			if test.wantCode != "" {
+				if transport.ErrorCode(err) != test.wantCode {
+					t.Fatalf("NewWithOptions() error = %v, want %s", err, test.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewWithOptions() error = %v", err)
+			}
+			if got := client.PoolStats().MaxConnectionsPerAccount; got != test.wantLimit {
+				t.Fatalf("max connections = %d, want %d", got, test.wantLimit)
+			}
+		})
+	}
+}
+
+func TestFailedAuthenticationDoesNotRetainEmptyAccountPool(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: false})
+	client, cfg := newFakeClient(t, srv)
+	if _, err := client.ListMailboxes(context.Background(), cfg); transport.ErrorCode(err) != transport.CodeIMAPAuthFailed {
+		t.Fatalf("ListMailboxes() error = %v, want %s", err, transport.CodeIMAPAuthFailed)
+	}
+	stats := client.PoolStats()
+	if stats.AccountPools != 0 || stats.PooledSessions != 0 || stats.ConnectingSessions != 0 {
+		t.Fatalf("pool stats after failed authentication = %+v", stats)
+	}
+}
+
+func TestIndependentReadsUseBoundedConcurrentSessions(t *testing.T) {
+	started := make(chan struct{}, DefaultMaxConnectionsPerAccount)
+	continueReads := make(chan struct{})
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"},
+		statusStartedEvents: started, statusContinue: continueReads,
+	})
+	client, cfg := newFakeClient(t, srv)
+	results := make(chan error, DefaultMaxConnectionsPerAccount)
+	for range DefaultMaxConnectionsPerAccount {
+		go func() {
+			_, err := client.CheckStatus(context.Background(), cfg, "INBOX")
+			results <- err
+		}()
+	}
+	for range DefaultMaxConnectionsPerAccount {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent STATUS did not reach the server")
+		}
+	}
+	stats := client.PoolStats()
+	if stats.PooledSessions != DefaultMaxConnectionsPerAccount ||
+		stats.InUseSessions != DefaultMaxConnectionsPerAccount ||
+		stats.PooledSessions > stats.MaxConnectionsPerAccount {
+		t.Fatalf("active pool stats = %+v", stats)
+	}
+	close(continueReads)
+	for range DefaultMaxConnectionsPerAccount {
+		if err := <-results; err != nil {
+			t.Fatalf("CheckStatus() error = %v", err)
+		}
+	}
+	if got := srv.MaxActiveConnections(); got != DefaultMaxConnectionsPerAccount {
+		t.Fatalf("maximum active connections = %d, want %d", got, DefaultMaxConnectionsPerAccount)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if stats := client.PoolStats(); stats.AccountPools != 0 || stats.PooledSessions != 0 {
+		t.Fatalf("pool stats after Close = %+v", stats)
+	}
+}
+
+func TestDifferentAccountIdentitiesUseIndependentPools(t *testing.T) {
+	started := make(chan struct{}, 2)
+	continueReads := make(chan struct{})
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"},
+		statusStartedEvents: started, statusContinue: continueReads,
+	})
+	client, first := newFakeClient(t, srv)
+	client.maxConnectionsPerAccount = 1
+	second := first
+	second.Username = "second-user"
+	results := make(chan error, 2)
+	for _, cfg := range []transport.ImapConfig{first, second} {
+		go func() {
+			_, err := client.CheckStatus(context.Background(), cfg, "INBOX")
+			results <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("different account identities did not reach the server concurrently")
+		}
+	}
+	stats := client.PoolStats()
+	if stats.AccountPools != 2 || stats.PooledSessions != 2 || stats.MaxConnectionsPerAccount != 1 {
+		t.Fatalf("independent account pool stats = %+v", stats)
+	}
+	close(continueReads)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("CheckStatus() error = %v", err)
+		}
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestMutationExcludesSelectedStateRead(t *testing.T) {
+	searchStarted := make(chan struct{}, 1)
+	searchContinue := make(chan struct{})
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, searchMatchID: "<found@example.com>",
+		searchStartedEvents: searchStarted, searchContinue: searchContinue,
+	})
+	client, cfg := newFakeClient(t, srv)
+	readResult := make(chan error, 1)
+	go func() {
+		_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
+		readResult <- err
+	}()
+	select {
+	case <-searchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("selected-state read did not reach the server")
+	}
+	mutationCtx, cancelMutation := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelMutation()
+	_, err := client.SetFlags(mutationCtx, cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
+		t.Fatalf("SetFlags() error = %v, want %s", err, transport.CodeIMAPTimeout)
+	}
+	if srv.StoreCalled() {
+		t.Fatal("mutation reached the server while selected-state read held the account gate")
+	}
+	close(searchContinue)
+	if err := <-readResult; err != nil {
+		t.Fatalf("SearchUID() error = %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestPoolExhaustionHonorsCancellation(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	client, cfg := newFakeClient(t, srv)
+	client.maxConnectionsPerAccount = 1
+	key := sessionKey(cfg)
+	client.mu.Lock()
+	pool := client.poolLocked(key)
+	client.mu.Unlock()
+	pooled, err := client.borrowSession(context.Background(), cfg, pool)
+	if err != nil {
+		t.Fatalf("initial borrowSession() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = client.borrowSession(ctx, cfg, pool)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
+		t.Fatalf("contended borrowSession() error = %v, want %s", err, transport.CodeIMAPTimeout)
+	}
+	client.releaseSession(context.Background(), pool, pooled)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 }
 
 func TestAcquireCancellationAfterAcquisitionReleasesSession(t *testing.T) {
@@ -280,6 +470,14 @@ func TestSessionKeyExcludesPassword(t *testing.T) {
 	second.Password = "new"
 	if sessionKey(first) != sessionKey(second) {
 		t.Fatal("session key changed with password; password material must not enter pool identity")
+	}
+}
+
+func TestSessionKeyHasUnambiguousFields(t *testing.T) {
+	first := transport.ImapConfig{Host: "a", Port: 1, Username: "b:2/c"}
+	second := transport.ImapConfig{Host: "a:1/b", Port: 2, Username: "c"}
+	if sessionKey(first) == sessionKey(second) {
+		t.Fatal("distinct host, port, and username tuples must not share a pool identity")
 	}
 }
 
@@ -474,8 +672,7 @@ func (portError) Error() string { return "invalid port" }
 
 var errInvalidPort = portError{}
 
-// Guard: session operations must stay serialized per client.
-func TestSessionOperationsSerialize(t *testing.T) {
+func TestConcurrentStatusOperationsComplete(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,
 		otherMboxes: []string{"INBOX"},
@@ -510,4 +707,59 @@ func TestSessionOperationsSerialize(t *testing.T) {
 		t.Fatal("concurrent CheckStatus deadlocked")
 	}
 	_ = client.Close()
+}
+
+func BenchmarkIndependentStatusConcurrency(b *testing.B) {
+	tests := []struct {
+		name  string
+		limit int
+	}{
+		{name: "serialized", limit: 1},
+		{name: "two sessions", limit: 2},
+	}
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			srv := newFakeServer(b, fakeServerConfig{
+				authOK: true, otherMboxes: []string{"INBOX"}, statusDelay: 2 * time.Millisecond,
+			})
+			host, portValue, err := net.SplitHostPort(srv.Addr())
+			if err != nil {
+				b.Fatalf("split host port: %v", err)
+			}
+			port, err := atoiPositive(portValue)
+			if err != nil {
+				b.Fatalf("parse port: %v", err)
+			}
+			client, err := NewWithOptions(ClientOptions{MaxConnectionsPerAccount: test.limit})
+			if err != nil {
+				b.Fatalf("NewWithOptions() error = %v", err)
+			}
+			client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+			cfg := sessionTestConfig(host, port)
+			b.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					b.Errorf("Close() error = %v", err)
+				}
+			})
+			b.ResetTimer()
+			for b.Loop() {
+				results := make(chan error, 2)
+				for range 2 {
+					go func() {
+						_, err := client.CheckStatus(context.Background(), cfg, "INBOX")
+						results <- err
+					}()
+				}
+				for range 2 {
+					if err := <-results; err != nil {
+						b.Fatalf("CheckStatus() error = %v", err)
+					}
+				}
+			}
+			b.StopTimer()
+			if got := srv.MaxActiveConnections(); got > test.limit {
+				b.Fatalf("maximum active connections = %d, limit = %d", got, test.limit)
+			}
+		})
+	}
 }

@@ -46,218 +46,11 @@ const (
 	maxUIDSearchResults      = 100000
 )
 
-// Client is a minimal IMAPv4 client that can mirror a message into the Sent
-// mailbox and perform message mutations. Authenticated connections are pooled
-// per host/port/username: repeated operations within one process reuse a
-// single TLS connection instead of dialing per command. IO-level failures
-// mark the session dirty and the pool discards it, so the next operation
-// reconnects; protocol rejections (NO/BAD, message not found) keep the
-// session. The zero value is usable; TLSConfig may be set to override the
-// default TLS configuration (for tests). Credential rotation callers must use
-// InvalidateCredentials; it does not retain or key on password material. Close
-// logs out of every pooled session.
-type Client struct {
-	TLSConfig *tls.Config
-
-	mu                    sync.Mutex
-	sessions              map[string]*pooledSession
-	credentialGenerations map[string]uint64
-	gateOnce              sync.Once
-	gate                  chan struct{}
-}
-
-// New returns a new Client.
-func New() *Client {
-	return &Client{}
-}
-
-func (c *Client) initializeGate() {
-	c.gateOnce.Do(func() {
-		c.gate = make(chan struct{}, 1)
-		c.gate <- struct{}{}
-	})
-}
-
-func (c *Client) acquireGate(ctx context.Context) error {
-	c.initializeGate()
-	if err := ctx.Err(); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP pool acquisition")
-	}
-	select {
-	case <-ctx.Done():
-		return wrapIOError(ctx, ctx.Err(), transport.CodeIMAPTimeout, "IMAP pool acquisition")
-	case <-c.gate:
-		if err := ctx.Err(); err != nil {
-			c.releaseGate()
-			return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP pool acquisition")
-		}
-		return nil
-	}
-}
-
-func (c *Client) releaseGate() {
-	c.gate <- struct{}{}
-}
-
-// pooledSession wraps one authenticated connection with its selected mailbox
-// state, so follow-up commands on the same mailbox skip the SELECT round
-// trip.
-type pooledSession struct {
-	sess                 *session
-	key                  string
-	credentialGeneration uint64
-	selected             string
-	uidvalidity          uint32
-	cancelWatch          context.CancelFunc
-	inUse                bool
-	invalidated          bool
-}
-
-func sessionKey(cfg transport.ImapConfig) string {
-	return fmt.Sprintf("%s:%d/%s", cfg.Host, cfg.Port, cfg.Username)
-}
-
-func nextCredentialGeneration(generation uint64) uint64 {
-	generation++
-	if generation == 0 {
-		return 1
-	}
-	return generation
-}
-
-// InvalidateCredentials advances the non-secret credential generation for one
-// IMAP identity. Idle sessions are closed immediately. An in-flight operation
-// keeps its connection until release, after which the stale session cannot be
-// reused.
-func (c *Client) InvalidateCredentials(cfg transport.ImapConfig) {
-	key := sessionKey(cfg)
-	var stale *pooledSession
-	c.mu.Lock()
-	if c.credentialGenerations == nil {
-		c.credentialGenerations = make(map[string]uint64)
-	}
-	c.credentialGenerations[key] = nextCredentialGeneration(c.credentialGenerations[key])
-	if ps := c.sessions[key]; ps != nil {
-		ps.invalidated = true
-		if !ps.inUse {
-			delete(c.sessions, key)
-			stale = ps
-		}
-	}
-	c.mu.Unlock()
-	if stale != nil {
-		_ = stale.sess.conn.Close()
-	}
-}
-
-// acquire returns the pooled session for cfg with the client operation gate
-// held. Operations on one client are therefore serialized (CLI invocations
-// are sequential; library callers get safe sharing). The caller MUST call the
-// returned release exactly once; it discards the session when the command
-// context expired (the watcher force-closed the connection) or the session is
-// dirty, and always releases the gate.
-func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooledSession, func(), error) {
-	if err := c.acquireGate(ctx); err != nil {
-		return nil, nil, err
-	}
-	key := sessionKey(cfg)
-	var stale *pooledSession
-	c.mu.Lock()
-	ps, ok := c.sessions[key]
-	generation := c.credentialGenerations[key]
-	if ok && (ps.invalidated || ps.credentialGeneration != generation) {
-		delete(c.sessions, key)
-		stale = ps
-		ps = nil
-		ok = false
-	}
-	if ok {
-		ps.inUse = true
-	}
-	c.mu.Unlock()
-	if stale != nil {
-		_ = stale.sess.conn.Close()
-	}
-	if !ok {
-		sess, err := c.connect(ctx, cfg)
-		if err != nil {
-			c.releaseGate()
-			return nil, nil, err
-		}
-		ps = &pooledSession{
-			sess:                 sess,
-			key:                  key,
-			credentialGeneration: generation,
-			inUse:                true,
-		}
-		c.mu.Lock()
-		if c.sessions == nil {
-			c.sessions = make(map[string]*pooledSession)
-		}
-		c.sessions[key] = ps
-		c.mu.Unlock()
-	}
-	watchCtx, cancelWatch := context.WithCancel(context.Background())
-	ps.cancelWatch = cancelWatch
-	conn := ps.sess.conn
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-watchCtx.Done():
-		}
-	}()
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			cancelWatch()
-			stale := false
-			c.mu.Lock()
-			ps.inUse = false
-			stale = ctx.Err() != nil || ps.sess.dirty || ps.invalidated ||
-				c.credentialGenerations[ps.key] != ps.credentialGeneration
-			if stale && c.sessions[ps.key] == ps {
-				delete(c.sessions, ps.key)
-			}
-			c.mu.Unlock()
-			if stale {
-				_ = ps.sess.conn.Close()
-			}
-			c.releaseGate()
-		})
-	}
-	return ps, release, nil
-}
-
-// Close logs out of and closes every pooled session. Safe to call repeatedly.
-func (c *Client) Close() error {
-	if err := c.acquireGate(context.Background()); err != nil {
-		return err
-	}
-	defer c.releaseGate()
-
-	c.mu.Lock()
-	pooled := make([]*pooledSession, 0, len(c.sessions))
-	for _, ps := range c.sessions {
-		pooled = append(pooled, ps)
-	}
-	c.sessions = nil
-	c.mu.Unlock()
-	var joined []error
-	for _, ps := range pooled {
-		logoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = c.doLogout(logoutCtx, ps.sess, ps.sess.nextTag())
-		cancel()
-		if err := ps.sess.conn.Close(); err != nil {
-			joined = append(joined, err)
-		}
-	}
-	return errors.Join(joined...)
-}
-
 // AppendToSent implements transport.SentMirror. It runs on its own dedicated
 // connection: the LOGIN/LIST/SELECT/SEARCH/APPEND/LOGOUT sequence is
-// self-contained and does not participate in the session pool.
+// self-contained and is not retained in the reusable session set. Its
+// reservation still counts against the account connection limit and excludes
+// concurrent reads and mutations for that identity.
 func (c *Client) AppendToSent(ctx context.Context, cfg transport.ImapConfig, msg []byte, messageID string) (transport.AppendEvidence, error) {
 	return c.AppendToSentReader(ctx, cfg, bytes.NewReader(msg), int64(len(msg)), messageID)
 }
@@ -284,6 +77,11 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 			Message: "IMAP host is empty",
 		}
 	}
+	releaseConnection, err := c.acquireDedicated(ctx, cfg)
+	if err != nil {
+		return empty, err
+	}
+	defer releaseConnection()
 
 	conn, err := c.dial(ctx, cfg)
 	if err != nil {
@@ -1178,7 +976,7 @@ func parseUIDValidity(line string) uint32 {
 
 // ListMailboxes returns all mailboxes on the IMAP server with their flags.
 func (c *Client) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireIndependent(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1407,7 +1205,7 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	if err := validateMessageUID(uid); err != nil {
 		return ev, err
 	}
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireMutation(ctx, cfg)
 	if err != nil {
 		return ev, err
 	}
@@ -1522,7 +1320,7 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 	if err := validateMessageUID(uid); err != nil {
 		return ev, err
 	}
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireMutation(ctx, cfg)
 	if err != nil {
 		return ev, err
 	}
@@ -1561,7 +1359,7 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 	if err := validateMessageUID(uid); err != nil {
 		return transport.MutationEvidence{}, err
 	}
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireMutation(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -1681,7 +1479,7 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 	if err := validateMessageUID(uid); err != nil {
 		return transport.MutationEvidence{}, err
 	}
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireMutation(ctx, cfg)
 	if err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -1854,7 +1652,7 @@ func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mail
 	var status transport.MailboxStatus
 	status.Mailbox = mailbox
 
-	ps, release, err := c.acquire(ctx, cfg)
+	ps, release, err := c.acquireIndependent(ctx, cfg)
 	if err != nil {
 		return status, err
 	}

@@ -10,6 +10,7 @@ import (
 
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
+	"mailcli/internal/transport/imapclient"
 )
 
 func TestCapabilitiesJSONContract(t *testing.T) {
@@ -106,6 +107,12 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		manifest.Limits.SearchCandidateCountDefault != "observed_lower_bound" ||
 		!manifest.Limits.SearchExactCountBounded {
 		t.Fatalf("search pagination capability = %+v", manifest.Limits)
+	}
+	if manifest.Limits.IMAPConnectionsPerAccount != imapclient.DefaultMaxConnectionsPerAccount ||
+		manifest.Limits.MaximumIMAPConnectionsPerAccount != imapclient.MaximumConnectionsPerAccount ||
+		!slices.Equal(manifest.Limits.IMAPConcurrentReadOperations, []string{"LIST", "STATUS", "SEARCH", "FETCH"}) ||
+		!slices.Equal(manifest.Limits.IMAPExclusiveOperations, []string{"APPEND", "STORE", "COPY", "MOVE", "DELETE"}) {
+		t.Fatalf("IMAP concurrency capability = %+v", manifest.Limits)
 	}
 	for _, id := range []string{"messages.filter", "messages.search"} {
 		command := manifest.Commands[slices.Index(got, id)]
