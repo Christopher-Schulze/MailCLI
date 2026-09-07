@@ -850,9 +850,12 @@ func (s *Service) reconcileUnknownViaImap(
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
-	sentBox := transport.PickSentMailbox(mailboxes)
-	if sentBox == "" {
-		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
+	sentBox, resolveErr := transport.ResolveSentMailbox(mailboxes)
+	if resolveErr != nil {
+		if transport.ErrorCode(resolveErr) == transport.CodeIMAPSentMailboxNotFound {
+			return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
+		}
+		return resultForReconcile(ref, attempt), resolveErr
 	}
 	uid, uidValidity, matchCount, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
 	if err != nil {
@@ -965,9 +968,12 @@ func (s *Service) reconcileMirrorPending(
 		if listErr != nil {
 			return result, mirrorPendingError(listErr)
 		}
-		sentBox = transport.PickSentMailbox(mailboxes)
-		if sentBox == "" {
-			return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
+		sentBox, resolveErr := transport.ResolveSentMailbox(mailboxes)
+		if resolveErr != nil {
+			if transport.ErrorCode(resolveErr) == transport.CodeIMAPSentMailboxNotFound {
+				return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
+			}
+			return result, resolveErr
 		}
 		uid, uidValidity, matchCount, searchErr := imap.SearchUID(
 			ctx,

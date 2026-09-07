@@ -147,11 +147,16 @@ func (c *Client) resolveImapTargetWithOptions(
 	if err != nil {
 		return target, err
 	}
-	target.trashMailbox = transport.PickTrashMailbox(boxes)
+	if rejectTrash {
+		target.trashMailbox, err = transport.ResolveTrashMailbox(boxes)
+		if err != nil {
+			return target, err
+		}
+	}
 
-	imapBox := mapPathToIMAP(boxes, resolved.Reference.MailboxPath)
-	if imapBox == "" {
-		imapBox = strings.Join(resolved.Reference.MailboxPath, "/")
+	imapBox, err := mapPathToIMAP(boxes, resolved.Reference.MailboxPath)
+	if err != nil {
+		return target, err
 	}
 	target.imapMailbox = imapBox
 	if rejectTrash {
@@ -261,7 +266,9 @@ func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperat
 }
 
 func mailboxCacheKey(cfg transport.ImapConfig, email string) string {
-	return fmt.Sprintf("%s:%d:%s:%s", cfg.Host, cfg.Port, cfg.Username, email)
+	// LIST results are scoped to every non-secret server/account identity input;
+	// NUL separators avoid collisions between values containing punctuation.
+	return fmt.Sprintf("%s\x00%d\x00%s\x00%s", cfg.Host, cfg.Port, cfg.Username, email)
 }
 
 func cloneMailboxInfos(boxes []transport.MailboxInfo) []transport.MailboxInfo {
@@ -279,69 +286,8 @@ func (c *Client) invalidateMailboxCache() {
 	c.mailboxCacheMu.Unlock()
 }
 
-func mapPathToIMAP(boxes []transport.MailboxInfo, path []string) string {
-	if len(path) == 0 {
-		return "INBOX"
-	}
-	if len(path) == 1 {
-		p0 := path[0]
-		if strings.EqualFold(p0, "INBOX") {
-			return "INBOX"
-		}
-		// Match by special-use flags
-		specialFlag := ""
-		switch strings.ToLower(p0) {
-		case "sent messages", "sent", "gesendet", "gesendete elemente":
-			specialFlag = "\\Sent"
-		case "trash", "papierkorb", "deleted messages", "gelöschte elemente":
-			specialFlag = "\\Trash"
-		case "junk", "spam":
-			specialFlag = "\\Junk"
-		case "drafts", "entwürfe":
-			specialFlag = "\\Drafts"
-		case "archive", "archiv":
-			specialFlag = "\\Archive"
-		}
-		if specialFlag != "" {
-			for _, m := range boxes {
-				for _, f := range m.Flags {
-					if strings.EqualFold(f, specialFlag) {
-						return m.Name
-					}
-				}
-			}
-		}
-		// Name matches
-		for _, m := range boxes {
-			if strings.EqualFold(m.Name, p0) {
-				return m.Name
-			}
-		}
-		for _, m := range boxes {
-			// Strip prefix e.g. "[Gmail]/Sent Mail" -> "Sent Mail"
-			if idx := strings.LastIndex(m.Name, "/"); idx != -1 {
-				if strings.EqualFold(m.Name[idx+1:], p0) {
-					return m.Name
-				}
-			}
-		}
-	}
-
-	// Multiple path segments
-	joinedSlash := strings.Join(path, "/")
-	for _, m := range boxes {
-		if strings.EqualFold(m.Name, joinedSlash) {
-			return m.Name
-		}
-	}
-	joinedDot := strings.Join(path, ".")
-	for _, m := range boxes {
-		if strings.EqualFold(m.Name, joinedDot) {
-			return m.Name
-		}
-	}
-
-	return strings.Join(path, "/")
+func mapPathToIMAP(boxes []transport.MailboxInfo, path []string) (string, error) {
+	return transport.ResolveMailboxPath(boxes, path)
 }
 
 // MarkMessage updates read, flagged, and junk status over IMAP.
@@ -467,7 +413,10 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
-	dstImapBox := mapPathToIMAP(boxes, dstRef.Path)
+	dstImapBox, err := mapPathToIMAP(boxes, dstRef.Path)
+	if err != nil {
+		return mail.MessageSummary{}, err
+	}
 
 	if !request.Copy {
 		if err := verifyMoveDestination(
@@ -836,7 +785,16 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 		}
 
 		for _, lb := range localBoxes {
-			imapName := mapPathToIMAP(serverBoxes, lb.Path)
+			imapName, resolveErr := mapPathToIMAP(serverBoxes, lb.Path)
+			if resolveErr != nil {
+				result.Failures = append(result.Failures, mail.SyncCheckFailure{
+					Account: email,
+					Mailbox: strings.Join(lb.Path, "/"),
+					Code:    failureCode(ctx, resolveErr),
+					Message: resolveErr.Error(),
+				})
+				continue
+			}
 			st, err := imapOp.CheckStatus(ctx, cfg, imapName)
 			if err != nil {
 				result.Failures = append(result.Failures, mail.SyncCheckFailure{

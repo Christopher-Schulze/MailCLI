@@ -773,7 +773,7 @@ func TestDeleteMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
 	}
 	fakeImap := &stubImapOperator{
-		boxes:        []transport.MailboxInfo{{Name: "INBOX"}},
+		boxes:        []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Trash", Flags: []string{"\\Trash"}}},
 		uid:          101,
 		mutationErrs: []error{uidValidityChangedErrorForTest()},
 	}
@@ -833,6 +833,48 @@ func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 	}
 	if fakeImap.mutationCalls != 2 {
 		t.Fatalf("mutation calls = %d, want 2 (first attempt + exactly one retry)", fakeImap.mutationCalls)
+	}
+}
+
+func TestTransferMessageRejectsAmbiguousDestinationMailbox(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "ambiguous-destination@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Sent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"},
+			{Name: "Sent A", Flags: []string{"\\Sent"}},
+			{Name: "Sent B", Flags: []string{"\\Sent"}},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"ambiguous-destination@gmail.com": "secret"},
+		},
+	}
+	_, err = client.TransferMessage(context.Background(), mail.TransferMessageRequest{
+		Ref: page.Messages[0].Ref, DestinationMailbox: destinationRef, Copy: true,
+	})
+	if transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMailbox {
+		t.Fatalf("TransferMessage() error = %v, want %s", err, transport.CodeIMAPAmbiguousMailbox)
+	}
+	if fakeImap.mutationCalls != 0 {
+		t.Fatalf("mutation calls = %d, want 0", fakeImap.mutationCalls)
+	}
+	if !strings.Contains(err.Error(), "Sent A") || !strings.Contains(err.Error(), "Sent B") {
+		t.Fatalf("TransferMessage() error = %v, want both candidates", err)
 	}
 }
 
@@ -907,7 +949,9 @@ func TestSyncCheckReportsFailingMailbox(t *testing.T) {
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "synccheck1@gmail.com")
 	fakeImap := &stubImapOperator{
-		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+		},
 		statusErr: map[string]error{
 			"INBOX": &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "IMAP STATUS deadline"},
 		},
@@ -938,13 +982,54 @@ func TestSyncCheckReportsFailingMailbox(t *testing.T) {
 	}
 }
 
+func TestSyncCheckReportsAmbiguousSpecialMailboxMapping(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "ambiguous-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"},
+			{Name: "Sent A", Flags: []string{"\\Sent"}},
+			{Name: "Sent B", Flags: []string{"\\Sent"}},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"ambiguous-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	found := false
+	for _, failure := range result.Failures {
+		if failure.Mailbox == "Sent" && failure.Code == transport.CodeIMAPAmbiguousMailbox {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("SyncCheck() failures = %+v, want ambiguous Sent mapping", result.Failures)
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite an ambiguous mailbox mapping")
+	}
+	if len(result.Mailboxes) == 0 {
+		t.Fatal("SyncCheck() did not retain unambiguous mailbox evidence")
+	}
+}
+
 // A dead context maps to sync_check_timeout per unchecked mailbox.
 func TestSyncCheckReportsTimeoutPerMailbox(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "synccheck2@gmail.com")
 	fakeImap := &stubImapOperator{
-		boxes:     []transport.MailboxInfo{{Name: "INBOX"}},
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+		},
 		statusErr: map[string]error{"INBOX": context.DeadlineExceeded},
 	}
 	client := &Client{
@@ -1043,7 +1128,9 @@ func TestSyncCheckCompleteWhenAllChecked(t *testing.T) {
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "synccheck5@gmail.com")
 	fakeImap := &stubImapOperator{
-		boxes:  []transport.MailboxInfo{{Name: "INBOX"}},
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+		},
 		status: transport.MailboxStatus{Messages: 3},
 	}
 	client := &Client{
@@ -2064,6 +2151,28 @@ func TestMailboxCacheIsScopedClonedAndExpires(t *testing.T) {
 	}
 	if operator.listCalls != 3 {
 		t.Fatalf("list calls after expiry = %d, want 3", operator.listCalls)
+	}
+}
+
+func TestMailboxCacheKeyIncludesEverySelectionIdentity(t *testing.T) {
+	base := transport.ImapConfig{Host: "imap.example.com", Port: 993, Username: "alice@example.com"}
+	baseKey := mailboxCacheKey(base, "alice@example.com")
+	tests := []struct {
+		name  string
+		cfg   transport.ImapConfig
+		email string
+	}{
+		{name: "host", cfg: transport.ImapConfig{Host: "imap.other.example", Port: 993, Username: base.Username}, email: "alice@example.com"},
+		{name: "port", cfg: transport.ImapConfig{Host: base.Host, Port: 143, Username: base.Username}, email: "alice@example.com"},
+		{name: "username", cfg: transport.ImapConfig{Host: base.Host, Port: base.Port, Username: "bob@example.com"}, email: "alice@example.com"},
+		{name: "account", cfg: base, email: "alias@example.com"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mailboxCacheKey(test.cfg, test.email); got == baseKey {
+				t.Fatalf("mailboxCacheKey() = %q, collides with base key", got)
+			}
+		})
 	}
 }
 

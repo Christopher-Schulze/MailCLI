@@ -257,12 +257,9 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return empty, err
 	}
 
-	sentBox := pickSent(mailboxes)
-	if sentBox == "" {
-		return empty, &transport.TransportError{
-			Code:    transport.CodeIMAPSentMailboxNotFound,
-			Message: "no Sent mailbox found",
-		}
+	sentBox, err := pickSent(mailboxes)
+	if err != nil {
+		return empty, err
 	}
 
 	if err := c.doSelect(ctx, sess, sess.nextTag(), sentBox); err != nil {
@@ -936,12 +933,12 @@ func parseQuoted(s string) (string, string, error) {
 	return "", s, fmt.Errorf("unterminated quoted string")
 }
 
-func pickSent(mailboxes []mailbox) string {
+func pickSent(mailboxes []mailbox) (string, error) {
 	infos := make([]transport.MailboxInfo, len(mailboxes))
 	for index, candidate := range mailboxes {
 		infos[index] = transport.MailboxInfo{Name: candidate.name, Flags: candidate.flags}
 	}
-	return transport.PickSentMailbox(infos)
+	return transport.ResolveSentMailbox(infos)
 }
 
 func parseStatus(line, tag string) string {
@@ -1632,12 +1629,9 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 		return transport.MutationEvidence{}, err
 	}
 
-	trashBox := transport.PickTrashMailbox(mboxes)
-	if trashBox == "" {
-		return transport.MutationEvidence{}, &transport.TransportError{
-			Code:    transport.CodeIMAPMailboxNotFound,
-			Message: "no Trash mailbox found on IMAP server",
-		}
+	trashBox, err := transport.ResolveTrashMailbox(mboxes)
+	if err != nil {
+		return transport.MutationEvidence{}, err
 	}
 	if strings.EqualFold(srcMailbox, trashBox) {
 		return transport.MutationEvidence{}, &transport.TransportError{

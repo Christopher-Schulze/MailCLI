@@ -67,6 +67,7 @@ const (
 	CodeIMAPTimeout              = "imap_timeout"
 	CodeIMAPMailboxNotFound      = "imap_mailbox_not_found"
 	CodeIMAPMessageNotFound      = "imap_message_not_found"
+	CodeIMAPAmbiguousMailbox     = "imap_ambiguous_mailbox"
 	CodeIMAPMutationFailed       = "imap_mutation_failed"
 	CodeIMAPFetchFailed          = "imap_fetch_failed"
 	CodeIMAPResponseMalformed    = "imap_response_malformed"

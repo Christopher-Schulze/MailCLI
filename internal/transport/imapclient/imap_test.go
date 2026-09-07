@@ -40,6 +40,11 @@ func TestAppendToSent(t *testing.T) {
 			wantAppendCalled: true,
 		},
 		{
+			name:        "ambiguous special-use mailboxes",
+			cfg:         fakeServerConfig{authOK: true, sentMboxes: []string{"Sent A", "Sent B"}, appendOK: true},
+			wantErrCode: transport.CodeIMAPAmbiguousMailbox,
+		},
+		{
 			name:         "special-use discovered, message found, no append",
 			cfg:          fakeServerConfig{authOK: true, sentMboxes: []string{"Sent"}, otherMboxes: []string{"INBOX"}, searchMatchID: messageID, appendOK: true},
 			wantMailbox:  "Sent",
@@ -446,13 +451,12 @@ func TestPickSent(t *testing.T) {
 			want: "Sent",
 		},
 		{
-			name: "fallback order",
+			name: "localized fallback",
 			mboxes: []mailbox{
 				{name: "INBOX", flags: []string{"\\HasNoChildren"}},
-				{name: "Sent Messages", flags: []string{"\\HasNoChildren"}},
 				{name: "Gesendet", flags: []string{"\\HasNoChildren"}},
 			},
-			want: "Sent Messages",
+			want: "Gesendet",
 		},
 		{
 			name:   "none",
@@ -462,8 +466,15 @@ func TestPickSent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := pickSent(c.mboxes); got != c.want {
+			got, err := pickSent(c.mboxes)
+			if got != c.want {
 				t.Fatalf("pickSent: got %q, want %q", got, c.want)
+			}
+			if c.want == "" && transport.ErrorCode(err) != transport.CodeIMAPSentMailboxNotFound {
+				t.Fatalf("pickSent() error = %v, want %s", err, transport.CodeIMAPSentMailboxNotFound)
+			}
+			if c.want != "" && err != nil {
+				t.Fatalf("pickSent() error = %v", err)
 			}
 		})
 	}
