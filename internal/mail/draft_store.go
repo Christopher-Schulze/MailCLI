@@ -298,7 +298,7 @@ func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
 		if _, err := os.Stat(draftFile); err == nil || !os.IsNotExist(err) {
 			continue
 		}
-		lockFile, err := os.OpenFile(filepath.Join(root, name), os.O_RDWR, 0o600)
+		lockFile, err := openExistingDraftLockResource(root, ref)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -306,17 +306,17 @@ func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
 			continue
 		}
-		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			_ = lockFile.Close()
+		if err := syscall.Flock(int(lockFile.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = lockFile.close()
 			if errors.Is(err, syscall.EWOULDBLOCK) {
 				continue
 			}
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
 			continue
 		}
-		removeErr := os.Remove(lockFile.Name())
-		unlockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		closeErr := lockFile.Close()
+		removeErr := lockFile.remove()
+		unlockErr := syscall.Flock(int(lockFile.file.Fd()), syscall.LOCK_UN)
+		closeErr := lockFile.close()
 		if err := errors.Join(removeErr, unlockErr, closeErr); err != nil {
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
 			continue
@@ -337,7 +337,7 @@ func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Ti
 	if err := draftContextError(ctx, "prune"); err != nil {
 		return err
 	}
-	draft, err := readDraftForMutation(root, ref)
+	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
@@ -351,7 +351,7 @@ func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Ti
 	if err := draftContextError(ctx, "prune"); err != nil {
 		return err
 	}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
 			return nil
@@ -380,7 +380,7 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 		return Draft{}, classifyDraftContextError(ctx, err, "update")
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	current, err := readDraftForMutation(root, request.Ref)
+	current, err := readDraftForMutation(lease, root, request.Ref)
 	if err != nil {
 		return Draft{}, err
 	}
@@ -431,7 +431,7 @@ func (s *Service) DiscardDraftContext(ctx context.Context, ref string) (resultEr
 	if err := draftContextError(ctx, "discard"); err != nil {
 		return err
 	}
-	return discardDraftFiles(root, ref)
+	return discardDraftFiles(lease, root, ref)
 }
 
 func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult, resultErr error) {
@@ -454,7 +454,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := draftContextError(ctx, "send"); err != nil {
 		return SendResult{}, err
 	}
-	draft, err := readDraftForMutation(root, ref)
+	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -471,7 +471,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		return SendResult{}, err
 	}
 	if draft.SendAttempt != nil {
-		return replaySendAttempt(root, ref, *draft.SendAttempt)
+		return replaySendAttempt(lease, root, ref, *draft.SendAttempt)
 	}
 	if draft.Kind == DraftKindNew && strings.TrimSpace(draft.From) == "" {
 		return SendResult{}, validationError("sending a new draft requires an explicit from address")
@@ -604,7 +604,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			Message: fmt.Sprintf("the message was sent and mirrored, but its local send state could not be recorded safely: %v", err),
 		}
 	}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		return result, &OperationError{
 			Code:    "send_cleanup_failed",
 			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
@@ -616,6 +616,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 
 func (s *Service) adoptObservedSentMessage(
 	ctx context.Context,
+	lease *draftLease,
 	root string,
 	ref string,
 	draft Draft,
@@ -659,7 +660,7 @@ func (s *Service) adoptObservedSentMessage(
 			Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
 		}
 	}
-	if cleanupErr := discardDraftFiles(root, ref); cleanupErr != nil {
+	if cleanupErr := discardDraftFiles(lease, root, ref); cleanupErr != nil {
 		return result, &OperationError{
 			Code:    "send_cleanup_failed",
 			Message: fmt.Sprintf("the existing Sent message was verified, but local draft cleanup failed: %v", cleanupErr),
@@ -719,7 +720,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	if err := draftContextError(ctx, "reconcile"); err != nil {
 		return SendResult{}, err
 	}
-	draft, err := readDraftForMutation(root, ref)
+	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -728,12 +729,12 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	}
 	attempt := *draft.SendAttempt
 	if attempt.Outcome == SendOutcomeObserved || attempt.Outcome == SendOutcomeSent {
-		result, err := replaySendAttempt(root, ref, attempt)
+		result, err := replaySendAttempt(lease, root, ref, attempt)
 		result.Reconciled = true
 		return result, err
 	}
 	if attempt.Outcome == SendOutcomeMirrorPending {
-		return s.reconcileMirrorPending(ctx, root, ref, draft, attempt)
+		return s.reconcileMirrorPending(ctx, lease, root, ref, draft, attempt)
 	}
 	if attempt.ObservationBaseline == nil {
 		if attempt.Outcome != SendOutcomeUnknown || attempt.MessageID == "" {
@@ -745,7 +746,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 				),
 			}
 		}
-		return s.reconcileUnknownViaImap(ctx, root, ref, draft, attempt)
+		return s.reconcileUnknownViaImap(ctx, lease, root, ref, draft, attempt)
 	}
 	reconciler, ok := s.gateway.(SendReconciler)
 	if !ok {
@@ -758,7 +759,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return resultForReconcile(ref, attempt), err
 	}
 	if evidence.SentStoreObserved && evidence.ObservedMessageRef != "" {
-		return persistReconciledSend(root, ref, attempt, evidence)
+		return persistReconciledSend(lease, root, ref, attempt, evidence)
 	}
 	result = resultForReconcile(ref, attempt)
 	if attempt.Outcome == SendOutcomeAccepted {
@@ -774,6 +775,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 }
 
 func persistReconciledSend(
+	lease *draftLease,
 	root string,
 	ref string,
 	attempt SendAttempt,
@@ -792,7 +794,7 @@ func persistReconciledSend(
 			Message: fmt.Sprintf("sent message was observed, but the reconciled state could not be recorded: %v", err),
 		}
 	}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		return result, &OperationError{
 			Code:    "send_cleanup_failed",
 			Message: fmt.Sprintf("sent message was observed, but local draft cleanup failed: %v", err),
@@ -809,6 +811,7 @@ func persistReconciledSend(
 // claim stays unknown and automatic retries remain blocked.
 func (s *Service) reconcileUnknownViaImap(
 	ctx context.Context,
+	lease *draftLease,
 	root string,
 	ref string,
 	draft Draft,
@@ -919,6 +922,7 @@ func resultForReconcile(ref string, attempt SendAttempt) SendResult {
 // verified but never replayed.
 func (s *Service) reconcileMirrorPending(
 	ctx context.Context,
+	lease *draftLease,
 	root string,
 	ref string,
 	draft Draft,
@@ -984,6 +988,7 @@ func (s *Service) reconcileMirrorPending(
 		if uid != 0 && matchCount == 1 {
 			return s.adoptObservedSentMessage(
 				ctx,
+				lease,
 				root,
 				ref,
 				draft,
@@ -1035,6 +1040,7 @@ func (s *Service) reconcileMirrorPending(
 		if matchCount > 0 {
 			return s.adoptObservedSentMessage(
 				ctx,
+				lease,
 				root,
 				ref,
 				draft,
@@ -1062,7 +1068,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: fmt.Sprintf("the sent message was mirrored, but the reconciled state could not be recorded: %v", err),
 		}
 	}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		return result, &OperationError{
 			Code:    "send_cleanup_failed",
 			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
@@ -1615,7 +1621,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := draftContextError(ctx, "save"); err != nil {
 		return SavedDraft{}, err
 	}
-	draft, err := readDraftForMutation(root, ref)
+	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
 		return SavedDraft{}, err
 	}
@@ -1633,7 +1639,7 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 				Message: "the selected Mail backend cannot reconcile the existing native draft-save attempt",
 			}
 		}
-		return reconcileNativeDraftSave(ctx, backend, root, ref, draft, *draft.SaveAttempt)
+		return reconcileNativeDraftSave(ctx, lease, backend, root, ref, draft, *draft.SaveAttempt)
 	}
 	if err := composeWriteSupportError(s.gateway); err != nil {
 		return SavedDraft{}, err
@@ -1647,11 +1653,12 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return SavedDraft{}, err
 	}
-	return s.saveDraftLegacy(ctx, root, ref, draft)
+	return s.saveDraftLegacy(ctx, lease, root, ref, draft)
 }
 
 func (s *Service) saveDraftLegacy(
 	ctx context.Context,
+	lease *draftLease,
 	root string,
 	ref string,
 	draft Draft,
@@ -1666,7 +1673,7 @@ func (s *Service) saveDraftLegacy(
 		}
 	}
 	result := SavedDraft{LocalDraftRef: ref, Message: message}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		return result, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
 	}
 	if saveErr != nil {
@@ -1680,6 +1687,7 @@ func (s *Service) saveDraftLegacy(
 
 func reconcileNativeDraftSave(
 	ctx context.Context,
+	lease *draftLease,
 	backend DraftSaveBackend,
 	root string,
 	ref string,
@@ -1709,17 +1717,18 @@ func reconcileNativeDraftSave(
 			Message: fmt.Sprintf("native draft was observed, but its reconciled state could not be recorded: %v", err),
 		}
 	}
-	return finishObservedDraftSave(root, ref, evidence.ObservedMessage, nil)
+	return finishObservedDraftSave(lease, root, ref, evidence.ObservedMessage, nil)
 }
 
 func finishObservedDraftSave(
+	lease *draftLease,
 	root string,
 	ref string,
 	message MessageSummary,
 	postflightErr error,
 ) (SavedDraft, error) {
 	result := SavedDraft{LocalDraftRef: ref, Message: message}
-	if err := discardDraftFiles(root, ref); err != nil {
+	if err := discardDraftFiles(lease, root, ref); err != nil {
 		return result, fmt.Errorf("native Mail.app draft saved but local draft cleanup failed: %w", err)
 	}
 	if postflightErr != nil {
@@ -2078,42 +2087,35 @@ func saveClaimPath(root string, ref string) (string, error) {
 }
 
 type draftLease struct {
-	file *os.File
+	lock *draftLockResource
 }
 
 func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	path, err := draftLockPath(root, ref)
+	lock, err := openDraftLockResource(root, ref)
 	if err != nil {
 		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open draft lock: %w", err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		return nil, errors.Join(fmt.Errorf("restrict draft lock: %w", err), file.Close())
 	}
 	ticker := time.NewTicker(draftLockPoll)
 	defer ticker.Stop()
 	for {
-		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			if ctx.Err() != nil {
-				closeErr := errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close())
+				closeErr := errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
 				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, closeErr)
 			}
-			return &draftLease{file: file}, nil
+			return &draftLease{lock: lock}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			closeErr := file.Close()
+			closeErr := lock.close()
 			return nil, errors.Join(fmt.Errorf("lock draft: %w", err), closeErr)
 		}
 		select {
 		case <-ctx.Done():
-			closeErr := file.Close()
+			closeErr := lock.close()
 			return nil, errors.Join(
 				&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"},
 				closeErr,
@@ -2125,9 +2127,13 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 
 func (l *draftLease) release() error {
 	return errors.Join(
-		syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN),
-		l.file.Close(),
+		syscall.Flock(int(l.lock.file.Fd()), syscall.LOCK_UN),
+		l.lock.close(),
 	)
+}
+
+func (l *draftLease) removeLock() error {
+	return l.lock.remove()
 }
 
 func rejectClaimedDraft(draft Draft) error {
@@ -2476,26 +2482,16 @@ func removeDraftSaveAttempt(root string, ref string) error {
 	return syncDirectory(root)
 }
 
-func removeDraftLockFile(root string, ref string) error {
-	path, err := draftLockPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove draft lock: %w", err)
-	}
-	return nil
-}
-
 // readDraftForMutation reads a draft while the caller holds its exclusive lease.
-// On a missing draft the lock file created by acquireDraftLease is removed, so a
-// failed mutation leaves no orphan lock; the held flock makes the unlink race-free.
-func readDraftForMutation(root string, ref string) (Draft, error) {
+// On a missing draft the lock file created by acquireDraftLease is removed through
+// that lease's pinned parent and file identity, so a failed mutation leaves no
+// orphan lock and cannot clean an attacker-replaced path.
+func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, error) {
 	draft, err := readDraftFile(root, ref)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
-			err = errors.Join(err, removeDraftLockFile(root, ref))
+			err = errors.Join(err, lease.removeLock())
 		}
 	}
 	return draft, err
@@ -2511,12 +2507,12 @@ func resultForAttempt(ref string, attempt SendAttempt, draftRetained bool) SendR
 	}
 }
 
-func replaySendAttempt(root string, ref string, attempt SendAttempt) (SendResult, error) {
+func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendAttempt) (SendResult, error) {
 	result := resultForAttempt(ref, attempt, true)
 	result.Replayed = true
 	switch attempt.Outcome {
 	case SendOutcomeObserved, SendOutcomeSent:
-		if err := discardDraftFiles(root, ref); err != nil {
+		if err := discardDraftFiles(lease, root, ref); err != nil {
 			return result, &OperationError{
 				Code: "send_cleanup_failed",
 				Message: fmt.Sprintf(
@@ -2545,7 +2541,7 @@ func replaySendAttempt(root string, ref string, attempt SendAttempt) (SendResult
 	}
 }
 
-func discardDraftFiles(root string, ref string) error {
+func discardDraftFiles(lease *draftLease, root string, ref string) error {
 	path, err := draftPath(root, ref)
 	if err != nil {
 		return err
@@ -2554,7 +2550,7 @@ func discardDraftFiles(root string, ref string) error {
 		if os.IsNotExist(err) {
 			return errors.Join(
 				&OperationError{Code: "not_found", Message: "draft not found"},
-				removeDraftLockFile(root, ref),
+				lease.removeLock(),
 			)
 		}
 		return fmt.Errorf("discard draft: %w", err)
@@ -2562,7 +2558,7 @@ func discardDraftFiles(root string, ref string) error {
 	if err := syncDirectory(root); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), removeDraftLockFile(root, ref))
+	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), lease.removeLock())
 }
 
 func writeDraftFile(root string, draft Draft) (resultErr error) {
