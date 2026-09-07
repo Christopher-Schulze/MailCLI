@@ -35,30 +35,33 @@ type commandCapability struct {
 }
 
 type capabilityLimits struct {
-	Platform                    string                      `json:"platform"`
-	Architecture                string                      `json:"architecture"`
-	OwnsMailIndex               bool                        `json:"owns_mail_index"`
-	BackgroundProcess           bool                        `json:"background_process"`
-	RawMIMERead                 bool                        `json:"raw_mime_read"`
-	RawMIMESend                 bool                        `json:"raw_mime_send"`
-	ComposeWrite                bool                        `json:"compose_write"`
-	ComposeAttachmentWrite      bool                        `json:"compose_attachment_write"`
-	VisibleComposeHandoff       bool                        `json:"visible_compose_handoff"`
-	VisibleAttachmentHandoff    bool                        `json:"visible_attachment_handoff"`
-	SendTransport               string                      `json:"send_transport"`
-	MutationTransport           string                      `json:"mutation_transport"`
-	SupportedProviders          []transport.ProviderSupport `json:"supported_providers"`
-	UnsupportedProviderCode     string                      `json:"unsupported_provider_code"`
-	ProviderSupportDescription  string                      `json:"provider_support_description"`
-	MaximumPageSize             int                         `json:"maximum_page_size"`
-	MaximumDraftInputBytes      int                         `json:"maximum_draft_input_bytes"`
-	MaximumDraftSubjectBytes    int                         `json:"maximum_draft_subject_bytes"`
-	MaximumDraftBodyBytes       int                         `json:"maximum_draft_body_bytes"`
-	MaximumDraftRecipients      int                         `json:"maximum_draft_recipients"`
-	MaximumDraftAttachments     int                         `json:"maximum_draft_attachments"`
-	MaximumDraftAttachmentBytes int64                       `json:"maximum_draft_attachment_bytes"`
-	MaximumComposeBodyBytes     int                         `json:"maximum_compose_body_bytes"`
-	MaximumRawSourceBytes       int64                       `json:"maximum_raw_source_bytes"`
+	Platform                       string                      `json:"platform"`
+	Architecture                   string                      `json:"architecture"`
+	OwnsMailIndex                  bool                        `json:"owns_mail_index"`
+	BackgroundProcess              bool                        `json:"background_process"`
+	RawMIMERead                    bool                        `json:"raw_mime_read"`
+	RawMIMESend                    bool                        `json:"raw_mime_send"`
+	ComposeWrite                   bool                        `json:"compose_write"`
+	ComposeAttachmentWrite         bool                        `json:"compose_attachment_write"`
+	VisibleComposeHandoff          bool                        `json:"visible_compose_handoff"`
+	VisibleAttachmentHandoff       bool                        `json:"visible_attachment_handoff"`
+	SendTransport                  string                      `json:"send_transport"`
+	MutationTransport              string                      `json:"mutation_transport"`
+	SupportedProviders             []transport.ProviderSupport `json:"supported_providers"`
+	UnsupportedProviderCode        string                      `json:"unsupported_provider_code"`
+	ProviderSupportDescription     string                      `json:"provider_support_description"`
+	MaximumPageSize                int                         `json:"maximum_page_size"`
+	MaximumDraftInputBytes         int                         `json:"maximum_draft_input_bytes"`
+	MaximumDraftSubjectBytes       int                         `json:"maximum_draft_subject_bytes"`
+	MaximumDraftBodyBytes          int                         `json:"maximum_draft_body_bytes"`
+	MaximumDraftRecipients         int                         `json:"maximum_draft_recipients"`
+	MaximumDraftAttachments        int                         `json:"maximum_draft_attachments"`
+	MaximumDraftAttachmentBytes    int64                       `json:"maximum_draft_attachment_bytes"`
+	MaximumComposeBodyBytes        int                         `json:"maximum_compose_body_bytes"`
+	MaximumRawSourceBytes          int64                       `json:"maximum_raw_source_bytes"`
+	SenderIdentityScanLimit        int                         `json:"sender_identity_scan_limit"`
+	MaximumSenderIdentityScanLimit int                         `json:"maximum_sender_identity_scan_limit"`
+	SenderIdentityCoverageStates   []string                    `json:"sender_identity_coverage_states"`
 }
 
 func capabilities() capabilityManifest {
@@ -83,7 +86,7 @@ func capabilities() capabilityManifest {
 			read("version", "none", "none", "available"),
 			write("update", "local-write", "none", "none", "none", "updated", "up_to_date"),
 			read("doctor", "mail-store", "optional-automation", "healthy", "unhealthy"),
-			read("accounts.list", "mail-store", "fallback-automation", "complete", "partial"),
+			read("accounts.list", "mail-store", "fallback-automation", "complete", "partial", "bounded_identity_coverage"),
 			read("mailboxes.list", "mail-store", "none", "complete"),
 			read("mailboxes.resolve", "mail-store", "none", "resolved"),
 			read("messages.list", "mail-store", "fallback-automation", "complete"),
@@ -119,23 +122,34 @@ func capabilities() capabilityManifest {
 			Platform: "darwin", Architecture: "arm64",
 			OwnsMailIndex: false, BackgroundProcess: false,
 			RawMIMERead: true, RawMIMESend: true, ComposeWrite: false,
-			ComposeAttachmentWrite:      false,
-			VisibleComposeHandoff:       true,
-			VisibleAttachmentHandoff:    true,
-			SendTransport:               "smtp",
-			MutationTransport:           "imap",
-			SupportedProviders:          transport.SupportedProviders(),
-			UnsupportedProviderCode:     transport.CodeUnsupportedProvider,
-			ProviderSupportDescription:  transport.ProviderSupportDescription(),
-			MaximumPageSize:             mail.MaximumPageLimit,
-			MaximumDraftInputBytes:      maximumDraftInputBytes,
-			MaximumDraftSubjectBytes:    mail.MaximumDraftSubjectBytes,
-			MaximumDraftBodyBytes:       mail.MaximumDraftBodyBytes,
-			MaximumDraftRecipients:      mail.MaximumDraftRecipients,
-			MaximumDraftAttachments:     mail.MaximumDraftAttachments,
-			MaximumDraftAttachmentBytes: mail.MaximumDraftAttachmentBytes,
-			MaximumComposeBodyBytes:     mail.MaximumComposeBodyBytes,
-			MaximumRawSourceBytes:       mail.MaximumRawSourceBytes,
+			ComposeAttachmentWrite:         false,
+			VisibleComposeHandoff:          true,
+			VisibleAttachmentHandoff:       true,
+			SendTransport:                  "smtp",
+			MutationTransport:              "imap",
+			SupportedProviders:             transport.SupportedProviders(),
+			UnsupportedProviderCode:        transport.CodeUnsupportedProvider,
+			ProviderSupportDescription:     transport.ProviderSupportDescription(),
+			MaximumPageSize:                mail.MaximumPageLimit,
+			MaximumDraftInputBytes:         maximumDraftInputBytes,
+			MaximumDraftSubjectBytes:       mail.MaximumDraftSubjectBytes,
+			MaximumDraftBodyBytes:          mail.MaximumDraftBodyBytes,
+			MaximumDraftRecipients:         mail.MaximumDraftRecipients,
+			MaximumDraftAttachments:        mail.MaximumDraftAttachments,
+			MaximumDraftAttachmentBytes:    mail.MaximumDraftAttachmentBytes,
+			MaximumComposeBodyBytes:        mail.MaximumComposeBodyBytes,
+			MaximumRawSourceBytes:          mail.MaximumRawSourceBytes,
+			SenderIdentityScanLimit:        mail.DefaultSenderIdentityScanLimit,
+			MaximumSenderIdentityScanLimit: mail.MaximumSenderIdentityScanLimit,
+			SenderIdentityCoverageStates: []string{
+				string(mail.SenderIdentityCoverageStateComplete),
+				string(mail.SenderIdentityCoverageStateBounded),
+				string(mail.SenderIdentityCoverageStateNotObserved),
+				string(mail.SenderIdentityCoverageStateNoValidSender),
+				string(mail.SenderIdentityCoverageStateNoSentMailbox),
+				string(mail.SenderIdentityCoverageStateUnavailable),
+				string(mail.SenderIdentityCoverageStateNotApplicable),
+			},
 		},
 		DraftSavePolicy: draftSavePolicy{
 			NewNativeSave:       "rejected_before_mail_contact",

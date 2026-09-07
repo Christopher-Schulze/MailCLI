@@ -281,6 +281,10 @@ func (c *Client) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 		}
 		accounts = append(accounts, mail.Account{
 			Ref: ref, Name: item.Name, EmailAddresses: item.EmailAddresses, State: "ok",
+			IdentityCoverage: mail.SenderIdentityCoverage{
+				Source: mail.SenderIdentityCoverageSourceMailApp,
+				State:  mail.SenderIdentityCoverageStateComplete,
+			},
 		})
 	}
 	return accounts, nil

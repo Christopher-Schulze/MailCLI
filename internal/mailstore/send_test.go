@@ -123,10 +123,11 @@ func TestSenderIdentityUsesRecentWindow(t *testing.T) {
 		t.Fatalf("close sender identity fixture writer: %v", err)
 	}
 
-	identities, err := store.loadSenderIdentities(context.Background(), []int64{4})
+	identityResult, err := store.loadSenderIdentityResult(context.Background(), []int64{4})
 	if err != nil {
-		t.Fatalf("loadSenderIdentities() error = %v", err)
+		t.Fatalf("loadSenderIdentityResult() error = %v", err)
 	}
+	identities := identityResult.identities
 	if len(identities) == 0 || identities[0].Address != "recent@example.com" || identities[0].MessageCount != 3 {
 		t.Fatalf("sender identities = %+v, want recent@example.com as the dominant recent sender", identities)
 	}
@@ -136,6 +137,110 @@ func TestSenderIdentityUsesRecentWindow(t *testing.T) {
 	}
 	if counted != senderIdentityRecentLimit {
 		t.Fatalf("sender identity window counted %d messages, want %d", counted, senderIdentityRecentLimit)
+	}
+	if identityResult.coverage.State != mail.SenderIdentityCoverageStateBounded ||
+		identityResult.coverage.ObservedMessages != senderIdentityRecentLimit ||
+		!identityResult.coverage.MoreAvailable {
+		t.Fatalf("sender identity coverage = %+v, want bounded %d+", identityResult.coverage, senderIdentityRecentLimit)
+	}
+}
+
+func TestSenderIdentityCoverageBoundary(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@example.com")
+	insertSentMessageFixture(t, store, 104)
+
+	store.senderIdentityScanLimit = 2
+	complete, err := store.loadSenderIdentityResult(context.Background(), []int64{4})
+	if err != nil {
+		t.Fatalf("complete boundary load: %v", err)
+	}
+	if complete.coverage.State != mail.SenderIdentityCoverageStateComplete ||
+		complete.coverage.ObservedMessages != 2 || complete.coverage.MoreAvailable {
+		t.Fatalf("complete boundary coverage = %+v", complete.coverage)
+	}
+
+	store.senderIdentityScanLimit = 1
+	bounded, err := store.loadSenderIdentityResult(context.Background(), []int64{4})
+	if err != nil {
+		t.Fatalf("bounded boundary load: %v", err)
+	}
+	if bounded.coverage.State != mail.SenderIdentityCoverageStateBounded ||
+		bounded.coverage.ObservedMessages != 1 || !bounded.coverage.MoreAvailable {
+		t.Fatalf("bounded boundary coverage = %+v", bounded.coverage)
+	}
+}
+
+func TestSenderIdentityCoverageDistinguishesUnobservedFromExhausted(t *testing.T) {
+	cases := []struct {
+		name             string
+		installIdentity  bool
+		wantState        mail.SenderIdentityCoverageState
+		wantMoreMessages bool
+	}{
+		{
+			name:             "sender absent inside bounded page with older history",
+			installIdentity:  true,
+			wantState:        mail.SenderIdentityCoverageStateNotObserved,
+			wantMoreMessages: true,
+		},
+		{
+			name:      "sender absent after history is exhausted",
+			wantState: mail.SenderIdentityCoverageStateNoValidSender,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			if test.installIdentity {
+				installImapIdentityFixture(t, store, "identity@example.com")
+			} else {
+				installSentMailboxFixture(t, store)
+			}
+			writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+			if _, err := writer.Exec(
+				`INSERT INTO messages(ROWID,sender,date_sent,date_received,mailbox,deleted) VALUES (901,999,100,100,4,0)`,
+			); err != nil {
+				closeTestResourceNow(t, writer, "sender-less identity writer")
+				t.Fatalf("insert sender-less Sent message: %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close sender-less identity writer: %v", err)
+			}
+
+			store.senderIdentityScanLimit = 1
+			result, err := store.loadSenderIdentityResult(context.Background(), []int64{4})
+			if err != nil {
+				t.Fatalf("load sender identity result: %v", err)
+			}
+			if len(result.identities) != 0 || result.coverage.State != test.wantState ||
+				result.coverage.ObservedMessages != 1 || result.coverage.MoreAvailable != test.wantMoreMessages {
+				t.Fatalf("coverage = %+v, identities = %+v", result.coverage, result.identities)
+			}
+		})
+	}
+}
+
+func TestSenderIdentityDeduplicatesDirectAndLabelMembership(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@example.com")
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	if _, err := writer.Exec(`INSERT INTO labels(message_id,mailbox_id) VALUES (900,4)`); err != nil {
+		closeTestResourceNow(t, writer, "duplicate label writer")
+		t.Fatalf("insert duplicate Sent label: %v", err)
+	}
+	closeTestResourceNow(t, writer, "duplicate label writer")
+
+	result, err := store.loadSenderIdentityResult(context.Background(), []int64{4})
+	if err != nil {
+		t.Fatalf("loadSenderIdentityResult() error = %v", err)
+	}
+	if len(result.identities) != 1 || result.identities[0].MessageCount != 1 ||
+		result.coverage.ObservedMessages != 1 || result.coverage.MoreAvailable {
+		t.Fatalf("deduplicated sender result = %+v, coverage = %+v", result.identities, result.coverage)
 	}
 }
 

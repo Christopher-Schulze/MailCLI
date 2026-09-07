@@ -44,8 +44,12 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 	}
 	accounts := catalog.Accounts
 	complete := catalog.Complete && accountCatalogComplete(accounts)
+	identityCoverageComplete := accountIdentityCoverageComplete(accounts)
 	if *jsonOutput {
-		return writeSuccess(stdout, "accounts.list", responseData{Accounts: &accounts, Complete: &complete})
+		return writeSuccess(stdout, "accounts.list", responseData{
+			Accounts: &accounts, Complete: &complete,
+			IdentityCoverageComplete: &identityCoverageComplete,
+		})
 	}
 	rows := make([][]string, 0, len(accounts))
 	for _, account := range accounts {
@@ -53,21 +57,25 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 		if account.State == "degraded" {
 			emailList = "degraded: " + account.DegradedReason
 		}
-		rows = append(rows, []string{account.Ref, account.Name, emailList})
+		rows = append(rows, []string{account.Ref, account.Name, emailList, identityCoverageSummary(account.IdentityCoverage)})
 	}
-	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES"}, rows) {
-		writeAccountCatalogStatus(stdout, complete)
+	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES", "IDENTITY COVERAGE"}, rows) {
+		writeAccountCatalogStatus(stdout, complete, identityCoverageComplete)
 		writeAccountCatalogWarnings(stdout, accounts)
 		return 0
 	}
 	for _, account := range accounts {
-		line := fmt.Sprintf("%s\t%s\t%s", account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","))
+		line := fmt.Sprintf(
+			"%s\t%s\t%s\t%s",
+			account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","),
+			identityCoverageSummary(account.IdentityCoverage),
+		)
 		if account.State == "degraded" {
 			line += "\tdegraded: " + account.DegradedReason
 		}
 		writeFormat(stdout, "%s\n", line)
 	}
-	writeAccountCatalogStatus(stdout, complete)
+	writeAccountCatalogStatus(stdout, complete, identityCoverageComplete)
 	writeAccountCatalogWarnings(stdout, accounts)
 	return 0
 }
@@ -81,8 +89,43 @@ func accountCatalogComplete(accounts []mail.Account) bool {
 	return true
 }
 
-func writeAccountCatalogStatus(writer io.Writer, complete bool) {
+func accountIdentityCoverageComplete(accounts []mail.Account) bool {
+	for _, account := range accounts {
+		switch account.IdentityCoverage.State {
+		case mail.SenderIdentityCoverageStateComplete,
+			mail.SenderIdentityCoverageStateNoValidSender,
+			mail.SenderIdentityCoverageStateNoSentMailbox,
+			mail.SenderIdentityCoverageStateNotApplicable:
+			continue
+		case mail.SenderIdentityCoverageStateBounded,
+			mail.SenderIdentityCoverageStateNotObserved,
+			mail.SenderIdentityCoverageStateUnavailable:
+			return false
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func identityCoverageSummary(coverage mail.SenderIdentityCoverage) string {
+	state := string(coverage.State)
+	if state == "" {
+		state = string(mail.SenderIdentityCoverageStateUnavailable)
+	}
+	if coverage.Limit == 0 {
+		return state
+	}
+	more := ""
+	if coverage.MoreAvailable {
+		more = "+"
+	}
+	return fmt.Sprintf("%s:%d/%d%s", state, coverage.ObservedMessages, coverage.Limit, more)
+}
+
+func writeAccountCatalogStatus(writer io.Writer, complete bool, identityCoverageComplete bool) {
 	writeFormat(writer, "complete\t%t\n", complete)
+	writeFormat(writer, "identity_coverage_complete\t%t\n", identityCoverageComplete)
 }
 
 func writeAccountCatalogWarnings(writer io.Writer, accounts []mail.Account) {
@@ -94,6 +137,18 @@ func writeAccountCatalogWarnings(writer io.Writer, accounts []mail.Account) {
 			writer,
 			"warning: account %s is degraded: %s; remediation: %s\n",
 			account.Ref, account.DegradedReason, account.DegradedRemediation,
+		)
+	}
+	for _, account := range accounts {
+		if account.IdentityCoverage.State != mail.SenderIdentityCoverageStateBounded &&
+			account.IdentityCoverage.State != mail.SenderIdentityCoverageStateNotObserved {
+			continue
+		}
+		writeFormat(
+			writer,
+			"warning: account %s sender identity coverage is %s; observed %d of configured %d Sent messages and more history is available\n",
+			account.Ref, account.IdentityCoverage.State,
+			account.IdentityCoverage.ObservedMessages, account.IdentityCoverage.Limit,
 		)
 	}
 }

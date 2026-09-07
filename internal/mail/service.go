@@ -131,6 +131,15 @@ func (s *Service) ListAccountCatalog(ctx context.Context) (AccountCatalog, error
 	if err != nil {
 		return AccountCatalog{}, err
 	}
+	for index := range accounts {
+		if accounts[index].IdentityCoverage.State != "" {
+			continue
+		}
+		accounts[index].IdentityCoverage = SenderIdentityCoverage{
+			Source: SenderIdentityCoverageSourceUnknown,
+			State:  SenderIdentityCoverageStateUnavailable,
+		}
+	}
 	return AccountCatalog{Accounts: accounts, Complete: true}, nil
 }
 

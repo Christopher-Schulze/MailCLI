@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mattn/go-sqlite3"
+	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
 
@@ -39,6 +40,10 @@ func TestListAccountCatalogDegradesAccountLocalSenderSQLFailure(t *testing.T) {
 	if issue.account.DegradedRemediation == "" {
 		t.Fatal("account issue remediation is empty")
 	}
+	if issue.account.IdentityCoverage.Source != "sent_history" ||
+		issue.account.IdentityCoverage.State != "unavailable" {
+		t.Fatalf("account issue coverage = %+v, want unavailable sent history", issue.account.IdentityCoverage)
+	}
 
 	catalog, err := store.ListAccountCatalog(context.Background())
 	if err != nil {
@@ -52,6 +57,18 @@ func TestListAccountCatalogDegradesAccountLocalSenderSQLFailure(t *testing.T) {
 	}
 	if catalog.Accounts[1].Ref != secondary || catalog.Accounts[1].State != "ok" {
 		t.Fatalf("unrelated account = %+v, want ok account %s", catalog.Accounts[1], secondary)
+	}
+}
+
+func TestSenderIdentityScanLimitConfigurationIsBounded(t *testing.T) {
+	if got, err := normalizeSenderIdentityScanLimit(0); err != nil || got != mail.DefaultSenderIdentityScanLimit {
+		t.Fatalf("default scan limit = %d, error = %v", got, err)
+	}
+	if got, err := normalizeSenderIdentityScanLimit(4000); err != nil || got != 4000 {
+		t.Fatalf("configured scan limit = %d, error = %v", got, err)
+	}
+	if _, err := normalizeSenderIdentityScanLimit(mail.MaximumSenderIdentityScanLimit + 1); errorCodeForTest(err) != "invalid_argument" {
+		t.Fatalf("oversized scan limit error = %v, want invalid_argument", err)
 	}
 }
 

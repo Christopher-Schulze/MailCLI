@@ -6,16 +6,45 @@ import (
 )
 
 const (
-	DefaultPageLimit            = 10
-	MaximumPageLimit            = 25
-	MaximumDraftSubjectBytes    = 64 * 1024
-	MaximumDraftBodyBytes       = 4 * 1024 * 1024
-	MaximumDraftRecipients      = 200
-	MaximumDraftAttachments     = 100
-	MaximumDraftAttachmentBytes = int64(512 * 1024 * 1024)
-	MaximumComposeBodyBytes     = 16 * 1024 * 1024
-	MaximumRawSourceBytes       = int64(64 * 1024 * 1024)
+	DefaultPageLimit               = 10
+	MaximumPageLimit               = 25
+	DefaultSenderIdentityScanLimit = 2000
+	MaximumSenderIdentityScanLimit = 10000
+	MaximumDraftSubjectBytes       = 64 * 1024
+	MaximumDraftBodyBytes          = 4 * 1024 * 1024
+	MaximumDraftRecipients         = 200
+	MaximumDraftAttachments        = 100
+	MaximumDraftAttachmentBytes    = int64(512 * 1024 * 1024)
+	MaximumComposeBodyBytes        = 16 * 1024 * 1024
+	MaximumRawSourceBytes          = int64(64 * 1024 * 1024)
 )
+
+type SenderIdentityCoverageSource string
+
+type SenderIdentityCoverageState string
+
+const (
+	SenderIdentityCoverageSourceSentHistory   SenderIdentityCoverageSource = "sent_history"
+	SenderIdentityCoverageSourceMailApp       SenderIdentityCoverageSource = "mail_app"
+	SenderIdentityCoverageSourceUnknown       SenderIdentityCoverageSource = "unknown"
+	SenderIdentityCoverageSourceNotApplicable SenderIdentityCoverageSource = "not_applicable"
+
+	SenderIdentityCoverageStateComplete      SenderIdentityCoverageState = "complete"
+	SenderIdentityCoverageStateBounded       SenderIdentityCoverageState = "bounded"
+	SenderIdentityCoverageStateNotObserved   SenderIdentityCoverageState = "not_observed"
+	SenderIdentityCoverageStateNoValidSender SenderIdentityCoverageState = "no_valid_sender"
+	SenderIdentityCoverageStateNoSentMailbox SenderIdentityCoverageState = "no_sent_mailbox"
+	SenderIdentityCoverageStateUnavailable   SenderIdentityCoverageState = "unavailable"
+	SenderIdentityCoverageStateNotApplicable SenderIdentityCoverageState = "not_applicable"
+)
+
+type SenderIdentityCoverage struct {
+	Source           SenderIdentityCoverageSource `json:"source"`
+	State            SenderIdentityCoverageState  `json:"state"`
+	ObservedMessages int                          `json:"observed_messages"`
+	Limit            int                          `json:"limit"`
+	MoreAvailable    bool                         `json:"more_available"`
+}
 
 type Check struct {
 	Name   string `json:"name"`
@@ -34,9 +63,10 @@ type DiagnosticTiming struct {
 }
 
 type Account struct {
-	Ref            string   `json:"ref"`
-	Name           string   `json:"name"`
-	EmailAddresses []string `json:"email_addresses"`
+	Ref              string                 `json:"ref"`
+	Name             string                 `json:"name"`
+	EmailAddresses   []string               `json:"email_addresses"`
+	IdentityCoverage SenderIdentityCoverage `json:"identity_coverage"`
 	// State is "ok" or "degraded"; degraded accounts carry a reason and
 	// keep empty identities rather than breaking the whole listing. The
 	// remediation tells callers how to restore a usable account state.

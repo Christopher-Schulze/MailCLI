@@ -11,13 +11,14 @@ import (
 )
 
 type Store struct {
-	database          *sql.DB
-	versionRoot       string
-	versionDirectory  *os.File
-	storeUUID         string
-	activeAccounts    []mailboxLocation
-	activeAccountKeys map[string]struct{}
-	capability        schemaCapability
+	database                *sql.DB
+	versionRoot             string
+	versionDirectory        *os.File
+	storeUUID               string
+	activeAccounts          []mailboxLocation
+	activeAccountKeys       map[string]struct{}
+	capability              schemaCapability
+	senderIdentityScanLimit int
 
 	// The mailbox catalog is memoized for the Store's read-only lifetime (one
 	// CLI invocation). Freshness of individual message membership lives in the
@@ -29,6 +30,10 @@ type Store struct {
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {
+	senderIdentityScanLimit, err := normalizeSenderIdentityScanLimit(config.SenderIdentityScanLimit)
+	if err != nil {
+		return nil, err
+	}
 	versionRoot, err := discoverVersionRoot(config.MailRoot)
 	if err != nil {
 		return nil, err
@@ -82,6 +87,7 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		database: database, versionRoot: versionRoot, storeUUID: capability.StoreUUID,
 		versionDirectory: versionDirectory,
 		activeAccounts:   activeAccounts, activeAccountKeys: activeKeys, capability: capability,
+		senderIdentityScanLimit: senderIdentityScanLimit,
 	}, nil
 }
 

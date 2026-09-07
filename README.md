@@ -33,7 +33,7 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 
 | Area | Commands | Behavior |
 |---|---|---|
-| Accounts | `accounts list` | Lists configured accounts and sender identities |
+| Accounts | `accounts list` | Lists configured accounts and bounded sender identities with explicit coverage evidence |
 | Mailboxes | `mailboxes list`, `mailboxes resolve` | Handles Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested labels |
 | Messages | `messages list`, `filter`, `search`, `get`, `raw` | Pages metadata, applies typed filters, scans bodies, and returns normalized or RFC 5322 content |
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |

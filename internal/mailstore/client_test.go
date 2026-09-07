@@ -1458,6 +1458,12 @@ func TestListAccountsHealthyStateOk(t *testing.T) {
 	if len(accounts[0].EmailAddresses) == 0 {
 		t.Fatalf("healthy account lost identities: %+v", accounts[0])
 	}
+	coverage := accounts[0].IdentityCoverage
+	if coverage.Source != mail.SenderIdentityCoverageSourceSentHistory ||
+		coverage.State != mail.SenderIdentityCoverageStateComplete ||
+		coverage.ObservedMessages != 1 || coverage.MoreAvailable {
+		t.Fatalf("healthy account identity coverage = %+v", coverage)
+	}
 }
 
 // A locally materialized (external-file) attachment satisfies the IMAP

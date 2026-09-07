@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"mailcli/internal/mail"
 )
 
 const envelopeIndexName = "Envelope Index"
@@ -18,6 +20,26 @@ type Config struct {
 	MailRoot          string
 	PreferencesPath   string
 	ActiveAccountURLs []string
+	// SenderIdentityScanLimit optionally increases the bounded Sent-history
+	// scan. Zero uses mail.DefaultSenderIdentityScanLimit; values above
+	// mail.MaximumSenderIdentityScanLimit are rejected.
+	SenderIdentityScanLimit int
+}
+
+func normalizeSenderIdentityScanLimit(requested int) (int, error) {
+	if requested == 0 {
+		return mail.DefaultSenderIdentityScanLimit, nil
+	}
+	if requested < 1 || requested > mail.MaximumSenderIdentityScanLimit {
+		return 0, operationError(
+			"invalid_argument",
+			fmt.Sprintf(
+				"sender identity scan limit must be between 1 and %d",
+				mail.MaximumSenderIdentityScanLimit,
+			),
+		)
+	}
+	return requested, nil
 }
 
 func DefaultConfig() (Config, error) {

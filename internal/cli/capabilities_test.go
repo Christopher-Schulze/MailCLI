@@ -93,8 +93,13 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		t.Fatalf("command IDs = %q, want %q", got, want)
 	}
 	accounts := manifest.Commands[slices.Index(got, "accounts.list")]
-	if !slices.Equal(accounts.ResultStates, []string{"complete", "partial"}) {
+	if !slices.Equal(accounts.ResultStates, []string{"complete", "partial", "bounded_identity_coverage"}) {
 		t.Fatalf("accounts.list result states = %+v", accounts.ResultStates)
+	}
+	if manifest.Limits.SenderIdentityScanLimit != mail.DefaultSenderIdentityScanLimit ||
+		manifest.Limits.MaximumSenderIdentityScanLimit != mail.MaximumSenderIdentityScanLimit ||
+		!slices.Contains(manifest.Limits.SenderIdentityCoverageStates, string(mail.SenderIdentityCoverageStateBounded)) {
+		t.Fatalf("sender identity coverage capability = %+v", manifest.Limits)
 	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]
 	if send.EffectClass != "smtp-send" || send.Confirmation != "required-flag" ||

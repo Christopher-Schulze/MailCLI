@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	stdmail "net/mail"
@@ -12,17 +13,19 @@ import (
 	"mailcli/internal/mailref"
 )
 
-const senderIdentityRecentLimit = 2000
+const senderIdentityRecentLimit = mail.DefaultSenderIdentityScanLimit
 
 const (
-	accountDegradedMailboxCache        = "mailbox_cache_unreadable"
-	accountDegradedSpecialUse          = "special_use_mailbox_unresolved"
-	accountDegradedSenderIdentity      = "sender_identity_unreadable"
-	accountDegradedNoSenderIdentity    = "no_provably_sent_identity"
-	accountRemediationMailboxCache     = "run `mailcli doctor` and let Mail.app rebuild the affected mailbox cache"
-	accountRemediationSpecialUse       = "run `mailcli doctor` and let Mail.app resync the affected account so its special-use mailbox is present"
-	accountRemediationSenderIdentity   = "run `mailcli doctor` and repair the affected Sent data before retrying"
-	accountRemediationNoSenderIdentity = "run `mailcli send setup --from ADDRESS` or complete one successful send, then rerun `mailcli accounts list`"
+	accountDegradedMailboxCache         = "mailbox_cache_unreadable"
+	accountDegradedSpecialUse           = "special_use_mailbox_unresolved"
+	accountDegradedSenderIdentity       = "sender_identity_unreadable"
+	accountDegradedNoSenderIdentity     = "no_provably_sent_identity"
+	accountDegradedSenderNotObserved    = "sender_identity_not_observed"
+	accountRemediationMailboxCache      = "run `mailcli doctor` and let Mail.app rebuild the affected mailbox cache"
+	accountRemediationSpecialUse        = "run `mailcli doctor` and let Mail.app resync the affected account so its special-use mailbox is present"
+	accountRemediationSenderIdentity    = "run `mailcli doctor` and repair the affected Sent data before retrying"
+	accountRemediationNoSenderIdentity  = "run `mailcli send setup --from ADDRESS` or complete one successful send, then rerun `mailcli accounts list`"
+	accountRemediationSenderNotObserved = "run `mailcli send setup --from ADDRESS` or increase the bounded sender identity scan before rerunning `mailcli accounts list`"
 )
 
 type senderIdentity struct {
@@ -55,7 +58,8 @@ func (e *accountCatalogIssue) Unwrap() error {
 }
 
 type senderIdentityDataError struct {
-	cause error
+	cause    error
+	coverage mail.SenderIdentityCoverage
 }
 
 func (e *senderIdentityDataError) Error() string {
@@ -120,11 +124,21 @@ func (s *Store) loadAccount(
 	if err != nil {
 		return mail.Account{}, accountCatalogError(location.AccountID, err)
 	}
-	degraded := func(reason string, remediation string, cause error) (mail.Account, error) {
+	limit := s.senderIdentityLimit()
+	unavailableCoverage := senderIdentityCoverage(
+		mail.SenderIdentityCoverageStateUnavailable, limit, 0, false,
+	)
+	degraded := func(
+		reason string,
+		remediation string,
+		coverage mail.SenderIdentityCoverage,
+		cause error,
+	) (mail.Account, error) {
 		account := mail.Account{
 			Ref: ref, Name: "On My Mac", EmailAddresses: []string{},
 			State: "degraded", DegradedReason: reason,
 			DegradedRemediation: remediation,
+			IdentityCoverage:    coverage,
 		}
 		return mail.Account{}, &accountCatalogIssue{
 			accountID: location.AccountID, account: account, cause: cause,
@@ -137,45 +151,67 @@ func (s *Store) loadAccount(
 		if contextErr := ctx.Err(); contextErr != nil {
 			return mail.Account{}, contextErr
 		}
-		return degraded(accountDegradedMailboxCache, accountRemediationMailboxCache, err)
+		return degraded(accountDegradedMailboxCache, accountRemediationMailboxCache, unavailableCoverage, err)
 	}
 	sentMailboxIDs, foundSent, err := strictSpecialMailboxIDs(
 		cached.Mailboxes, location, mailboxAttributeSent, records,
 	)
 	if err != nil {
-		return degraded(accountDegradedSpecialUse, accountRemediationSpecialUse, err)
+		return degraded(accountDegradedSpecialUse, accountRemediationSpecialUse, unavailableCoverage, err)
 	}
-	identities := []senderIdentity(nil)
+	if location.Scheme != "imap" && !foundSent {
+		return mail.Account{
+			Ref: ref, Name: "On My Mac", EmailAddresses: []string{}, State: "ok",
+			IdentityCoverage: mail.SenderIdentityCoverage{
+				Source: mail.SenderIdentityCoverageSourceNotApplicable,
+				State:  mail.SenderIdentityCoverageStateNotApplicable,
+			},
+		}, nil
+	}
+	identityResult := senderIdentityResult{
+		coverage: senderIdentityCoverage(
+			mail.SenderIdentityCoverageStateNoSentMailbox, limit, 0, false,
+		),
+	}
 	if foundSent {
-		identities, err = s.loadSenderIdentities(ctx, sentMailboxIDs)
+		identityResult, err = s.loadSenderIdentityResult(ctx, sentMailboxIDs)
 		if err != nil {
 			if contextErr := ctx.Err(); contextErr != nil {
 				return mail.Account{}, contextErr
 			}
 			var dataErr *senderIdentityDataError
 			if errors.As(err, &dataErr) {
-				return degraded(accountDegradedSenderIdentity, accountRemediationSenderIdentity, err)
+				return degraded(accountDegradedSenderIdentity, accountRemediationSenderIdentity, dataErr.coverage, err)
 			}
 			// Query and iteration failures can indicate a global SQL/schema
 			// problem, so they abort the catalog instead of degrading an account.
 			return mail.Account{}, accountCatalogError(location.AccountID, err)
 		}
 	}
-	if location.Scheme == "imap" && (!foundSent || len(identities) == 0) {
-		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, nil)
+	if location.Scheme == "imap" && !foundSent {
+		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, identityResult.coverage, nil)
+	}
+	if location.Scheme == "imap" && len(identityResult.identities) == 0 {
+		if identityResult.coverage.State == mail.SenderIdentityCoverageStateNotObserved {
+			return degraded(accountDegradedSenderNotObserved, accountRemediationSenderNotObserved, identityResult.coverage, nil)
+		}
+		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, identityResult.coverage, nil)
 	}
 	name := "On My Mac"
-	addresses := make([]string, len(identities))
-	for index, identity := range identities {
+	addresses := make([]string, len(identityResult.identities))
+	for index, identity := range identityResult.identities {
 		addresses[index] = identity.Address
 	}
-	if len(identities) > 0 {
-		name = identities[0].Name
+	if len(identityResult.identities) > 0 {
+		name = identityResult.identities[0].Name
 		if name == "" {
-			name = identities[0].Address
+			name = identityResult.identities[0].Address
 		}
 	}
-	return mail.Account{Ref: ref, Name: name, EmailAddresses: addresses, State: "ok"}, nil
+	return mail.Account{
+		Ref: ref, Name: name, EmailAddresses: addresses, State: "ok",
+		IdentityCoverage: identityResult.coverage,
+	}, nil
 }
 
 func strictSpecialMailboxIDs(
@@ -238,16 +274,179 @@ func strictSpecialMailboxIDs(
 	return identifiers, len(identifiers) > 0, nil
 }
 
-// loadSenderIdentities derives sender identity from the 2000 newest sent
-// messages across the account's union of Sent mailboxes.
+type senderIdentityResult struct {
+	identities []senderIdentity
+	coverage   mail.SenderIdentityCoverage
+}
+
+// loadSenderIdentities preserves the package-local helper used by existing
+// callers while the account listing also consumes explicit coverage evidence.
 func (s *Store) loadSenderIdentities(
 	ctx context.Context,
 	mailboxIDs []int64,
-) (result []senderIdentity, resultErr error) {
-	if len(mailboxIDs) == 0 {
-		return []senderIdentity{}, nil
+) ([]senderIdentity, error) {
+	result, err := s.loadSenderIdentityResult(ctx, mailboxIDs)
+	return result.identities, err
+}
+
+// loadSenderIdentityResult aggregates only the configured newest Sent
+// messages and separately checks one bounded successor row for coverage.
+func (s *Store) loadSenderIdentityResult(
+	ctx context.Context,
+	mailboxIDs []int64,
+) (senderIdentityResult, error) {
+	limit := s.senderIdentityLimit()
+	result := senderIdentityResult{
+		coverage: senderIdentityCoverage(
+			mail.SenderIdentityCoverageStateNoValidSender, limit, 0, false,
+		),
 	}
-	arguments := make([]any, 0, len(mailboxIDs)*4+1)
+	if len(mailboxIDs) == 0 {
+		return result, nil
+	}
+	identities, observed, err := s.querySenderIdentityRows(ctx, mailboxIDs, limit)
+	if err != nil {
+		return result, err
+	}
+	moreAvailable, err := s.hasMoreSenderIdentityRows(ctx, mailboxIDs, limit)
+	if err != nil {
+		return result, err
+	}
+	state := mail.SenderIdentityCoverageStateComplete
+	if moreAvailable {
+		state = mail.SenderIdentityCoverageStateBounded
+		if len(identities) == 0 {
+			state = mail.SenderIdentityCoverageStateNotObserved
+		}
+	} else if len(identities) == 0 {
+		state = mail.SenderIdentityCoverageStateNoValidSender
+	}
+	result.identities = identities
+	result.coverage = senderIdentityCoverage(state, limit, observed, moreAvailable)
+	return result, nil
+}
+
+func (s *Store) querySenderIdentityRows(
+	ctx context.Context,
+	mailboxIDs []int64,
+	limit int,
+) (result []senderIdentity, observed int, resultErr error) {
+	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit, limit, 0)
+	rows, err := s.database.QueryContext(ctx, cte+`
+		SELECT (SELECT count(*) FROM membership), sender.ROWID,
+			COALESCE(sender.address, ''), COALESCE(sender.comment, ''),
+			count(*), max(COALESCE(message.date_sent, message.date_received, 0))
+		FROM membership
+		JOIN messages message ON message.ROWID = membership.id
+		LEFT JOIN addresses sender ON sender.ROWID = message.sender
+		GROUP BY sender.address, sender.comment
+	`, arguments...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query Sent sender identities: %w", err)
+	}
+	defer joinCloseError(&resultErr, rows, "Sent sender identity rows")
+	identities := make(map[string]senderIdentity)
+	for rows.Next() {
+		var address string
+		var name string
+		var senderID sql.NullInt64
+		var observedCount int64
+		var messageCount int64
+		var latestSent int64
+		if err := rows.Scan(&observedCount, &senderID, &address, &name, &messageCount, &latestSent); err != nil {
+			if observedCount > 0 {
+				observed = int(observedCount)
+			}
+			coverage := senderIdentityCoverage(
+				mail.SenderIdentityCoverageStateUnavailable,
+				limit, min(observed, limit), false,
+			)
+			return nil, observed, &senderIdentityDataError{
+				cause:    fmt.Errorf("scan Sent sender identity: %w", err),
+				coverage: coverage,
+			}
+		}
+		observed = int(observedCount)
+		if !senderID.Valid {
+			continue
+		}
+		parsed, err := stdmail.ParseAddress(strings.TrimSpace(address))
+		if err != nil || strings.TrimSpace(parsed.Address) == "" {
+			coverage := senderIdentityCoverage(
+				mail.SenderIdentityCoverageStateUnavailable,
+				limit, min(observed, limit), false,
+			)
+			return nil, observed, &senderIdentityDataError{
+				cause: fmt.Errorf(
+					"sent mailbox contains an invalid sender address %q", address,
+				),
+				coverage: coverage,
+			}
+		}
+		key := strings.ToLower(parsed.Address)
+		identity := identities[key]
+		if identity.Address == "" {
+			identity.Address = parsed.Address
+		}
+		identity.MessageCount += messageCount
+		if latestSent > identity.LatestSent {
+			identity.LatestSent = latestSent
+		}
+		name = strings.TrimSpace(name)
+		if name != "" &&
+			(messageCount > identity.nameCount ||
+				messageCount == identity.nameCount && strings.ToLower(name) < strings.ToLower(identity.Name)) {
+			identity.Name = name
+			identity.nameCount = messageCount
+		}
+		identities[key] = identity
+	}
+	if err := rows.Err(); err != nil {
+		return nil, observed, fmt.Errorf("iterate Sent sender identities: %w", err)
+	}
+	result = make([]senderIdentity, 0, len(identities))
+	for _, identity := range identities {
+		result = append(result, identity)
+	}
+	sort.Slice(result, func(left int, right int) bool {
+		if result[left].MessageCount != result[right].MessageCount {
+			return result[left].MessageCount > result[right].MessageCount
+		}
+		if result[left].LatestSent != result[right].LatestSent {
+			return result[left].LatestSent > result[right].LatestSent
+		}
+		return strings.ToLower(result[left].Address) < strings.ToLower(result[right].Address)
+	})
+	return result, observed, resultErr
+}
+
+func (s *Store) hasMoreSenderIdentityRows(
+	ctx context.Context,
+	mailboxIDs []int64,
+	limit int,
+) (more bool, resultErr error) {
+	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit+1, 1, limit)
+	rows, err := s.database.QueryContext(ctx, cte+`
+		SELECT 1 FROM membership
+	`, arguments...)
+	if err != nil {
+		return false, fmt.Errorf("query Sent sender identity coverage: %w", err)
+	}
+	defer joinCloseError(&resultErr, rows, "Sent sender identity coverage rows")
+	more = rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate Sent sender identity coverage: %w", err)
+	}
+	return more, resultErr
+}
+
+func senderIdentityMembershipQuery(
+	mailboxIDs []int64,
+	perMailboxLimit int,
+	resultLimit int,
+	resultOffset int,
+) (string, []any) {
+	arguments := make([]any, 0, len(mailboxIDs)*4+2)
 	arms := make([]string, 0, len(mailboxIDs)*2)
 	for range mailboxIDs {
 		arms = append(arms,
@@ -268,79 +467,42 @@ func (s *Store) loadSenderIdentities(
 		)
 	}
 	for _, identifier := range mailboxIDs {
-		arguments = append(arguments, identifier, senderIdentityRecentLimit, identifier, senderIdentityRecentLimit)
+		arguments = append(arguments, identifier, perMailboxLimit, identifier, perMailboxLimit)
 	}
-	arguments = append(arguments, senderIdentityRecentLimit)
-	rows, err := s.database.QueryContext(ctx, `
-		WITH sent_membership(id) AS (
-			`+strings.Join(arms, "\n\t\t\tUNION\n\t\t\t")+`
-		), membership(id) AS (
-			SELECT sent.id
-			FROM sent_membership sent
-			JOIN messages message ON message.ROWID = sent.id
-			WHERE message.deleted = 0
-			ORDER BY COALESCE(message.date_sent, message.date_received) DESC, message.ROWID DESC
-			LIMIT ?
-		)
-		SELECT COALESCE(sender.address, ''), COALESCE(sender.comment, ''),
-			count(*), max(COALESCE(message.date_sent, message.date_received, 0))
-		FROM membership
-		JOIN messages message ON message.ROWID = membership.id
-		JOIN addresses sender ON sender.ROWID = message.sender
-		GROUP BY sender.address, sender.comment
-	`, arguments...)
-	if err != nil {
-		return nil, fmt.Errorf("query Sent sender identities: %w", err)
+	arguments = append(arguments, resultLimit, resultOffset)
+	return `WITH sent_membership(id) AS (
+		` + strings.Join(arms, "\n\t\tUNION\n\t\t") + `
+	), membership(id) AS (
+		SELECT sent.id
+		FROM sent_membership sent
+		JOIN messages message ON message.ROWID = sent.id
+		WHERE message.deleted = 0
+		ORDER BY COALESCE(message.date_sent, message.date_received) DESC, message.ROWID DESC
+		LIMIT ? OFFSET ?
+	)
+	`, arguments
+}
+
+func (s *Store) senderIdentityLimit() int {
+	if s.senderIdentityScanLimit >= 1 && s.senderIdentityScanLimit <= mail.MaximumSenderIdentityScanLimit {
+		return s.senderIdentityScanLimit
 	}
-	defer joinCloseError(&resultErr, rows, "Sent sender identity rows")
-	identities := make(map[string]senderIdentity)
-	for rows.Next() {
-		var address string
-		var name string
-		var messageCount int64
-		var latestSent int64
-		if err := rows.Scan(&address, &name, &messageCount, &latestSent); err != nil {
-			return nil, &senderIdentityDataError{cause: fmt.Errorf("scan Sent sender identity: %w", err)}
-		}
-		parsed, err := stdmail.ParseAddress(strings.TrimSpace(address))
-		if err != nil || strings.TrimSpace(parsed.Address) == "" {
-			return nil, &senderIdentityDataError{
-				cause: fmt.Errorf("sent mailbox contains an invalid sender address %q", address),
-			}
-		}
-		key := strings.ToLower(parsed.Address)
-		identity := identities[key]
-		if identity.Address == "" {
-			identity.Address = parsed.Address
-		}
-		identity.MessageCount += messageCount
-		if latestSent > identity.LatestSent {
-			identity.LatestSent = latestSent
-		}
-		name = strings.TrimSpace(name)
-		if name != "" && messageCount > identity.nameCount {
-			identity.Name = name
-			identity.nameCount = messageCount
-		}
-		identities[key] = identity
+	return senderIdentityRecentLimit
+}
+
+func senderIdentityCoverage(
+	state mail.SenderIdentityCoverageState,
+	limit int,
+	observed int,
+	moreAvailable bool,
+) mail.SenderIdentityCoverage {
+	return mail.SenderIdentityCoverage{
+		Source:           mail.SenderIdentityCoverageSourceSentHistory,
+		State:            state,
+		ObservedMessages: observed,
+		Limit:            limit,
+		MoreAvailable:    moreAvailable,
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate Sent sender identities: %w", err)
-	}
-	result = make([]senderIdentity, 0, len(identities))
-	for _, identity := range identities {
-		result = append(result, identity)
-	}
-	sort.Slice(result, func(left int, right int) bool {
-		if result[left].MessageCount != result[right].MessageCount {
-			return result[left].MessageCount > result[right].MessageCount
-		}
-		if result[left].LatestSent != result[right].LatestSent {
-			return result[left].LatestSent > result[right].LatestSent
-		}
-		return strings.ToLower(result[left].Address) < strings.ToLower(result[right].Address)
-	})
-	return result, nil
 }
 
 func accountCatalogError(accountID string, err error) error {
