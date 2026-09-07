@@ -33,6 +33,9 @@ func (c *sqliteConnector) Driver() driver.Driver {
 }
 
 func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
+	if err := ensureSecureOpenSupported(); err != nil {
+		return nil, err
+	}
 	absolutePath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Envelope Index path: %w", err)

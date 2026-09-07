@@ -20,6 +20,10 @@ func openDirectoryPath(rootDirectory *os.File, root string, path string) (*os.Fi
 	return openPathAt(rootDirectory, root, path, true)
 }
 
+func ensureSecureOpenSupported() error {
+	return nil
+}
+
 func openPathAt(
 	rootDirectory *os.File,
 	root string,
