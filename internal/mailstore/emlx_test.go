@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +90,68 @@ func TestValidateEMLXFrameRejectsInvalidInput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateXMLPlistRequiresSingleRoot(t *testing.T) {
+	t.Parallel()
+	valid := string(validPlistTrailer())
+	tests := []struct {
+		name    string
+		source  string
+		wantErr bool
+	}{
+		{name: "minimal plist", source: `<plist><dict/></plist>`},
+		{name: "standard plist", source: valid},
+		{name: "namespaced root and attributes", source: `<p:plist xmlns:p="urn:mail" version="1.0" custom="accepted"><p:dict/></p:plist>`},
+		{name: "doctype before root", source: `<?xml version="1.0"?><!DOCTYPE plist><plist version="1.0"><dict/></plist>`},
+		{name: "wrong root", source: `<wrapper><plist><dict/></plist></wrapper>`, wantErr: true},
+		{name: "wrong child", source: `<plist version="1.0"><array/></plist>`, wantErr: true},
+		{name: "unsupported version", source: `<plist version="2.0"><dict/></plist>`, wantErr: true},
+		{name: "nested plist", source: `<plist><dict><key>nested</key><plist><dict/></plist></dict></plist>`, wantErr: true},
+		{name: "duplicate root", source: valid + valid, wantErr: true},
+		{name: "trailing text", source: valid + "trailing", wantErr: true},
+		{name: "trailing element", source: valid + `<extra/>`, wantErr: true},
+		{name: "malformed XML", source: `<plist><dict></plist>`, wantErr: true},
+		{name: "invalid encoding", source: `<?xml version="1.0" encoding="ISO-8859-1"?><plist><dict/></plist>`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateXMLPlist(strings.NewReader(test.source))
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("validateXMLPlist() error = nil, want error")
+				}
+				if errorCodeForTest(err) != "invalid_emlx" {
+					t.Fatalf("validateXMLPlist() error = %v, want invalid_emlx", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateXMLPlist() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateXMLPlistSizeLimit(t *testing.T) {
+	t.Parallel()
+	source := string(validPlistTrailer()) + strings.Repeat(" ", int(maximumPlistBytes))
+	err := validateXMLPlist(strings.NewReader(source))
+	if errorCodeForTest(err) != "invalid_emlx" {
+		t.Fatalf("validateXMLPlist() error = %v, want invalid_emlx", err)
+	}
+}
+
+func FuzzValidateXMLPlist(f *testing.F) {
+	f.Add(string(validPlistTrailer()))
+	f.Add(`<wrapper><plist><dict/></plist></wrapper>`)
+	f.Add(`<plist><dict>`)
+	f.Fuzz(func(t *testing.T, source string) {
+		if err := validateXMLPlist(strings.NewReader(source)); err != nil && errorCodeForTest(err) != "invalid_emlx" {
+			t.Fatalf("validateXMLPlist() error = %v, want invalid_emlx", err)
+		}
+	})
 }
 
 func TestValidatePathWithoutSymlinksRejectsSymlink(t *testing.T) {

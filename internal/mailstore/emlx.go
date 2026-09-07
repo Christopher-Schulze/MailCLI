@@ -327,23 +327,172 @@ func validateEMLXFrame(file *os.File, fileSize int64) (int64, error) {
 }
 
 func validateXMLPlist(reader io.Reader) error {
-	decoder := xml.NewDecoder(reader)
-	foundPlist := false
+	limited := &io.LimitedReader{R: reader, N: maximumPlistBytes + 1}
+	decoder := xml.NewDecoder(limited)
+	decoder.Strict = true
+	root, err := nextEMLXStart(decoder)
+	if err != nil {
+		return invalidEMLXPlistError("parse EMLX plist trailer", err)
+	}
+	if root.Name.Local != "plist" {
+		return operationError("invalid_emlx", "EMLX trailer root is not plist")
+	}
+	if version, ok := emlxPlistVersion(root); ok && version != "1.0" {
+		return operationError("invalid_emlx", fmt.Sprintf("unsupported EMLX plist version %q", version))
+	}
+	child, err := nextEMLXContentToken(decoder)
+	if err != nil {
+		return invalidEMLXPlistError("parse EMLX plist trailer", err)
+	}
+	childStart, ok := child.(xml.StartElement)
+	if !ok || childStart.Name.Local != "dict" {
+		return operationError("invalid_emlx", "EMLX plist root must contain one dict object")
+	}
+	if err := consumeEMLXDict(decoder); err != nil {
+		return invalidEMLXPlistError("parse EMLX plist trailer", err)
+	}
+	if err := consumeEMLXPlistEnd(decoder); err != nil {
+		return invalidEMLXPlistError("parse EMLX plist trailer", err)
+	}
+	if err := requireEMLXEOF(decoder); err != nil {
+		return invalidEMLXPlistError("parse EMLX plist trailer", err)
+	}
+	if limited.N == 0 {
+		return operationError(
+			"invalid_emlx",
+			fmt.Sprintf("EMLX plist trailer exceeds %d bytes", maximumPlistBytes),
+		)
+	}
+	return nil
+}
+
+func invalidEMLXPlistError(context string, cause error) error {
+	return operationErrorWithCause("invalid_emlx", context+": "+cause.Error(), cause)
+}
+
+func emlxPlistVersion(start xml.StartElement) (string, bool) {
+	for _, attribute := range start.Attr {
+		if attribute.Name.Space == "" && attribute.Name.Local == "version" {
+			return attribute.Value, true
+		}
+	}
+	return "", false
+}
+
+func nextEMLXStart(decoder *xml.Decoder) (xml.StartElement, error) {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return xml.StartElement{}, err
+		}
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" {
+				return xml.StartElement{}, fmt.Errorf("unexpected non-whitespace text")
+			}
+		case xml.StartElement:
+			return value, nil
+		case xml.EndElement:
+			return xml.StartElement{}, fmt.Errorf("unexpected closing element </%s>", value.Name.Local)
+		case xml.Comment, xml.Directive, xml.ProcInst:
+			continue
+		default:
+			return xml.StartElement{}, fmt.Errorf("unexpected XML token")
+		}
+	}
+}
+
+func nextEMLXContentToken(decoder *xml.Decoder) (xml.Token, error) {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) == "" {
+				continue
+			}
+			return nil, fmt.Errorf("unexpected plist text")
+		case xml.Comment, xml.ProcInst:
+			continue
+		default:
+			return token, nil
+		}
+	}
+}
+
+func consumeEMLXDict(decoder *xml.Decoder) error {
+	depth := 1
+	for depth > 0 {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			if value.Name.Local == "plist" {
+				return fmt.Errorf("nested plist element")
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+			if depth == 0 && value.Name.Local != "dict" {
+				return fmt.Errorf("dict object closed by </%s>", value.Name.Local)
+			}
+		case xml.Directive:
+			return fmt.Errorf("unexpected XML directive inside plist object")
+		}
+	}
+	return nil
+}
+
+func consumeEMLXPlistEnd(decoder *xml.Decoder) error {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) == "" {
+				continue
+			}
+			return fmt.Errorf("unexpected text after plist object")
+		case xml.Comment, xml.ProcInst:
+			continue
+		case xml.StartElement:
+			return fmt.Errorf("plist contains more than one object")
+		case xml.EndElement:
+			if value.Name.Local != "plist" {
+				return fmt.Errorf("plist closed by </%s>", value.Name.Local)
+			}
+			return nil
+		default:
+			return fmt.Errorf("unexpected XML token after plist object")
+		}
+	}
+}
+
+func requireEMLXEOF(decoder *xml.Decoder) error {
 	for {
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
-			return operationError("invalid_emlx", fmt.Sprintf("parse EMLX plist trailer: %v", err))
+			return err
 		}
-		start, ok := token.(xml.StartElement)
-		if ok && start.Name.Local == "plist" {
-			foundPlist = true
+		switch value := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) == "" {
+				continue
+			}
+			return fmt.Errorf("trailing non-whitespace content")
+		case xml.Comment, xml.ProcInst:
+			continue
+		default:
+			return fmt.Errorf("trailing XML content")
 		}
 	}
-	if !foundPlist {
-		return operationError("invalid_emlx", "EMLX trailer is not an XML plist")
-	}
-	return nil
 }
