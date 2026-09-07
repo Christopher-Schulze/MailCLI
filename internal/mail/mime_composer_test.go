@@ -8,8 +8,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+)
+
+const composerGoldenMessageID = "<build-0001@mailcli.local>"
+
+var (
+	composerGoldenDatePattern      = regexp.MustCompile(`(?m)^Date: .*$`)
+	composerGoldenMessageIDPattern = regexp.MustCompile(`(?m)^Message-ID: .*$`)
+	composerGoldenBoundaryPattern  = regexp.MustCompile(`=_[0-9a-f]{32}`)
 )
 
 type scriptedAttachmentReader struct {
@@ -34,6 +43,105 @@ func (r *scriptedAttachmentReader) Read(buffer []byte) (int, error) {
 }
 
 func (r *scriptedAttachmentReader) Close() error { return nil }
+
+func TestBuildMessageGolden(t *testing.T) {
+	directory := t.TempDir()
+	notes := composerGoldenAttachment(t, directory, "notes.txt", "meeting notes\nline two\n")
+	resume := composerGoldenAttachment(t, directory, "résumé final.txt", "curriculum vitae with ünïcode\n")
+
+	tests := []struct {
+		name  string
+		draft Draft
+	}{
+		{
+			name: "plain-only",
+			draft: Draft{
+				Kind: DraftKindNew, From: "sender@example.com",
+				To:   []Recipient{{Address: "alice@example.com"}},
+				Body: "Hello Alice,\n\nHere is the update.\n\nBest,\nSender\n",
+			},
+		},
+		{
+			name: "plain-html",
+			draft: Draft{
+				Kind: DraftKindNew, From: "sender@example.com",
+				To: []Recipient{{Address: "alice@example.com"}}, Subject: "Styled update",
+				Body: "Hello Alice,\n\nHere is the update.\n", BodyFormat: DraftBodyHTML,
+				BodyHTML: "<p>Hello Alice,</p><p>Here is the <strong>update</strong>.</p>",
+			},
+		},
+		{
+			name: "attachments",
+			draft: Draft{
+				Kind: DraftKindNew, From: "sender@example.com",
+				To:      []Recipient{{Name: "Alice", Address: "alice@example.com"}},
+				Subject: "Documents attached", Body: "Both documents are attached.\n",
+				Attachments: []DraftAttachment{notes, resume},
+			},
+		},
+		{
+			name: "reply-threading",
+			draft: Draft{
+				Kind: DraftKindReply, SourceMessageID: "<original-123@example.com>",
+				SourceReferences: "<first-1@example.com> <second-2@example.com>",
+				From:             "sender@example.com", To: []Recipient{{Address: "original@example.com"}},
+				Subject: "Re: Original subject", Body: "Thanks, understood.\n",
+			},
+		},
+		{
+			name: "bcc-excluded",
+			draft: Draft{
+				Kind: DraftKindNew, From: "sender@example.com",
+				To:      []Recipient{{Name: "Alice", Address: "alice@example.com"}},
+				CC:      []Recipient{{Name: "Copy", Address: "copy@example.com"}},
+				BCC:     []Recipient{{Name: "Secret", Address: "secret@example.com"}},
+				Subject: "Visible to To and CC only", Body: "The BCC recipient must never appear.\n",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message, err := BuildMessage(test.draft, composerGoldenMessageID)
+			if err != nil {
+				t.Fatalf("BuildMessage() error = %v", err)
+			}
+			messageText := string(message)
+			if !strings.HasSuffix(messageText, composerCRLF) ||
+				strings.Count(messageText, "\n") != strings.Count(messageText, composerCRLF) {
+				t.Fatal("composed message contains a bare LF or lacks its final CRLF")
+			}
+			got := normalizeComposerGolden(message)
+			goldenPath := filepath.Join("testdata", "golden", test.name+".golden")
+			golden, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatalf("ReadFile(%q) error = %v", goldenPath, err)
+			}
+			want := strings.ReplaceAll(string(golden), composerCRLF, "\n")
+			if got != want {
+				t.Fatalf("message mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
+		})
+	}
+}
+
+func composerGoldenAttachment(t *testing.T, directory, name, content string) DraftAttachment {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	payload := []byte(content)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	digest := sha256.Sum256(payload)
+	return DraftAttachment{Path: path, Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}
+}
+
+func normalizeComposerGolden(message []byte) string {
+	normalized := composerGoldenDatePattern.ReplaceAllString(string(message), "Date: <DATE>")
+	normalized = composerGoldenMessageIDPattern.ReplaceAllString(normalized, "Message-ID: <MESSAGE-ID>")
+	normalized = composerGoldenBoundaryPattern.ReplaceAllString(normalized, "<BOUNDARY>")
+	return strings.ReplaceAll(normalized, composerCRLF, "\n")
+}
 
 func TestComposeMessageSpoolContextStopsCanceledWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

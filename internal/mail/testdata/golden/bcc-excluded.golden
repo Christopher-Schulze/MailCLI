@@ -1,6 +1,7 @@
 From: sender@example.com
-To: <alice@example.com>
-Subject: Visible to To only
+To: "Alice" <alice@example.com>
+Cc: "Copy" <copy@example.com>
+Subject: Visible to To and CC only
 Date: <DATE>
 Message-ID: <MESSAGE-ID>
 MIME-Version: 1.0
