@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -90,6 +91,7 @@ func runSign(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	defer clearPrivateKey(privateKey)
 	if err := validatePublicKey(privateKey, *expectedPublic); err != nil {
 		return err
 	}
@@ -157,22 +159,31 @@ func decodePublicKey(value string) (ed25519.PublicKey, error) {
 }
 
 func readPrivateKey(path string) (ed25519.PrivateKey, error) {
-	info, err := os.Lstat(path)
+	file, info, err := openPrivateKeyFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect private key: %w", err)
+		return nil, fmt.Errorf("open private key: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		_ = file.Close()
 		return nil, fmt.Errorf("private key must be a regular file accessible only by its owner")
 	}
-	payload, err := readBoundedFile(path, 1024)
+	payload, err := readBoundedOpenFile(file, 1024)
 	if err != nil {
 		return nil, fmt.Errorf("read private key: %w", err)
 	}
-	decoded, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(payload)))
+	encoded := bytes.TrimSpace(payload)
+	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
+	decodedLength, err := base64.StdEncoding.Strict().Decode(decoded, encoded)
+	decoded = decoded[:decodedLength]
+	clearBytes(payload)
 	if err != nil || len(decoded) != ed25519.PrivateKeySize {
+		clearBytes(decoded)
 		return nil, fmt.Errorf("private key is not a valid base64 Ed25519 private key")
 	}
-	return ed25519.PrivateKey(decoded), nil
+	privateKey := make(ed25519.PrivateKey, len(decoded))
+	copy(privateKey, decoded)
+	clearBytes(decoded)
+	return privateKey, nil
 }
 
 func readBoundedFile(path string, maximum int64) ([]byte, error) {
@@ -180,15 +191,31 @@ func readBoundedFile(path string, maximum int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readBoundedOpenFile(file, maximum)
+}
+
+func readBoundedOpenFile(file *os.File, maximum int64) ([]byte, error) {
 	payload, readErr := io.ReadAll(io.LimitReader(file, maximum+1))
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
+		clearBytes(payload)
 		return nil, errors.Join(readErr, closeErr)
 	}
 	if int64(len(payload)) > maximum {
+		clearBytes(payload)
 		return nil, fmt.Errorf("file exceeds %d bytes", maximum)
 	}
 	return payload, nil
+}
+
+func clearBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+func clearPrivateKey(privateKey ed25519.PrivateKey) {
+	clearBytes(privateKey)
 }
 
 func writeExclusive(path string, payload []byte, mode os.FileMode) error {

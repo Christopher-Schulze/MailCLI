@@ -165,6 +165,49 @@ func TestReadPrivateKeyRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestReadPrivateKeyRejectsSymlinkParent(t *testing.T) {
+	dir := t.TempDir()
+	targetDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetDirectory, "key.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+	parent := filepath.Join(dir, "keys")
+	if err := os.Symlink(targetDirectory, parent); err != nil {
+		t.Fatalf("Symlink error = %v", err)
+	}
+	_, err := readPrivateKey(filepath.Join(parent, "key.txt"))
+	if err == nil {
+		t.Fatal("readPrivateKey error = nil, want symlink-parent rejection error")
+	}
+}
+
+func TestReadPrivateKeyRejectsReplacedParent(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "keys")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir error = %v", err)
+	}
+	keyPath := filepath.Join(parent, "key.txt")
+	if err := os.WriteFile(keyPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "key.txt"), []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+	movedParent := filepath.Join(dir, "keys-original")
+	if err := os.Rename(parent, movedParent); err != nil {
+		t.Fatalf("Rename error = %v", err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatalf("Symlink error = %v", err)
+	}
+	_, err := readPrivateKey(keyPath)
+	if err == nil {
+		t.Fatal("readPrivateKey error = nil, want replaced-parent rejection error")
+	}
+}
+
 func TestReadPrivateKeyRejectsGroupReadable(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "key.txt")
