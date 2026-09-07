@@ -152,6 +152,8 @@ The primary worktree is single-writer. Parallel analysis stays read-only; indepe
 
 After the edit, only allowlisted paths are staged. `manage-write-lease.sh review TOKEN` rejects unstaged, untracked, or out-of-scope changes and records the exact patch identity. `manage-write-lease.sh gate TOKEN` runs `scripts/tests/test.sh` and records evidence only when the full suite returns success against the unchanged staged patch and baseline HEAD; failure or interruption preserves the exact nonzero status and leaves no commit proof. After the manual `TASK NNN:` commit, `manage-write-lease.sh release TOKEN` requires one commit over the acquired HEAD, the same tested patch bytes, an allowlisted commit path set, and a clean worktree. `abort TOKEN` is available only while HEAD and worktree match the clean baseline. The lease does not authorize pushes, tags, releases, external actions, or cleanup.
 
+`docs/tasks.md` and `docs/tasks/` are the private local task control plane and remain ignored because the GitHub repository is public. They may contain task metadata and technical evidence, but never credentials, tokens, message bodies, or private session transcripts. Git status, a TASK commit, and the public remote are not backup proof for these ignored files. `scripts/utils/export-task-history.sh create` atomically copies only the board and canonical Markdown detail files to a new owner-only snapshot under `~/Library/Application Support/MailCLI/task-history-backups` by default, after proving that the source file set and hashes stayed unchanged during the copy. The snapshot and its directories use mode `0700`, its files use `0600`, and `MANIFEST.sha256` binds the complete file set and bytes. An explicit destination must be an absolute owner-only directory outside the repository. `export-task-history.sh verify ABSOLUTE_SNAPSHOT_DIRECTORY` rejects added, missing, modified, symlinked, noncanonical, or permission-widened content. A verified external or backup-system copy of that snapshot is required for off-device recovery; MailCLI does not upload private task history.
+
 ## Local security and permissions
 
 MailCLI reuses Mail.app's configured accounts and Keychain-backed authentication for reads and mutations. It does not request, read, log, or transmit account passwords, OAuth tokens, or cookies. The one stored secret is the per-account app-specific SMTP password that `mailcli send setup` writes to the macOS Keychain (`mailcli-smtp` service) at the user's no-echo prompt; MailCLI never displays it, includes it in output or logs, or sends it anywhere except the provider's SMTP submission and IMAP endpoints. Account identifiers containing an embedded NUL byte are rejected with `keychain_invalid_identifier` before any platform keychain or CoreFoundation bridge call; valid Unicode identifiers remain supported.
@@ -229,6 +231,8 @@ Requirements are macOS on Apple silicon, Go 1.27 or newer for development, `/Sys
 ```bash
 ./scripts/tests/test.sh
 ./scripts/benchmarks/run-performance-evidence.sh
+./scripts/utils/export-task-history.sh create
+./scripts/utils/export-task-history.sh verify /absolute/path/to/mailcli-task-history-SNAPSHOT
 ./scripts/build/build.sh
 ./scripts/release/build-release.sh "${VERSION:?set to the release version}"
 ./scripts/tests/test-live-responsiveness.sh
