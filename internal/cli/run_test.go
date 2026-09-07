@@ -720,7 +720,8 @@ func TestSyncCheckHumanPrintsFailuresSection(t *testing.T) {
 		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "failures") || !strings.Contains(out, "imap_timeout") || !strings.Contains(out, "Archive") {
+	if !strings.Contains(out, "complete\tfalse") || !strings.Contains(out, "failures") ||
+		!strings.Contains(out, "imap_timeout") || !strings.Contains(out, "Archive") {
 		t.Fatalf("unexpected stdout: %s", out)
 	}
 }

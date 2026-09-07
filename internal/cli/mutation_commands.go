@@ -10,6 +10,8 @@ import (
 	"mailcli/internal/mail"
 )
 
+const syncCheckIncompleteExitCode = 3
+
 func runMessageMark(
 	ctx context.Context,
 	service *mail.Service,
@@ -131,9 +133,17 @@ func runSync(ctx context.Context, service *mail.Service, args []string, stdout i
 	flags := newFlagSet("sync", stderr)
 	accountRef := flags.String("account", "", "account ref; omit to check all mail")
 	checkOnly := flags.Bool("check", false, "check server vs local message counts over IMAP without launching Mail.app")
+	requireComplete := flags.Bool("require-complete", false, "return exit 3 when an IMAP check has incomplete coverage")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *requireComplete && !*checkOnly {
+		return failCommand(
+			"sync", *jsonOutput,
+			&commandError{code: "invalid_argument", message: "--require-complete requires --check"},
+			stdout, stderr,
+		)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -143,9 +153,17 @@ func runSync(ctx context.Context, service *mail.Service, args []string, stdout i
 		if err != nil {
 			return failCommand("sync", *jsonOutput, err, stdout, stderr)
 		}
-		if *jsonOutput {
-			return writeSuccess(stdout, "sync", responseData{SyncCheck: &checkResult})
+		exitCode := 0
+		if *requireComplete && !checkResult.Complete {
+			exitCode = syncCheckIncompleteExitCode
 		}
+		if *jsonOutput {
+			if code := writeSuccess(stdout, "sync", responseData{SyncCheck: &checkResult}); code != 0 {
+				return code
+			}
+			return exitCode
+		}
+		writeFormat(stdout, "complete\t%t\n", checkResult.Complete)
 		writeLine(stdout, "account\tmailbox\tlocal\tserver\tdelta\tunseen")
 		for _, mbx := range checkResult.Mailboxes {
 			writeFormat(stdout, "%s\t%s\t%d\t%d\t%+d\t%d\n",
@@ -159,7 +177,7 @@ func runSync(ctx context.Context, service *mail.Service, args []string, stdout i
 					failure.Account, failure.Mailbox, failure.Code, failure.Message)
 			}
 		}
-		return 0
+		return exitCode
 	}
 
 	result, err := service.Sync(operationCtx, *accountRef)

@@ -64,6 +64,15 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 		manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts save --ref <DRAFT_REF> --json" {
 		t.Fatalf("draft save policy = %+v", manifest.DraftSavePolicy)
 	}
+	if !manifest.SyncCheckPolicy.IncompleteIsSuccessfulResult ||
+		manifest.SyncCheckPolicy.DefaultIncompleteExitCode != 0 ||
+		manifest.SyncCheckPolicy.RequireCompleteFlag != "--require-complete" ||
+		manifest.SyncCheckPolicy.RequireCompleteIncompleteExitCode != syncCheckIncompleteExitCode {
+		t.Fatalf("sync check policy = %+v", manifest.SyncCheckPolicy)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"require_complete_incomplete_exit_code":3`)) {
+		t.Fatalf("serialized sync check policy = %s", stdout.String())
+	}
 }
 
 func TestCapabilityCommandInventory(t *testing.T) {
@@ -144,6 +153,10 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		if command.StoreDependency != "mail-store" || command.MailAppDependency != "none" {
 			t.Fatalf("%s capability = %+v", id, command)
 		}
+	}
+	syncCommand := manifest.Commands[slices.Index(got, "sync")]
+	if !slices.Equal(syncCommand.ResultStates, []string{"triggered", "checked_complete", "checked_incomplete"}) {
+		t.Fatalf("sync result states = %+v", syncCommand.ResultStates)
 	}
 }
 

@@ -17,7 +17,15 @@ type capabilityManifest struct {
 	Version         string              `json:"version"`
 	Commands        []commandCapability `json:"commands"`
 	Limits          capabilityLimits    `json:"limits"`
+	SyncCheckPolicy syncCheckPolicy     `json:"sync_check_policy"`
 	DraftSavePolicy draftSavePolicy     `json:"draft_save_policy"`
+}
+
+type syncCheckPolicy struct {
+	IncompleteIsSuccessfulResult      bool   `json:"incomplete_is_successful_result"`
+	DefaultIncompleteExitCode         int    `json:"default_incomplete_exit_code"`
+	RequireCompleteFlag               string `json:"require_complete_flag"`
+	RequireCompleteIncompleteExitCode int    `json:"require_complete_incomplete_exit_code"`
 }
 
 type draftSavePolicy struct {
@@ -125,7 +133,7 @@ func capabilities() capabilityManifest {
 			write("messages.move", "imap-write", "draft-flag", "mail-store", "none", "moved"),
 			write("messages.copy", "imap-write", "none", "mail-store", "none", "copied"),
 			write("messages.delete", "imap-write", "required-and-draft-flags", "mail-store", "none", "deleted"),
-			write("sync", "mail-write", "none", "mail-store", "optional", "triggered", "checked"),
+			write("sync", "mail-write", "none", "mail-store", "optional", "triggered", "checked_complete", "checked_incomplete"),
 		},
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
@@ -167,6 +175,12 @@ func capabilities() capabilityManifest {
 				string(mail.SenderIdentityCoverageStateUnavailable),
 				string(mail.SenderIdentityCoverageStateNotApplicable),
 			},
+		},
+		SyncCheckPolicy: syncCheckPolicy{
+			IncompleteIsSuccessfulResult:      true,
+			DefaultIncompleteExitCode:         0,
+			RequireCompleteFlag:               "--require-complete",
+			RequireCompleteIncompleteExitCode: syncCheckIncompleteExitCode,
 		},
 		DraftSavePolicy: draftSavePolicy{
 			NewNativeSave:       "rejected_before_mail_contact",

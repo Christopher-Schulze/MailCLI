@@ -40,7 +40,7 @@ Run `mailcli capabilities --json` before automation. Its versioned response is t
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `open`, `discard`, `prune`, `reconcile` | Manages plain, Markdown, or safe HTML drafts, prunes stale never-sent drafts, reconciles retained send claims, and opens a reviewed new draft visibly; scripted `save` remains blocked |
 | Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required. Short SMTP commands run under a 30 s budget while the DATA transfer scales with message size (up to 512 MiB attachments inside a 15 min cap) |
-| Synchronization | `sync` | `--check` reports server-vs-local deltas over IMAP; without `--check` asks Mail.app to synchronize |
+| Synchronization | `sync` | `--check` reports server-vs-local deltas over IMAP; `--require-complete` makes incomplete checks exit 3; without `--check` asks Mail.app to synchronize |
 | Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 
 Run `mailcli help` for the compact command overview. Focused command help accepts
@@ -270,6 +270,7 @@ mailcli messages mark --ref MESSAGE_REF --read true --flagged false --json
 mailcli messages move --ref MESSAGE_REF --mailbox DESTINATION_MAILBOX_REF --json
 mailcli messages copy --ref MESSAGE_REF --mailbox DESTINATION_MAILBOX_REF --json
 mailcli messages delete --ref MESSAGE_REF --confirm --json
+mailcli sync --check --require-complete --account ACCOUNT_REF --json
 mailcli sync --account ACCOUNT_REF --json
 ```
 
@@ -293,7 +294,7 @@ Every data-bearing command supports `--json` and returns the same top-level enve
 }
 ```
 
-Exit code `0` means success, `1` means a runtime or Mail failure, and `2` means invalid CLI usage. Errors use stable machine-readable codes and actionable messages. References and cursors are opaque and bound to the current Mail store. Resolve a fresh reference after moving, copying, deleting, or synchronizing a message.
+Exit code `0` means success, `1` means a runtime or Mail failure, and `2` means invalid CLI usage. Exit code `3` is reserved for `sync --check --require-complete` when the check ran but `data.sync_check.complete` is false. That exit-3 JSON remains a successful result with `ok:true`, `error:null`, and every typed failure under `data.sync_check.failures`; the same incomplete check without `--require-complete` keeps the compatible exit code 0. Errors use stable machine-readable codes and actionable messages. References and cursors are opaque and bound to the current Mail store. Resolve a fresh reference after moving, copying, deleting, or synchronizing a message.
 
 ## Agent skill
 
