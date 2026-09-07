@@ -4,6 +4,7 @@
 - [CLI contract](#cli-contract)
 - [Composition](#composition)
 - [Data model](#data-model)
+- [Development workflow](#development-workflow)
 - [Local security and permissions](#local-security-and-permissions)
 - [Release distribution](#release-distribution)
 - [Scope](#scope)
@@ -144,6 +145,12 @@ Account, mailbox, message, recipient, attachment, draft, and cursor are typed do
 Mailbox paths are account-relative arrays internally and escaped display strings externally. This prevents collisions between Gmail labels, iCloud folders, and identically named nested mailboxes.
 
 List and search cursors bind the store UUID, query or mailbox fingerprint, sort anchor, row ID, and the nullable received-date state. Cursor fingerprints exclude page size, so a cursor may continue with a different `--limit` while remaining bound to the same query and store. They cannot be reused after a store replacement or with different filters. Message detail distinguishes normalized plain content, raw source, headers, attachment metadata, `content_source`, `content_complete`, and `missing_parts`. MIME parsing selects one representation from each `multipart/alternative`, preserves mixed-part order, and marks malformed recipient or decoding data incomplete. Large bodies, raw MIME, and attachment bytes are never included in list responses.
+
+## Development workflow
+
+The primary worktree is single-writer. Parallel analysis stays read-only; independent writers require separate Git worktrees and disjoint path ownership. Before any TASK write, `scripts/utils/manage-write-lease.sh acquire TASK_ID OWNER PATH...` atomically records the clean baseline HEAD, owner, exact path allowlist, and pre-write status under that worktree's Git directory. An existing lease or dirty worktree stops the write, and a stale lease is never stolen or expired automatically.
+
+After the edit, only allowlisted paths are staged. `manage-write-lease.sh review TOKEN` rejects unstaged, untracked, or out-of-scope changes and records the exact patch identity. `manage-write-lease.sh gate TOKEN` runs `scripts/tests/test.sh` and records evidence only when the full suite returns success against the unchanged staged patch and baseline HEAD; failure or interruption preserves the exact nonzero status and leaves no commit proof. After the manual `TASK NNN:` commit, `manage-write-lease.sh release TOKEN` requires one commit over the acquired HEAD, the same tested patch bytes, an allowlisted commit path set, and a clean worktree. `abort TOKEN` is available only while HEAD and worktree match the clean baseline. The lease does not authorize pushes, tags, releases, external actions, or cleanup.
 
 ## Local security and permissions
 
