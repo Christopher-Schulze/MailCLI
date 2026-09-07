@@ -115,6 +115,12 @@ type CredentialStore interface {
 	Delete(account string) error
 }
 
+// CredentialInvalidator invalidates pooled authenticated sessions for the
+// host, port, and username in cfg. Password is deliberately ignored.
+type CredentialInvalidator interface {
+	InvalidateCredentials(cfg ImapConfig)
+}
+
 // ProviderSupport describes one provider family supported by direct SMTP and
 // IMAP transport. Domains are exact aliases; subdomains are not included.
 type ProviderSupport struct {

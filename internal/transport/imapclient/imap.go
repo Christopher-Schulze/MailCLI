@@ -53,15 +53,17 @@ const (
 // mark the session dirty and the pool discards it, so the next operation
 // reconnects; protocol rejections (NO/BAD, message not found) keep the
 // session. The zero value is usable; TLSConfig may be set to override the
-// default TLS configuration (for tests). Close logs out of every pooled
-// session.
+// default TLS configuration (for tests). Credential rotation callers must use
+// InvalidateCredentials; it does not retain or key on password material. Close
+// logs out of every pooled session.
 type Client struct {
 	TLSConfig *tls.Config
 
-	mu       sync.Mutex
-	sessions map[string]*pooledSession
-	gateOnce sync.Once
-	gate     chan struct{}
+	mu                    sync.Mutex
+	sessions              map[string]*pooledSession
+	credentialGenerations map[string]uint64
+	gateOnce              sync.Once
+	gate                  chan struct{}
 }
 
 // New returns a new Client.
@@ -101,15 +103,51 @@ func (c *Client) releaseGate() {
 // state, so follow-up commands on the same mailbox skip the SELECT round
 // trip.
 type pooledSession struct {
-	sess        *session
-	key         string
-	selected    string
-	uidvalidity uint32
-	cancelWatch context.CancelFunc
+	sess                 *session
+	key                  string
+	credentialGeneration uint64
+	selected             string
+	uidvalidity          uint32
+	cancelWatch          context.CancelFunc
+	inUse                bool
+	invalidated          bool
 }
 
 func sessionKey(cfg transport.ImapConfig) string {
 	return fmt.Sprintf("%s:%d/%s", cfg.Host, cfg.Port, cfg.Username)
+}
+
+func nextCredentialGeneration(generation uint64) uint64 {
+	generation++
+	if generation == 0 {
+		return 1
+	}
+	return generation
+}
+
+// InvalidateCredentials advances the non-secret credential generation for one
+// IMAP identity. Idle sessions are closed immediately. An in-flight operation
+// keeps its connection until release, after which the stale session cannot be
+// reused.
+func (c *Client) InvalidateCredentials(cfg transport.ImapConfig) {
+	key := sessionKey(cfg)
+	var stale *pooledSession
+	c.mu.Lock()
+	if c.credentialGenerations == nil {
+		c.credentialGenerations = make(map[string]uint64)
+	}
+	c.credentialGenerations[key] = nextCredentialGeneration(c.credentialGenerations[key])
+	if ps := c.sessions[key]; ps != nil {
+		ps.invalidated = true
+		if !ps.inUse {
+			delete(c.sessions, key)
+			stale = ps
+		}
+	}
+	c.mu.Unlock()
+	if stale != nil {
+		_ = stale.sess.conn.Close()
+	}
 }
 
 // acquire returns the pooled session for cfg with the client operation gate
@@ -123,16 +161,35 @@ func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooled
 		return nil, nil, err
 	}
 	key := sessionKey(cfg)
+	var stale *pooledSession
 	c.mu.Lock()
 	ps, ok := c.sessions[key]
+	generation := c.credentialGenerations[key]
+	if ok && (ps.invalidated || ps.credentialGeneration != generation) {
+		delete(c.sessions, key)
+		stale = ps
+		ps = nil
+		ok = false
+	}
+	if ok {
+		ps.inUse = true
+	}
 	c.mu.Unlock()
+	if stale != nil {
+		_ = stale.sess.conn.Close()
+	}
 	if !ok {
 		sess, err := c.connect(ctx, cfg)
 		if err != nil {
 			c.releaseGate()
 			return nil, nil, err
 		}
-		ps = &pooledSession{sess: sess, key: key}
+		ps = &pooledSession{
+			sess:                 sess,
+			key:                  key,
+			credentialGeneration: generation,
+			inUse:                true,
+		}
 		c.mu.Lock()
 		if c.sessions == nil {
 			c.sessions = make(map[string]*pooledSession)
@@ -154,12 +211,18 @@ func (c *Client) acquire(ctx context.Context, cfg transport.ImapConfig) (*pooled
 	release := func() {
 		releaseOnce.Do(func() {
 			cancelWatch()
+			stale := false
 			c.mu.Lock()
-			if ctx.Err() != nil || ps.sess.dirty {
+			ps.inUse = false
+			stale = ctx.Err() != nil || ps.sess.dirty || ps.invalidated ||
+				c.credentialGenerations[ps.key] != ps.credentialGeneration
+			if stale && c.sessions[ps.key] == ps {
 				delete(c.sessions, ps.key)
-				_ = ps.sess.conn.Close()
 			}
 			c.mu.Unlock()
+			if stale {
+				_ = ps.sess.conn.Close()
+			}
 			c.releaseGate()
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -12,6 +13,15 @@ type stubSetupCredentials struct {
 	stored    map[string]string
 	loadErr   error
 	deleteErr error
+}
+
+type setupCredentialInvalidatingImap struct {
+	transport.ImapOperator
+	configs []transport.ImapConfig
+}
+
+func (s *setupCredentialInvalidatingImap) InvalidateCredentials(cfg transport.ImapConfig) {
+	s.configs = append(s.configs, cfg)
 }
 
 func newStubSetupCredentials() *stubSetupCredentials {
@@ -175,6 +185,57 @@ func TestSendSetupRejectsUnsupportedProviderBeforeCredentialStore(t *testing.T) 
 	if !strings.Contains(stdout.String(), `"code":"transport_unsupported_provider"`) ||
 		!strings.Contains(stdout.String(), transport.ProviderSupportDescription()) {
 		t.Fatalf("stdout = %q, want typed provider remediation", stdout.String())
+	}
+}
+
+func TestSendSetupInvalidatesImapCredentialsAfterSuccessfulChange(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		stdin      string
+		setup      func(*stubSetupCredentials)
+		wantAction string
+	}{
+		{
+			name: "store", args: []string{"setup", "--from", "alice@icloud.com", "--json"}, stdin: "secret\n",
+			wantAction: "stored",
+		},
+		{
+			name: "remove", args: []string{"setup", "--from", "alice@icloud.com", "--remove", "--json"},
+			setup:      func(credentials *stubSetupCredentials) { credentials.stored["alice@icloud.com"] = "old" },
+			wantAction: "removed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			credentials := newStubSetupCredentials()
+			if test.setup != nil {
+				test.setup(credentials)
+			}
+			previousCredentials := sendSetupCredentials
+			previousStdin := sendSetupStdin
+			sendSetupCredentials = func() transport.CredentialStore { return credentials }
+			sendSetupStdin = strings.NewReader(test.stdin)
+			t.Cleanup(func() {
+				sendSetupCredentials = previousCredentials
+				sendSetupStdin = previousStdin
+			})
+
+			invalidator := &setupCredentialInvalidatingImap{}
+			service := mail.NewServiceWithTransport(nil, "", mail.SendTransport{Imap: invalidator})
+			var stdout, stderr bytes.Buffer
+			code := runSendWithInvalidator(test.args, &stdout, &stderr, service.InvalidateCredentials)
+			if code != 0 || stderr.Len() != 0 || len(invalidator.configs) != 1 {
+				t.Fatalf("code = %d, stderr = %q, invalidations = %+v", code, stderr.String(), invalidator.configs)
+			}
+			if !strings.Contains(stdout.String(), `"action":"`+test.wantAction+`"`) {
+				t.Fatalf("stdout = %q, want action %s", stdout.String(), test.wantAction)
+			}
+			got := invalidator.configs[0]
+			if got.Host != "imap.mail.me.com" || got.Port != 993 || got.Username != "alice@icloud.com" || got.Password != "" {
+				t.Fatalf("invalidation target = %+v, want password-free iCloud identity", got)
+			}
+		})
 	}
 }
 

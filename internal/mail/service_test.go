@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"mailcli/internal/transport"
 )
 
 type gatewayStub struct {
@@ -206,6 +208,32 @@ func TestServicePassthroughAndHealth(t *testing.T) {
 	}
 	if elapsedMilliseconds(time.Now()) < 0 {
 		t.Fatal("elapsedMilliseconds() < 0")
+	}
+}
+
+type credentialInvalidatingImapStub struct {
+	transport.ImapOperator
+	configs []transport.ImapConfig
+}
+
+func (s *credentialInvalidatingImapStub) InvalidateCredentials(cfg transport.ImapConfig) {
+	s.configs = append(s.configs, cfg)
+}
+
+func TestServicePropagatesCredentialInvalidationWithoutPassword(t *testing.T) {
+	imap := &credentialInvalidatingImapStub{}
+	service := NewServiceWithTransport(nil, "", SendTransport{Imap: imap})
+
+	service.InvalidateCredentials("alice@icloud.com")
+	if len(imap.configs) != 1 {
+		t.Fatalf("invalidation calls = %d, want 1", len(imap.configs))
+	}
+	got := imap.configs[0]
+	if got.Host != "imap.mail.me.com" || got.Port != 993 || got.Username != "alice@icloud.com" {
+		t.Fatalf("invalidation target = %+v, want iCloud IMAP identity", got)
+	}
+	if got.Password != "" {
+		t.Fatal("invalidation target carried password material")
 	}
 }
 

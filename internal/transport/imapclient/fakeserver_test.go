@@ -22,6 +22,7 @@ import (
 
 type fakeServerConfig struct {
 	authOK                  bool
+	authPassword            string
 	sentMboxes              []string
 	trashMboxes             []string
 	otherMboxes             []string
@@ -33,6 +34,8 @@ type fakeServerConfig struct {
 	appendOK                bool
 	dropAppendResponse      bool
 	searchDelay             time.Duration
+	searchStarted           chan struct{}
+	searchContinue          chan struct{}
 	deliverAfterFirstSearch bool
 	moveSupported           bool
 	uidExpungeSupported     bool
@@ -85,6 +88,7 @@ type fakeServer struct {
 	uidExpungeUID        uint32
 	deletedUIDs          map[uint32]struct{}
 	connections          int
+	searchStartedOnce    sync.Once
 }
 
 func newFakeServer(t *testing.T, cfg fakeServerConfig) *fakeServer {
@@ -146,6 +150,12 @@ func (s *fakeServer) ConnectionCount() int {
 	return s.connections
 }
 
+func (s *fakeServer) SetAuthPassword(password string) {
+	s.mu.Lock()
+	s.config.authPassword = password
+	s.mu.Unlock()
+}
+
 func (s *fakeServer) SearchCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,7 +215,10 @@ func (s *fakeServer) handle(conn net.Conn) {
 
 		switch strings.ToUpper(cmd) {
 		case "LOGIN":
-			if s.config.authOK {
+			s.mu.Lock()
+			authOK, authPassword := s.config.authOK, s.config.authPassword
+			s.mu.Unlock()
+			if authOK && (authPassword == "" || (len(args) >= 2 && args[1] == authPassword)) {
 				s.writeLine(bw, tag+" OK LOGIN completed")
 			} else {
 				s.writeLine(bw, tag+" NO Authentication failed")
@@ -265,7 +278,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.searchCalls++
 			searchCall := s.searchCalls
 			appendedMessageCount := s.appendedMessageCount
+			searchStarted := s.config.searchStarted
+			searchContinue := s.config.searchContinue
 			s.mu.Unlock()
+			if searchStarted != nil {
+				s.searchStartedOnce.Do(func() { close(searchStarted) })
+			}
+			if searchContinue != nil {
+				<-searchContinue
+			}
 			matchCount := 0
 			if queryMessageID != "" && queryMessageID == searchMatchID {
 				matchCount++
@@ -401,7 +422,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 					strings.EqualFold(args[2], "Message-ID") {
 					s.lastSearchMessageID = args[3]
 				}
+				searchStarted := s.config.searchStarted
+				searchContinue := s.config.searchContinue
 				s.mu.Unlock()
+				if searchStarted != nil {
+					s.searchStartedOnce.Do(func() { close(searchStarted) })
+				}
+				if searchContinue != nil {
+					<-searchContinue
+				}
 				if (searchMatchID != "" || appendedMessageID != "") && len(args) >= 4 {
 					if strings.EqualFold(args[1], "HEADER") && strings.EqualFold(args[2], "Message-ID") {
 						if args[3] == searchMatchID || args[3] == appendedMessageID {

@@ -24,6 +24,15 @@ type sendSetupResult struct {
 }
 
 func runSend(args []string, stdout io.Writer, stderr io.Writer) int {
+	return runSendWithInvalidator(args, stdout, stderr, nil)
+}
+
+func runSendWithInvalidator(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	invalidateCredentials func(string),
+) int {
 	if len(args) == 0 {
 		writeLine(stderr, "Usage:\n  mailcli send <setup> [options]")
 		return 2
@@ -33,14 +42,19 @@ func runSend(args []string, stdout io.Writer, stderr io.Writer) int {
 		writeFormat(stdout, "Usage:\n  mailcli send setup --from <email> [--remove] [--json]\n\n%s\n", transport.ProviderSupportDescription())
 		return 0
 	case "setup":
-		return runSendSetup(args[1:], stdout, stderr)
+		return runSendSetup(args[1:], stdout, stderr, invalidateCredentials)
 	default:
 		writeFormat(stderr, "unknown send command %q\n", args[0])
 		return 2
 	}
 }
 
-func runSendSetup(args []string, stdout io.Writer, stderr io.Writer) int {
+func runSendSetup(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	invalidateCredentials func(string),
+) int {
 	flags := newFlagSet("send setup", stderr)
 	from := flags.String("from", "", "sender email address")
 	remove := flags.Bool("remove", false, "remove the stored app-specific password")
@@ -65,6 +79,9 @@ func runSendSetup(args []string, stdout io.Writer, stderr io.Writer) int {
 		if err := credentials.Delete(account); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
+		if invalidateCredentials != nil {
+			invalidateCredentials(account)
+		}
 		return writeSendSetupResult(stdout, "send.setup", *jsonOutput, sendSetupResult{
 			Account: account, Action: "removed",
 		})
@@ -82,6 +99,9 @@ func runSendSetup(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if err := credentials.Store(account, password); err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+	}
+	if invalidateCredentials != nil {
+		invalidateCredentials(account)
 	}
 	return writeSendSetupResult(stdout, "send.setup", *jsonOutput, sendSetupResult{
 		Account: account, Action: "stored",

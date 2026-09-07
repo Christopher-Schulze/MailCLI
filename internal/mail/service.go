@@ -21,6 +21,22 @@ type SendTransport struct {
 	Imap        transport.ImapOperator
 }
 
+// InvalidateCredentials advances the IMAP pool generation for account after
+// its credential store has successfully changed it.
+func (t SendTransport) InvalidateCredentials(account string) {
+	_, _, imapHost, imapPort, err := transport.ProviderHosts(account)
+	if err != nil {
+		return
+	}
+	invalidator, ok := t.ImapClient().(transport.CredentialInvalidator)
+	if !ok {
+		return
+	}
+	invalidator.InvalidateCredentials(transport.ImapConfig{
+		Host: imapHost, Port: imapPort, Username: account,
+	})
+}
+
 func (t SendTransport) ImapClient() transport.ImapOperator {
 	if t.Imap != nil {
 		return t.Imap
@@ -56,6 +72,12 @@ func NewServiceWithDraftRoot(gateway Gateway, draftRoot string) *Service {
 
 func NewServiceWithTransport(gateway Gateway, draftRoot string, send SendTransport) *Service {
 	return &Service{gateway: gateway, draftRoot: draftRoot, send: send}
+}
+
+// InvalidateCredentials propagates a successful credential change to the
+// configured direct-send transport.
+func (s *Service) InvalidateCredentials(account string) {
+	s.send.InvalidateCredentials(account)
 }
 
 func (e *ValidationError) Error() string {

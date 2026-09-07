@@ -148,6 +148,141 @@ func TestAcquireCancellationAfterAcquisitionReleasesSession(t *testing.T) {
 	}
 }
 
+func TestCredentialInvalidationBeforeAcquireUsesNewGeneration(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	client, cfg := newFakeClient(t, srv)
+	client.InvalidateCredentials(cfg)
+
+	ps, release, err := client.acquire(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("acquire after credential invalidation: %v", err)
+	}
+	if ps.credentialGeneration != 1 {
+		t.Fatalf("credential generation = %d, want 1", ps.credentialGeneration)
+	}
+	release()
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestCredentialInvalidationReauthenticatesIdleSession(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	client, cfg := newFakeClient(t, srv)
+	ctx := context.Background()
+
+	if _, err := client.ListMailboxes(ctx, cfg); err != nil {
+		t.Fatalf("initial ListMailboxes: %v", err)
+	}
+	client.InvalidateCredentials(cfg)
+	if _, err := client.ListMailboxes(ctx, cfg); err != nil {
+		t.Fatalf("ListMailboxes after rotation: %v", err)
+	}
+	if got := srv.ConnectionCount(); got != 2 {
+		t.Fatalf("connection count after idle rotation = %d, want 2", got)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestCredentialInvalidationDuringOperationDefersClose(t *testing.T) {
+	searchStarted := make(chan struct{})
+	searchContinue := make(chan struct{})
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:         true,
+		otherMboxes:    []string{"INBOX"},
+		searchMatchID:  "<found@example.com>",
+		searchStarted:  searchStarted,
+		searchContinue: searchContinue,
+	})
+	client, cfg := newFakeClient(t, srv)
+	result := make(chan error, 1)
+	go func() {
+		_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<found@example.com>")
+		result <- err
+	}()
+
+	select {
+	case <-searchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SearchUID did not reach the server")
+	}
+	client.InvalidateCredentials(cfg)
+	close(searchContinue)
+	if err := <-result; err != nil {
+		t.Fatalf("SearchUID after in-flight rotation: %v", err)
+	}
+	if got := srv.ConnectionCount(); got != 1 {
+		t.Fatalf("connection count during in-flight rotation = %d, want 1", got)
+	}
+	if _, err := client.ListMailboxes(context.Background(), cfg); err != nil {
+		t.Fatalf("ListMailboxes after in-flight rotation: %v", err)
+	}
+	if got := srv.ConnectionCount(); got != 2 {
+		t.Fatalf("connection count after in-flight rotation release = %d, want 2", got)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestCredentialInvalidationAuthenticationFailureDoesNotReuseSession(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:       true,
+		authPassword: "old",
+		otherMboxes:  []string{"INBOX"},
+	})
+	client, cfg := newFakeClient(t, srv)
+	cfg.Password = "old"
+	if _, err := client.ListMailboxes(context.Background(), cfg); err != nil {
+		t.Fatalf("initial ListMailboxes: %v", err)
+	}
+
+	srv.SetAuthPassword("new")
+	client.InvalidateCredentials(cfg)
+	wrong := cfg
+	wrong.Password = "wrong"
+	if _, err := client.ListMailboxes(context.Background(), wrong); transport.ErrorCode(err) != transport.CodeIMAPAuthFailed {
+		t.Fatalf("ListMailboxes with wrong rotated credential = %v, want %s", err, transport.CodeIMAPAuthFailed)
+	}
+	current := cfg
+	current.Password = "new"
+	if _, err := client.ListMailboxes(context.Background(), current); err != nil {
+		t.Fatalf("ListMailboxes with current credential: %v", err)
+	}
+	if got := srv.ConnectionCount(); got != 3 {
+		t.Fatalf("connection count after authentication failure = %d, want 3", got)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestCredentialInvalidationCloseIsIdempotent(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	client, cfg := newFakeClient(t, srv)
+	if _, err := client.ListMailboxes(context.Background(), cfg); err != nil {
+		t.Fatalf("ListMailboxes: %v", err)
+	}
+	client.InvalidateCredentials(cfg)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close after invalidation: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("second Close after invalidation: %v", err)
+	}
+}
+
+func TestSessionKeyExcludesPassword(t *testing.T) {
+	first := transport.ImapConfig{Host: "imap.example.com", Port: 993, Username: "user", Password: "old"}
+	second := first
+	second.Password = "new"
+	if sessionKey(first) != sessionKey(second) {
+		t.Fatal("session key changed with password; password material must not enter pool identity")
+	}
+}
+
 func TestCloseWaitsForAcquiredSession(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,

@@ -342,8 +342,11 @@ var commandRegistry = map[string]commandSpec{
 	"drafts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runDrafts(ctx, service, args, stdout, stderr)
 	}, requiresMailService: draftCommandRequired, requiresSignal: draftSignalRequired, requiresMainThread: draftHandoffRequired},
-	"send": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runSend(args, stdout, stderr)
+	"send": {run: func(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		if service == nil {
+			return runSend(args, stdout, stderr)
+		}
+		return runSendWithInvalidator(args, stdout, stderr, service.InvalidateCredentials)
 	}},
 	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runSync(ctx, service, args, stdout, stderr)
