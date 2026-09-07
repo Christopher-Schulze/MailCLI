@@ -68,6 +68,8 @@ done
 
 tar -xzf "${ARCHIVE}" -C "${TEST_ROOT}"
 PACKAGE_ROOT="${TEST_ROOT}/mailcli_${TEST_VERSION}_darwin_arm64"
+SOURCE_BINARY_COPY="${TEST_ROOT}/release-source-binary"
+cp "${PACKAGE_ROOT}/bin/mailcli" "${SOURCE_BINARY_COPY}"
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
 cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${MAILCLI_ROOT}/bin/mailcli"
 TEST_HOME="${TEST_ROOT}/home"
@@ -118,29 +120,57 @@ rmdir "${INSTALLED_SKILL}.mailcli-backup"
 printf 'rollback binary\n' >"${INSTALLED_BINARY}"
 chmod 0755 "${INSTALLED_BINARY}"
 printf 'rollback skill\n' >"${INSTALLED_SKILL}/SKILL.md"
-cp "${INSTALLED_BINARY}" "${TEST_ROOT}/binary-before-rollback"
-cp -R "${INSTALLED_SKILL}" "${TEST_ROOT}/skill-before-rollback"
-MV_FAILURE_ENV="${TEST_ROOT}/fail-fourth-move.sh"
-# The generated BASH_ENV must expand inside the child shell.
+cp "${INSTALLED_BINARY}" "${TEST_ROOT}/binary-before-binary-interruption"
+cp -R "${INSTALLED_SKILL}" "${TEST_ROOT}/skill-before-binary-interruption"
+INTERRUPT_ENV="${TEST_ROOT}/kill-after-live-rename.sh"
 # shellcheck disable=SC2016
 printf '%s\n' \
-  'MAILCLI_TEST_MV_COUNT=0' \
   'mv() {' \
-  '  MAILCLI_TEST_MV_COUNT=$((MAILCLI_TEST_MV_COUNT + 1))' \
-  '  if [[ "${MAILCLI_TEST_MV_COUNT}" -eq 4 ]]; then' \
-  '    return 71' \
+  '  if [[ "${2:-}" == "${MAILCLI_TEST_INTERRUPT_PATH:-}" ]]; then' \
+  '    command mv "$@"' \
+  '    kill -KILL "$$"' \
   '  fi' \
   '  command mv "$@"' \
-  '}' >"${MV_FAILURE_ENV}"
-if BASH_ENV="${MV_FAILURE_ENV}" HOME="${TEST_HOME}" \
-  "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
-  printf 'Installer unexpectedly succeeded after an injected staged-move failure\n' >&2
+  '}' >"${INTERRUPT_ENV}"
+set +e
+MAILCLI_TEST_INTERRUPT_PATH="${INSTALLED_BINARY}" BASH_ENV="${INTERRUPT_ENV}" HOME="${TEST_HOME}" \
+  "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1
+INTERRUPTION_STATUS=$?
+set -e
+[[ "${INTERRUPTION_STATUS}" -eq 137 ]]
+printf 'invalid source\n' >"${PACKAGE_ROOT}/bin/mailcli"
+chmod 0755 "${PACKAGE_ROOT}/bin/mailcli"
+if HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
+  printf 'Installer unexpectedly accepted an invalid source after binary interruption\n' >&2
   exit 1
 fi
-cmp -s "${TEST_ROOT}/binary-before-rollback" "${INSTALLED_BINARY}"
-diff -qr "${TEST_ROOT}/skill-before-rollback" "${INSTALLED_SKILL}" >/dev/null
-[[ ! -e "${INSTALLED_BINARY}.mailcli-backup" ]]
-[[ ! -e "${INSTALLED_SKILL}.mailcli-backup" ]]
+cmp -s "${TEST_ROOT}/binary-before-binary-interruption" "${INSTALLED_BINARY}"
+diff -qr "${TEST_ROOT}/skill-before-binary-interruption" "${INSTALLED_SKILL}" >/dev/null
+cp "${SOURCE_BINARY_COPY}" "${PACKAGE_ROOT}/bin/mailcli"
+chmod 0755 "${PACKAGE_ROOT}/bin/mailcli"
+HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null
+
+printf 'rollback binary again\n' >"${INSTALLED_BINARY}"
+chmod 0755 "${INSTALLED_BINARY}"
+printf 'rollback skill again\n' >"${INSTALLED_SKILL}/SKILL.md"
+cp "${INSTALLED_BINARY}" "${TEST_ROOT}/binary-before-skill-interruption"
+cp -R "${INSTALLED_SKILL}" "${TEST_ROOT}/skill-before-skill-interruption"
+set +e
+MAILCLI_TEST_INTERRUPT_PATH="${INSTALLED_SKILL}" BASH_ENV="${INTERRUPT_ENV}" HOME="${TEST_HOME}" \
+  "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1
+INTERRUPTION_STATUS=$?
+set -e
+[[ "${INTERRUPTION_STATUS}" -eq 137 ]]
+printf 'invalid source\n' >"${PACKAGE_ROOT}/bin/mailcli"
+chmod 0755 "${PACKAGE_ROOT}/bin/mailcli"
+if HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
+  printf 'Installer unexpectedly accepted an invalid source after skill interruption\n' >&2
+  exit 1
+fi
+cmp -s "${TEST_ROOT}/binary-before-skill-interruption" "${INSTALLED_BINARY}"
+diff -qr "${TEST_ROOT}/skill-before-skill-interruption" "${INSTALLED_SKILL}" >/dev/null
+cp "${SOURCE_BINARY_COPY}" "${PACKAGE_ROOT}/bin/mailcli"
+chmod 0755 "${PACKAGE_ROOT}/bin/mailcli"
 HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null
 
 if grep -Eq 'xattr|spctl[[:space:]]+--master-disable' "${PACKAGE_ROOT}/install.sh"; then
@@ -157,6 +187,24 @@ if MAILCLI_BINARY_DESTINATION="${TEST_ROOT}/backup-overlap/mailcli" \
   MAILCLI_SKILL_DESTINATION="${TEST_ROOT}/backup-overlap/mailcli.mailcli-backup/skill" \
   HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
   printf 'Installer accepted a destination nested under another destination backup\n' >&2
+  exit 1
+fi
+
+SYMLINK_ROOT="${TEST_ROOT}/symlink-check"
+mkdir -p "${SYMLINK_ROOT}/outside" "${SYMLINK_ROOT}/safe"
+ln -s "${SYMLINK_ROOT}/outside" "${SYMLINK_ROOT}/linked-parent"
+if MAILCLI_BINARY_DESTINATION="${SYMLINK_ROOT}/linked-parent/mailcli" \
+  MAILCLI_SKILL_DESTINATION="${SYMLINK_ROOT}/safe/skill" \
+  HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
+  printf 'Installer accepted a symbolic-link parent directory\n' >&2
+  exit 1
+fi
+[[ ! -e "${SYMLINK_ROOT}/outside/mailcli" ]]
+ln -s "${SYMLINK_ROOT}/outside/missing" "${SYMLINK_ROOT}/linked-destination"
+if MAILCLI_BINARY_DESTINATION="${SYMLINK_ROOT}/linked-destination" \
+  MAILCLI_SKILL_DESTINATION="${SYMLINK_ROOT}/safe/skill" \
+  HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh" >/dev/null 2>&1; then
+  printf 'Installer accepted a symbolic-link destination\n' >&2
   exit 1
 fi
 

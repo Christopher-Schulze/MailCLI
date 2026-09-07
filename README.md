@@ -111,7 +111,7 @@ command -v mailcli
 mailcli version --json
 ```
 
-The release installer copies the verified binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`. It stages and verifies both before replacing an existing installation, restores backups on failure, rejects symbolic-link destinations and unresolved backup paths, and never removes macOS security attributes. Start a new agent session after installation so the skill is discovered.
+The release installer copies the verified binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`. It stages and verifies both before any live rename, records a durable transaction manifest, commits each target with identity-checked rollback, and deterministically recovers interrupted installs before accepting a new one. It rejects unsafe parent or destination symlinks and unresolved backup paths, and never removes macOS security attributes. Start a new agent session after installation so the skill is discovered.
 
 After the first installation, update both components with:
 
