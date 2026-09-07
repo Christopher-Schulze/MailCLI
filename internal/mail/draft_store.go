@@ -1123,9 +1123,9 @@ func readComposedMessage(message *ComposedMessage) (payload []byte, resultErr er
 // sender, recipients, subject, and body. Draft edits after the claim (or a
 // mismatched claim) are detected before reconciliation trusts the claim.
 // The fingerprint hashes the immutable draft fields, deliberately NOT the
-// composed message bytes: BuildMessage generates fresh random multipart
-// boundaries per invocation, so a byte hash would never reproduce at
-// reconcile time and would falsely reject legitimate multipart sends.
+// composed message bytes: message composition generates fresh random multipart
+// boundaries per invocation, so a byte hash would never reproduce at reconcile
+// time and would falsely reject legitimate multipart sends.
 func envelopeFingerprint(draft Draft, messageID string) string {
 	hash := sha256.New()
 	parts := []string{messageID, draft.From, draft.Subject}
@@ -1942,69 +1942,6 @@ func preflightDraftAttachmentsContext(ctx context.Context, attachments []DraftAt
 		remaining -= info.Size()
 	}
 	return nil
-}
-
-func verifyAndLoadAttachments(draft Draft) ([]composerAttachment, error) {
-	if len(draft.Attachments) > MaximumDraftAttachments {
-		return nil, validationError("draft exceeds 100 attachments")
-	}
-	remaining := MaximumDraftAttachmentBytes
-	loaded := make([]composerAttachment, 0, len(draft.Attachments))
-	for _, expected := range draft.Attachments {
-		if expected.Size < 0 || expected.Size > remaining {
-			return nil, validationError("draft attachments exceed 512 MiB total")
-		}
-		attachment, actual, err := loadVerifiedAttachment(expected, remaining)
-		if err != nil {
-			return nil, err
-		}
-		if actual.Size != expected.Size || actual.SHA256 != expected.SHA256 {
-			return nil, validationError("draft attachment " + filepath.Base(expected.Path) + " changed after review; update the draft before sending")
-		}
-		loaded = append(loaded, attachment)
-		remaining -= actual.Size
-	}
-	return loaded, nil
-}
-
-func loadVerifiedAttachment(
-	expected DraftAttachment,
-	maximumSize int64,
-) (loaded composerAttachment, actual DraftAttachment, resultErr error) {
-	name := filepath.Base(expected.Path)
-	file, err := os.Open(expected.Path)
-	if err != nil {
-		return composerAttachment{}, DraftAttachment{}, &ComposerError{Message: "read draft attachment " + name, Err: err}
-	}
-	defer func() {
-		if closeErr := file.Close(); closeErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("close draft attachment: %w", closeErr))
-		}
-	}()
-	info, err := file.Stat()
-	if err != nil {
-		return composerAttachment{}, DraftAttachment{}, fmt.Errorf("stat draft attachment %s: %w", name, err)
-	}
-	if !info.Mode().IsRegular() {
-		return composerAttachment{}, DraftAttachment{}, validationError("draft attachment must be a regular file")
-	}
-	if info.Size() < 0 || info.Size() > maximumSize {
-		return composerAttachment{}, DraftAttachment{}, validationError("draft attachments exceed 512 MiB total")
-	}
-	hash := sha256.New()
-	data := make([]byte, int(info.Size()))
-	if _, err := io.ReadFull(io.TeeReader(io.LimitReader(file, maximumSize), hash), data); err != nil {
-		return composerAttachment{}, DraftAttachment{}, &ComposerError{Message: "read draft attachment " + name, Err: err}
-	}
-	finalInfo, err := file.Stat()
-	if err != nil {
-		return composerAttachment{}, DraftAttachment{}, fmt.Errorf("stat draft attachment %s after read: %w", name, err)
-	}
-	if finalInfo.Size() != info.Size() {
-		return composerAttachment{}, DraftAttachment{}, validationError("draft attachment " + name + " changed while sending")
-	}
-	actual = DraftAttachment{Path: expected.Path, Size: int64(len(data)), SHA256: hex.EncodeToString(hash.Sum(nil))}
-	return composerAttachmentFromData(expected.Path, data), actual, nil
 }
 
 func (s *Service) resolveDraftRoot() (string, error) {

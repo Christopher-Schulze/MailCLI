@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -42,21 +41,28 @@ func (e *ComposerError) Error() string {
 
 func (e *ComposerError) Unwrap() error { return e.Err }
 
-// BuildMessage renders a draft into exact RFC 5322 bytes ready for SMTP
-// submission. messageID is used verbatim as the Message-ID header. BCC
-// recipients are deliberately omitted from the output. Reply and forward
-// drafts carry In-Reply-To and References threading headers when source
-// threading is available. Subject
-// prefixes (Re:/Fwd:) are applied at draft creation and are never added here.
-func BuildMessage(draft Draft, messageID string) ([]byte, error) {
+// BuildMessage is the compatibility byte-returning adapter for the verified
+// spool composer. It materializes the final message because its legacy API
+// returns []byte; production send paths must use ComposeMessageSpool instead.
+// messageID is used verbatim as the Message-ID header. BCC recipients are
+// deliberately omitted from the output. Reply and forward drafts carry
+// In-Reply-To and References threading headers when source threading is
+// available. Subject prefixes (Re:/Fwd:) are applied at draft creation and
+// are never added here.
+func BuildMessage(draft Draft, messageID string) (payload []byte, resultErr error) {
 	if messageID == "" {
 		return nil, &ComposerError{Message: "message id is required"}
 	}
-	attachments, err := loadComposerAttachments(draft.Attachments)
+	message, err := composeDraftSpool(context.Background(), draft, messageID)
 	if err != nil {
 		return nil, err
 	}
-	return buildMessageWithAttachments(draft, messageID, attachments)
+	defer func() {
+		if err := message.Remove(); err != nil {
+			resultErr = errors.Join(resultErr, &ComposerError{Message: "remove message spool", Err: err})
+		}
+	}()
+	return readComposedMessage(message)
 }
 
 // ComposedMessage is a private replayable spool for a composed RFC 5322
@@ -273,81 +279,6 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-func buildMessageWithAttachments(draft Draft, messageID string, attachments []composerAttachment) ([]byte, error) {
-	alternativeBoundary, err := randomBoundary()
-	if err != nil {
-		return nil, err
-	}
-	mixedBoundary := ""
-	if len(attachments) > 0 {
-		mixedBoundary, err = randomBoundary()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	contentType := "multipart/alternative; boundary=\"" + alternativeBoundary + "\""
-	if len(attachments) > 0 {
-		contentType = "multipart/mixed; boundary=\"" + mixedBoundary + "\""
-	}
-
-	estimatedSize := estimateMessageSize(draft, attachments)
-	buffer := &bytes.Buffer{}
-	buffer.Grow(estimatedSize)
-	writeComposerHeaders(buffer, draft, messageID, contentType)
-	buffer.WriteString(composerCRLF)
-
-	if len(attachments) == 0 {
-		writeAlternativeMultipart(buffer, alternativeBoundary, draft)
-		buffer.WriteString(composerCRLF)
-		return buffer.Bytes(), nil
-	}
-
-	// Mixed multipart: write the alternative section as the first part,
-	// then each attachment, all directly into the buffer without intermediate
-	// string copies.
-	buffer.WriteString("--")
-	buffer.WriteString(mixedBoundary)
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("Content-Type: multipart/alternative; boundary=\"")
-	buffer.WriteString(alternativeBoundary)
-	buffer.WriteString("\"")
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString(composerCRLF)
-	writeAlternativeMultipart(buffer, alternativeBoundary, draft)
-	buffer.WriteString(composerCRLF)
-
-	for _, attachment := range attachments {
-		buffer.WriteString("--")
-		buffer.WriteString(mixedBoundary)
-		buffer.WriteString(composerCRLF)
-		for _, header := range attachment.headers() {
-			buffer.WriteString(header)
-			buffer.WriteString(composerCRLF)
-		}
-		buffer.WriteString(composerCRLF)
-		writeBase64Body(buffer, attachment.data)
-		buffer.WriteString(composerCRLF)
-	}
-
-	buffer.WriteString("--")
-	buffer.WriteString(mixedBoundary)
-	buffer.WriteString("--")
-	buffer.WriteString(composerCRLF)
-	return buffer.Bytes(), nil
-}
-
-// estimateMessageSize pre-allocates the buffer to avoid repeated growth.
-func estimateMessageSize(draft Draft, attachments []composerAttachment) int {
-	size := 1024                // headers
-	size += len(draft.Body) * 2 // quoted-printable worst case
-	size += len(draft.BodyHTML) * 2
-	for _, a := range attachments {
-		size += len(a.data)*4/3 + len(a.data)/57*2 + 256
-	}
-	return size
-}
-
 // writeAlternativeMultipart writes the multipart/alternative section
 // directly into buffer, streaming quoted-printable encoding without
 // intermediate string copies.
@@ -401,15 +332,6 @@ func writeQuotedPrintable(buffer *bytes.Buffer, body string) error {
 		return fmt.Errorf("quote-printable encode body: %w", err)
 	}
 	return writer.Close()
-}
-
-// writeBase64Body streams base64-encoded data into buffer with RFC 2045
-// line wrapping, avoiding the intermediate EncodeToString + string copy
-// that the previous base64Body() method required.
-func writeBase64Body(buffer *bytes.Buffer, data []byte) {
-	encoder := base64.NewEncoder(base64.StdEncoding, &base64LineWriter{w: buffer})
-	_, _ = encoder.Write(data)
-	_ = encoder.Close()
 }
 
 // base64LineWriter wraps a writer and inserts CRLF every composerLineLength
@@ -531,97 +453,6 @@ func threadReferences(references, sourceMessageID string) string {
 		return sourceMessageID
 	}
 	return prior + " " + sourceMessageID
-}
-
-type composerAttachment struct {
-	filename    string
-	contentType string
-	data        []byte
-}
-
-func loadComposerAttachments(attachments []DraftAttachment) ([]composerAttachment, error) {
-	if len(attachments) == 0 {
-		return nil, nil
-	}
-	if len(attachments) == 1 {
-		return loadSingleAttachment(attachments[0])
-	}
-	return loadAttachmentsParallel(attachments)
-}
-
-func loadSingleAttachment(attachment DraftAttachment) ([]composerAttachment, error) {
-	loaded, err := readAttachmentData(attachment)
-	if err != nil {
-		return nil, err
-	}
-	return []composerAttachment{loaded}, nil
-}
-
-// loadAttachmentsParallel reads multiple attachment files concurrently.
-// For the typical 1-2 attachment case the goroutine overhead is negligible
-// compared to file I/O; for larger attachment sets it provides real speedup.
-// All attachment errors are aggregated so the caller sees every failure,
-// not just the first one encountered.
-func loadAttachmentsParallel(attachments []DraftAttachment) ([]composerAttachment, error) {
-	type result struct {
-		loaded composerAttachment
-		err    error
-	}
-	results := make([]result, len(attachments))
-	var wg sync.WaitGroup
-	wg.Add(len(attachments))
-	for i, attachment := range attachments {
-		go func(idx int, att DraftAttachment) {
-			defer wg.Done()
-			loaded, err := readAttachmentData(att)
-			results[idx] = result{loaded: loaded, err: err}
-		}(i, attachment)
-	}
-	wg.Wait()
-	loaded := make([]composerAttachment, len(attachments))
-	var errs []error
-	for i, r := range results {
-		if r.err != nil {
-			errs = append(errs, r.err)
-			continue
-		}
-		loaded[i] = r.loaded
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
-	return loaded, nil
-}
-
-func readAttachmentData(attachment DraftAttachment) (composerAttachment, error) {
-	data, err := os.ReadFile(attachment.Path)
-	if err != nil {
-		return composerAttachment{}, &ComposerError{
-			Message: "read draft attachment " + filepath.Base(attachment.Path),
-			Err:     err,
-		}
-	}
-	return composerAttachmentFromData(attachment.Path, data), nil
-}
-
-func composerAttachmentFromData(path string, data []byte) composerAttachment {
-	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	return composerAttachment{
-		filename:    filepath.Base(path),
-		contentType: contentType,
-		data:        data,
-	}
-}
-
-func (a composerAttachment) headers() []string {
-	return []string{
-		"Content-Type: " + a.contentType,
-		"Content-Transfer-Encoding: base64",
-		"Content-Disposition: " + mime.FormatMediaType("attachment", map[string]string{"filename": a.filename}),
-	}
 }
 
 // randomBoundary returns a cryptographically random boundary unique per message.

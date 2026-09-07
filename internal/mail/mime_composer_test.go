@@ -152,148 +152,56 @@ func TestThreadReferencesWithWhitespace(t *testing.T) {
 	}
 }
 
-func TestLoadComposerAttachmentsEmpty(t *testing.T) {
-	got, err := loadComposerAttachments(nil)
-	if err != nil {
-		t.Fatalf("loadComposerAttachments(nil) error = %v", err)
-	}
-	if got != nil {
-		t.Errorf("loadComposerAttachments(nil) = %v, want nil", got)
-	}
-}
-
-func TestLoadComposerAttachmentsSingleFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.txt")
-	if err := os.WriteFile(path, []byte("test content"), 0o644); err != nil {
-		t.Fatalf("WriteFile error = %v", err)
-	}
-	got, err := loadComposerAttachments([]DraftAttachment{{Path: path}})
-	if err != nil {
-		t.Fatalf("loadComposerAttachments error = %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("got %d attachments, want 1", len(got))
-	}
-	if got[0].filename != "test.txt" {
-		t.Errorf("filename = %q, want test.txt", got[0].filename)
-	}
-	if string(got[0].data) != "test content" {
-		t.Errorf("data = %q, want test content", string(got[0].data))
-	}
-	if got[0].contentType != "text/plain; charset=utf-8" {
-		t.Errorf("contentType = %q, want text/plain; charset=utf-8", got[0].contentType)
-	}
-}
-
-func TestLoadComposerAttachmentsMultipleFilesParallel(t *testing.T) {
-	dir := t.TempDir()
-	paths := make([]DraftAttachment, 3)
-	for i := 0; i < 3; i++ {
-		path := filepath.Join(dir, "file"+string(rune('A'+i))+".txt")
-		content := "content-" + string(rune('A'+i))
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("WriteFile error = %v", err)
-		}
-		paths[i] = DraftAttachment{Path: path}
-	}
-	got, err := loadComposerAttachments(paths)
-	if err != nil {
-		t.Fatalf("loadComposerAttachments error = %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("got %d attachments, want 3", len(got))
-	}
-	// Verify all files loaded correctly (order preserved)
-	for i, att := range got {
-		expected := "content-" + string(rune('A'+i))
-		if string(att.data) != expected {
-			t.Errorf("attachment %d data = %q, want %q", i, string(att.data), expected)
-		}
-	}
-}
-
-func TestLoadComposerAttachmentsMissingFile(t *testing.T) {
-	_, err := loadComposerAttachments([]DraftAttachment{{Path: "/nonexistent/file.txt"}})
-	if err == nil {
-		t.Fatal("loadComposerAttachments error = nil, want file not found")
-	}
-	composerErr, ok := err.(*ComposerError)
-	if !ok {
-		t.Fatalf("error type = %T, want *ComposerError", err)
-	}
-	if composerErr.Message != "read draft attachment file.txt" {
-		t.Errorf("Message = %q, want read draft attachment file.txt", composerErr.Message)
-	}
-}
-
-func TestLoadComposerAttachmentsUnknownExtension(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "data.xyzunknown")
-	if err := os.WriteFile(path, []byte("content"), 0o644); err != nil {
-		t.Fatalf("WriteFile error = %v", err)
-	}
-	got, err := loadComposerAttachments([]DraftAttachment{{Path: path}})
-	if err != nil {
-		t.Fatalf("loadComposerAttachments error = %v", err)
-	}
-	if got[0].contentType != "application/octet-stream" {
-		t.Errorf("contentType = %q, want application/octet-stream", got[0].contentType)
-	}
-}
-
-func TestBuildMessageWithPreloadedAttachmentsPreservesWireFormat(t *testing.T) {
+func TestBuildMessageUsesVerifiedSpoolForAttachments(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "invoice.pdf")
-	if err := os.WriteFile(path, []byte("invoice-bytes"), 0o600); err != nil {
+	payload := []byte("invoice-bytes")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
+	sum := sha256.Sum256(payload)
 	draft := Draft{
 		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
 		Subject: "Attachment", Body: "Body",
-		Attachments: []DraftAttachment{{Path: path}},
+		Attachments: []DraftAttachment{{Path: path, Size: int64(len(payload)), SHA256: hex.EncodeToString(sum[:])}},
 	}
-	legacy, err := BuildMessage(draft, "<test@example.com>")
+	message, err := BuildMessage(draft, "<test@example.com>")
 	if err != nil {
 		t.Fatalf("BuildMessage() error = %v", err)
 	}
-	loaded, err := loadComposerAttachments(draft.Attachments)
-	if err != nil {
-		t.Fatalf("loadComposerAttachments() error = %v", err)
+	messageText := string(message)
+	if !contains(messageText, "Content-Disposition: attachment; filename=invoice.pdf") {
+		t.Fatal("verified composition missing attachment disposition")
 	}
-	preloaded, err := buildMessageWithAttachments(draft, "<test@example.com>", loaded)
-	if err != nil {
-		t.Fatalf("buildMessageWithAttachments() error = %v", err)
-	}
-	if normalizeGeneratedMessage(legacy) != normalizeGeneratedMessage(preloaded) {
-		t.Fatalf("preloaded composition changed the MIME wire format:\nlegacy:\n%s\npreloaded:\n%s", legacy, preloaded)
+	if !contains(messageText, "aW52b2ljZS1ieXRlcw==") {
+		t.Fatal("verified composition missing attachment payload")
 	}
 }
 
-func normalizeGeneratedMessage(message []byte) string {
-	lines := strings.Split(string(message), "\r\n")
-	var boundaries []string
-	for _, line := range lines {
-		marker := `boundary="`
-		start := strings.Index(line, marker)
-		if start < 0 {
-			continue
-		}
-		value := line[start+len(marker):]
-		if end := strings.IndexByte(value, '"'); end >= 0 {
-			boundaries = append(boundaries, value[:end])
-		}
+func TestBuildMessageRejectsSameSizeAttachmentReplacement(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "reviewed.txt")
+	original := []byte("original payload")
+	replacement := []byte("changed payload!")
+	if len(original) != len(replacement) {
+		t.Fatalf("test payload sizes differ: %d != %d", len(original), len(replacement))
 	}
-	for index, line := range lines {
-		if strings.HasPrefix(line, "Date: ") {
-			line = "Date: <generated>"
-		}
-		for _, boundary := range boundaries {
-			line = strings.ReplaceAll(line, boundary, "<boundary>")
-		}
-		lines[index] = line
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write original attachment: %v", err)
 	}
-	return strings.Join(lines, "\r\n")
+	sum := sha256.Sum256(original)
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Attachment", Body: "Body",
+		Attachments: []DraftAttachment{{Path: path, Size: int64(len(original)), SHA256: hex.EncodeToString(sum[:])}},
+	}
+	if err := os.WriteFile(path, replacement, 0o600); err != nil {
+		t.Fatalf("replace attachment: %v", err)
+	}
+	_, err := BuildMessage(draft, "<replacement@example.com>")
+	if err == nil || !strings.Contains(err.Error(), "changed after review") {
+		t.Fatalf("BuildMessage() error = %v, want same-size replacement rejection", err)
+	}
 }
 
 func TestBuildMessageWithHTMLBody(t *testing.T) {
