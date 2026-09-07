@@ -51,6 +51,11 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if manifest.Limits.MaximumDraftSubjectBytes != mail.MaximumDraftSubjectBytes {
 		t.Fatalf("maximum draft subject bytes = %d", manifest.Limits.MaximumDraftSubjectBytes)
 	}
+	if manifest.DraftSavePolicy.NewNativeSave != "rejected_before_mail_contact" ||
+		manifest.DraftSavePolicy.LegacyClaimHandling != "reconcile_only" ||
+		manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts save --ref <DRAFT_REF> --json" {
+		t.Fatalf("draft save policy = %+v", manifest.DraftSavePolicy)
+	}
 }
 
 func TestCapabilityCommandInventory(t *testing.T) {

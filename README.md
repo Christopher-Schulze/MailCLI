@@ -241,6 +241,8 @@ Every draft JSON object must contain an explicit `body` field; an intentionally 
 
 On the verified Mail 16 build, `drafts save` returns `compose_automation_unsupported` before acquiring the Apple Events gate. Live tests proved that Mail can accept scripted setters while persisting only the automatic signature, lose recipients, reject scripted attachments, and retain an invisible outgoing backend after `close saving no`. `mailcli capabilities --json` therefore keeps scripted `compose_write:false` and `compose_attachment_write:false`, advertises `send_transport:"smtp"` with `raw_mime_send:true`, and separately advertises visible handoff support. Retained reconciliation fails closed unless Mail supplied an exact final native body and exact headers, recipient roles, and attachment count.
 
+Draft-save state matrix: a new local draft without a historical `save_attempt` is rejected before Mail contact. A valid historical `save_attempt` is reconcile-only; the exact safe agent command is `mailcli drafts save --ref <DRAFT_REF> --json`, which never starts a new compose. If exact observation fails, retain the claim and draft and do not retry as a new native save.
+
 ### Send a reviewed draft
 
 Sending bypasses Mail.app entirely: MailCLI resolves the SMTP and IMAP endpoints from the draft's From address, loads the app-specific password from the macOS Keychain, submits the composed RFC 5322 message over SMTP with STARTTLS, and appends it to the account's Sent mailbox over IMAP.

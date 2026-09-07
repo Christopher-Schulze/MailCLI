@@ -2103,8 +2103,8 @@ func rejectClaimedDraft(draft Draft) error {
 		return &OperationError{
 			Code: "draft_save_retry_blocked",
 			Message: fmt.Sprintf(
-				"draft has native save attempt %s; run drafts save again only to reconcile it, or discard explicitly",
-				draft.SaveAttempt.ID,
+				"draft has legacy native save attempt %s; recover it with `mailcli drafts save --ref %s --json` (reconcile-only), or discard explicitly",
+				draft.SaveAttempt.ID, draft.Ref,
 			),
 		}
 	}
@@ -2323,47 +2323,6 @@ type storedDraftSaveAttempt struct {
 	Attempt  DraftSaveAttempt `json:"attempt"`
 }
 
-func beginDraftSaveAttempt(
-	root string,
-	ref string,
-	baseline *SendObservationBaseline,
-) (DraftSaveAttempt, error) {
-	id, err := newDraftSaveAttemptID()
-	if err != nil {
-		return DraftSaveAttempt{}, err
-	}
-	now := time.Now().UTC()
-	attempt := DraftSaveAttempt{
-		ID: id, StartedAt: now, UpdatedAt: now,
-		ObservationBaseline: cloneSendObservationBaseline(baseline),
-	}
-	path, err := saveClaimPath(root, ref)
-	if err != nil {
-		return DraftSaveAttempt{}, err
-	}
-	payload, err := encodeDraftSaveAttempt(ref, attempt)
-	if err != nil {
-		return DraftSaveAttempt{}, err
-	}
-	if err := writePrivateFile(path, payload); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return DraftSaveAttempt{}, &OperationError{
-				Code: "draft_save_retry_blocked", Message: "draft already has a native save attempt",
-			}
-		}
-		return DraftSaveAttempt{}, fmt.Errorf("create draft-save claim: %w", err)
-	}
-	return attempt, nil
-}
-
-func newDraftSaveAttemptID() (string, error) {
-	var value [18]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", fmt.Errorf("generate draft-save attempt id: %w", err)
-	}
-	return "save_" + base64.RawURLEncoding.EncodeToString(value[:]), nil
-}
-
 func encodeDraftSaveAttempt(ref string, attempt DraftSaveAttempt) ([]byte, error) {
 	payload, err := json.MarshalIndent(storedDraftSaveAttempt{
 		Version: 1, DraftRef: ref, Attempt: attempt,
@@ -2427,9 +2386,24 @@ func validDraftSaveAttempt(stored storedDraftSaveAttempt, ref string) bool {
 	return attempt.ObservedMessageRef == "" || attempt.InvocationStarted && attempt.AcceptedByMail
 }
 
+func validateDraftSaveAttempt(ref string, attempt DraftSaveAttempt) error {
+	if attempt.ObservationBaseline == nil {
+		return validationError("draft-save claim requires an observation baseline")
+	}
+	if !validDraftSaveAttempt(storedDraftSaveAttempt{
+		Version: 1, DraftRef: ref, Attempt: attempt,
+	}, ref) {
+		return validationError("draft-save claim is invalid")
+	}
+	return nil
+}
+
 func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt) (resultErr error) {
 	path, err := saveClaimPath(root, ref)
 	if err != nil {
+		return err
+	}
+	if err := validateDraftSaveAttempt(ref, attempt); err != nil {
 		return err
 	}
 	payload, err := encodeDraftSaveAttempt(ref, attempt)

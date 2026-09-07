@@ -10,11 +10,18 @@ import (
 const capabilitySchemaVersion = 1
 
 type capabilityManifest struct {
-	SchemaVersion int                 `json:"schema_version"`
-	Name          string              `json:"name"`
-	Version       string              `json:"version"`
-	Commands      []commandCapability `json:"commands"`
-	Limits        capabilityLimits    `json:"limits"`
+	SchemaVersion   int                 `json:"schema_version"`
+	Name            string              `json:"name"`
+	Version         string              `json:"version"`
+	Commands        []commandCapability `json:"commands"`
+	Limits          capabilityLimits    `json:"limits"`
+	DraftSavePolicy draftSavePolicy     `json:"draft_save_policy"`
+}
+
+type draftSavePolicy struct {
+	NewNativeSave       string `json:"new_native_save"`
+	LegacyClaimHandling string `json:"legacy_claim_handling"`
+	SafeRecoveryCommand string `json:"safe_recovery_command"`
 }
 
 type commandCapability struct {
@@ -122,6 +129,11 @@ func capabilities() capabilityManifest {
 			MaximumDraftAttachmentBytes: mail.MaximumDraftAttachmentBytes,
 			MaximumComposeBodyBytes:     mail.MaximumComposeBodyBytes,
 			MaximumRawSourceBytes:       mail.MaximumRawSourceBytes,
+		},
+		DraftSavePolicy: draftSavePolicy{
+			NewNativeSave:       "rejected_before_mail_contact",
+			LegacyClaimHandling: "reconcile_only",
+			SafeRecoveryCommand: "mailcli drafts save --ref <DRAFT_REF> --json",
 		},
 	}
 }

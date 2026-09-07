@@ -30,6 +30,10 @@ type durableDraftSaveGateway struct {
 	reconcileCalls int
 }
 
+type unknownDraftSaveGateway struct {
+	durableDraftSaveGateway
+}
+
 func (g *durableDraftSaveGateway) ReconcileDraftSave(
 	_ context.Context,
 	_ Draft,
@@ -40,6 +44,18 @@ func (g *durableDraftSaveGateway) ReconcileDraftSave(
 		InvocationStarted: true, AcceptedByMail: true,
 		ObservedMessage:     MessageSummary{Ref: "msg_observed", Subject: "Saved once"},
 		ObservationBaseline: attempt.ObservationBaseline, Materialized: attempt.Materialized,
+	}, nil
+}
+
+func (g *unknownDraftSaveGateway) ReconcileDraftSave(
+	_ context.Context,
+	_ Draft,
+	attempt DraftSaveAttempt,
+) (DraftSaveEvidence, error) {
+	g.reconcileCalls++
+	return DraftSaveEvidence{
+		ObservationBaseline: attempt.ObservationBaseline,
+		Materialized:        attempt.Materialized,
 	}, nil
 }
 
@@ -221,9 +237,7 @@ func TestSaveDraftReconcilesHistoricalClaimWithoutNewInvocation(t *testing.T) {
 	baseline := &SendObservationBaseline{
 		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
 	}
-	if _, err := beginDraftSaveAttempt(root, draft.Ref, baseline); err != nil {
-		t.Fatalf("beginDraftSaveAttempt() error = %v", err)
-	}
+	writeLegacyDraftSaveAttempt(t, root, draft.Ref, baseline)
 	saved, err := service.SaveDraft(context.Background(), draft.Ref)
 	if err != nil || saved.Message.Ref != "msg_observed" {
 		t.Fatalf("reconciled SaveDraft() = %+v, error = %v", saved, err)
@@ -233,6 +247,36 @@ func TestSaveDraftReconcilesHistoricalClaimWithoutNewInvocation(t *testing.T) {
 	}
 	if _, err := service.GetDraft(draft.Ref); errorCode(err) != "not_found" {
 		t.Fatalf("GetDraft() after reconcile error = %v", err)
+	}
+}
+
+func TestSaveDraftRetainsLegacyClaimAfterUnprovenReconcile(t *testing.T) {
+	gateway := &unknownDraftSaveGateway{}
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(gateway, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	writeLegacyDraftSaveAttempt(t, root, draft.Ref, &SendObservationBaseline{
+		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
+	})
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := service.SaveDraft(context.Background(), draft.Ref); errorCode(err) != "draft_save_outcome_unknown" {
+			t.Fatalf("SaveDraft() attempt %d error = %v", attempt, err)
+		}
+		current, err := service.GetDraft(draft.Ref)
+		if err != nil {
+			t.Fatalf("GetDraft() after attempt %d error = %v", attempt, err)
+		}
+		if current.SaveAttempt == nil || current.SaveAttempt.ID != "save_legacy" {
+			t.Fatalf("SaveAttempt after attempt %d = %+v, want retained legacy claim", attempt, current.SaveAttempt)
+		}
+	}
+	if gateway.reconcileCalls != 2 {
+		t.Fatalf("reconcile calls = %d, want one idempotent retry per command", gateway.reconcileCalls)
 	}
 }
 
@@ -423,12 +467,9 @@ func TestListDraftsRedactsLegacySaveAttemptMaterializedBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	attempt, err := beginDraftSaveAttempt(root, draft.Ref, &SendObservationBaseline{
+	attempt := writeLegacyDraftSaveAttempt(t, root, draft.Ref, &SendObservationBaseline{
 		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
 	})
-	if err != nil {
-		t.Fatalf("beginDraftSaveAttempt() error = %v", err)
-	}
 	body := "legacy save body"
 	attempt.Materialized = &SendMaterialization{
 		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
@@ -454,6 +495,78 @@ func TestListDraftsRedactsLegacySaveAttemptMaterializedBody(t *testing.T) {
 	}
 	if !strings.Contains(output, `"save_attempt"`) {
 		t.Fatalf("ListDrafts() JSON = %s, want redacted save-attempt metadata", output)
+	}
+}
+
+func writeLegacyDraftSaveAttempt(
+	t *testing.T,
+	root string,
+	ref string,
+	baseline *SendObservationBaseline,
+) DraftSaveAttempt {
+	t.Helper()
+	now := time.Unix(1, 0).UTC()
+	attempt := DraftSaveAttempt{
+		ID: "save_legacy", StartedAt: now, UpdatedAt: now,
+		ObservationBaseline: cloneSendObservationBaseline(baseline),
+	}
+	if err := replaceDraftSaveAttempt(root, ref, attempt); err != nil {
+		t.Fatalf("replaceDraftSaveAttempt() error = %v", err)
+	}
+	return attempt
+}
+
+func TestDraftSaveClaimRejectsNilBaselineBeforePersistence(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	attempt := DraftSaveAttempt{
+		ID: "save_nil_baseline", StartedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(),
+	}
+	if err := replaceDraftSaveAttempt(root, draft.Ref, attempt); err == nil {
+		t.Fatal("replaceDraftSaveAttempt() error = nil, want nil-baseline rejection")
+	}
+	path, err := saveClaimPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("saveClaimPath() error = %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("save claim stat error = %v, want no persisted claim", err)
+	}
+}
+
+func TestDraftSaveClaimReadRejectsNilBaseline(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	path, err := saveClaimPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("saveClaimPath() error = %v", err)
+	}
+	payload, err := json.Marshal(storedDraftSaveAttempt{
+		Version: 1, DraftRef: draft.Ref,
+		Attempt: DraftSaveAttempt{
+			ID: "save_nil_baseline", StartedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write save claim: %v", err)
+	}
+	if _, err := readDraftSaveAttempt(root, draft.Ref); err == nil {
+		t.Fatal("readDraftSaveAttempt() error = nil, want nil-baseline rejection")
 	}
 }
 
