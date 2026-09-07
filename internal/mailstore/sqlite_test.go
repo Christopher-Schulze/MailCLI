@@ -120,6 +120,85 @@ func TestValidateSchemaRejectsUnknownSemanticProfile(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaPropertyPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		statements []string
+		wantError  string
+	}{
+		{
+			name:       "missing required property",
+			statements: []string{`DELETE FROM properties WHERE key = 'minor_version'`},
+			wantError:  "unsupported_mail_store_schema",
+		},
+		{
+			name:       "identical duplicate",
+			statements: []string{`INSERT INTO properties(key, value) VALUES ('UUID', 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE')`},
+			wantError:  "unsupported_mail_store_schema",
+		},
+		{
+			name:       "conflicting duplicate",
+			statements: []string{`INSERT INTO properties(key, value) VALUES ('UUID', 'FFFFFFFF-EEEE-4DDD-8CCC-BBBBBBBBBBBB')`},
+			wantError:  "unsupported_mail_store_schema",
+		},
+		{
+			name: "conflicting duplicate reversed",
+			statements: []string{
+				`DELETE FROM properties WHERE key = 'UUID'`,
+				`INSERT INTO properties(key, value) VALUES ('UUID', 'FFFFFFFF-EEEE-4DDD-8CCC-BBBBBBBBBBBB')`,
+				`INSERT INTO properties(key, value) VALUES ('UUID', 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE')`,
+			},
+			wantError: "unsupported_mail_store_schema",
+		},
+		{
+			name:       "malformed required value",
+			statements: []string{`UPDATE properties SET value = NULL WHERE key = 'UUID'`},
+			wantError:  "unsupported_mail_store_schema",
+		},
+		{
+			name:       "unknown property ignored",
+			statements: []string{`INSERT INTO properties(key, value) VALUES ('future_property', 'ignored')`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "Envelope Index")
+			writer := openTestWriter(t, path)
+			createTestSchema(t, writer, "")
+			for _, statement := range test.statements {
+				if _, err := writer.ExecContext(ctx, statement); err != nil {
+					closeTestResourceNow(t, writer, "fixture writer")
+					t.Fatalf("execute property mutation %q: %v", statement, err)
+				}
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close writer: %v", err)
+			}
+			reader, err := openReadOnlyDatabase(ctx, path)
+			if err != nil {
+				t.Fatalf("openReadOnlyDatabase() error = %v", err)
+			}
+			closeTestResource(t, reader, "read-only database")
+			_, err = validateSchema(ctx, reader)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateSchema() error = %v, want success", err)
+				}
+				return
+			}
+			if errorCodeForTest(err) != test.wantError {
+				t.Fatalf("validateSchema() error = %v, want %s", err, test.wantError)
+			}
+			if test.name != "missing required property" && !strings.Contains(err.Error(), "property") {
+				t.Fatalf("validateSchema() error = %v, want property evidence", err)
+			}
+		})
+	}
+}
+
 func openTestWriter(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	database := sql.OpenDB(&sqliteConnector{

@@ -245,7 +245,7 @@ Keychain tests cover the Go wrapper, SecItem status mapping, and CoreFoundation 
 
 ## Technical baseline
 
-The verified development host is macOS 15.6.1 on `darwin/arm64`, Mail 16.0 build 3826.700.81, and Go 1.27.0. The supported Envelope Index profile is store version `4`, minor version `74003`, framework version `3826.700.81`, WAL journal mode, and a valid store UUID. Any profile drift fails closed before message queries.
+The verified development host is macOS 15.6.1 on `darwin/arm64`, Mail 16.0 build 3826.700.81, and Go 1.27.0. The supported Envelope Index profile is store version `4`, minor version `74003`, framework version `3826.700.81`, WAL journal mode, and a valid store UUID. Required schema properties must be unique and readable; duplicate, malformed, missing, or unsupported profile values fail closed with `unsupported_mail_store_schema` before message queries. Unknown property keys remain ignored for forward-compatible metadata. Any other profile drift fails closed before message queries.
 
 Directory enumeration is never authoritative because Mail can retain stale or partial filesystem sources. Store rows select candidates, safe mailbox mapping resolves their sources, and every result reports whether the corresponding local content is complete. Spotlight is not a required dependency; full-text search uses the deterministic on-demand MIME scanner and never creates another persistent index.
 

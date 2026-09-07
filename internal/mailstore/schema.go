@@ -251,12 +251,23 @@ func readSchemaProperties(
 	}
 	defer joinCloseError(&resultErr, rows, "Envelope Index property rows")
 	values := make(map[string]string, 4)
+	seen := make(map[string]struct{}, 4)
 	for rows.Next() {
 		var key string
 		var value string
 		if err := rows.Scan(&key, &value); err != nil {
-			return schemaCapability{}, fmt.Errorf("scan Envelope Index property: %w", err)
+			return schemaCapability{}, operationError(
+				"unsupported_mail_store_schema",
+				fmt.Sprintf("scan Envelope Index property: %v", err),
+			)
 		}
+		if _, exists := seen[key]; exists {
+			return schemaCapability{}, operationError(
+				"unsupported_mail_store_schema",
+				fmt.Sprintf("Envelope Index contains duplicate schema property key %q", key),
+			)
+		}
+		seen[key] = struct{}{}
 		values[key] = value
 	}
 	if err := rows.Err(); err != nil {
