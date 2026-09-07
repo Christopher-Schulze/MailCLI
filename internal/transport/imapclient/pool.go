@@ -36,15 +36,14 @@ type PoolStats struct {
 	DedicatedConnections     int
 }
 
-// Client is a minimal IMAPv4 client that can mirror a message into the Sent
-// mailbox and perform message mutations. It keeps a bounded authenticated
-// session pool per host/port/username. LIST and STATUS may overlap on
-// independent sessions. SEARCH and FETCH may overlap each other but exclude
-// APPEND and message mutations for the same identity, preserving selected
-// mailbox and UIDVALIDITY invariants. Different identities never share a pool
-// or operation gate. The zero value is usable with default limits. Set
-// TLSConfig before first use and do not copy a Client after first use. Close
-// waits for acquired operations and leaves the Client reusable.
+// Client is a minimal IMAPv4 client with a bounded authenticated session pool
+// per host/port/username. OperationContracts documents its shared and exclusive
+// account gates, session ownership, mailbox selection, UIDVALIDITY checks, and
+// Close lifecycle. Different identities never share a pool or operation gate.
+// Separate Clients do not coordinate with each other. The zero value is usable
+// with default limits. Set TLSConfig before first use and do not copy a Client
+// after first use. Close waits for acquired operations and leaves the Client
+// reusable.
 type Client struct {
 	TLSConfig *tls.Config
 

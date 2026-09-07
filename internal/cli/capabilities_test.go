@@ -73,6 +73,9 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if !bytes.Contains(stdout.Bytes(), []byte(`"require_complete_incomplete_exit_code":3`)) {
 		t.Fatalf("serialized sync check policy = %s", stdout.String())
 	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"imap_operation_contract":[{"operation":"LIST"`)) {
+		t.Fatalf("serialized IMAP operation contract = %s", stdout.String())
+	}
 }
 
 func TestCapabilityCommandInventory(t *testing.T) {
@@ -120,7 +123,8 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	if manifest.Limits.IMAPConnectionsPerAccount != imapclient.DefaultMaxConnectionsPerAccount ||
 		manifest.Limits.MaximumIMAPConnectionsPerAccount != imapclient.MaximumConnectionsPerAccount ||
 		!slices.Equal(manifest.Limits.IMAPConcurrentReadOperations, []string{"LIST", "STATUS", "SEARCH", "FETCH"}) ||
-		!slices.Equal(manifest.Limits.IMAPExclusiveOperations, []string{"APPEND", "STORE", "COPY", "MOVE", "DELETE"}) {
+		!slices.Equal(manifest.Limits.IMAPExclusiveOperations, []string{"APPEND", "STORE", "COPY", "MOVE", "DELETE"}) ||
+		!reflect.DeepEqual(manifest.Limits.IMAPOperationContract, imapclient.OperationContracts()) {
 		t.Fatalf("IMAP concurrency capability = %+v", manifest.Limits)
 	}
 	for _, id := range []string{"messages.filter", "messages.search"} {

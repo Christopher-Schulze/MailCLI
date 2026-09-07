@@ -44,44 +44,59 @@ type commandCapability struct {
 }
 
 type capabilityLimits struct {
-	Platform                         string                      `json:"platform"`
-	Architecture                     string                      `json:"architecture"`
-	OwnsMailIndex                    bool                        `json:"owns_mail_index"`
-	BackgroundProcess                bool                        `json:"background_process"`
-	RawMIMERead                      bool                        `json:"raw_mime_read"`
-	RawMIMESend                      bool                        `json:"raw_mime_send"`
-	ComposeWrite                     bool                        `json:"compose_write"`
-	ComposeAttachmentWrite           bool                        `json:"compose_attachment_write"`
-	VisibleComposeHandoff            bool                        `json:"visible_compose_handoff"`
-	VisibleAttachmentHandoff         bool                        `json:"visible_attachment_handoff"`
-	SendTransport                    string                      `json:"send_transport"`
-	MutationTransport                string                      `json:"mutation_transport"`
-	SupportedProviders               []transport.ProviderSupport `json:"supported_providers"`
-	UnsupportedProviderCode          string                      `json:"unsupported_provider_code"`
-	ProviderSupportDescription       string                      `json:"provider_support_description"`
-	MaximumPageSize                  int                         `json:"maximum_page_size"`
-	MaximumDraftInputBytes           int                         `json:"maximum_draft_input_bytes"`
-	MaximumDraftSubjectBytes         int                         `json:"maximum_draft_subject_bytes"`
-	MaximumDraftBodyBytes            int                         `json:"maximum_draft_body_bytes"`
-	MaximumDraftRecipients           int                         `json:"maximum_draft_recipients"`
-	MaximumDraftAttachments          int                         `json:"maximum_draft_attachments"`
-	MaximumDraftAttachmentBytes      int64                       `json:"maximum_draft_attachment_bytes"`
-	MaximumComposeBodyBytes          int                         `json:"maximum_compose_body_bytes"`
-	MaximumRawSourceBytes            int64                       `json:"maximum_raw_source_bytes"`
-	SenderIdentityScanLimit          int                         `json:"sender_identity_scan_limit"`
-	MaximumSenderIdentityScanLimit   int                         `json:"maximum_sender_identity_scan_limit"`
-	SenderIdentityCoverageStates     []string                    `json:"sender_identity_coverage_states"`
-	SearchPaginationConsistency      string                      `json:"search_pagination_consistency"`
-	SearchCursorDetectsIndexDrift    bool                        `json:"search_cursor_detects_index_drift"`
-	SearchCandidateCountDefault      string                      `json:"search_candidate_count_default"`
-	SearchExactCountBounded          bool                        `json:"search_exact_count_bounded"`
-	IMAPConnectionsPerAccount        int                         `json:"imap_connections_per_account"`
-	MaximumIMAPConnectionsPerAccount int                         `json:"maximum_imap_connections_per_account"`
-	IMAPConcurrentReadOperations     []string                    `json:"imap_concurrent_read_operations"`
-	IMAPExclusiveOperations          []string                    `json:"imap_exclusive_operations"`
+	Platform                         string                         `json:"platform"`
+	Architecture                     string                         `json:"architecture"`
+	OwnsMailIndex                    bool                           `json:"owns_mail_index"`
+	BackgroundProcess                bool                           `json:"background_process"`
+	RawMIMERead                      bool                           `json:"raw_mime_read"`
+	RawMIMESend                      bool                           `json:"raw_mime_send"`
+	ComposeWrite                     bool                           `json:"compose_write"`
+	ComposeAttachmentWrite           bool                           `json:"compose_attachment_write"`
+	VisibleComposeHandoff            bool                           `json:"visible_compose_handoff"`
+	VisibleAttachmentHandoff         bool                           `json:"visible_attachment_handoff"`
+	SendTransport                    string                         `json:"send_transport"`
+	MutationTransport                string                         `json:"mutation_transport"`
+	SupportedProviders               []transport.ProviderSupport    `json:"supported_providers"`
+	UnsupportedProviderCode          string                         `json:"unsupported_provider_code"`
+	ProviderSupportDescription       string                         `json:"provider_support_description"`
+	MaximumPageSize                  int                            `json:"maximum_page_size"`
+	MaximumDraftInputBytes           int                            `json:"maximum_draft_input_bytes"`
+	MaximumDraftSubjectBytes         int                            `json:"maximum_draft_subject_bytes"`
+	MaximumDraftBodyBytes            int                            `json:"maximum_draft_body_bytes"`
+	MaximumDraftRecipients           int                            `json:"maximum_draft_recipients"`
+	MaximumDraftAttachments          int                            `json:"maximum_draft_attachments"`
+	MaximumDraftAttachmentBytes      int64                          `json:"maximum_draft_attachment_bytes"`
+	MaximumComposeBodyBytes          int                            `json:"maximum_compose_body_bytes"`
+	MaximumRawSourceBytes            int64                          `json:"maximum_raw_source_bytes"`
+	SenderIdentityScanLimit          int                            `json:"sender_identity_scan_limit"`
+	MaximumSenderIdentityScanLimit   int                            `json:"maximum_sender_identity_scan_limit"`
+	SenderIdentityCoverageStates     []string                       `json:"sender_identity_coverage_states"`
+	SearchPaginationConsistency      string                         `json:"search_pagination_consistency"`
+	SearchCursorDetectsIndexDrift    bool                           `json:"search_cursor_detects_index_drift"`
+	SearchCandidateCountDefault      string                         `json:"search_candidate_count_default"`
+	SearchExactCountBounded          bool                           `json:"search_exact_count_bounded"`
+	IMAPConnectionsPerAccount        int                            `json:"imap_connections_per_account"`
+	MaximumIMAPConnectionsPerAccount int                            `json:"maximum_imap_connections_per_account"`
+	IMAPConcurrentReadOperations     []string                       `json:"imap_concurrent_read_operations"`
+	IMAPExclusiveOperations          []string                       `json:"imap_exclusive_operations"`
+	IMAPOperationContract            []imapclient.OperationContract `json:"imap_operation_contract"`
+}
+
+func imapOperationsWithConcurrency(
+	contracts []imapclient.OperationContract,
+	concurrency imapclient.OperationConcurrency,
+) []string {
+	operations := make([]string, 0, len(contracts))
+	for _, contract := range contracts {
+		if contract.Concurrency == concurrency {
+			operations = append(operations, contract.Operation)
+		}
+	}
+	return operations
 }
 
 func capabilities() capabilityManifest {
+	imapContract := imapclient.OperationContracts()
 	read := func(id, store, mailApp string, states ...string) commandCapability {
 		return commandCapability{
 			ID: id, EffectClass: "read", Confirmation: "none",
@@ -164,8 +179,13 @@ func capabilities() capabilityManifest {
 			SearchExactCountBounded:          true,
 			IMAPConnectionsPerAccount:        imapclient.DefaultMaxConnectionsPerAccount,
 			MaximumIMAPConnectionsPerAccount: imapclient.MaximumConnectionsPerAccount,
-			IMAPConcurrentReadOperations:     []string{"LIST", "STATUS", "SEARCH", "FETCH"},
-			IMAPExclusiveOperations:          []string{"APPEND", "STORE", "COPY", "MOVE", "DELETE"},
+			IMAPConcurrentReadOperations: imapOperationsWithConcurrency(
+				imapContract, imapclient.OperationConcurrencySharedAccount,
+			),
+			IMAPExclusiveOperations: imapOperationsWithConcurrency(
+				imapContract, imapclient.OperationConcurrencyExclusiveAccount,
+			),
+			IMAPOperationContract: imapContract,
 			SenderIdentityCoverageStates: []string{
 				string(mail.SenderIdentityCoverageStateComplete),
 				string(mail.SenderIdentityCoverageStateBounded),

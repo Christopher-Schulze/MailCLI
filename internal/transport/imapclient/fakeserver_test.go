@@ -59,6 +59,7 @@ type fakeServerConfig struct {
 	hugeFetchDone  bool
 	statusResponse string
 	statusDelay    time.Duration
+	fetchDelay     time.Duration
 }
 
 type fakeServer struct {
@@ -92,6 +93,7 @@ type fakeServer struct {
 	connections          int
 	activeConnections    int
 	maxConnections       int
+	commands             []string
 	searchStartedOnce    sync.Once
 }
 
@@ -164,6 +166,18 @@ func (s *fakeServer) MaxActiveConnections() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.maxConnections
+}
+
+func (s *fakeServer) Commands() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.commands...)
+}
+
+func (s *fakeServer) recordCommand(command string) {
+	s.mu.Lock()
+	s.commands = append(s.commands, command)
+	s.mu.Unlock()
 }
 
 func (s *fakeServer) SetAuthPassword(password string) {
@@ -241,6 +255,7 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.writeLine(bw, tag+" BAD parse error")
 			continue
 		}
+		s.recordCommand(protocolCommandName(cmd, args))
 
 		switch strings.ToUpper(cmd) {
 		case "LOGIN":
@@ -569,6 +584,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.mu.Unlock()
 				s.writeLine(bw, tag+" OK MOVE completed")
 			case "FETCH":
+				if s.config.fetchDelay > 0 {
+					time.Sleep(s.config.fetchDelay)
+				}
 				uid := 0
 				if len(args) > 1 {
 					uid, _ = strconv.Atoi(args[1])
@@ -602,6 +620,14 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.writeLine(bw, tag+" BAD unknown command")
 		}
 	}
+}
+
+func protocolCommandName(command string, args []string) string {
+	command = strings.ToUpper(command)
+	if command == "UID" && len(args) > 0 {
+		return command + " " + strings.ToUpper(args[0])
+	}
+	return command
 }
 
 func (s *fakeServer) writeLine(bw *bufio.Writer, line string) {
