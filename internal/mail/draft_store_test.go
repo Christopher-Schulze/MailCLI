@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -826,6 +828,157 @@ func TestDraftLeaseSerializesProcesses(t *testing.T) {
 	}
 }
 
+func TestDraftLeaseTimeoutAndCancellationDoNotReleaseOtherOwner(t *testing.T) {
+	tests := []struct {
+		name       string
+		contextErr error
+		wantCode   string
+		operation  string
+	}{
+		{name: "deadline", contextErr: context.DeadlineExceeded, wantCode: "draft_busy", operation: "send"},
+		{name: "cancellation", contextErr: context.Canceled, wantCode: "draft_operation_canceled", operation: "send"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			ref := "draft_abcdefghijklmnopqrstuvwx"
+			command, release := startDraftLockHelper(t, root, ref)
+			defer func() { _ = release.Close(); _ = command.Wait() }()
+
+			controlled := &controlledDraftContext{
+				done:     make(chan struct{}),
+				observed: make(chan struct{}),
+				err:      test.contextErr,
+			}
+			result := make(chan error, 1)
+			go func() {
+				_, err := acquireDraftLease(controlled, root, ref)
+				result <- err
+			}()
+			<-controlled.observed
+			close(controlled.done)
+			leaseErr := <-result
+			if test.name == "cancellation" {
+				leaseErr = classifyDraftContextError(controlled, leaseErr, test.operation)
+			}
+			if errorCode(leaseErr) != test.wantCode {
+				t.Fatalf("acquireDraftLease() error = %v, want %s", leaseErr, test.wantCode)
+			}
+
+			path, err := draftLockPath(root, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.OpenFile(path, os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatalf("open held lock: %v", err)
+			}
+			lockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			_ = file.Close()
+			if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+				t.Fatalf("held lock probe error = %v, want EWOULDBLOCK", lockErr)
+			}
+		})
+	}
+}
+
+func TestAcquireDraftLeaseUsesUnheldStaleLockFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	ref := "draft_abcdefghijklmnopqrstuvwx"
+	path, err := draftLockPath(root, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("create stale lock: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := acquireDraftLease(context.Background(), root, ref)
+	if err != nil {
+		t.Fatalf("acquireDraftLease() error = %v", err)
+	}
+	if err := lease.release(); err != nil {
+		t.Fatalf("release() error = %v", err)
+	}
+}
+
+func TestAcquireDraftLeaseCanceledBeforeOpenLeavesNoLock(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	ref := "draft_abcdefghijklmnopqrstuvwx"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := acquireDraftLease(ctx, root, ref)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquireDraftLease() error = %v, want context.Canceled", err)
+	}
+	path, pathErr := draftLockPath(root, ref)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("canceled acquisition left lock file: %v", statErr)
+	}
+}
+
+type controlledDraftContext struct {
+	done     chan struct{}
+	observed chan struct{}
+	err      error
+	once     sync.Once
+}
+
+func (c *controlledDraftContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c *controlledDraftContext) Done() <-chan struct{} { return c.done }
+
+func (c *controlledDraftContext) Err() error {
+	c.once.Do(func() { close(c.observed) })
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
+	}
+}
+
+func (c *controlledDraftContext) Value(any) any { return nil }
+
+func startDraftLockHelper(t *testing.T, root string, ref string) (*exec.Cmd, io.WriteCloser) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=TestDraftLeaseProcessHelper")
+	command.Env = append(os.Environ(),
+		"MAILCLI_DRAFT_LEASE_HELPER=1", "MAILCLI_DRAFT_LEASE_HOLD=1", "MAILCLI_DRAFT_ROOT="+root,
+		"MAILCLI_DRAFT_REF="+ref,
+	)
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe() error = %v", err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		t.Fatalf("StdoutPipe() error = %v", err)
+	}
+	if err := command.Start(); err != nil {
+		_ = stdin.Close()
+		t.Fatalf("helper start: %v", err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || line != "locked\n" {
+		_ = stdin.Close()
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("helper readiness = %q, error = %v", line, err)
+	}
+	return command, stdin
+}
+
 func TestDraftLeaseProcessHelper(t *testing.T) {
 	if os.Getenv("MAILCLI_DRAFT_LEASE_HELPER") != "1" {
 		t.Skip("subprocess helper")
@@ -839,7 +992,11 @@ func TestDraftLeaseProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("locked")
-	time.Sleep(250 * time.Millisecond)
+	if os.Getenv("MAILCLI_DRAFT_LEASE_HOLD") == "1" {
+		_, _ = io.ReadAll(os.Stdin)
+	} else {
+		time.Sleep(250 * time.Millisecond)
+	}
 	if err := lease.release(); err != nil {
 		t.Fatal(err)
 	}

@@ -247,7 +247,9 @@ func editDraftInput(
 	if err != nil {
 		return mail.Draft{}, fmt.Errorf("validate edited draft: %w", err)
 	}
-	return service.UpdateDraft(mail.UpdateDraftRequest{Ref: ref, Input: edited})
+	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
+	defer cancel()
+	return service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: ref, Input: edited})
 }
 
 func writeDraftEditorFile(path string, input mail.DraftInput) error {

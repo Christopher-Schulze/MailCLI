@@ -11,6 +11,11 @@ import (
 
 const (
 	maximumDraftInputBytes = 16 * 1024 * 1024
+	draftUpdateTimeout     = 15 * time.Second
+	draftDiscardTimeout    = 15 * time.Second
+	draftPruneTimeout      = 2 * time.Minute
+	draftReconcileTimeout  = 15 * time.Second
+	draftSaveTimeout       = 2 * time.Minute
 	draftSendTimeout       = 15 * time.Minute
 	pruneDayDuration       = 24 * time.Hour
 	maxPruneAgeDays        = int64((1<<63 - 1) / int64(pruneDayDuration))
@@ -51,7 +56,7 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 	case "handoff":
 		return runDraftHandoff(ctx, service, args[1:], stdout, stderr)
 	case "update":
-		return runDraftUpdate(service, args[1:], stdout, stderr)
+		return runDraftUpdate(ctx, service, args[1:], stdout, stderr)
 	case "save":
 		return runDraftSave(ctx, service, args[1:], stdout, stderr)
 	case "open":
@@ -61,9 +66,9 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 	case "reconcile":
 		return runDraftReconcile(ctx, service, args[1:], stdout, stderr)
 	case "discard":
-		return runDraftDiscard(service, args[1:], stdout, stderr)
+		return runDraftDiscard(ctx, service, args[1:], stdout, stderr)
 	case "prune":
-		return runDraftPrune(service, args[1:], stdout, stderr)
+		return runDraftPrune(ctx, service, args[1:], stdout, stderr)
 	default:
 		writeFormat(stderr, "unknown drafts command %q\n", args[0])
 		return 2
@@ -77,7 +82,7 @@ func runDraftReconcile(ctx context.Context, service *mail.Service, args []string
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	operationCtx, cancel := context.WithTimeout(ctx, draftReconcileTimeout)
 	defer cancel()
 	result, err := service.ReconcileDraft(operationCtx, *ref)
 	if err != nil {
@@ -102,7 +107,7 @@ func runDraftSave(ctx context.Context, service *mail.Service, args []string, std
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	operationCtx, cancel := context.WithTimeout(ctx, draftSaveTimeout)
 	defer cancel()
 	saved, err := service.SaveDraft(operationCtx, *ref)
 	if err != nil {
@@ -210,7 +215,7 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 	return 0
 }
 
-func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+func runDraftPrune(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts prune", stderr)
 	olderThan := flags.Int("older-than", 30, "age threshold in days for never-sent drafts (minimum 1)")
 	confirm := flags.Bool("confirm", false, "delete the listed stale drafts")
@@ -236,7 +241,9 @@ func runDraftPrune(service *mail.Service, args []string, stdout io.Writer, stder
 			),
 		}, stdout, stderr)
 	}
-	result, err := service.PruneDrafts(mail.PruneDraftsRequest{
+	operationCtx, cancel := context.WithTimeout(ctx, draftPruneTimeout)
+	defer cancel()
+	result, err := service.PruneDraftsContext(operationCtx, mail.PruneDraftsRequest{
 		OlderThan: time.Duration(*olderThan) * pruneDayDuration,
 		Confirm:   *confirm,
 	})
@@ -287,7 +294,7 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 	return writeDraftResponse(stdout, "drafts.inspect", draft, *jsonOutput)
 }
 
-func runDraftUpdate(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts update", stderr)
 	ref := flags.String("ref", "", "draft ref")
 	inputFlags := registerDraftInputFlags(flags)
@@ -302,7 +309,9 @@ func runDraftUpdate(service *mail.Service, args []string, stdout io.Writer, stde
 	if err != nil {
 		return failCommand("drafts.update", *jsonOutput, err, stdout, stderr)
 	}
-	draft, err := service.UpdateDraft(mail.UpdateDraftRequest{Ref: *ref, Input: input})
+	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
+	defer cancel()
+	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, Input: input})
 	if err != nil {
 		return failCommand("drafts.update", *jsonOutput, err, stdout, stderr)
 	}
@@ -338,7 +347,7 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 	return 0
 }
 
-func runDraftDiscard(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+func runDraftDiscard(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts discard", stderr)
 	ref := flags.String("ref", "", "draft ref")
 	confirm := flags.Bool("confirm", false, "confirm local draft removal")
@@ -349,7 +358,9 @@ func runDraftDiscard(service *mail.Service, args []string, stdout io.Writer, std
 	if !*confirm {
 		return failCommand("drafts.discard", *jsonOutput, confirmationRequired("draft discard"), stdout, stderr)
 	}
-	if err := service.DiscardDraft(*ref); err != nil {
+	operationCtx, cancel := context.WithTimeout(ctx, draftDiscardTimeout)
+	defer cancel()
+	if err := service.DiscardDraftContext(operationCtx, *ref); err != nil {
 		return failCommand("drafts.discard", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {

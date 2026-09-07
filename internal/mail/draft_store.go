@@ -28,7 +28,7 @@ import (
 
 const (
 	draftLockPoll          = 25 * time.Millisecond
-	draftMutationLockWait  = 2 * time.Second
+	draftLockWait          = 2 * time.Second
 	maximumDraftStateBytes = int64(20 * 1024 * 1024)
 )
 
@@ -210,6 +210,13 @@ func pruneAgeDays(updatedAt time.Time) int {
 // PruneDrafts lists (dry run) or deletes stale never-sent local drafts. Drafts with a
 // send or save attempt are reconcilable at-most-once state and are never pruned.
 func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, error) {
+	return s.PruneDraftsContext(context.Background(), request)
+}
+
+func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsRequest) (PruneDraftsResult, error) {
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return PruneDraftsResult{}, err
+	}
 	if request.OlderThan < 24*time.Hour {
 		return PruneDraftsResult{}, validationError(
 			"older-than must be at least 1 day; every never-sent draft would be pruned at lower values",
@@ -221,6 +228,9 @@ func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, er
 	}
 	drafts, err := s.ListDrafts()
 	if err != nil {
+		return PruneDraftsResult{}, err
+	}
+	if err := draftContextError(ctx, "prune"); err != nil {
 		return PruneDraftsResult{}, err
 	}
 	cutoff := time.Now().Add(-request.OlderThan)
@@ -237,11 +247,21 @@ func (s *Service) PruneDrafts(request PruneDraftsRequest) (PruneDraftsResult, er
 		return result, nil
 	}
 	for _, candidate := range result.Candidates {
-		if err := pruneDraftOnce(root, candidate.Ref, cutoff); err != nil {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return result, err
+		}
+		if err := pruneDraftOnce(ctx, root, candidate.Ref, cutoff); err != nil {
+			var coded interface{ ErrorCode() string }
+			if errors.As(err, &coded) && coded.ErrorCode() == "draft_operation_canceled" {
+				return result, err
+			}
 			result.Failed = append(result.Failed, PruneFailure{Ref: candidate.Ref, Error: err.Error()})
 			continue
 		}
 		result.Removed = append(result.Removed, candidate.Ref)
+	}
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return result, err
 	}
 	swept, failures, err := sweepOrphanDraftLocks(root)
 	result.SweptLocks = swept
@@ -306,14 +326,17 @@ func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
 	return swept, failures, nil
 }
 
-func pruneDraftOnce(root string, ref string, cutoff time.Time) (resultErr error) {
-	lockContext, cancel := context.WithTimeout(context.Background(), draftMutationLockWait)
+func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Time) (resultErr error) {
+	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
-		return err
+		return classifyDraftContextError(ctx, err, "prune")
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return err
+	}
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		var operation *OperationError
@@ -324,6 +347,9 @@ func pruneDraftOnce(root string, ref string, cutoff time.Time) (resultErr error)
 	}
 	if !pruneEligible(draftSummaryFrom(draft), cutoff) {
 		return &OperationError{Code: "prune_state_changed", Message: "draft changed since listing; skipped"}
+	}
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return err
 	}
 	if err := discardDraftFiles(root, ref); err != nil {
 		var operation *OperationError
@@ -336,19 +362,29 @@ func pruneDraftOnce(root string, ref string, cutoff time.Time) (resultErr error)
 }
 
 func (s *Service) UpdateDraft(request UpdateDraftRequest) (result Draft, resultErr error) {
+	return s.UpdateDraftContext(context.Background(), request)
+}
+
+func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftRequest) (result Draft, resultErr error) {
+	if err := draftContextError(ctx, "update"); err != nil {
+		return Draft{}, err
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return Draft{}, err
 	}
-	lockContext, cancel := context.WithTimeout(context.Background(), draftMutationLockWait)
+	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, request.Ref)
 	if err != nil {
-		return Draft{}, err
+		return Draft{}, classifyDraftContextError(ctx, err, "update")
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
 	current, err := readDraftForMutation(root, request.Ref)
 	if err != nil {
+		return Draft{}, err
+	}
+	if err := draftContextError(ctx, "update"); err != nil {
 		return Draft{}, err
 	}
 	if err := rejectClaimedDraft(current); err != nil {
@@ -362,6 +398,9 @@ func (s *Service) UpdateDraft(request UpdateDraftRequest) (result Draft, resultE
 	if err != nil {
 		return Draft{}, err
 	}
+	if err := draftContextError(ctx, "update"); err != nil {
+		return Draft{}, err
+	}
 	replacement.Ref = current.Ref
 	replacement.CreatedAt = current.CreatedAt
 	if err := writeDraftFile(root, replacement); err != nil {
@@ -371,17 +410,27 @@ func (s *Service) UpdateDraft(request UpdateDraftRequest) (result Draft, resultE
 }
 
 func (s *Service) DiscardDraft(ref string) (resultErr error) {
+	return s.DiscardDraftContext(context.Background(), ref)
+}
+
+func (s *Service) DiscardDraftContext(ctx context.Context, ref string) (resultErr error) {
+	if err := draftContextError(ctx, "discard"); err != nil {
+		return err
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return err
 	}
-	lockContext, cancel := context.WithTimeout(context.Background(), draftMutationLockWait)
+	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
-		return err
+		return classifyDraftContextError(ctx, err, "discard")
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+	if err := draftContextError(ctx, "discard"); err != nil {
+		return err
+	}
 	return discardDraftFiles(root, ref)
 }
 
@@ -393,13 +442,18 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	lease, err := acquireDraftLease(ctx, root, ref)
+	lockContext, cancelLock := draftLockContext(ctx)
+	defer cancelLock()
+	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
 		return SendResult{}, classifyDraftContextError(ctx, err, "send")
 	}
 	defer func() {
 		resultErr = errors.Join(classifyDraftContextError(ctx, resultErr, "send"), lease.release())
 	}()
+	if err := draftContextError(ctx, "send"); err != nil {
+		return SendResult{}, err
+	}
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SendResult{}, err
@@ -648,15 +702,23 @@ type SendReconciler interface {
 }
 
 func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendResult, resultErr error) {
+	if err := draftContextError(ctx, "reconcile"); err != nil {
+		return SendResult{}, err
+	}
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return SendResult{}, err
 	}
-	lease, err := acquireDraftLease(ctx, root, ref)
+	lockContext, cancelLock := draftLockContext(ctx)
+	defer cancelLock()
+	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
-		return SendResult{}, err
+		return SendResult{}, classifyDraftContextError(ctx, err, "reconcile")
 	}
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+	if err := draftContextError(ctx, "reconcile"); err != nil {
+		return SendResult{}, err
+	}
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SendResult{}, err
@@ -1032,16 +1094,25 @@ func draftContextError(ctx context.Context, operation string) error {
 	}
 }
 
+func draftLockContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, draftLockWait)
+}
+
 func classifyDraftContextError(ctx context.Context, err error, operation string) error {
 	if err == nil || ctx.Err() == nil {
 		return err
 	}
-	var coded interface{ ErrorCode() string }
-	if errors.As(err, &coded) && coded.ErrorCode() != "" {
-		return err
-	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return draftContextError(ctx, operation)
+	}
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) {
+		if coded.ErrorCode() == "draft_busy" {
+			return draftContextError(ctx, operation)
+		}
+		if coded.ErrorCode() != "" {
+			return err
+		}
 	}
 	return err
 }
@@ -1532,13 +1603,18 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err != nil {
 		return SavedDraft{}, err
 	}
-	lease, err := acquireDraftLease(ctx, root, ref)
+	lockContext, cancelLock := draftLockContext(ctx)
+	defer cancelLock()
+	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
 		return SavedDraft{}, classifyDraftContextError(ctx, err, "save")
 	}
 	defer func() {
 		resultErr = errors.Join(classifyDraftContextError(ctx, resultErr, "save"), lease.release())
 	}()
+	if err := draftContextError(ctx, "save"); err != nil {
+		return SavedDraft{}, err
+	}
 	draft, err := readDraftForMutation(root, ref)
 	if err != nil {
 		return SavedDraft{}, err
@@ -2006,6 +2082,9 @@ type draftLease struct {
 }
 
 func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	path, err := draftLockPath(root, ref)
 	if err != nil {
 		return nil, err
@@ -2022,6 +2101,10 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
+			if ctx.Err() != nil {
+				closeErr := errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close())
+				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, closeErr)
+			}
 			return &draftLease{file: file}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
