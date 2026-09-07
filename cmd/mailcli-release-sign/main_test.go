@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,190 @@ func TestWriteExclusiveRejectsExistingFile(t *testing.T) {
 	err := writeExclusive(path, []byte("new"), 0o600)
 	if err == nil {
 		t.Fatal("writeExclusive error = nil, want file exists error")
+	}
+}
+
+func TestFinishExclusiveOutputCleansEveryFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testExclusiveOutput)
+	}{
+		{name: "write", configure: func(output *testExclusiveOutput) {
+			output.writeErr = errors.New("write failed")
+		}},
+		{name: "sync", configure: func(output *testExclusiveOutput) {
+			output.syncErr = errors.New("sync failed")
+		}},
+		{name: "validation", configure: func(output *testExclusiveOutput) {
+			output.validateErr = errors.New("validation failed")
+		}},
+		{name: "close", configure: func(output *testExclusiveOutput) {
+			output.closeErr = errors.New("close failed")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := newTestExclusiveOutput(t)
+			test.configure(output)
+			err := finishExclusiveOutput(output, []byte("signature"))
+			if err == nil || !errors.Is(err, output.expectedErr()) {
+				t.Fatalf("finishExclusiveOutput() error = %v", err)
+			}
+			if _, statErr := os.Stat(output.path); !os.IsNotExist(statErr) {
+				t.Fatalf("failed output still exists: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestFinishExclusiveOutputReportsCleanupFailure(t *testing.T) {
+	output := newTestExclusiveOutput(t)
+	writeErr := errors.New("write failed")
+	cleanupErr := errors.New("cleanup failed")
+	output.writeErr = writeErr
+	output.cleanupErr = cleanupErr
+	err := finishExclusiveOutput(output, []byte("signature"))
+	if !errors.Is(err, writeErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("finishExclusiveOutput() error = %v, want write and cleanup errors", err)
+	}
+	if _, statErr := os.Stat(output.path); statErr != nil {
+		t.Fatalf("cleanup-failure output disappeared unexpectedly: %v", statErr)
+	}
+}
+
+func TestFinishExclusiveOutputPreservesReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signature")
+	output, err := openExclusiveOutput(path, 0o600)
+	if err != nil {
+		t.Fatalf("openExclusiveOutput() error = %v", err)
+	}
+	if _, err := output.Write([]byte("signature")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	movedPath := path + ".original"
+	if err := os.Rename(path, movedPath); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("attacker"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := finishExclusiveOutput(output, []byte("signature")); err == nil {
+		t.Fatal("finishExclusiveOutput() error = nil, want replacement detection")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(content) != "attacker" {
+		t.Fatalf("replacement content = %q, want attacker", content)
+	}
+}
+
+func TestWriteExclusiveCanRerunAfterFailureCleanup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "signature")
+	output := newTestExclusiveOutputAtPath(t, path)
+	output.writeErr = errors.New("write failed")
+	if err := finishExclusiveOutput(output, []byte("signature")); err == nil {
+		t.Fatal("finishExclusiveOutput() error = nil, want injected write failure")
+	}
+	if err := writeExclusive(path, []byte("signature"), 0o600); err != nil {
+		t.Fatalf("writeExclusive() rerun error = %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(content) != "signature" {
+		t.Fatalf("rerun content = %q, want signature", content)
+	}
+}
+
+type testExclusiveOutput struct {
+	file        *os.File
+	path        string
+	identity    os.FileInfo
+	writeErr    error
+	syncErr     error
+	validateErr error
+	closeErr    error
+	cleanupErr  error
+}
+
+func newTestExclusiveOutput(t *testing.T) *testExclusiveOutput {
+	return newTestExclusiveOutputAtPath(t, filepath.Join(t.TempDir(), "output"))
+}
+
+func newTestExclusiveOutputAtPath(t *testing.T, path string) *testExclusiveOutput {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	identity, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		t.Fatalf("Stat() error = %v", err)
+	}
+	return &testExclusiveOutput{file: file, path: path, identity: identity}
+}
+
+func (output *testExclusiveOutput) Write(payload []byte) (int, error) {
+	if output.writeErr != nil {
+		return 0, output.writeErr
+	}
+	return output.file.Write(payload)
+}
+
+func (output *testExclusiveOutput) Sync() error {
+	if output.syncErr != nil {
+		return output.syncErr
+	}
+	return output.file.Sync()
+}
+
+func (output *testExclusiveOutput) Validate(_ int64) error {
+	if output.validateErr != nil {
+		return output.validateErr
+	}
+	return nil
+}
+
+func (output *testExclusiveOutput) CloseFile() error {
+	err := output.file.Close()
+	return errors.Join(output.closeErr, err)
+}
+
+func (output *testExclusiveOutput) Cleanup() error {
+	if output.cleanupErr != nil {
+		return output.cleanupErr
+	}
+	current, err := os.Lstat(output.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !os.SameFile(output.identity, current) {
+		return errors.New("output changed")
+	}
+	return os.Remove(output.path)
+}
+
+func (output *testExclusiveOutput) CloseParent() error {
+	return nil
+}
+
+func (output *testExclusiveOutput) expectedErr() error {
+	switch {
+	case output.writeErr != nil:
+		return output.writeErr
+	case output.syncErr != nil:
+		return output.syncErr
+	case output.validateErr != nil:
+		return output.validateErr
+	default:
+		return output.closeErr
 	}
 }
 

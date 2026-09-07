@@ -218,16 +218,43 @@ func clearPrivateKey(privateKey ed25519.PrivateKey) {
 	clearBytes(privateKey)
 }
 
+type exclusiveOutput interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Validate(int64) error
+	CloseFile() error
+	Cleanup() error
+	CloseParent() error
+}
+
 func writeExclusive(path string, payload []byte, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	output, err := openExclusiveOutput(path, mode)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(payload); err != nil {
-		return errors.Join(err, file.Close())
+	return finishExclusiveOutput(output, payload)
+}
+
+func finishExclusiveOutput(output exclusiveOutput, payload []byte) error {
+	written, writeErr := output.Write(payload)
+	var resultErr error
+	if writeErr != nil {
+		resultErr = writeErr
 	}
-	if err := file.Sync(); err != nil {
-		return errors.Join(err, file.Close())
+	if written != len(payload) {
+		resultErr = errors.Join(resultErr, io.ErrShortWrite)
 	}
-	return file.Close()
+	if resultErr == nil {
+		resultErr = output.Sync()
+	}
+	if resultErr == nil {
+		resultErr = output.Validate(int64(len(payload)))
+	}
+	closeErr := output.CloseFile()
+	if resultErr == nil && closeErr == nil {
+		return output.CloseParent()
+	}
+	cleanupErr := output.Cleanup()
+	parentCloseErr := output.CloseParent()
+	return errors.Join(resultErr, closeErr, cleanupErr, parentCloseErr)
 }
