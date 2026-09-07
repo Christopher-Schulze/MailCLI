@@ -85,6 +85,10 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("command IDs = %q, want %q", got, want)
 	}
+	accounts := manifest.Commands[slices.Index(got, "accounts.list")]
+	if !slices.Equal(accounts.ResultStates, []string{"complete", "partial"}) {
+		t.Fatalf("accounts.list result states = %+v", accounts.ResultStates)
+	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]
 	if send.EffectClass != "smtp-send" || send.Confirmation != "required-flag" ||
 		send.StoreDependency != "draft-store" || send.MailAppDependency != "none" ||

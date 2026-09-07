@@ -280,7 +280,7 @@ func (c *Client) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 			return nil, err
 		}
 		accounts = append(accounts, mail.Account{
-			Ref: ref, Name: item.Name, EmailAddresses: item.EmailAddresses,
+			Ref: ref, Name: item.Name, EmailAddresses: item.EmailAddresses, State: "ok",
 		})
 	}
 	return accounts, nil

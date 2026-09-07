@@ -14,6 +14,17 @@ import (
 
 const senderIdentityRecentLimit = 2000
 
+const (
+	accountDegradedMailboxCache        = "mailbox_cache_unreadable"
+	accountDegradedSpecialUse          = "special_use_mailbox_unresolved"
+	accountDegradedSenderIdentity      = "sender_identity_unreadable"
+	accountDegradedNoSenderIdentity    = "no_provably_sent_identity"
+	accountRemediationMailboxCache     = "run `mailcli doctor` and let Mail.app rebuild the affected mailbox cache"
+	accountRemediationSpecialUse       = "run `mailcli doctor` and let Mail.app resync the affected account so its special-use mailbox is present"
+	accountRemediationSenderIdentity   = "run `mailcli doctor` and repair the affected Sent data before retrying"
+	accountRemediationNoSenderIdentity = "run `mailcli send setup --from ADDRESS` or complete one successful send, then rerun `mailcli accounts list`"
+)
+
 type senderIdentity struct {
 	Address      string
 	Name         string
@@ -22,10 +33,51 @@ type senderIdentity struct {
 	nameCount    int64
 }
 
+type accountCatalogIssue struct {
+	accountID string
+	account   mail.Account
+	cause     error
+}
+
+func (e *accountCatalogIssue) Error() string {
+	message := fmt.Sprintf(
+		"account %s is degraded: %s; remediation: %s",
+		e.accountID, e.account.DegradedReason, e.account.DegradedRemediation,
+	)
+	if e.cause != nil {
+		message += ": " + e.cause.Error()
+	}
+	return message
+}
+
+func (e *accountCatalogIssue) Unwrap() error {
+	return e.cause
+}
+
+type senderIdentityDataError struct {
+	cause error
+}
+
+func (e *senderIdentityDataError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *senderIdentityDataError) Unwrap() error {
+	return e.cause
+}
+
 func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
+	catalog, err := s.ListAccountCatalog(ctx)
+	return catalog.Accounts, err
+}
+
+func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, error) {
 	records, err := s.mailboxRecords(ctx)
 	if err != nil {
-		return nil, err
+		if contextErr := ctx.Err(); contextErr != nil {
+			return mail.AccountCatalog{}, contextErr
+		}
+		return mail.AccountCatalog{}, accountCatalogError("", err)
 	}
 	recordsByPath := make(map[string]mailboxRecord, len(records))
 	for _, record := range records {
@@ -37,11 +89,26 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 		// hard SQL failures abort discovery for everyone.
 		account, err := s.loadAccount(ctx, location, recordsByPath)
 		if err != nil {
-			return nil, err
+			var issue *accountCatalogIssue
+			if errors.As(err, &issue) {
+				accounts = append(accounts, issue.account)
+				continue
+			}
+			if contextErr := ctx.Err(); contextErr != nil {
+				return mail.AccountCatalog{}, contextErr
+			}
+			return mail.AccountCatalog{}, err
 		}
 		accounts = append(accounts, account)
 	}
-	return accounts, nil
+	complete := true
+	for _, account := range accounts {
+		if account.State == "degraded" {
+			complete = false
+			break
+		}
+	}
+	return mail.AccountCatalog{Accounts: accounts, Complete: complete}, nil
 }
 
 func (s *Store) loadAccount(
@@ -51,43 +118,51 @@ func (s *Store) loadAccount(
 ) (mail.Account, error) {
 	ref, err := mailref.EncodeAccount(location.AccountID)
 	if err != nil {
-		return mail.Account{}, err
+		return mail.Account{}, accountCatalogError(location.AccountID, err)
 	}
-	degraded := func(reason string) (mail.Account, error) {
-		return mail.Account{
+	degraded := func(reason string, remediation string, cause error) (mail.Account, error) {
+		account := mail.Account{
 			Ref: ref, Name: "On My Mac", EmailAddresses: []string{},
 			State: "degraded", DegradedReason: reason,
-		}, nil
+			DegradedRemediation: remediation,
+		}
+		return mail.Account{}, &accountCatalogIssue{
+			accountID: location.AccountID, account: account, cause: cause,
+		}
 	}
 
 	// Unreadable mailbox cache: listed degraded, other accounts unaffected.
 	cached, err := s.loadMailboxCache(ctx, location.AccountID)
 	if err != nil {
-		if isHardCatalogError(err) {
-			return mail.Account{}, accountCatalogError(location.AccountID, err)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return mail.Account{}, contextErr
 		}
-		return degraded("mailbox_cache_unreadable")
+		return degraded(accountDegradedMailboxCache, accountRemediationMailboxCache, err)
 	}
 	sentMailboxIDs, foundSent, err := strictSpecialMailboxIDs(
 		cached.Mailboxes, location, mailboxAttributeSent, records,
 	)
 	if err != nil {
-		if isHardCatalogError(err) {
-			return mail.Account{}, accountCatalogError(location.AccountID, err)
-		}
-		return degraded("special_use_mailbox_unresolved")
+		return degraded(accountDegradedSpecialUse, accountRemediationSpecialUse, err)
 	}
 	identities := []senderIdentity(nil)
 	if foundSent {
 		identities, err = s.loadSenderIdentities(ctx, sentMailboxIDs)
 		if err != nil {
-			// SQL identity failures stay hard: identity correctness feeds
-			// mutation credential resolution.
+			if contextErr := ctx.Err(); contextErr != nil {
+				return mail.Account{}, contextErr
+			}
+			var dataErr *senderIdentityDataError
+			if errors.As(err, &dataErr) {
+				return degraded(accountDegradedSenderIdentity, accountRemediationSenderIdentity, err)
+			}
+			// Query and iteration failures can indicate a global SQL/schema
+			// problem, so they abort the catalog instead of degrading an account.
 			return mail.Account{}, accountCatalogError(location.AccountID, err)
 		}
 	}
 	if location.Scheme == "imap" && (!foundSent || len(identities) == 0) {
-		return degraded("no_provably_sent_identity")
+		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, nil)
 	}
 	name := "On My Mac"
 	addresses := make([]string, len(identities))
@@ -101,26 +176,6 @@ func (s *Store) loadAccount(
 		}
 	}
 	return mail.Account{Ref: ref, Name: name, EmailAddresses: addresses, State: "ok"}, nil
-}
-
-// isHardCatalogError reports whether a catalog failure must abort the whole
-// listing (SQL/store failures) instead of degrading one account. Degraded
-// causes are typed codes: unreadable mailbox cache, unsafe cache path
-// segments, and cache-declared special-use mailboxes missing from the
-// Envelope Index.
-func isHardCatalogError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var typed *Error
-	if errors.As(err, &typed) {
-		switch typed.Code {
-		case "invalid_mailbox_cache", "mailbox_cache_malformed", "invalid_path_segment", "special_use_mailbox_unresolved":
-			return false
-		}
-		return true
-	}
-	return true
 }
 
 func strictSpecialMailboxIDs(
@@ -245,11 +300,13 @@ func (s *Store) loadSenderIdentities(
 		var messageCount int64
 		var latestSent int64
 		if err := rows.Scan(&address, &name, &messageCount, &latestSent); err != nil {
-			return nil, fmt.Errorf("scan Sent sender identity: %w", err)
+			return nil, &senderIdentityDataError{cause: fmt.Errorf("scan Sent sender identity: %w", err)}
 		}
 		parsed, err := stdmail.ParseAddress(strings.TrimSpace(address))
 		if err != nil || strings.TrimSpace(parsed.Address) == "" {
-			return nil, fmt.Errorf("sent mailbox contains an invalid sender address %q", address)
+			return nil, &senderIdentityDataError{
+				cause: fmt.Errorf("sent mailbox contains an invalid sender address %q", address),
+			}
 		}
 		key := strings.ToLower(parsed.Address)
 		identity := identities[key]
@@ -287,8 +344,13 @@ func (s *Store) loadSenderIdentities(
 }
 
 func accountCatalogError(accountID string, err error) error {
-	return operationError(
+	scope := "the account catalog"
+	if accountID != "" {
+		scope = "the account catalog for account " + accountID
+	}
+	return operationErrorWithCause(
 		"account_catalog_incomplete",
-		fmt.Sprintf("cannot prove the complete account catalog for account %s: %v", accountID, err),
+		fmt.Sprintf("cannot prove %s; run `mailcli doctor` and retry: %v", scope, err),
+		err,
 	)
 }

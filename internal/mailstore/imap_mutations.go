@@ -203,9 +203,10 @@ func (c *Client) resolveImapTargetWithOptions(
 func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (string, error) {
 	accounts, err := c.store.ListAccounts(ctx)
 	if err != nil {
-		return "", operationError(
+		return "", operationErrorWithCause(
 			"account_catalog_incomplete",
 			fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
+			err,
 		)
 	}
 	if c.send.Credentials == nil {
@@ -222,9 +223,9 @@ func (c *Client) resolveAccountEmail(ctx context.Context, accountID string) (str
 			}
 		}
 		if acct.State == "degraded" {
-			return "", fmt.Errorf(
-				"account %s is degraded (%s): send setup or a prior successful send must exist before mutations can resolve an identity",
-				accountID, acct.DegradedReason,
+			return "", operationError(
+				"account_degraded",
+				fmt.Sprintf("account %s is degraded (%s): %s", accountID, acct.DegradedReason, acct.DegradedRemediation),
 			)
 		}
 		return "", fmt.Errorf(
@@ -732,7 +733,7 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			result.Failures = append(result.Failures, mail.SyncCheckFailure{
 				Account: acct.Ref,
 				Code:    "account_degraded",
-				Message: "account is degraded: " + acct.DegradedReason,
+				Message: "account is degraded: " + acct.DegradedReason + "; remediation: " + acct.DegradedRemediation,
 			})
 			continue
 		}

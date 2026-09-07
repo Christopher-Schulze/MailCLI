@@ -33,6 +33,7 @@ type responseData struct {
 	Checks          []mail.Check            `json:"checks,omitempty"`
 	Timings         []mail.DiagnosticTiming `json:"timings,omitempty"`
 	Accounts        *[]mail.Account         `json:"accounts,omitempty"`
+	Complete        *bool                   `json:"complete,omitempty"`
 	Mailboxes       *[]mail.Mailbox         `json:"mailboxes,omitempty"`
 	Mailbox         *mail.Mailbox           `json:"mailbox,omitempty"`
 	Page            *responsePage           `json:"page,omitempty"`

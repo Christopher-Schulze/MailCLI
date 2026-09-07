@@ -94,7 +94,19 @@ func elapsedMilliseconds(started time.Time) float64 {
 }
 
 func (s *Service) ListAccounts(ctx context.Context) ([]Account, error) {
-	return s.gateway.ListAccounts(ctx)
+	catalog, err := s.ListAccountCatalog(ctx)
+	return catalog.Accounts, err
+}
+
+func (s *Service) ListAccountCatalog(ctx context.Context) (AccountCatalog, error) {
+	if reader, ok := s.gateway.(AccountCatalogReader); ok {
+		return reader.ListAccountCatalog(ctx)
+	}
+	accounts, err := s.gateway.ListAccounts(ctx)
+	if err != nil {
+		return AccountCatalog{}, err
+	}
+	return AccountCatalog{Accounts: accounts, Complete: true}, nil
 }
 
 func (s *Service) ListMailboxes(ctx context.Context, request ListMailboxesRequest) ([]Mailbox, error) {

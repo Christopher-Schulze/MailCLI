@@ -38,9 +38,11 @@ type Account struct {
 	Name           string   `json:"name"`
 	EmailAddresses []string `json:"email_addresses"`
 	// State is "ok" or "degraded"; degraded accounts carry a reason and
-	// keep empty identities rather than breaking the whole listing.
-	State          string `json:"state"`
-	DegradedReason string `json:"degraded_reason,omitempty"`
+	// keep empty identities rather than breaking the whole listing. The
+	// remediation tells callers how to restore a usable account state.
+	State               string `json:"state"`
+	DegradedReason      string `json:"degraded_reason,omitempty"`
+	DegradedRemediation string `json:"degraded_remediation,omitempty"`
 }
 
 type Mailbox struct {

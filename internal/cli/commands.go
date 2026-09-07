@@ -37,12 +37,14 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	accounts, err := service.ListAccounts(operationCtx)
+	catalog, err := service.ListAccountCatalog(operationCtx)
 	if err != nil {
 		return failCommand("accounts.list", *jsonOutput, err, stdout, stderr)
 	}
+	accounts := catalog.Accounts
+	complete := catalog.Complete && accountCatalogComplete(accounts)
 	if *jsonOutput {
-		return writeSuccess(stdout, "accounts.list", responseData{Accounts: &accounts})
+		return writeSuccess(stdout, "accounts.list", responseData{Accounts: &accounts, Complete: &complete})
 	}
 	rows := make([][]string, 0, len(accounts))
 	for _, account := range accounts {
@@ -53,11 +55,8 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 		rows = append(rows, []string{account.Ref, account.Name, emailList})
 	}
 	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES"}, rows) {
-		for _, account := range accounts {
-			if account.State == "degraded" {
-				writeFormat(stdout, "warning: account %s is degraded: %s\n", account.Ref, account.DegradedReason)
-			}
-		}
+		writeAccountCatalogStatus(stdout, complete)
+		writeAccountCatalogWarnings(stdout, accounts)
 		return 0
 	}
 	for _, account := range accounts {
@@ -67,7 +66,35 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 		}
 		writeFormat(stdout, "%s\n", line)
 	}
+	writeAccountCatalogStatus(stdout, complete)
+	writeAccountCatalogWarnings(stdout, accounts)
 	return 0
+}
+
+func accountCatalogComplete(accounts []mail.Account) bool {
+	for _, account := range accounts {
+		if account.State == "degraded" {
+			return false
+		}
+	}
+	return true
+}
+
+func writeAccountCatalogStatus(writer io.Writer, complete bool) {
+	writeFormat(writer, "complete\t%t\n", complete)
+}
+
+func writeAccountCatalogWarnings(writer io.Writer, accounts []mail.Account) {
+	for _, account := range accounts {
+		if account.State != "degraded" {
+			continue
+		}
+		writeFormat(
+			writer,
+			"warning: account %s is degraded: %s; remediation: %s\n",
+			account.Ref, account.DegradedReason, account.DegradedRemediation,
+		)
+	}
 }
 
 func runMailboxes(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

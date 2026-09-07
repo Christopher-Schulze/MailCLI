@@ -363,14 +363,18 @@ func TestClientListAccountsUsesStoreWithoutFallback(t *testing.T) {
 	}
 }
 
-func TestClientListAccountsFailsClosedWithoutStoreCatalog(t *testing.T) {
+func TestClientListAccountCatalogReportsMissingAccountCache(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	spy := &fallbackSpy{accounts: []mail.Account{{EmailAddresses: []string{"fallback@example.com"}}}}
 	client := &Client{store: store, fallback: spy}
-	_, err := client.ListAccounts(context.Background())
-	if errorCodeForTest(err) != "account_catalog_incomplete" {
-		t.Fatalf("ListAccounts() error = %v, want account_catalog_incomplete", err)
+	catalog, err := client.ListAccountCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountCatalog() error = %v", err)
+	}
+	if catalog.Complete || len(catalog.Accounts) != 1 || catalog.Accounts[0].State != "degraded" ||
+		catalog.Accounts[0].DegradedReason != "mailbox_cache_unreadable" {
+		t.Fatalf("ListAccountCatalog() = %+v, want one degraded account", catalog)
 	}
 	if spy.accountCalls != 0 {
 		t.Fatalf("fallback ListAccounts() calls = %d, want 0", spy.accountCalls)
@@ -390,7 +394,7 @@ func TestClientListAccountsFallsBackOnlyWhenStoreUnavailable(t *testing.T) {
 	}
 }
 
-func TestMutationDoesNotUseFallbackWhenStoreCatalogFails(t *testing.T) {
+func TestMutationUsesHealthyAccountWhenSiblingCatalogDegraded(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "identity@gmail.com")
@@ -423,17 +427,14 @@ func TestMutationDoesNotUseFallbackWhenStoreCatalogFails(t *testing.T) {
 	_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{
 		Ref: page.Messages[0].Ref, Read: &read, AllowDraftMutation: true,
 	})
-	if errorCodeForTest(err) != "account_catalog_incomplete" {
-		t.Fatalf("MarkMessage() error = %v, want account_catalog_incomplete", err)
-	}
-	if !strings.Contains(err.Error(), "mailcli doctor") {
-		t.Fatalf("MarkMessage() error = %v, want doctor remediation", err)
+	if err != nil {
+		t.Fatalf("MarkMessage() error = %v, want healthy account mutation to proceed", err)
 	}
 	if fallback.accountCalls != 0 {
 		t.Fatalf("fallback ListAccounts() calls = %d, want 0", fallback.accountCalls)
 	}
-	if fakeImap.mutationCalls != 0 {
-		t.Fatalf("IMAP mutation calls = %d, want 0", fakeImap.mutationCalls)
+	if fakeImap.mutationCalls != 1 {
+		t.Fatalf("IMAP mutation calls = %d, want 1", fakeImap.mutationCalls)
 	}
 }
 
@@ -1371,6 +1372,9 @@ func TestListAccountsDegradesSentEmptyAccount(t *testing.T) {
 		if account.DegradedReason != "no_provably_sent_identity" {
 			t.Fatalf("degraded reason = %q, want no_provably_sent_identity", account.DegradedReason)
 		}
+		if account.DegradedRemediation == "" {
+			t.Fatalf("degraded account has no remediation: %+v", account)
+		}
 		if len(account.EmailAddresses) != 0 {
 			t.Fatalf("degraded account carries identities: %+v", account)
 		}
@@ -1398,6 +1402,9 @@ func TestListAccountsDegradesUnreadableCache(t *testing.T) {
 	found := false
 	for _, account := range accounts {
 		if account.State == "degraded" && account.DegradedReason == "mailbox_cache_unreadable" {
+			if account.DegradedRemediation == "" {
+				t.Fatalf("degraded account has no remediation: %+v", account)
+			}
 			found = true
 		}
 	}
@@ -1426,6 +1433,9 @@ func TestListAccountsDegradesUnresolvedSpecialMailbox(t *testing.T) {
 	found := false
 	for _, account := range accounts {
 		if account.State == "degraded" && account.DegradedReason == "special_use_mailbox_unresolved" {
+			if account.DegradedRemediation == "" {
+				t.Fatalf("degraded account has no remediation: %+v", account)
+			}
 			found = true
 		}
 	}

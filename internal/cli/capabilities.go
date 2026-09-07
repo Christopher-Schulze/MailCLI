@@ -79,7 +79,7 @@ func capabilities() capabilityManifest {
 			read("version", "none", "none", "available"),
 			write("update", "local-write", "none", "none", "none", "updated", "up_to_date"),
 			read("doctor", "mail-store", "optional-automation", "healthy", "unhealthy"),
-			read("accounts.list", "mail-store", "fallback-automation", "complete"),
+			read("accounts.list", "mail-store", "fallback-automation", "complete", "partial"),
 			read("mailboxes.list", "mail-store", "none", "complete"),
 			read("mailboxes.resolve", "mail-store", "none", "resolved"),
 			read("messages.list", "mail-store", "fallback-automation", "complete"),

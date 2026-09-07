@@ -8,6 +8,7 @@ import (
 type Error struct {
 	Code    string
 	Message string
+	Err     error
 }
 
 func (e *Error) Error() string {
@@ -18,8 +19,16 @@ func (e *Error) ErrorCode() string {
 	return e.Code
 }
 
+func (e *Error) Unwrap() error {
+	return e.Err
+}
+
 func operationError(code string, message string) error {
-	return &Error{Code: code, Message: message}
+	return operationErrorWithCause(code, message, nil)
+}
+
+func operationErrorWithCause(code string, message string, cause error) error {
+	return &Error{Code: code, Message: message, Err: cause}
 }
 
 type hydrationError struct {
