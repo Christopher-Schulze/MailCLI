@@ -43,6 +43,8 @@ type fakeServerConfig struct {
 	deliverAfterFirstSearch bool
 	moveSupported           bool
 	uidExpungeSupported     bool
+	dropCopyResponse        bool
+	rejectStore             bool
 	initialDeletedUIDs      []uint32
 	fetchPayload            []byte
 	fetchResponseUID        uint32
@@ -541,6 +543,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 				if len(args) > 2 {
 					s.storeFlags = strings.Join(args[2:], " ")
 				}
+				s.mu.Unlock()
+				if s.config.rejectStore {
+					s.writeLine(bw, tag+" NO STORE rejected")
+					continue
+				}
+				s.mu.Lock()
 				if strings.Contains(strings.ToLower(strings.Join(args[2:], " ")), "\\deleted") {
 					s.deletedUIDs[uint32(uid)] = struct{}{}
 				}
@@ -577,7 +585,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.copyUID = uint32(uid)
 				s.copyDst = dst
 				s.mu.Unlock()
-				s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 1 %d 100] COPY completed", uid))
+				if s.config.dropCopyResponse {
+					s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] COPY completed", uid))
+					return
+				}
+				s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] COPY completed", uid))
 				s.writeLine(bw, tag+" OK COPY completed")
 			case "MOVE":
 				if !s.config.moveSupported {

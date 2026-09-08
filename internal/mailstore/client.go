@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 type Client struct {
@@ -25,6 +26,8 @@ type Client struct {
 	storeOpenDuration time.Duration
 	mailboxCacheMu    sync.Mutex
 	mailboxCache      map[string]mailboxCacheEntry
+	mutationMu        sync.Mutex
+	copyAttempts      map[string]transport.MutationEvidence
 }
 
 func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config, send mail.SendTransport) *Client {
@@ -34,6 +37,7 @@ func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config
 		store: store, storeErr: err, fallback: fallback, send: send,
 		storeOpenDuration: time.Since(started),
 		mailboxCache:      make(map[string]mailboxCacheEntry),
+		copyAttempts:      make(map[string]transport.MutationEvidence),
 	}
 }
 

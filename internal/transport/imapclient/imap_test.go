@@ -1103,13 +1103,43 @@ func TestCopyMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CopyMessage: %v", err)
 	}
-	if ev.Command != "COPY" || ev.UID != 42 || ev.Mailbox != "INBOX" || ev.TargetMailbox != "Archive" {
+	if ev.Command != "COPY" || ev.UID != 42 || ev.Mailbox != "INBOX" || ev.TargetMailbox != "Archive" ||
+		ev.Outcome != transport.MutationOutcomeCompleted || ev.CopyUIDValidity != 12345 ||
+		ev.CopySourceUID != 42 || ev.CopyDestinationUID != 100 || ev.DestinationUIDValidity != 12345 ||
+		ev.DestinationUID != 100 {
 		t.Fatalf("unexpected evidence: %+v", ev)
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	if !srv.copyCalled || srv.copyUID != 42 || srv.copyDst != "Archive" {
 		t.Fatalf("copy not recorded on server: called=%v, uid=%d, dst=%s", srv.copyCalled, srv.copyUID, srv.copyDst)
+	}
+}
+
+func TestCopyMessageResponseLossReturnsRecoverableEvidence(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX", "Archive"}, dropCopyResponse: true,
+	})
+	client, cfg := newFakeClient(t, srv)
+
+	ev, err := client.CopyMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	if transport.ErrorCode(err) != transport.CodeIMAPCopyOutcomeUnknown {
+		t.Fatalf("CopyMessage() error = %v, want %s", err, transport.CodeIMAPCopyOutcomeUnknown)
+	}
+	if ev.OperationID == "" || ev.SourceAccount != "user" || ev.Outcome != transport.MutationOutcomeUnknown ||
+		ev.Command != "COPY" || ev.Mailbox != "INBOX" || ev.TargetMailbox != "Archive" || ev.UID != 42 ||
+		ev.UIDValidity != 12345 || ev.ExpectedUIDValidity != 12345 {
+		t.Fatalf("unexpected recoverable evidence: %+v", ev)
+	}
+	var outcomeErr *transport.MutationOutcomeError
+	if !errors.As(err, &outcomeErr) || outcomeErr.Evidence.OperationID != ev.OperationID {
+		t.Fatalf("error evidence = %+v, want operation %q", outcomeErr, ev.OperationID)
+	}
+	srv.mu.Lock()
+	copyCalled := srv.copyCalled
+	srv.mu.Unlock()
+	if !copyCalled {
+		t.Fatal("server did not record COPY before response loss")
 	}
 }
 
@@ -1130,7 +1160,9 @@ func TestMoveMessageNative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveMessage native: %v", err)
 	}
-	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" {
+	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" ||
+		ev.OperationID == "" || ev.Outcome != transport.MutationOutcomeCompleted ||
+		len(ev.CompletedEffects) != 1 || ev.CompletedEffects[0] != "move" {
 		t.Fatalf("unexpected evidence: %+v", ev)
 	}
 	srv.mu.Lock()
@@ -1158,7 +1190,10 @@ func TestMoveMessageFallback(t *testing.T) {
 		t.Fatalf("MoveMessage fallback: %v", err)
 	}
 	if ev.Command != "MOVE" || ev.UID != 42 || ev.TargetMailbox != "Archive" ||
-		ev.ExpungeBranch != "deferred" || ev.ForeignDeletedCount != 0 {
+		ev.Outcome != transport.MutationOutcomeCompleted || ev.ExpungeBranch != "deferred" ||
+		ev.ForeignDeletedCount != 0 || len(ev.CompletedEffects) != 3 ||
+		ev.CompletedEffects[0] != "copy" || ev.CompletedEffects[1] != "source_flag" ||
+		ev.CompletedEffects[2] != "cleanup_deferred" {
 		t.Fatalf("unexpected evidence: %+v", ev)
 	}
 	srv.mu.Lock()
@@ -1169,6 +1204,30 @@ func TestMoveMessageFallback(t *testing.T) {
 	}
 	if deleted := srv.DeletedUIDs(); len(deleted) != 1 || deleted[0] != 42 {
 		t.Fatalf("deferred cleanup lost deleted UID state: %v", deleted)
+	}
+}
+
+func TestMoveMessageFallbackReportsCopyWhenStoreRejected(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX", "Archive"},
+		moveSupported: false, rejectStore: true,
+	})
+	client, cfg := newFakeClient(t, srv)
+
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
+		t.Fatalf("MoveMessage() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
+	}
+	if ev.Outcome != transport.MutationOutcomePartial || len(ev.CompletedEffects) != 1 || ev.CompletedEffects[0] != "copy" ||
+		ev.CopyDestinationUID != 100 || ev.CopyUIDValidity != 12345 {
+		t.Fatalf("unexpected partial evidence: %+v", ev)
+	}
+	var outcomeErr *transport.MutationOutcomeError
+	if !errors.As(err, &outcomeErr) || outcomeErr.Evidence.CompletedEffects[0] != "copy" {
+		t.Fatalf("error evidence = %+v", outcomeErr)
+	}
+	if deleted := srv.DeletedUIDs(); len(deleted) != 0 {
+		t.Fatalf("rejected STORE changed source flags: %v", deleted)
 	}
 }
 
@@ -1183,7 +1242,9 @@ func TestMoveMessageFallbackUsesUIDExpunge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveMessage UID EXPUNGE fallback: %v", err)
 	}
-	if ev.ExpungeBranch != "uid_expunge" || ev.ForeignDeletedCount != 0 {
+	if ev.Outcome != transport.MutationOutcomeCompleted || ev.ExpungeBranch != "uid_expunge" ||
+		ev.ForeignDeletedCount != 0 || len(ev.CompletedEffects) != 3 ||
+		ev.CompletedEffects[2] != "uid_expunge" {
 		t.Fatalf("unexpected UID EXPUNGE evidence: %+v", ev)
 	}
 	srv.mu.Lock()
