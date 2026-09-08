@@ -200,7 +200,9 @@ type DraftSummary struct {
 }
 
 // DraftSendAttemptSummary is the metadata-only list projection of SendAttempt.
-// Materialized content is intentionally excluded.
+// Materialized content is intentionally excluded. AcceptedByMail and
+// SentStoreObserved remain compatibility aliases; use SubmissionAccepted and
+// SentCopyObserved for precise send evidence.
 type DraftSendAttemptSummary struct {
 	ID                  string                   `json:"id"`
 	StartedAt           time.Time                `json:"started_at"`
@@ -211,7 +213,9 @@ type DraftSendAttemptSummary struct {
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`
+	SubmissionAccepted  bool                     `json:"submission_accepted"`
 	SentStoreObserved   bool                     `json:"sent_store_observed"`
+	SentCopyObserved    bool                     `json:"sent_copy_observed"`
 	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
 	ObservationBaseline *SendObservationBaseline `json:"observation_baseline,omitempty"`
 	Transport           *TransportEvidence       `json:"transport,omitempty"`
@@ -279,7 +283,8 @@ type SendAttempt struct {
 
 // TransportEvidence records the deterministic proof of a direct SMTP
 // submission and its Sent-mailbox mirror. ServerResponse is the final SMTP
-// response line, MessageID the submitted Message-ID, MirrorMailbox the Sent
+// response line, SubmissionAccepted records that final 2yz response after
+// DATA, MessageID the submitted Message-ID, MirrorMailbox the Sent
 // mailbox holding the message, MirrorAttemptID identifies the latest durable
 // mirror boundary, MirrorAttempted records that boundary, and
 // MirrorOutcomeUnknown forbids replay after an ambiguous APPEND.
@@ -287,6 +292,7 @@ type TransportEvidence struct {
 	ServerResponse       string `json:"server_response,omitempty"`
 	MessageID            string `json:"message_id,omitempty"`
 	SubmissionStage      string `json:"submission_stage,omitempty"`
+	SubmissionAccepted   bool   `json:"submission_accepted,omitempty"`
 	MirrorMailbox        string `json:"mirror_mailbox,omitempty"`
 	MirrorUIDValidity    uint32 `json:"mirror_uidvalidity,omitempty"`
 	MirrorUID            uint32 `json:"mirror_uid,omitempty"`
@@ -317,7 +323,8 @@ type SendEvidence struct {
 
 // SendReceipt is the compact terminal proof retained after a successfully
 // observed send has removed the local draft and transient send claim. It never
-// contains message bodies or attachment bytes.
+// contains message bodies or attachment bytes. Accepted remains a compatibility
+// alias; the canonical fields separate SMTP submission from Sent persistence.
 type SendReceipt struct {
 	DraftRef           string      `json:"draft_ref"`
 	AttemptID          string      `json:"attempt_id"`
@@ -326,6 +333,8 @@ type SendReceipt struct {
 	ExpiresAt          time.Time   `json:"expires_at"`
 	Outcome            SendOutcome `json:"outcome"`
 	Accepted           bool        `json:"accepted"`
+	SubmissionAccepted bool        `json:"submission_accepted"`
+	SentCopyObserved   bool        `json:"sent_copy_observed"`
 	ObservedMessageRef string      `json:"observed_message_ref,omitempty"`
 	MessageID          string      `json:"message_id,omitempty"`
 	ServerResponse     string      `json:"server_response,omitempty"`
@@ -354,14 +363,18 @@ type DraftSaveEvidence struct {
 	Materialized        *SendMaterialization
 }
 
+// SendResult keeps the legacy Accepted/AcceptedByMail aliases while exposing
+// the separate SMTP submission and Sent-copy evidence boundaries.
 type SendResult struct {
 	DraftRef           string       `json:"draft_ref"`
 	AttemptID          string       `json:"attempt_id"`
 	Outcome            SendOutcome  `json:"outcome"`
 	Accepted           bool         `json:"accepted"`
+	SubmissionAccepted bool         `json:"submission_accepted"`
 	InvocationStarted  bool         `json:"invocation_started"`
 	AcceptedByMail     bool         `json:"accepted_by_mail"`
 	SentStoreObserved  bool         `json:"sent_store_observed"`
+	SentCopyObserved   bool         `json:"sent_copy_observed"`
 	ObservedMessageRef string       `json:"observed_message_ref,omitempty"`
 	DraftRetained      bool         `json:"draft_retained"`
 	Replayed           bool         `json:"replayed"`

@@ -149,7 +149,9 @@ func draftSendAttemptSummaryFrom(attempt *SendAttempt) *DraftSendAttemptSummary 
 		Outcome:             attempt.Outcome,
 		InvocationStarted:   attempt.InvocationStarted,
 		AcceptedByMail:      attempt.AcceptedByMail,
+		SubmissionAccepted:  submissionAcceptedForAttempt(*attempt),
 		SentStoreObserved:   attempt.SentStoreObserved,
+		SentCopyObserved:    attempt.SentStoreObserved,
 		ObservedMessageRef:  attempt.ObservedMessageRef,
 		ObservationBaseline: cloneSendObservationBaseline(attempt.ObservationBaseline),
 	}
