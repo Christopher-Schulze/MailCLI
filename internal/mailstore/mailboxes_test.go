@@ -5,7 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -405,35 +405,114 @@ func TestFindMailboxRecordUsesCachedPathKey(t *testing.T) {
 	}
 }
 
-func TestListMailboxesSortOrderByAccountThenPath(t *testing.T) {
+func TestListMailboxesSortKeepsValuesWithKeys(t *testing.T) {
 	t.Parallel()
-	// Test the sort key pre-computation logic directly, since the full
-	// ListMailboxes path requires a mailbox cache fixture.
-	type keyed struct {
-		key string
-		mbx mail.Mailbox
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	otherAccountID := "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF"
+	otherAccount, err := parseAccountRoot("imap://" + otherAccountID + "/")
+	if err != nil {
+		t.Fatalf("parseAccountRoot() error = %v", err)
 	}
-	items := []keyed{
-		{key: "acct_b\x00INBOX", mbx: mail.Mailbox{AccountRef: "acct_b", Path: []string{"INBOX"}}},
-		{key: "acct_a\x00Sent", mbx: mail.Mailbox{AccountRef: "acct_a", Path: []string{"Sent"}}},
-		{key: "acct_a\x00INBOX", mbx: mail.Mailbox{AccountRef: "acct_a", Path: []string{"INBOX"}}},
-		{key: "acct_b\x00Archive", mbx: mail.Mailbox{AccountRef: "acct_b", Path: []string{"Archive"}}},
-		{key: "acct_a\x00Drafts", mbx: mail.Mailbox{AccountRef: "acct_a", Path: []string{"Drafts"}}},
+	store.activeAccountKeys[otherAccount.rootKey()] = struct{}{}
+	writer := openTestWriter(t, store.databasePath)
+	if _, err := writer.Exec(
+		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES
+			(3,'imap://` + otherAccountID + `/INBOX',7,1,0,1),
+			(4,'imap://` + otherAccountID + `/Parent/Child',9,2,0,1)`,
+	); err != nil {
+		closeTestResourceNow(t, writer, "mailbox sort fixture writer")
+		t.Fatalf("insert mailbox sort fixture rows: %v", err)
 	}
-	sort.Slice(items, func(left int, right int) bool {
-		return items[left].key < items[right].key
-	})
-	want := []string{
-		"acct_a/Drafts",
-		"acct_a/INBOX",
-		"acct_a/Sent",
-		"acct_b/Archive",
-		"acct_b/INBOX",
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close mailbox sort fixture writer: %v", err)
 	}
-	for i, wantPath := range want {
-		gotPath := items[i].mbx.AccountRef + "/" + strings.Join(items[i].mbx.Path, "/")
-		if gotPath != wantPath {
-			t.Fatalf("items[%d] = %q, want %q", i, gotPath, wantPath)
+
+	writeCache := func(accountID, cache string) {
+		t.Helper()
+		accountRoot := filepath.Join(store.versionRoot, accountID)
+		if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", accountID, err)
 		}
+		if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), []byte(cache), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", accountID, err)
+		}
+	}
+	firstCache := `<?xml version="1.0"?><plist version="1.0"><dict><key>mboxes</key><dict>` +
+		`<key>zulu</key><dict><key>MailboxPathComponent</key><string>Zulu</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+		`<key>alpha</key><dict><key>MailboxPathComponent</key><string>Alpha</string><key>MailboxUnreadCount</key><integer>2</integer>` +
+		`<key>IMAPMailboxChildren</key><dict><key>child</key><dict><key>MailboxPathComponent</key><string>Child</string>` +
+		`<key>MailboxUnreadCount</key><integer>5</integer><key>IMAPMailboxChildren</key><dict/></dict></dict></dict>` +
+		`<key>middle</key><dict><key>MailboxPathComponent</key><string>Middle</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+		`</dict></dict></plist>`
+	secondCache := `<?xml version="1.0"?><plist version="1.0"><dict><key>mboxes</key><dict>` +
+		`<key>shared</key><dict><key>MailboxPathComponent</key><string>Shared</string><key>MailboxUnreadCount</key><integer>6</integer>` +
+		`<key>IMAPMailboxChildren</key><dict/></dict>` +
+		`<key>parent</key><dict><key>MailboxPathComponent</key><string>Parent</string><key>IMAPMailboxChildren</key><dict>` +
+		`<key>child</key><dict><key>MailboxPathComponent</key><string>Child</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+		`</dict></dict>` +
+		`<key>inbox</key><dict><key>MailboxPathComponent</key><string>INBOX</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+		`</dict></dict></plist>`
+	writeCache(testAccountID, firstCache)
+	writeCache(otherAccountID, secondCache)
+
+	mailboxes, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{})
+	if err != nil {
+		t.Fatalf("ListMailboxes() error = %v", err)
+	}
+	again, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{})
+	if err != nil {
+		t.Fatalf("second ListMailboxes() error = %v", err)
+	}
+	if !reflect.DeepEqual(mailboxes, again) {
+		t.Fatalf("repeated ListMailboxes() changed output: first=%+v second=%+v", mailboxes, again)
+	}
+	type expectedMailbox struct {
+		name           string
+		unreadCount    int
+		messageCount   int
+		localAvailable bool
+	}
+	expected := make(map[string]expectedMailbox)
+	addExpected := func(accountID string, path []string, value expectedMailbox) {
+		t.Helper()
+		accountRef, err := mailref.EncodeAccount(accountID)
+		if err != nil {
+			t.Fatalf("EncodeAccount(%s) error = %v", accountID, err)
+		}
+		expected[accountRef+"\x00"+strings.Join(path, "\x00")] = value
+	}
+	addExpected(testAccountID, []string{"All"}, expectedMailbox{name: "All", messageCount: 1, localAvailable: true})
+	addExpected(testAccountID, []string{"Alpha"}, expectedMailbox{name: "Alpha", unreadCount: 2})
+	addExpected(testAccountID, []string{"Alpha", "Child"}, expectedMailbox{name: "Child", unreadCount: 5})
+	addExpected(testAccountID, []string{"INBOX"}, expectedMailbox{name: "INBOX", messageCount: 3, localAvailable: true})
+	addExpected(testAccountID, []string{"Middle"}, expectedMailbox{name: "Middle"})
+	addExpected(testAccountID, []string{"Zulu"}, expectedMailbox{name: "Zulu"})
+	addExpected(otherAccountID, []string{"INBOX"}, expectedMailbox{name: "INBOX", unreadCount: 1, messageCount: 7, localAvailable: true})
+	addExpected(otherAccountID, []string{"Parent"}, expectedMailbox{name: "Parent"})
+	addExpected(otherAccountID, []string{"Parent", "Child"}, expectedMailbox{name: "Child", unreadCount: 2, messageCount: 9, localAvailable: true})
+	addExpected(otherAccountID, []string{"Shared"}, expectedMailbox{name: "Shared", unreadCount: 6})
+	if len(mailboxes) != len(expected) {
+		t.Fatalf("ListMailboxes() returned %d entries, want %d: %+v", len(mailboxes), len(expected), mailboxes)
+	}
+	var previousKey string
+	for index, mailbox := range mailboxes {
+		key := mailbox.AccountRef + "\x00" + strings.Join(mailbox.Path, "\x00")
+		if index > 0 && key <= previousKey {
+			t.Fatalf("mailboxes[%d] sort key = %q, previous = %q", index, key, previousKey)
+		}
+		previousKey = key
+		want, ok := expected[key]
+		if !ok {
+			t.Fatalf("mailboxes[%d] = %+v, unexpected identity %q", index, mailbox, key)
+		}
+		if mailbox.Name != want.name || mailbox.UnreadCount != want.unreadCount ||
+			mailbox.MessageCount != want.messageCount || mailbox.LocalMessagesAvailable != want.localAvailable {
+			t.Fatalf("mailboxes[%d] = %+v, want %+v", index, mailbox, want)
+		}
+		delete(expected, key)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("ListMailboxes() omitted identities: %v", expected)
 	}
 }
