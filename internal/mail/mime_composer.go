@@ -80,7 +80,8 @@ func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error
 
 func ComposeMessageSpoolContext(ctx context.Context, draft Draft, messageID string) (*ComposedMessage, error) {
 	return composeMessageSpoolContext(ctx, draft, messageID, func(path string) (io.ReadCloser, error) {
-		return os.Open(path)
+		file, _, err := openRegularAttachment(path)
+		return file, err
 	})
 }
 

@@ -45,7 +45,7 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard|prune> [options]")
 		return 0
 	case "create":
-		return runDraftCreate(service, args[1:], stdout, stderr)
+		return runDraftCreateContext(ctx, service, args[1:], stdout, stderr)
 	case "list":
 		return runDraftList(service, args[1:], stdout, stderr)
 	case "inspect":
@@ -149,6 +149,10 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 }
 
 func runDraftCreate(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	return runDraftCreateContext(context.Background(), service, args, stdout, stderr)
+}
+
+func runDraftCreateContext(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts create", stderr)
 	inputFlags := registerDraftInputFlags(flags)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -159,7 +163,7 @@ func runDraftCreate(service *mail.Service, args []string, stdout io.Writer, stde
 	if err != nil {
 		return failCommand("drafts.create", *jsonOutput, err, stdout, stderr)
 	}
-	draft, err := service.CreateDraft(mail.CreateDraftRequest{Kind: mail.DraftKindNew, Input: input})
+	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{Kind: mail.DraftKindNew, Input: input})
 	if err != nil {
 		return failCommand("drafts.create", *jsonOutput, err, stdout, stderr)
 	}
@@ -451,7 +455,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	if err != nil {
 		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
 	}
-	draft, err := service.CreateDraft(mail.CreateDraftRequest{
+	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{
 		Kind: kind, SourceRef: *messageRef, ReplyAll: replyAll, Input: derived,
 		SourceMessageID: sourceMessageID, SourceReferences: references,
 	})

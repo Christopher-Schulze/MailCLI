@@ -582,7 +582,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: "direct SMTP send is unavailable because no send transport is configured",
 		}
 	}
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
+	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return result, err
 	}
 	identity, err := s.resolveSendIdentity(ctx, draft)
