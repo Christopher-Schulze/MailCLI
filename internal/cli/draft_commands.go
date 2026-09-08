@@ -15,7 +15,7 @@ const (
 	draftUpdateTimeout     = 15 * time.Second
 	draftDiscardTimeout    = 15 * time.Second
 	draftPruneTimeout      = 2 * time.Minute
-	draftReconcileTimeout  = 15 * time.Second
+	draftReconcileTimeout  = draftSendTimeout
 	draftSaveTimeout       = 2 * time.Minute
 	draftSendTimeout       = 15 * time.Minute
 	pruneDayDuration       = 24 * time.Hour

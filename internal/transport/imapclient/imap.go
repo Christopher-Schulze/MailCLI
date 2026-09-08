@@ -40,6 +40,7 @@ import (
 
 const (
 	flagSeen                 = "\\Seen"
+	imapDialTimeout          = 10 * time.Second
 	maxIMAPResponseLineBytes = 1 << 20
 	maxListLiteralBytes      = 1 << 20
 	maxListResponseBytes     = 8 << 20
@@ -273,7 +274,7 @@ func (c *Client) dial(ctx context.Context, cfg transport.ImapConfig) (net.Conn, 
 
 	tlsCfg := c.tlsConfig(host)
 	d := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: 10 * time.Second},
+		NetDialer: &net.Dialer{Timeout: imapDialTimeout},
 		Config:    tlsCfg,
 	}
 	conn, err := d.DialContext(ctx, "tcp", addr)
@@ -438,6 +439,9 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		}
 	}
 
+	if err := c.setTransferDeadline(ctx, sess, size); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND transfer deadline")
+	}
 	written, err := io.Copy(sess.bw, msg)
 	if err != nil {
 		sess.dirty = true
@@ -458,6 +462,9 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF"))
 	}
 
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND final reply deadline"))
+	}
 	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return appendOutcomeUnknown(err)
@@ -488,11 +495,19 @@ func (c *Client) doLogout(ctx context.Context, sess *session, tag string) error 
 }
 
 func (c *Client) setDeadline(ctx context.Context, sess *session) error {
+	return c.setDeadlineFor(ctx, sess, transport.TransferCommandBudget)
+}
+
+func (c *Client) setTransferDeadline(ctx context.Context, sess *session, size int64) error {
+	return c.setDeadlineFor(ctx, sess, transport.TransferBudgetForSize(size))
+}
+
+func (c *Client) setDeadlineFor(ctx context.Context, sess *session, budget time.Duration) error {
 	if err := ctx.Err(); err != nil {
 		sess.dirty = true
 		return err
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(budget)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
