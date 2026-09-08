@@ -176,6 +176,26 @@ func TestHTMLToTextPreservesReadableLayout(t *testing.T) {
 	}
 }
 
+func TestHTMLToTextPreservesSemanticContent(t *testing.T) {
+	source := `<p>Read <a href="https://example.com/report">report</a></p>` +
+		`<pre>  first` + "\n" + `    second</pre>` +
+		`<ul><li>One<ul><li>Nested</li></ul></li></ul>` +
+		`<table><tr><th>Item</th><th>Qty</th></tr><tr><td>12</td><td>34</td></tr></table>`
+	want := "Read report (https://example.com/report)\n  first\n    second\n- One\n  - Nested\n| Item | Qty |\n| 12 | 34 |"
+	if got := htmlToText([]byte(source)); got != want {
+		t.Fatalf("htmlToText() = %q, want %q", got, want)
+	}
+	document, err := parseMIMEDocument(strings.NewReader(
+		"Content-Type: text/html; charset=utf-8\r\n\r\n"+source,
+	), false, false, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	if document.Content != want {
+		t.Fatalf("parseMIMEDocument().Content = %q, want %q", document.Content, want)
+	}
+}
+
 func TestCollapseSearchText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

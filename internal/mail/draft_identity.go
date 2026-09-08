@@ -335,7 +335,7 @@ func validateMIMEText(data []byte) ([]byte, error) {
 func normalizeMIMEText(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
-	return strings.TrimSpace(value)
+	return strings.Trim(value, "\n")
 }
 
 func canonicalDraftAddress(value string) string {

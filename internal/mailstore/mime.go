@@ -17,8 +17,6 @@ import (
 
 	"github.com/emersion/go-message"
 	messageMail "github.com/emersion/go-message/mail"
-	"golang.org/x/net/html"
-
 	"mailcli/internal/mail"
 )
 
@@ -232,7 +230,7 @@ func parseMIMEEntity(
 	rank := mimeTextPlain
 	var text string
 	if mediaType == "text/html" {
-		text = strings.TrimSpace(htmlToText(body))
+		text = htmlToText(body)
 		rank = mimeTextHTML
 	} else {
 		text = strings.TrimSpace(string(body))
@@ -445,48 +443,11 @@ func firstFormattedAddress(header *messageMail.Header, key string) (string, bool
 }
 
 func htmlToText(source []byte) string {
-	tokenizer := html.NewTokenizer(bytes.NewReader(source))
-	var output strings.Builder
-	output.Grow(len(source) / 2)
-	skipDepth := 0
-	breakPending := false
-	for {
-		switch tokenType := tokenizer.Next(); tokenType {
-		case html.ErrorToken:
-			return normalizeTextLayout(output.String())
-		case html.StartTagToken, html.SelfClosingTagToken:
-			name := htmlTagName(tokenizer.Raw())
-			skipped := isHTMLTag(name, "script") || isHTMLTag(name, "style")
-			if skipped && tokenType == html.StartTagToken {
-				skipDepth++
-			}
-			if skipDepth == 0 && isBlockTag(name) && output.Len() > 0 {
-				breakPending = true
-			}
-		case html.EndTagToken:
-			name := htmlTagName(tokenizer.Raw())
-			if isHTMLTag(name, "script") || isHTMLTag(name, "style") {
-				if skipDepth > 0 {
-					skipDepth--
-				}
-				continue
-			}
-			if skipDepth == 0 && isBlockTag(name) && output.Len() > 0 {
-				breakPending = true
-			}
-		case html.TextToken:
-			if skipDepth == 0 {
-				text := tokenizer.Text()
-				if breakPending && hasVisibleText(text) {
-					output.WriteByte('\n')
-					breakPending = false
-				}
-				if !breakPending {
-					output.Write(text)
-				}
-			}
-		}
-	}
+	return mail.HTMLToPlainText(source)
+}
+
+func isASCIIWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'
 }
 
 func hasVisibleText(value []byte) bool {
@@ -506,50 +467,6 @@ func hasVisibleText(value []byte) bool {
 		i += size
 	}
 	return false
-}
-
-func htmlTagName(raw []byte) []byte {
-	if len(raw) < 3 || raw[0] != '<' {
-		return nil
-	}
-	index := 1
-	if raw[index] == '/' {
-		index++
-	}
-	for index < len(raw) && isASCIIWhitespace(raw[index]) {
-		index++
-	}
-	start := index
-	for index < len(raw) && !isASCIIWhitespace(raw[index]) && raw[index] != '/' && raw[index] != '>' {
-		index++
-	}
-	return raw[start:index]
-}
-
-func isBlockTag(name []byte) bool {
-	return isHTMLTag(name, "br") || isHTMLTag(name, "div") ||
-		isHTMLTag(name, "h1") || isHTMLTag(name, "h2") || isHTMLTag(name, "h3") ||
-		isHTMLTag(name, "h4") || isHTMLTag(name, "h5") || isHTMLTag(name, "h6") ||
-		isHTMLTag(name, "li") || isHTMLTag(name, "p") || isHTMLTag(name, "tr")
-}
-
-func isHTMLTag(name []byte, target string) bool {
-	if len(name) != len(target) {
-		return false
-	}
-	for index, character := range name {
-		if character >= 'A' && character <= 'Z' {
-			character += 'a' - 'A'
-		}
-		if character != target[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func isASCIIWhitespace(value byte) bool {
-	return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'
 }
 
 func normalizeTextLayout(value string) string {
