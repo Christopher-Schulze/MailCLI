@@ -484,18 +484,39 @@ type SyncCheckFailure struct {
 	Message string `json:"message"`
 }
 
+type HydrationState string
+
+const (
+	HydrationStateFailed   HydrationState = "failed"
+	HydrationStateCanceled HydrationState = "canceled"
+)
+
+type HydrationCause struct {
+	Code    string `json:"code"`
+	Message string `json:"message,omitempty"`
+}
+
+type HydrationDiagnostic struct {
+	State           HydrationState  `json:"state"`
+	AttemptedSource string          `json:"attempted_source"`
+	Local           *HydrationCause `json:"local,omitempty"`
+	Remote          *HydrationCause `json:"remote,omitempty"`
+	Remediation     string          `json:"remediation"`
+}
+
 type Message struct {
-	Summary         MessageSummary `json:"summary"`
-	ReplyTo         string         `json:"reply_to"`
-	To              []Recipient    `json:"to"`
-	CC              []Recipient    `json:"cc"`
-	BCC             []Recipient    `json:"bcc"`
-	Headers         string         `json:"headers"`
-	Content         string         `json:"content"`
-	ContentSource   string         `json:"content_source"`
-	ContentComplete bool           `json:"content_complete"`
-	MissingParts    []string       `json:"missing_parts"`
-	Attachments     []Attachment   `json:"attachments"`
+	Summary         MessageSummary       `json:"summary"`
+	ReplyTo         string               `json:"reply_to"`
+	To              []Recipient          `json:"to"`
+	CC              []Recipient          `json:"cc"`
+	BCC             []Recipient          `json:"bcc"`
+	Headers         string               `json:"headers"`
+	Content         string               `json:"content"`
+	ContentSource   string               `json:"content_source"`
+	ContentComplete bool                 `json:"content_complete"`
+	MissingParts    []string             `json:"missing_parts"`
+	Hydration       *HydrationDiagnostic `json:"hydration,omitempty"`
+	Attachments     []Attachment         `json:"attachments"`
 }
 
 type MessagePage struct {
