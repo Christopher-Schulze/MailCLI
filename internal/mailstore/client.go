@@ -308,40 +308,52 @@ func (c *Client) SaveAttachmentTo(
 	attachmentID string,
 	outputPath string,
 ) error {
+	_, err := c.SaveAttachmentToWithEvidence(ctx, messageRef, attachmentID, outputPath)
+	return err
+}
+
+func (c *Client) SaveAttachmentToWithEvidence(
+	ctx context.Context,
+	messageRef string,
+	attachmentID string,
+	outputPath string,
+) (mail.AttachmentEvidence, error) {
 	var localErr error
 	if c.store != nil {
-		err := c.store.SaveAttachmentTo(ctx, messageRef, attachmentID, outputPath)
+		evidence, err := c.store.saveAttachmentToWithEvidence(ctx, messageRef, attachmentID, outputPath)
 		if err == nil {
-			return nil
+			return evidence, nil
 		}
 		if !safeTargetedFallback(err) {
-			return err
+			return mail.AttachmentEvidence{}, err
 		}
 		localErr = err
 		// Local materialization beats hydration: if Mail stored the
 		// attachment as an external file, copying it needs no IMAP traffic
 		// even when the .emlx source is partial or missing.
-		saved, materializedErr := c.store.saveMaterializedAttachment(ctx, messageRef, attachmentID, outputPath)
+		evidence, saved, materializedErr := c.store.saveMaterializedAttachmentWithEvidence(
+			ctx, messageRef, attachmentID, outputPath,
+		)
 		if materializedErr != nil {
-			return materializedErr
+			return mail.AttachmentEvidence{}, materializedErr
 		}
 		if saved {
-			return nil
+			return evidence, nil
 		}
 	}
 	if c.send.ImapClient() != nil {
 		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, true)
 		if rawErr != nil {
-			return newHydrationError("save attachment", localErr, rawErr)
+			return mail.AttachmentEvidence{}, newHydrationError("save attachment", localErr, rawErr)
 		}
 		if len(rawBytes) > 0 {
-			return extractMIMEAttachment(bytes.NewReader(rawBytes), attachmentID, outputPath)
+			return extractMIMEAttachmentWithEvidence(bytes.NewReader(rawBytes), attachmentID, outputPath)
 		}
 	}
 	if localErr != nil {
-		return localErr
+		return mail.AttachmentEvidence{}, localErr
 	}
-	return c.readUnavailableError()
+	return mail.AttachmentEvidence{}, c.readUnavailableError()
 }
 
 func (c *Client) SaveDraft(ctx context.Context, _ mail.Draft) (mail.MessageSummary, error) {

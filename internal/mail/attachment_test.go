@@ -2,6 +2,8 @@ package mail
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,11 +13,46 @@ import (
 
 type attachmentGateway struct {
 	gatewayStub
+	content       []byte
+	afterEvidence func(string) error
+}
+
+type legacyAttachmentGateway struct {
+	gatewayStub
 	content []byte
 }
 
 func (g *attachmentGateway) SaveAttachmentTo(_ context.Context, _ string, _ string, path string) error {
 	return os.WriteFile(path, g.content, 0o644)
+}
+
+func (g *legacyAttachmentGateway) SaveAttachmentTo(_ context.Context, _ string, _ string, path string) error {
+	return os.WriteFile(path, g.content, 0o644)
+}
+
+func (g *attachmentGateway) SaveAttachmentToWithEvidence(
+	_ context.Context,
+	_ string,
+	_ string,
+	path string,
+) (AttachmentEvidence, error) {
+	if err := os.WriteFile(path, g.content, 0o644); err != nil {
+		return AttachmentEvidence{}, err
+	}
+	digest := sha256.Sum256(g.content)
+	identity, err := os.Lstat(path)
+	if err != nil {
+		return AttachmentEvidence{}, err
+	}
+	if g.afterEvidence != nil {
+		if err := g.afterEvidence(path); err != nil {
+			return AttachmentEvidence{}, err
+		}
+	}
+	return AttachmentEvidence{
+		Path: path, Size: int64(len(g.content)), SHA256: hex.EncodeToString(digest[:]),
+		Identity: identity,
+	}, nil
 }
 
 func TestSaveAttachmentPublishesExactPrivateFile(t *testing.T) {
@@ -197,6 +234,89 @@ func TestSaveAttachmentUsesVerifiedCopyWhenLinkCrossesFilesystem(t *testing.T) {
 		t.Fatalf("saved.Size = %d, want %d", saved.Size, len(content))
 	}
 	assertAttachmentFile(t, output, content, 0o600)
+}
+
+func TestSaveAttachmentReusesGatewayEvidenceWithoutInspectionRead(t *testing.T) {
+	var readBytes int64
+	previous := attachmentPublicationReadHook
+	attachmentPublicationReadHook = func(bytes int64) { readBytes += bytes }
+	t.Cleanup(func() { attachmentPublicationReadHook = previous })
+
+	content := []byte("verified without a second publication read")
+	output := filepath.Join(t.TempDir(), "report.pdf")
+	if _, err := NewService(&attachmentGateway{content: content}).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	); err != nil {
+		t.Fatalf("SaveAttachment() error = %v", err)
+	}
+	if readBytes != 0 {
+		t.Fatalf("publication inspection read %d bytes, want zero", readBytes)
+	}
+}
+
+func TestSaveAttachmentKeepsLegacyGatewayInspectionFallback(t *testing.T) {
+	var readBytes int64
+	previous := attachmentPublicationReadHook
+	attachmentPublicationReadHook = func(bytes int64) { readBytes += bytes }
+	t.Cleanup(func() { attachmentPublicationReadHook = previous })
+
+	content := []byte("legacy gateway attachment")
+	output := filepath.Join(t.TempDir(), "report.pdf")
+	saved, err := NewService(&legacyAttachmentGateway{content: content}).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	)
+	if err != nil {
+		t.Fatalf("SaveAttachment() error = %v", err)
+	}
+	if readBytes != int64(len(content)) {
+		t.Fatalf("publication inspection read %d bytes, want %d", readBytes, len(content))
+	}
+	digest := sha256.Sum256(content)
+	if saved.Size != int64(len(content)) || saved.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("saved = %+v, want size %d and sha256 %s", saved, len(content), hex.EncodeToString(digest[:]))
+	}
+}
+
+func TestSaveAttachmentRejectsEvidenceAfterTemporaryReplacement(t *testing.T) {
+	directory := t.TempDir()
+	output := filepath.Join(directory, "report.pdf")
+	replacement := []byte("changed!")
+	gateway := &attachmentGateway{content: []byte("original")}
+	gateway.afterEvidence = func(path string) error {
+		if err := os.Rename(path, path+".original"); err != nil {
+			return err
+		}
+		return os.WriteFile(path, replacement, 0o644)
+	}
+
+	_, err := NewService(gateway).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	)
+	if errorCode(err) != "attachment_changed" {
+		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
+	}
+	entries, readErr := os.ReadDir(directory)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error = %v", readErr)
+	}
+	found := false
+	for _, entry := range entries {
+		candidate := filepath.Join(directory, entry.Name())
+		content, candidateErr := os.ReadFile(candidate)
+		if candidateErr == nil && string(content) == string(replacement) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("temporary replacement was removed")
+	}
 }
 
 func TestSaveAttachmentRejectsUnprivatePublishedFile(t *testing.T) {

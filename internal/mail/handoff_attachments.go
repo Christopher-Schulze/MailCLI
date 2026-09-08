@@ -13,7 +13,10 @@ import (
 	"strings"
 )
 
-var removeHandoffSnapshotRoot = os.RemoveAll
+var (
+	removeHandoffSnapshotRoot = os.RemoveAll
+	handoffAttachmentReadHook = func(int) {}
+)
 
 // StageDraftAttachments copies verified draft attachments into private paths
 // that remain stable while a native compose handoff consumes them.
@@ -97,7 +100,10 @@ func stageDraftAttachment(
 	}
 	hash := sha256.New()
 	limited := io.LimitReader(source, expected.Size+1)
-	written, copyErr := io.Copy(destination, io.TeeReader(contextReader{ctx: ctx, reader: limited}, hash))
+	copyReader := attachmentFingerprintReader{
+		ctx: ctx, reader: limited, afterRead: handoffAttachmentReadHook,
+	}
+	written, copyErr := io.Copy(destination, io.TeeReader(copyReader, hash))
 	syncErr := destination.Sync()
 	closeErr := destination.Close()
 	if copyErr != nil {

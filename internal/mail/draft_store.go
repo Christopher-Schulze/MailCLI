@@ -94,7 +94,7 @@ func (s *Service) PrepareDraftHandoffContext(ctx context.Context, ref string) (D
 	if len(draft.To) == 0 {
 		return Draft{}, validationError("visible compose handoff requires at least one recipient")
 	}
-	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
+	if err := preflightDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
 		return Draft{}, classifyDraftContextError(ctx, err, "handoff")
 	}
 	return draft, nil

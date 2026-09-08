@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
@@ -120,6 +121,29 @@ type SavedAttachment struct {
 	Path         string `json:"path"`
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
+}
+
+// AttachmentEvidence is the immutable byte proof returned by an attachment
+// writer. Path and Identity bind the proof to the output it owns; callers
+// must still recheck that path identity before reusing the proof.
+type AttachmentEvidence struct {
+	Path     string      `json:"-"`
+	Size     int64       `json:"-"`
+	SHA256   string      `json:"-"`
+	Identity os.FileInfo `json:"-"`
+}
+
+// AttachmentEvidenceGateway is an optional extension of Gateway used by
+// attachment writers that can return proof from the authoritative copy pass.
+// Gateways that do not implement it retain the safe inspect-after-publish
+// fallback.
+type AttachmentEvidenceGateway interface {
+	SaveAttachmentToWithEvidence(
+		ctx context.Context,
+		messageRef string,
+		attachmentID string,
+		outputPath string,
+	) (AttachmentEvidence, error)
 }
 
 type SaveAttachmentRequest struct {

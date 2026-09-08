@@ -65,6 +65,80 @@ func TestStageDraftAttachmentsRejectsSameSizeReplacement(t *testing.T) {
 	}
 }
 
+func TestStageDraftAttachmentsRejectsReplacementDuringSingleCopy(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "report.pdf")
+	original := []byte("original bytes that span the staged read")
+	replacement := []byte("replacement bytes that span the staged read")
+	if err := os.WriteFile(source, original, 0o600); err != nil {
+		t.Fatalf("WriteFile(original) error = %v", err)
+	}
+	expected := draftAttachmentFingerprint(source, original)
+	previous := handoffAttachmentReadHook
+	readCalls := 0
+	handoffAttachmentReadHook = func(int) {
+		readCalls++
+		if readCalls != 1 {
+			return
+		}
+		moved := source + ".original"
+		if err := os.Rename(source, moved); err != nil {
+			t.Errorf("Rename() error = %v", err)
+			return
+		}
+		if err := os.WriteFile(source, replacement, 0o600); err != nil {
+			t.Errorf("WriteFile(replacement) error = %v", err)
+		}
+	}
+	t.Cleanup(func() { handoffAttachmentReadHook = previous })
+
+	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{expected})
+	if cleanup != nil {
+		t.Cleanup(func() { _ = cleanup() })
+	}
+	if errorCode(err) != "handoff_attachment_changed" {
+		t.Fatalf("StageDraftAttachments() error = %v, want handoff_attachment_changed", err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("staged paths = %v, want none", paths)
+	}
+}
+
+func TestStageDraftAttachmentsUsesOneAuthoritativeReadAfterPreflight(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	source := filepath.Join(t.TempDir(), "report.pdf")
+	content := []byte("one authoritative handoff read")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	service := NewServiceWithDraftRoot(&gatewayStub{}, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body", Attachments: []string{source},
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+
+	var readBytes int
+	previous := handoffAttachmentReadHook
+	handoffAttachmentReadHook = func(read int) { readBytes += read }
+	t.Cleanup(func() { handoffAttachmentReadHook = previous })
+	prepared, err := service.PrepareDraftHandoffContext(context.Background(), draft.Ref)
+	if err != nil {
+		t.Fatalf("PrepareDraftHandoffContext() error = %v", err)
+	}
+	paths, cleanup, err := StageDraftAttachments(context.Background(), prepared.Attachments)
+	if cleanup != nil {
+		t.Cleanup(func() { _ = cleanup() })
+	}
+	if err != nil {
+		t.Fatalf("StageDraftAttachments() error = %v", err)
+	}
+	if len(paths) != 1 || readBytes != len(content) {
+		t.Fatalf("staged paths = %v, read bytes = %d, want one path and %d bytes", paths, readBytes, len(content))
+	}
+}
+
 func TestStageDraftAttachmentsRejectsSymlinkReplacement(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "report.pdf")
