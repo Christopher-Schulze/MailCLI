@@ -206,6 +206,7 @@ type DraftSendAttemptSummary struct {
 	UpdatedAt           time.Time                `json:"updated_at"`
 	MessageID           string                   `json:"message_id,omitempty"`
 	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
+	MIMEFingerprint     string                   `json:"mime_fingerprint,omitempty"`
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`
@@ -264,6 +265,7 @@ type SendAttempt struct {
 	UpdatedAt           time.Time                `json:"updated_at"`
 	MessageID           string                   `json:"message_id,omitempty"`
 	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
+	MIMEFingerprint     string                   `json:"mime_fingerprint,omitempty"`
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`

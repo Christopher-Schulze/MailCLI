@@ -2,10 +2,14 @@ package mail
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -772,7 +776,11 @@ func (s *reconcileImapStub) FetchMessage(
 func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) {
 	t.Helper()
 	fingerprint := envelopeFingerprint(draft, "<claim@example.com>")
-	if _, err := beginSendAttempt(root, draft.Ref, "<claim@example.com>", fingerprint); err != nil {
+	mimeFingerprint, err := draftMIMEFingerprint(draft)
+	if err != nil {
+		t.Fatalf("draftMIMEFingerprint() error = %v", err)
+	}
+	if _, err := beginSendAttemptWithMIMEFingerprint(root, draft.Ref, nil, "<claim@example.com>", fingerprint, mimeFingerprint); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	return "<claim@example.com>", fingerprint
@@ -984,5 +992,114 @@ func TestSendDraftClaimCarriesMessageIDBeforeSubmit(t *testing.T) {
 	}
 	if spec.fingerprint != envelopeFingerprint(draft, spec.messageID) {
 		t.Fatalf("claim fingerprint %q does not match the draft envelope", spec.fingerprint)
+	}
+}
+
+func TestVerifySentMessageIdentityRequiresMIMEProof(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Subject", Body: "Body",
+	}
+	raw := []byte("From: sender@example.com\r\n" +
+		"To: recipient@example.com\r\n" +
+		"Subject: Subject\r\n" +
+		"Message-ID: <identity@example.com>\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n")
+	if err := verifySentMessageIdentity(raw, draft, "<identity@example.com>"); errorCode(err) != "send_identity_unverifiable" {
+		t.Fatalf("verifySentMessageIdentity() error = %v, want send_identity_unverifiable", err)
+	}
+}
+
+func TestVerifySentMessageIdentityChecksHTMLAttachmentsAndOrder(t *testing.T) {
+	directory := t.TempDir()
+	firstPath := filepath.Join(directory, "first.txt")
+	secondPath := filepath.Join(directory, "second.bin")
+	if err := os.WriteFile(firstPath, []byte("first"), 0o600); err != nil {
+		t.Fatalf("WriteFile(first) error = %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte{0, 1, 2, 3}, 0o600); err != nil {
+		t.Fatalf("WriteFile(second) error = %v", err)
+	}
+	firstDigest := sha256.Sum256([]byte("first"))
+	secondDigest := sha256.Sum256([]byte{0, 1, 2, 3})
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Subject", Body: "Body", BodyHTML: "<p>HTML</p>",
+		Attachments: []DraftAttachment{
+			{Path: firstPath, Size: 5, SHA256: hex.EncodeToString(firstDigest[:])},
+			{Path: secondPath, Size: 4, SHA256: hex.EncodeToString(secondDigest[:])},
+		},
+	}
+	messageID := "<identity@example.com>"
+	expected, err := draftMIMEFingerprint(draft)
+	if err != nil {
+		t.Fatalf("draftMIMEFingerprint() error = %v", err)
+	}
+	raw, err := BuildMessage(draft, messageID)
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	if err := verifySentMessageIdentity(raw, draft, messageID, expected); err != nil {
+		t.Fatalf("verifySentMessageIdentity(equal) error = %v", err)
+	}
+
+	withoutHTML := draft
+	withoutHTML.BodyHTML = ""
+	missingHTML, err := BuildMessage(withoutHTML, messageID)
+	if err != nil {
+		t.Fatalf("BuildMessage(withoutHTML) error = %v", err)
+	}
+	if err := verifySentMessageIdentity(missingHTML, draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+		t.Fatalf("verifySentMessageIdentity(missing HTML) error = %v, want send_identity_mismatch", err)
+	}
+
+	changedAttachment := strings.Replace(string(raw), base64.StdEncoding.EncodeToString([]byte("first")), base64.StdEncoding.EncodeToString([]byte("other")), 1)
+	if err := verifySentMessageIdentity([]byte(changedAttachment), draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+		t.Fatalf("verifySentMessageIdentity(changed attachment) error = %v, want send_identity_mismatch", err)
+	}
+
+	reordered := draft
+	reordered.Attachments = []DraftAttachment{draft.Attachments[1], draft.Attachments[0]}
+	reorderedRaw, err := BuildMessage(reordered, messageID)
+	if err != nil {
+		t.Fatalf("BuildMessage(reordered) error = %v", err)
+	}
+	if err := verifySentMessageIdentity(reorderedRaw, draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+		t.Fatalf("verifySentMessageIdentity(reordered) error = %v, want send_identity_mismatch", err)
+	}
+}
+
+func TestVerifySentMessageIdentityAllowsBoundaryAndTransferReencoding(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Subject", Body: "Body", BodyHTML: "<p>HTML</p>",
+	}
+	messageID := "<identity@example.com>"
+	expected, err := draftMIMEFingerprint(draft)
+	if err != nil {
+		t.Fatalf("draftMIMEFingerprint() error = %v", err)
+	}
+	raw, err := BuildMessage(draft, messageID)
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	boundaryPattern := regexp.MustCompile(`=_[0-9a-f]{32}`)
+	seen := make(map[string]string)
+	mutated := boundaryPattern.ReplaceAllStringFunc(string(raw), func(value string) string {
+		if replacement, ok := seen[value]; ok {
+			return replacement
+		}
+		replacement := "=_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		if len(seen) > 0 {
+			replacement = "=_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}
+		seen[value] = replacement
+		return replacement
+	})
+	mutated = strings.Replace(mutated,
+		"Content-Transfer-Encoding: quoted-printable\r\n\r\nBody",
+		"Content-Transfer-Encoding: 8bit\r\n\r\nBody", 1)
+	if err := verifySentMessageIdentity([]byte(mutated), draft, messageID, expected); err != nil {
+		t.Fatalf("verifySentMessageIdentity(reencoded) error = %v", err)
 	}
 }
