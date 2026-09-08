@@ -522,7 +522,8 @@ func (s *Service) reconcileMirrorPending(
 		if listErr != nil {
 			return result, mirrorPendingError(listErr)
 		}
-		sentBox, resolveErr := transport.ResolveSentMailbox(mailboxes)
+		var resolveErr error
+		sentBox, resolveErr = transport.ResolveSentMailbox(mailboxes)
 		if resolveErr != nil {
 			if transport.ErrorCode(resolveErr) == transport.CodeIMAPSentMailboxNotFound {
 				return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
