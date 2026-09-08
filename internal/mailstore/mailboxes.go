@@ -91,15 +91,25 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 		mailboxes = append(mailboxes, item)
 		seen[record.pathKey] = struct{}{}
 	}
-	// Pre-compute sort keys to avoid O(n log n) string allocations inside
-	// the sort comparator.
-	sortKeys := make([]string, len(mailboxes))
-	for index, mailbox := range mailboxes {
-		sortKeys[index] = mailbox.AccountRef + "\x00" + strings.Join(mailbox.Path, "\x00")
+	// Keep each pre-computed account/path key paired with its mailbox while
+	// sorting. The full path distinguishes equal display names and seen
+	// guarantees one value for each account/path identity.
+	type sortableMailbox struct {
+		key     string
+		mailbox mail.Mailbox
 	}
-	sort.Slice(mailboxes, func(left int, right int) bool {
-		return sortKeys[left] < sortKeys[right]
+	sortable := make([]sortableMailbox, len(mailboxes))
+	for index, mailbox := range mailboxes {
+		sortable[index] = sortableMailbox{
+			key: mailbox.AccountRef + "\x00" + strings.Join(mailbox.Path, "\x00"), mailbox: mailbox,
+		}
+	}
+	sort.SliceStable(sortable, func(left int, right int) bool {
+		return sortable[left].key < sortable[right].key
 	})
+	for index, item := range sortable {
+		mailboxes[index] = item.mailbox
+	}
 	return mailboxes, nil
 }
 
