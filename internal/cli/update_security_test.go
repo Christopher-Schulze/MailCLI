@@ -104,6 +104,9 @@ func TestMakeDraftPreviewHTMLFormat(t *testing.T) {
 		Body:       "Plain content",
 		BodyHTML:   "<p>HTML content</p>",
 		BodyFormat: mail.DraftBodyHTML,
+		ContentDiagnostics: []mail.ContentDiagnostic{
+			{Code: mail.ContentDiagnosticRemovedElement, Element: "img"},
+		},
 	}
 	preview, err := makeDraftPreview(draft, "html")
 	if err != nil {
@@ -111,6 +114,9 @@ func TestMakeDraftPreviewHTMLFormat(t *testing.T) {
 	}
 	if preview.Body != "<p>HTML content</p>" {
 		t.Errorf("Body = %q, want HTML content", preview.Body)
+	}
+	if len(preview.ContentDiagnostics) != 1 || preview.ContentDiagnostics[0].Element != "img" {
+		t.Fatalf("ContentDiagnostics = %+v, want image removal", preview.ContentDiagnostics)
 	}
 }
 
@@ -234,6 +240,22 @@ func TestWriteHumanDraftPreviewWithCCAndBCC(t *testing.T) {
 	}
 	if !strings.Contains(output, "BCC:") {
 		t.Errorf("output missing BCC: %q", output)
+	}
+}
+
+func TestWriteHumanDraftPreviewShowsContentDiagnostics(t *testing.T) {
+	preview := draftPreview{
+		BodyFormat: mail.DraftBodyHTML, View: "plain", Body: "Logo",
+		ContentDiagnostics: []mail.ContentDiagnostic{
+			{Code: mail.ContentDiagnosticRemoteResource, Element: "img", Attribute: "src"},
+		},
+	}
+	var buf bytes.Buffer
+	writeHumanDraftPreview(&buf, preview)
+	output := buf.String()
+	if !strings.Contains(output, "Content transformations:") ||
+		!strings.Contains(output, "remote_resource_removed element=img attribute=src") {
+		t.Fatalf("output missing content diagnostic: %q", output)
 	}
 }
 
