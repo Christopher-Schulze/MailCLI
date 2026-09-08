@@ -87,7 +87,18 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil || password == "" {
 		return SendResult{}, missingCredentialsError(sender)
 	}
-	attempt, err := beginSendAttempt(root, ref, messageID, envelopeFingerprint(draft, messageID))
+	mimeFingerprint, err := draftMIMEFingerprint(draft)
+	if err != nil {
+		return SendResult{}, err
+	}
+	attempt, err := beginSendAttemptWithMIMEFingerprint(
+		root,
+		ref,
+		nil,
+		messageID,
+		envelopeFingerprint(draft, messageID),
+		mimeFingerprint,
+	)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -215,7 +226,7 @@ func (s *Service) adoptObservedSentMessage(
 	if fetchErr != nil {
 		return result, mirrorPendingError(fetchErr)
 	}
-	if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
+	if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID, attempt.MIMEFingerprint); identityErr != nil {
 		return result, identityErr
 	}
 	attempt.SentStoreObserved = true
@@ -377,6 +388,12 @@ func (s *Service) reconcileUnknownViaImap(
 			Message: "the draft no longer matches the claimed send envelope; reconciliation is blocked and retries remain forbidden",
 		}
 	}
+	if strings.TrimSpace(attempt.MIMEFingerprint) == "" {
+		return resultForReconcile(ref, attempt), &OperationError{
+			Code:    "send_identity_unverifiable",
+			Message: "the retained send claim has no versioned MIME fingerprint; reconciliation cannot prove the exact content",
+		}
+	}
 	if err := s.send.available(); err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
@@ -427,7 +444,7 @@ func (s *Service) reconcileUnknownViaImap(
 		if fetchErr != nil {
 			return resultForReconcile(ref, attempt), fetchErr
 		}
-		if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID); identityErr != nil {
+		if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID, attempt.MIMEFingerprint); identityErr != nil {
 			return resultForReconcile(ref, attempt), identityErr
 		}
 		attempt.InvocationStarted = true
@@ -490,6 +507,12 @@ func (s *Service) reconcileMirrorPending(
 		return result, &OperationError{
 			Code:    "send_reconcile_unavailable",
 			Message: "the send attempt carries no Message-ID; the Sent mirror cannot be completed safely",
+		}
+	}
+	if strings.TrimSpace(attempt.MIMEFingerprint) == "" {
+		return result, &OperationError{
+			Code:    "send_identity_unverifiable",
+			Message: "the retained send claim has no versioned MIME fingerprint; Sent adoption and mirror retry are blocked",
 		}
 	}
 	outcomeUnknown := attempt.Transport.MirrorOutcomeUnknown

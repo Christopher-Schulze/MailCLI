@@ -44,7 +44,7 @@ func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservati
 }
 
 func beginSendAttempt(root string, ref string, messageID, envelopeFingerprint string) (SendAttempt, error) {
-	return beginSendAttemptWithBaseline(root, ref, nil, messageID, envelopeFingerprint)
+	return beginSendAttemptWithMIMEFingerprint(root, ref, nil, messageID, envelopeFingerprint, "")
 }
 
 func beginSendAttemptWithBaseline(
@@ -54,6 +54,17 @@ func beginSendAttemptWithBaseline(
 	messageID string,
 	envelopeFingerprint string,
 ) (SendAttempt, error) {
+	return beginSendAttemptWithMIMEFingerprint(root, ref, baseline, messageID, envelopeFingerprint, "")
+}
+
+func beginSendAttemptWithMIMEFingerprint(
+	root string,
+	ref string,
+	baseline *SendObservationBaseline,
+	messageID string,
+	envelopeFingerprint string,
+	mimeFingerprint string,
+) (SendAttempt, error) {
 	id, err := newSendAttemptID()
 	if err != nil {
 		return SendAttempt{}, err
@@ -62,6 +73,7 @@ func beginSendAttemptWithBaseline(
 	attempt := SendAttempt{
 		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
 		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint,
+		MIMEFingerprint:     mimeFingerprint,
 		ObservationBaseline: cloneSendObservationBaseline(baseline),
 	}
 	path, err := sendClaimPath(root, ref)
