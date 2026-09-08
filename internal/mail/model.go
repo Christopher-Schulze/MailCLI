@@ -170,6 +170,12 @@ type DraftInput struct {
 	Body        string          `json:"body"`
 	BodyFormat  DraftBodyFormat `json:"body_format,omitempty"`
 	Attachments []string        `json:"attachments,omitempty"`
+	// SubjectSet, ToSet, and CCSet preserve whether a caller supplied a
+	// derivable field. They are intentionally excluded from JSON because the
+	// field's presence is carried by the corresponding JSON key itself.
+	SubjectSet bool `json:"-"`
+	ToSet      bool `json:"-"`
+	CCSet      bool `json:"-"`
 }
 
 type DraftAttachment struct {

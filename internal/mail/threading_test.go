@@ -100,6 +100,50 @@ func TestDeriveReplyInputExplicitInputWins(t *testing.T) {
 	}
 }
 
+func TestDeriveReplyInputPreservesExplicitEmptyFields(t *testing.T) {
+	t.Parallel()
+	source := ThreadSource{
+		Subject: "s", From: "Alice <alice@example.com>",
+		To: []Recipient{{Address: "bob@example.com"}}, MessageID: "<m1@example.com>",
+	}
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{
+		SubjectSet: true, CCSet: true, Subject: "", CC: []Recipient{}, Body: "x",
+	})
+	if err != nil {
+		t.Fatalf("DeriveReplyInput() error = %v", err)
+	}
+	if input.Subject != "" {
+		t.Fatalf("subject = %q, want explicit empty subject", input.Subject)
+	}
+	if input.CC == nil || len(input.CC) != 0 {
+		t.Fatalf("cc = %#v, want explicit empty CC", input.CC)
+	}
+}
+
+func TestDeriveReplyInputReplyAllDeduplicatesExplicitTo(t *testing.T) {
+	t.Parallel()
+	source := ThreadSource{
+		Subject: "s", From: "Alice <alice@example.com>",
+		To: []Recipient{
+			{Name: "Bob", Address: "bob@example.com"},
+			{Address: "carol@example.com"},
+		},
+		CC: []Recipient{{Address: "dave@example.com"}}, MessageID: "<m1@example.com>",
+	}
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{
+		ToSet: true, To: []Recipient{{Name: "Bob", Address: "BOB@example.com"}}, Body: "x",
+	})
+	if err != nil {
+		t.Fatalf("DeriveReplyInput() error = %v", err)
+	}
+	if len(input.To) != 1 || input.To[0].Address != "BOB@example.com" {
+		t.Fatalf("to = %+v", input.To)
+	}
+	if len(input.CC) != 2 || input.CC[0].Address != "carol@example.com" || input.CC[1].Address != "dave@example.com" {
+		t.Fatalf("cc = %+v, want source recipients except explicit To", input.CC)
+	}
+}
+
 func TestDeriveReplyInputForward(t *testing.T) {
 	t.Parallel()
 	source := ThreadSource{Subject: "Re: s", MessageID: "<m1@example.com>"}

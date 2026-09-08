@@ -50,12 +50,13 @@ func (s *Service) ThreadSource(ctx context.Context, ref string) (ThreadSource, e
 // Explicit input fields win (documented last-wins). The subject gains exactly
 // one Re:/Fwd: prefix after stripping existing ones; reply recipients default
 // to the source Reply-To (preferred) or From address; reply --all promotes the
-// source To/CC recipients into CC minus the reply target; the thread chain is
-// the source References plus the source Message-ID, bounded to
-// maximumThreadReferences, deduplicated, and free of control characters.
+// source To/CC recipients into CC minus the reply target and final To roles;
+// the thread chain is the source References plus the source Message-ID,
+// bounded to maximumThreadReferences, deduplicated, and free of control
+// characters.
 func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input DraftInput) (DraftInput, string, string, error) {
 	subject := threadSubject(source.Subject, kind)
-	if input.Subject != "" {
+	if input.SubjectSet || input.Subject != "" {
 		subject = input.Subject
 	}
 	out := input
@@ -72,7 +73,7 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 				Message: "source message has no reply target",
 			}
 		}
-		if len(out.To) == 0 {
+		if !input.ToSet && len(out.To) == 0 {
 			recipient, err := recipientFromFormatted(target)
 			if err != nil {
 				return DraftInput{}, "", "", &OperationError{
@@ -82,8 +83,11 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 			}
 			out.To = []Recipient{recipient}
 		}
-		if replyAll && len(out.CC) == 0 {
-			out.CC = promotedReplyAllRecipients(source.To, source.CC, target)
+		if replyAll && !input.CCSet && len(out.CC) == 0 {
+			out.CC = promotedReplyAllRecipients(source.To, source.CC, target, out.To)
+		}
+		if replyAll {
+			out.CC = deduplicateRecipientsAgainst(out.CC, out.To)
 		}
 	}
 
@@ -118,12 +122,24 @@ func threadSubject(subject string, kind DraftKind) string {
 	return prefix + trimmed
 }
 
-func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string) []Recipient {
-	seen := map[string]struct{}{strings.ToLower(addressOnly(target)): {}}
+func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string, existingTo []Recipient) []Recipient {
+	seen := make(map[string]struct{}, len(existingTo)+1)
+	if key := strings.ToLower(addressOnly(target)); key != "" {
+		seen[key] = struct{}{}
+	}
+	for _, recipient := range existingTo {
+		if key, err := recipientAddressKey(recipient); err == nil {
+			seen[key] = struct{}{}
+		}
+	}
 	promoted := make([]Recipient, 0, len(to)+len(cc))
 	for _, group := range [][]Recipient{to, cc} {
 		for _, recipient := range group {
-			key := strings.ToLower(recipient.Address)
+			key, err := recipientAddressKey(recipient)
+			if err != nil {
+				promoted = append(promoted, recipient)
+				continue
+			}
 			if key == "" {
 				continue
 			}
@@ -135,6 +151,44 @@ func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string) [
 		}
 	}
 	return promoted
+}
+
+func deduplicateRecipientsAgainst(recipients []Recipient, existing []Recipient) []Recipient {
+	seen := make(map[string]struct{}, len(existing)+len(recipients))
+	for _, recipient := range existing {
+		if key, err := recipientAddressKey(recipient); err == nil {
+			seen[key] = struct{}{}
+		}
+	}
+	result := make([]Recipient, 0, len(recipients))
+	for _, recipient := range recipients {
+		key, err := recipientAddressKey(recipient)
+		if err != nil || key == "" {
+			result = append(result, recipient)
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, recipient)
+	}
+	return result
+}
+
+func recipientAddressKey(recipient Recipient) (string, error) {
+	address := recipient.Address
+	if recipient.Name != "" {
+		address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
+	}
+	parsed, err := stdmail.ParseAddress(address)
+	if err != nil || parsed.Address == "" {
+		if err == nil {
+			err = fmt.Errorf("recipient address is empty")
+		}
+		return "", err
+	}
+	return strings.ToLower(parsed.Address), nil
 }
 
 // threadChain builds the outgoing References value from the source headers.
