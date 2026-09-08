@@ -211,28 +211,48 @@ func ambiguousMessageIDError(mailbox, messageID string, count int) error {
 }
 
 func (c *Client) verifyMessageID(ctx context.Context, sess *session, uid uint32, messageID string) error {
-	if err := validateMessageUID(uid); err != nil {
-		return err
-	}
 	normalizedMessageID, err := normalizeMessageID(messageID)
 	if err != nil {
 		return err
 	}
-	tag := sess.nextTag()
-	if err := c.setDeadline(ctx, sess); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH deadline")
-	}
-	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])", tag, uid)
-	if err := c.writeLine(sess, cmd); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH write")
-	}
-	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes)
+	matched, err := c.checkMessageIDNormalized(ctx, sess, uid, normalizedMessageID)
 	if err != nil {
 		return err
 	}
+	if !matched {
+		return messageIDNotFoundError(uid, normalizedMessageID)
+	}
+	return nil
+}
+
+// checkMessageIDNormalized fetches one bounded header block without setting
+// Seen and reports whether the candidate contains exactly the requested
+// Message-ID. A valid but different header is a normal SEARCH false positive;
+// malformed, missing, or duplicate headers remain explicit identity errors.
+func (c *Client) checkMessageIDNormalized(
+	ctx context.Context,
+	sess *session,
+	uid uint32,
+	normalizedMessageID string,
+) (bool, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return false, err
+	}
+	tag := sess.nextTag()
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return false, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH deadline")
+	}
+	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])", tag, uid)
+	if err := c.writeLine(sess, cmd); err != nil {
+		return false, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH write")
+	}
+	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes)
+	if err != nil {
+		return false, err
+	}
 	message, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return messageIDNotFoundError(uid, normalizedMessageID)
+		return false, messageIDNotFoundError(uid, normalizedMessageID)
 	}
 	var values []string
 	for key, headers := range message.Header {
@@ -241,13 +261,13 @@ func (c *Client) verifyMessageID(ctx context.Context, sess *session, uid uint32,
 		}
 	}
 	if len(values) != 1 {
-		return messageIDNotFoundError(uid, normalizedMessageID)
+		return false, messageIDNotFoundError(uid, normalizedMessageID)
 	}
 	actual, err := normalizeMessageID(strings.TrimSpace(values[0]))
-	if err != nil || actual != normalizedMessageID {
-		return messageIDNotFoundError(uid, normalizedMessageID)
+	if err != nil {
+		return false, messageIDNotFoundError(uid, normalizedMessageID)
 	}
-	return nil
+	return actual == normalizedMessageID, nil
 }
 
 func messageIDNotFoundError(uid uint32, messageID string) error {
@@ -1177,8 +1197,9 @@ func (c *Client) listMailboxes(ctx context.Context, ps *pooledSession) ([]transp
 	return infos, nil
 }
 
-// SearchUID resolves a Message-ID to its last IMAP UID in the specified
-// mailbox and returns the total number of matching UIDs.
+// SearchUID treats UID SEARCH as candidate discovery, then verifies every
+// candidate's bounded Message-ID header before returning an exact UID and
+// count. A valid but different header is discarded as a SEARCH false positive.
 func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
 	normalizedMessageID, err := normalizeMessageID(messageID)
 	if err != nil {
@@ -1206,7 +1227,42 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 			Message: fmt.Sprintf("message %s not found in mailbox %s", messageID, mailbox),
 		}
 	}
-	return uids[len(uids)-1], info.uidvalidity, len(uids), nil
+
+	exactUID, exactMatches, err := c.verifySearchCandidates(
+		ctx, ps.sess, uids, normalizedMessageID, mailbox,
+	)
+	if err != nil {
+		return 0, info.uidvalidity, 0, err
+	}
+	return exactUID, info.uidvalidity, exactMatches, nil
+}
+
+func (c *Client) verifySearchCandidates(
+	ctx context.Context,
+	sess *session,
+	uids []uint32,
+	messageID string,
+	mailbox string,
+) (uint32, int, error) {
+	var exactUID uint32
+	exactMatches := 0
+	for _, candidateUID := range uids {
+		matched, err := c.checkMessageIDNormalized(ctx, sess, candidateUID, messageID)
+		if err != nil {
+			return 0, 0, err
+		}
+		if matched {
+			exactUID = candidateUID
+			exactMatches++
+		}
+	}
+	if exactMatches == 0 {
+		return 0, 0, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageNotFound,
+			Message: fmt.Sprintf("message %s did not have an exact Message-ID header in mailbox %s", messageID, mailbox),
+		}
+	}
+	return exactUID, exactMatches, nil
 }
 
 // ensureSelected switches the pooled session to mailbox when needed and

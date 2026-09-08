@@ -67,7 +67,7 @@ func TestMutationProtocolOrderAfterSelectedRead(t *testing.T) {
 	if _, err := client.SetFlags(context.Background(), cfg, "INBOX", 42, 12345, []string{"\\Seen"}, nil); err != nil {
 		t.Fatalf("SetFlags() error = %v", err)
 	}
-	want := []string{"SELECT", "UID SEARCH", "SELECT", "UID STORE"}
+	want := []string{"SELECT", "UID SEARCH", "UID FETCH", "SELECT", "UID STORE"}
 	if got := protocolCommands(srv.Commands()); !slices.Equal(got, want) {
 		t.Fatalf("protocol commands = %q, want %q", got, want)
 	}

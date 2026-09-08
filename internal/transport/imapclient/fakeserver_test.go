@@ -47,6 +47,7 @@ type fakeServerConfig struct {
 	rejectStore             bool
 	initialDeletedUIDs      []uint32
 	fetchPayload            []byte
+	fetchPayloadByUID       map[uint32][]byte
 	fetchResponse           []byte
 	fetchResponseUID        uint32
 	selectFailBox           string
@@ -634,8 +635,21 @@ func (s *fakeServer) handle(conn net.Conn) {
 					return
 				}
 				payload := s.config.fetchPayload
+				if byUID, ok := s.config.fetchPayloadByUID[uint32(uid)]; ok {
+					payload = byUID
+				}
 				if len(payload) == 0 {
-					payload = []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody\r\n")
+					messageID := s.config.searchMatchID
+					if messageID == "" {
+						s.mu.Lock()
+						messageID = s.appendedMessageID
+						s.mu.Unlock()
+					}
+					if messageID != "" {
+						payload = []byte("Message-ID: " + messageID + "\r\n\r\nBody\r\n")
+					} else {
+						payload = []byte("From: test@example.com\r\nSubject: Test\r\n\r\nBody\r\n")
+					}
 				}
 				responseUID := s.config.fetchResponseUID
 				if responseUID == 0 {
