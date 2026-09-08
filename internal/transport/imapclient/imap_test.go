@@ -45,10 +45,40 @@ func TestAppendToSent(t *testing.T) {
 			wantErrCode: transport.CodeIMAPAmbiguousMailbox,
 		},
 		{
-			name:         "special-use discovered, message found, no append",
-			cfg:          fakeServerConfig{authOK: true, sentMboxes: []string{"Sent"}, otherMboxes: []string{"INBOX"}, searchMatchID: messageID, appendOK: true},
+			name: "special-use discovered, exact message found, no append",
+			cfg: fakeServerConfig{
+				authOK: true, sentMboxes: []string{"Sent"}, otherMboxes: []string{"INBOX"},
+				searchMatchID: messageID,
+				fetchPayload:  []byte("Message-ID: <abc@example.com>\r\n\r\nbody\r\n"),
+				appendOK:      true,
+			},
 			wantMailbox:  "Sent",
 			wantAppended: false,
+		},
+		{
+			name: "multiple existing Message-ID candidates",
+			cfg: fakeServerConfig{
+				authOK: true, sentMboxes: []string{"Sent"}, searchMatchID: messageID,
+				searchUIDs: []uint32{41, 42}, appendOK: true,
+			},
+			wantErrCode: transport.CodeIMAPAmbiguousMessageID,
+		},
+		{
+			name: "substring candidate with mismatched Message-ID",
+			cfg: fakeServerConfig{
+				authOK: true, sentMboxes: []string{"Sent"}, searchMatchID: messageID,
+				fetchPayload: []byte("Message-ID: <different@example.com>\r\n\r\nbody\r\n"), appendOK: true,
+			},
+			wantErrCode: transport.CodeIMAPMessageNotFound,
+		},
+		{
+			name: "appended candidate with mismatched Message-ID",
+			cfg: fakeServerConfig{
+				authOK: true, sentMboxes: []string{"Sent"},
+				fetchPayload: []byte("Message-ID: <different@example.com>\r\n\r\nbody\r\n"), appendOK: true,
+			},
+			wantErrCode:      transport.CodeIMAPAppendOutcomeUnknown,
+			wantAppendCalled: true,
 		},
 		{
 			name:             "fallback Sent Messages",
@@ -92,6 +122,11 @@ func TestAppendToSent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newFakeServer(t, tt.cfg)
+			srv.mu.Lock()
+			if len(srv.config.fetchPayload) == 0 {
+				srv.config.fetchPayload = []byte("Message-ID: " + messageID + "\r\n\r\nbody\r\n")
+			}
+			srv.mu.Unlock()
 			host, portStr, err := net.SplitHostPort(srv.Addr())
 			if err != nil {
 				t.Fatalf("split host port: %v", err)
@@ -115,6 +150,10 @@ func TestAppendToSent(t *testing.T) {
 				}
 				if code := transport.ErrorCode(err); code != tt.wantErrCode {
 					t.Fatalf("expected error code %s, got %s: %v", tt.wantErrCode, code, err)
+				}
+				called, _, _, _ := srv.AppendRecord()
+				if called != tt.wantAppendCalled {
+					t.Fatalf("append called: got %v, want %v", called, tt.wantAppendCalled)
 				}
 				return
 			}
@@ -157,6 +196,7 @@ func TestAppendToSent(t *testing.T) {
 func TestAppendToSentConfirmsPostAppendSearch(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+		fetchPayload: []byte("Message-ID: <confirm@example.com>\r\n\r\nmessage\r\n"),
 	})
 	host, portStr, err := net.SplitHostPort(srv.Addr())
 	if err != nil {
@@ -485,10 +525,11 @@ var _ transport.SentMirror = (*Client)(nil)
 
 func TestAppendToSentMidCommandCancel(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
-		authOK:      true,
-		sentMboxes:  []string{"Sent"},
-		appendOK:    true,
-		searchDelay: 500 * time.Millisecond,
+		authOK:       true,
+		sentMboxes:   []string{"Sent"},
+		appendOK:     true,
+		searchDelay:  500 * time.Millisecond,
+		fetchPayload: []byte("Message-ID: <x@example.com>\r\n\r\nmessage\r\n"),
 	})
 
 	host, portStr, err := net.SplitHostPort(srv.Addr())
@@ -563,6 +604,7 @@ func TestListLiteralMailboxesAndMutations(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:        true,
 		appendOK:      true,
+		fetchPayload:  []byte("Message-ID: <literal@example.com>\r\n\r\nmessage\r\n"),
 		moveSupported: true,
 		listResponse: []byte(
 			"* LIST (\\Sent) \".\" {9}\r\nEntw\xc3\xbcrfe\r\n" +
