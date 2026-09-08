@@ -125,7 +125,8 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return empty, err
 	}
 
-	if err := c.doSelect(ctx, sess, sess.nextTag(), sentBox); err != nil {
+	selected, err := c.doSelectInfo(ctx, sess, sess.nextTag(), sentBox)
+	if err != nil {
 		return empty, err
 	}
 
@@ -138,12 +139,14 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return empty, ambiguousMessageIDError(sentBox, messageID, matchCount)
 	}
 	if matchCount == 1 {
-		if err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID); err != nil {
+		uid, err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID)
+		if err != nil {
 			return empty, err
 		}
 		_ = c.doLogout(ctx, sess, sess.nextTag())
 		return transport.AppendEvidence{
 			Mailbox: sentBox, Appended: false, MatchCount: matchCount,
+			UIDValidity: selected.uidvalidity, UID: uid,
 		}, nil
 	}
 
@@ -162,7 +165,8 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 	if matchCount > 1 {
 		return empty, ambiguousMessageIDError(sentBox, messageID, matchCount)
 	}
-	if err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID); err != nil {
+	uid, err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID)
+	if err != nil {
 		if transport.ErrorCode(err) == transport.CodeIMAPAmbiguousMessageID {
 			return empty, err
 		}
@@ -172,21 +176,25 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 	_ = c.doLogout(ctx, sess, sess.nextTag())
 	return transport.AppendEvidence{
 		Mailbox: sentBox, Appended: true, MatchCount: 1,
+		UIDValidity: selected.uidvalidity, UID: uid,
 	}, nil
 }
 
-func (c *Client) verifySingleSentMatch(ctx context.Context, sess *session, mailbox, messageID string) error {
+func (c *Client) verifySingleSentMatch(ctx context.Context, sess *session, mailbox, messageID string) (uint32, error) {
 	uids, err := c.doUIDSearch(ctx, sess, sess.nextTag(), messageID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(uids) != 1 {
 		if len(uids) > 1 {
-			return ambiguousMessageIDError(mailbox, messageID, len(uids))
+			return 0, ambiguousMessageIDError(mailbox, messageID, len(uids))
 		}
-		return messageIDNotFoundError(0, messageID)
+		return 0, messageIDNotFoundError(0, messageID)
 	}
-	return c.verifyMessageID(ctx, sess, uids[0], messageID)
+	if err := c.verifyMessageID(ctx, sess, uids[0], messageID); err != nil {
+		return 0, err
+	}
+	return uids[0], nil
 }
 
 func ambiguousMessageIDError(mailbox, messageID string, count int) error {
@@ -354,30 +362,6 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 			return nil, listResponseMalformed(perr)
 		}
 		mailboxes = append(mailboxes, mailbox{name: name, flags: flags})
-	}
-}
-
-func (c *Client) doSelect(ctx context.Context, sess *session, tag, mbox string) error {
-	if err := c.setDeadline(ctx, sess); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
-	}
-	quotedMailbox, err := safeQuoteIMAP(mbox)
-	if err != nil {
-		return err
-	}
-	if err := c.writeLine(sess, tag+" SELECT "+quotedMailbox); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP SELECT write")
-	}
-	status, _, err := c.readFinal(ctx, sess, tag)
-	if err != nil {
-		return err
-	}
-	if status == "OK" {
-		return nil
-	}
-	return &transport.TransportError{
-		Code:    transport.CodeIMAPSentMailboxNotFound,
-		Message: "IMAP SELECT failed: " + status,
 	}
 }
 

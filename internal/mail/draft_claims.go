@@ -269,6 +269,212 @@ func removeSendAttempt(root string, ref string) error {
 	return syncDirectory(root)
 }
 
+const maximumSendReceiptBytes = 64 * 1024
+
+type storedSendReceipt struct {
+	Version  int         `json:"version"`
+	DraftRef string      `json:"draft_ref"`
+	Receipt  SendReceipt `json:"receipt"`
+}
+
+func receiptFromAttempt(ref string, attempt SendAttempt) SendReceipt {
+	receipt := SendReceipt{
+		DraftRef:           ref,
+		AttemptID:          attempt.ID,
+		StartedAt:          attempt.StartedAt,
+		CompletedAt:        attempt.UpdatedAt,
+		Outcome:            attempt.Outcome,
+		Accepted:           attempt.AcceptedByMail || attempt.SentStoreObserved,
+		ObservedMessageRef: attempt.ObservedMessageRef,
+	}
+	receipt.ExpiresAt = receipt.CompletedAt.Add(SendReceiptRetention)
+	if attempt.Transport != nil {
+		receipt.MessageID = attempt.Transport.MessageID
+		receipt.ServerResponse = attempt.Transport.ServerResponse
+		receipt.SentMailbox = attempt.Transport.MirrorMailbox
+		receipt.UIDValidity = attempt.Transport.MirrorUIDValidity
+		receipt.UID = attempt.Transport.MirrorUID
+		receipt.SentAppended = attempt.Transport.MirrorAppended
+	}
+	if receipt.MessageID == "" {
+		receipt.MessageID = attempt.MessageID
+	}
+	return receipt
+}
+
+func resultForReceipt(receipt SendReceipt) SendResult {
+	return SendResult{
+		DraftRef: receipt.DraftRef, AttemptID: receipt.AttemptID, Outcome: receipt.Outcome,
+		Accepted: receipt.Accepted, InvocationStarted: true, AcceptedByMail: receipt.Accepted,
+		SentStoreObserved: true, DraftRetained: false, Replayed: true,
+		Receipt: &receipt,
+	}
+}
+
+func encodeSendReceipt(receipt SendReceipt) ([]byte, error) {
+	payload, err := json.MarshalIndent(storedSendReceipt{
+		Version: 1, DraftRef: receipt.DraftRef, Receipt: receipt,
+	}, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode send receipt: %w", err)
+	}
+	payload = append(payload, '\n')
+	if len(payload) > maximumSendReceiptBytes {
+		return nil, validationError("send receipt exceeds 64 KiB")
+	}
+	return payload, nil
+}
+
+func readSendReceipt(root string, ref string) (*SendReceipt, error) {
+	path, err := sendReceiptPath(root, ref)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect send receipt: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maximumSendReceiptBytes {
+		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt is not a bounded regular file"}
+	}
+	payload, err := readBoundedRegularFile(path, info, maximumSendReceiptBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read send receipt: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder.DisallowUnknownFields()
+	var stored storedSendReceipt
+	if err := decoder.Decode(&stored); err != nil {
+		return nil, &OperationError{Code: "send_receipt_invalid", Message: fmt.Sprintf("decode send receipt: %v", err)}
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt must contain exactly one JSON object"}
+	}
+	if !validSendReceipt(stored, ref) {
+		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt is invalid"}
+	}
+	receipt := stored.Receipt
+	return &receipt, nil
+}
+
+func readActiveSendReceipt(root string, ref string) (*SendReceipt, error) {
+	receipt, err := readSendReceipt(root, ref)
+	if err != nil || receipt == nil {
+		return receipt, err
+	}
+	if !time.Now().UTC().Before(receipt.ExpiresAt) {
+		return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send receipt has expired"}
+	}
+	return receipt, nil
+}
+
+func validSendReceipt(stored storedSendReceipt, ref string) bool {
+	receipt := stored.Receipt
+	if stored.Version != 1 || stored.DraftRef != ref || receipt.DraftRef != ref ||
+		receipt.AttemptID == "" || receipt.StartedAt.IsZero() || receipt.CompletedAt.IsZero() ||
+		receipt.ExpiresAt.IsZero() || receipt.CompletedAt.Before(receipt.StartedAt) ||
+		receipt.ExpiresAt.Before(receipt.CompletedAt) || !receipt.Accepted {
+		return false
+	}
+	if receipt.ExpiresAt.Sub(receipt.CompletedAt) != SendReceiptRetention {
+		return false
+	}
+	switch receipt.Outcome {
+	case SendOutcomeObserved, SendOutcomeSent:
+		return true
+	default:
+		return false
+	}
+}
+
+func sendReceiptsEqual(left SendReceipt, right SendReceipt) bool {
+	return left.DraftRef == right.DraftRef && left.AttemptID == right.AttemptID &&
+		left.StartedAt.Equal(right.StartedAt) && left.CompletedAt.Equal(right.CompletedAt) &&
+		left.ExpiresAt.Equal(right.ExpiresAt) && left.Outcome == right.Outcome &&
+		left.Accepted == right.Accepted && left.ObservedMessageRef == right.ObservedMessageRef &&
+		left.MessageID == right.MessageID &&
+		left.ServerResponse == right.ServerResponse && left.SentMailbox == right.SentMailbox &&
+		left.UIDValidity == right.UIDValidity && left.UID == right.UID &&
+		left.SentAppended == right.SentAppended
+}
+
+func persistSendReceipt(root string, ref string, receipt SendReceipt) error {
+	if !validSendReceipt(storedSendReceipt{Version: 1, DraftRef: ref, Receipt: receipt}, ref) {
+		return &OperationError{Code: "send_receipt_invalid", Message: "terminal send receipt is invalid"}
+	}
+	existing, err := readSendReceipt(root, ref)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if !sendReceiptsEqual(*existing, receipt) {
+			return &OperationError{Code: "send_receipt_conflict", Message: "an immutable send receipt already exists with different evidence"}
+		}
+		return nil
+	}
+	payload, err := encodeSendReceipt(receipt)
+	if err != nil {
+		return err
+	}
+	path, err := sendReceiptPath(root, ref)
+	if err != nil {
+		return err
+	}
+	if err := writePrivateFile(path, payload); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("persist send receipt: %w", err)
+		}
+		existing, readErr := readSendReceipt(root, ref)
+		if readErr != nil {
+			return readErr
+		}
+		if existing == nil || !sendReceiptsEqual(*existing, receipt) {
+			return &OperationError{Code: "send_receipt_conflict", Message: "an immutable send receipt already exists with different evidence"}
+		}
+	}
+	return nil
+}
+
+func ensureSendReceipt(root string, ref string, attempt SendAttempt) (*SendReceipt, error) {
+	derived := receiptFromAttempt(ref, attempt)
+	if !time.Now().UTC().Before(derived.ExpiresAt) {
+		return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send evidence is older than the receipt retention window"}
+	}
+	receipt, err := readSendReceipt(root, ref)
+	if err != nil {
+		return nil, err
+	}
+	if receipt != nil {
+		if !time.Now().UTC().Before(receipt.ExpiresAt) {
+			return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send receipt has expired; the retained claim remains available for explicit recovery"}
+		}
+		if receipt.DraftRef != derived.DraftRef || receipt.AttemptID != derived.AttemptID ||
+			receipt.Outcome != derived.Outcome || receipt.Accepted != derived.Accepted {
+			return nil, &OperationError{Code: "send_receipt_conflict", Message: "the terminal send receipt does not match the retained send attempt"}
+		}
+		return receipt, nil
+	}
+	if err := persistSendReceipt(root, ref, derived); err != nil {
+		return nil, err
+	}
+	return &derived, nil
+}
+
+func removeSendReceipt(root string, ref string) error {
+	path, err := sendReceiptPath(root, ref)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove send receipt: %w", err)
+	}
+	return syncDirectory(root)
+}
+
 type storedDraftSaveAttempt struct {
 	Version  int              `json:"version"`
 	DraftRef string           `json:"draft_ref"`

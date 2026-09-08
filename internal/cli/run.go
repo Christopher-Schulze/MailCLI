@@ -54,6 +54,7 @@ type responseData struct {
 	PruneResult              *mail.PruneDraftsResult `json:"prune,omitempty"`
 	SavedDraft               *mail.SavedDraft        `json:"saved_draft,omitempty"`
 	SendResult               *mail.SendResult        `json:"send_result,omitempty"`
+	SendReceipt              *mail.SendReceipt       `json:"send_receipt,omitempty"`
 	SendSetup                *sendSetupResult        `json:"send_setup,omitempty"`
 	DeleteResult             *mail.DeleteResult      `json:"delete_result,omitempty"`
 	SyncResult               *mail.SyncResult        `json:"sync_result,omitempty"`

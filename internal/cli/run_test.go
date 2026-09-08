@@ -515,6 +515,29 @@ func TestDraftsListEmitsSummariesWithoutBodies(t *testing.T) {
 	}
 }
 
+func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportTestService(root, &cliMirror{})
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Receipt", Body: "private body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runDraftInspect(service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("runDraftInspect() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"send_receipt"`) || strings.Contains(stdout.String(), "private body") || strings.Contains(stdout.String(), `"draft"`) {
+		t.Fatalf("consumed inspect output = %s", stdout.String())
+	}
+}
+
 func TestDraftSendWithoutTransportIsJSONFailure(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
