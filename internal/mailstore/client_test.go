@@ -228,11 +228,10 @@ func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfi
 }
 
 func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
-	if err := s.nextMutationErr(); err != nil {
-		return transport.MutationEvidence{}, err
-	}
-	s.lastCommand = "COPY"
-	return transport.MutationEvidence{
+	evidence := transport.MutationEvidence{
+		OperationID:         transport.MutationOperationID("COPY", cfg.Username, srcMailbox, uid, expectedUIDValidity, dstMailbox),
+		Outcome:             transport.MutationOutcomeAttempted,
+		SourceAccount:       cfg.Username,
 		Command:             "COPY",
 		ServerResponse:      "OK COPY completed",
 		Mailbox:             srcMailbox,
@@ -240,7 +239,13 @@ func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapCo
 		UID:                 uid,
 		UIDValidity:         s.stubValidity(),
 		ExpectedUIDValidity: expectedUIDValidity,
-	}, nil
+	}
+	if err := s.nextMutationErr(); err != nil {
+		return evidence, err
+	}
+	s.lastCommand = "COPY"
+	evidence.Outcome = transport.MutationOutcomeCompleted
+	return evidence, nil
 }
 
 func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
@@ -816,8 +821,9 @@ func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 			{Name: "INBOX"},
 			{Name: "Sent", Flags: []string{"\\Sent"}},
 		},
-		uid:          102,
-		mutationErrs: []error{uidValidityChangedErrorForTest()},
+		uid:                    102,
+		mutationErrs:           []error{uidValidityChangedErrorForTest()},
+		searchMatchesByMailbox: map[string][]int{"Sent": []int{0, 0, 1}},
 	}
 	client := &Client{
 		store: store,
@@ -923,6 +929,94 @@ func TestTransferMoveDoesNotReplayAfterUnknownOutcome(t *testing.T) {
 	}
 	if fakeImap.mutationCalls != 1 {
 		t.Fatalf("replayed mutation calls = %d, want 1", fakeImap.mutationCalls)
+	}
+}
+
+func TestTransferCopyDoesNotReplayAfterUnknownOutcome(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes:                  []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}},
+		mutationErrs:           []error{errors.New("copy response lost")},
+		searchMatchesByMailbox: map[string][]int{"Archive": []int{0, 1, 1}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	request := mail.TransferMessageRequest{
+		Ref: page.Messages[0].Ref, DestinationMailbox: destinationRef, Copy: true,
+	}
+
+	_, err = client.TransferMessage(context.Background(), request)
+	if transport.ErrorCode(err) != transport.CodeIMAPCopyOutcomeUnknown {
+		t.Fatalf("first TransferMessage() error = %v, want %s", err, transport.CodeIMAPCopyOutcomeUnknown)
+	}
+	var outcomeErr *transport.MutationOutcomeError
+	if !errors.As(err, &outcomeErr) || outcomeErr.Evidence.OperationID == "" ||
+		outcomeErr.Evidence.DestinationUID == 0 || outcomeErr.Evidence.DestinationUIDValidity == 0 {
+		t.Fatalf("first COPY error evidence = %+v", outcomeErr)
+	}
+	if fakeImap.mutationCalls != 1 {
+		t.Fatalf("first mutation calls = %d, want 1", fakeImap.mutationCalls)
+	}
+
+	_, err = client.TransferMessage(context.Background(), request)
+	if transport.ErrorCode(err) != transport.CodeIMAPCopyOutcomeUnknown {
+		t.Fatalf("replayed TransferMessage() error = %v, want %s", err, transport.CodeIMAPCopyOutcomeUnknown)
+	}
+	if fakeImap.mutationCalls != 1 {
+		t.Fatalf("replayed mutation calls = %d, want 1", fakeImap.mutationCalls)
+	}
+}
+
+func TestTransferCopyRejectsAmbiguousDestinationBeforeDispatch(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "identity@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	destinationRef, err := mailref.EncodeMailbox(testAccountID, []string{"Archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes:                  []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}},
+		searchMatchesByMailbox: map[string][]int{"Archive": []int{2}},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"identity@gmail.com": "secret"},
+		},
+	}
+	_, err = client.TransferMessage(context.Background(), mail.TransferMessageRequest{
+		Ref: page.Messages[0].Ref, DestinationMailbox: destinationRef, Copy: true,
+	})
+	if transport.ErrorCode(err) != transport.CodeIMAPCopyOutcomeUnknown {
+		t.Fatalf("TransferMessage() error = %v, want %s", err, transport.CodeIMAPCopyOutcomeUnknown)
+	}
+	if fakeImap.mutationCalls != 0 {
+		t.Fatalf("mutation calls = %d, want 0", fakeImap.mutationCalls)
 	}
 }
 

@@ -383,6 +383,9 @@ type SendResult struct {
 }
 
 type ServerMutationEvidence struct {
+	OperationID    string `json:"operation_id,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
+	SourceAccount  string `json:"source_account,omitempty"`
 	Command        string `json:"command"`
 	ServerResponse string `json:"server_response"`
 	Mailbox        string `json:"mailbox"`
@@ -390,11 +393,18 @@ type ServerMutationEvidence struct {
 	UID            uint32 `json:"uid"`
 	// ExpectedUIDValidity is the UIDVALIDITY resolved before the mutation;
 	// with UIDValidity it forms the compared pair (048: fail closed on rebuild).
-	ExpectedUIDValidity uint32 `json:"expected_uidvalidity,omitempty"`
-	UIDValidity         uint32 `json:"uidvalidity,omitempty"`
-	DuplicateMatches    int    `json:"duplicate_matches,omitempty"`
-	ExpungeBranch       string `json:"expunge_branch,omitempty"`
-	ForeignDeletedCount int    `json:"foreign_deleted_count,omitempty"`
+	ExpectedUIDValidity    uint32   `json:"expected_uidvalidity,omitempty"`
+	UIDValidity            uint32   `json:"uidvalidity,omitempty"`
+	DuplicateMatches       int      `json:"duplicate_matches,omitempty"`
+	ExpungeBranch          string   `json:"expunge_branch,omitempty"`
+	ForeignDeletedCount    int      `json:"foreign_deleted_count,omitempty"`
+	DestinationUIDValidity uint32   `json:"destination_uidvalidity,omitempty"`
+	DestinationUID         uint32   `json:"destination_uid,omitempty"`
+	CopyUIDResponse        string   `json:"copyuid_response,omitempty"`
+	CopyUIDValidity        uint32   `json:"copyuid_validity,omitempty"`
+	CopySourceUID          uint32   `json:"copy_source_uid,omitempty"`
+	CopyDestinationUID     uint32   `json:"copy_destination_uid,omitempty"`
+	CompletedEffects       []string `json:"completed_effects,omitempty"`
 }
 
 type MessageSummary struct {

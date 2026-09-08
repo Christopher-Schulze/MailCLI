@@ -17,6 +17,27 @@ type SubmissionError struct {
 	Err   error
 }
 
+// MutationOutcomeError carries the evidence collected before a mutation's
+// final result became unavailable. Callers must reconcile the evidence before
+// replaying an operation with an unknown outcome.
+type MutationOutcomeError struct {
+	Code     string
+	Message  string
+	Evidence MutationEvidence
+	Err      error
+}
+
+func (e *MutationOutcomeError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("%s: %s", e.Code, e.Message)
+	}
+	return fmt.Sprintf("%s: %s: %v", e.Code, e.Message, e.Err)
+}
+
+func (e *MutationOutcomeError) Unwrap() error { return e.Err }
+
+func (e *MutationOutcomeError) ErrorCode() string { return e.Code }
+
 func (e *SubmissionError) Error() string {
 	if e.Err == nil {
 		return CodeSMTPSubmissionUnknown + ": SMTP submission outcome is unknown during " + e.Stage
@@ -75,6 +96,7 @@ const (
 	CodeIMAPMessageUIDMismatch   = "imap_message_uid_mismatch"
 	CodeIMAPAmbiguousMessageID   = "imap_ambiguous_message_id"
 	CodeIMAPMoveOutcomeUnknown   = "imap_move_outcome_unknown"
+	CodeIMAPCopyOutcomeUnknown   = "imap_copy_outcome_unknown"
 	CodeIMAPMessageUIDUnknown    = "imap_message_uid_unknown"
 	CodeIMAPUIDValidityUnknown   = "mailbox_uidvalidity_unknown"
 	CodeIMAPRawSourceTooLarge    = "raw_source_too_large"

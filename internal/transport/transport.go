@@ -2,8 +2,11 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	stdmail "net/mail"
+	"strconv"
 	"strings"
 )
 
@@ -46,6 +49,13 @@ type MailboxInfo struct {
 
 // MutationEvidence records server proof for an IMAP message mutation.
 type MutationEvidence struct {
+	// OperationID is stable for one source identity and destination. Callers
+	// can use it to correlate a retry with the original mutation attempt.
+	OperationID string
+	// Outcome is attempted, completed, rejected, or unknown.
+	Outcome string
+	// SourceAccount is the credential-backed account that owns the source.
+	SourceAccount  string
 	Command        string // STORE, COPY, MOVE, or DELETE
 	ServerResponse string // final server status line
 	Mailbox        string // source mailbox
@@ -65,6 +75,41 @@ type MutationEvidence struct {
 	// ExpectedUIDValidity is the UIDVALIDITY the caller resolved before the
 	// mutation; together with UIDValidity it forms the compared pair.
 	ExpectedUIDValidity uint32
+	// DestinationUIDValidity and DestinationUID identify a destination match
+	// observed after COPY. They are zero when the destination was not checked.
+	DestinationUIDValidity uint32
+	DestinationUID         uint32
+	// COPYUID is the optional RFC 3501 response code returned by COPY. The raw
+	// response is retained even when its UID mapping cannot be trusted.
+	CopyUIDResponse    string
+	CopyUIDValidity    uint32
+	CopySourceUID      uint32
+	CopyDestinationUID uint32
+	// CompletedEffects lists independently proven phases of a compound
+	// mutation, such as copy and source_flag in a MOVE fallback.
+	CompletedEffects []string
+}
+
+const (
+	MutationOutcomeNotStarted = "not_started"
+	MutationOutcomeAttempted  = "attempted"
+	MutationOutcomeCompleted  = "completed"
+	MutationOutcomePartial    = "partial"
+	MutationOutcomeRejected   = "rejected"
+	MutationOutcomeUnknown    = "unknown"
+	MutationOutcomeObserved   = "observed"
+)
+
+// MutationOperationID returns a deterministic, credential-free identity for
+// one mutation intent. UIDVALIDITY is included so a rebuilt source mailbox
+// cannot inherit an older operation identity.
+func MutationOperationID(command, account, mailbox string, uid, uidvalidity uint32, targetMailbox string) string {
+	identity := strings.Join([]string{
+		strings.ToUpper(command), account, mailbox, strconv.FormatUint(uint64(uid), 10),
+		strconv.FormatUint(uint64(uidvalidity), 10), targetMailbox,
+	}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return strings.ToLower(command) + "_" + hex.EncodeToString(digest[:12])
 }
 
 // MailboxStatus records server state from an IMAP STATUS command.
