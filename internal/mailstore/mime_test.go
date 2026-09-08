@@ -240,8 +240,76 @@ func TestParseMIMEDocumentMarksExternalizedAttachmentIncomplete(t *testing.T) {
 		t.Fatalf("parseMIMEDocument() error = %v", err)
 	}
 	part, exists := document.Parts["2"]
-	if !exists || part.Complete {
-		t.Fatalf("externalized attachment part = %#v, exists = %t", part, exists)
+	if !exists || part.Complete || document.Complete || !reflect.DeepEqual(document.MissingParts, []string{"2"}) {
+		t.Fatalf("externalized attachment document = %#v, part = %#v, exists = %t", document, part, exists)
+	}
+}
+
+func TestParseMIMEDocumentPropagatesMalformedAttachment(t *testing.T) {
+	t.Parallel()
+	source := []byte("Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+		"--b\r\nContent-Type: application/pdf\r\n" +
+		"Content-Disposition: attachment; filename=broken.pdf\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\nnot-base64!\r\n--b--\r\n")
+	document, err := parseMIMEDocument(bytes.NewReader(source), false, true, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	part, exists := document.Parts["2"]
+	if !exists || part.Complete || document.Complete || !reflect.DeepEqual(document.MissingParts, []string{"2"}) {
+		t.Fatalf("malformed attachment document = %#v, part = %#v, exists = %t", document, part, exists)
+	}
+	if document.Content != "body" {
+		t.Fatalf("Content = %q, want body retained", document.Content)
+	}
+}
+
+func TestParseMIMEDocumentPropagatesNestedAttachmentFailure(t *testing.T) {
+	t.Parallel()
+	source := []byte("Content-Type: multipart/mixed; boundary=outer\r\n\r\n" +
+		"--outer\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+		"--outer\r\nContent-Type: multipart/mixed; boundary=inner\r\n\r\n" +
+		"--inner\r\nContent-Type: application/pdf\r\n" +
+		"Content-Disposition: attachment; filename=healthy.pdf\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\naGVhbHRoeQ==\r\n" +
+		"--inner\r\nContent-Type: application/pdf\r\n" +
+		"Content-Disposition: attachment; filename=truncated.pdf\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\nYnl0ZXM\r\n" +
+		"--inner--\r\n--outer--\r\n")
+	document, err := parseMIMEDocument(bytes.NewReader(source), false, true, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	healthy, healthyExists := document.Parts["2.1"]
+	failed, failedExists := document.Parts["2.2"]
+	digest := sha256.Sum256([]byte("healthy"))
+	if !healthyExists || !healthy.Complete || healthy.Size != int64(len("healthy")) ||
+		healthy.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("healthy nested attachment = %#v, exists = %t", healthy, healthyExists)
+	}
+	if !failedExists || failed.Complete || document.Complete ||
+		!reflect.DeepEqual(document.MissingParts, []string{"2.2"}) {
+		t.Fatalf("nested attachment document = %#v, failed = %#v, exists = %t", document, failed, failedExists)
+	}
+	if document.Content != "body" {
+		t.Fatalf("Content = %q, want body retained", document.Content)
+	}
+}
+
+func TestParseMIMEDocumentDeduplicatesUnsupportedAttachmentFailure(t *testing.T) {
+	t.Parallel()
+	source := []byte("Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=unknown.bin\r\n" +
+		"Content-Transfer-Encoding: unsupported\r\n\r\nbytes\r\n--b--\r\n")
+	document, err := parseMIMEDocument(bytes.NewReader(source), false, true, false)
+	if err != nil {
+		t.Fatalf("parseMIMEDocument() error = %v", err)
+	}
+	part, exists := document.Parts["1"]
+	if !exists || part.Complete || document.Complete || !reflect.DeepEqual(document.MissingParts, []string{"1"}) {
+		t.Fatalf("unsupported attachment document = %#v, part = %#v, exists = %t", document, part, exists)
 	}
 }
 

@@ -506,6 +506,35 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	}
 }
 
+func TestClientGetMessageReportsCorruptAttachment(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithExpectedID(t, messageRefWithSubject(t, page.Messages, "Quarterly Report"), "<101@example.com>")
+	writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", []byte(
+		"From: Alice <alice@example.com>\r\nTo: Christopher <christopher@example.com>\r\n"+
+			"Subject: Quarterly Report\r\nMessage-ID: <101@example.com>\r\n"+
+			"Content-Type: multipart/mixed; boundary=b\r\n\r\n"+
+			"--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"+
+			"--b\r\nContent-Type: application/pdf\r\n"+
+			"Content-Disposition: attachment; filename=broken.pdf\r\n"+
+			"Content-Transfer-Encoding: base64\r\n\r\nnot-base64!\r\n--b--\r\n",
+	))
+	client := &Client{store: store}
+	message, err := client.GetMessage(context.Background(), messageRef)
+	if err != nil || message.ContentComplete || message.Content != "body" ||
+		len(message.MissingParts) != 1 || message.MissingParts[0] != "2" ||
+		len(message.Attachments) != 1 || message.Attachments[0].Downloaded ||
+		message.Attachments[0].SizeKnown {
+		t.Fatalf("GetMessage() = %+v, error = %v; want explicit incomplete attachment", message, err)
+	}
+}
+
 func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 	tests := []struct {
 		name      string

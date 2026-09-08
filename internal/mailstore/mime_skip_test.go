@@ -125,6 +125,30 @@ func TestSkipModeMarksPartialSourceIncomplete(t *testing.T) {
 	}
 }
 
+func TestSkipModePreservesUnverifiedAttachmentSemantics(t *testing.T) {
+	t.Parallel()
+	source := []byte("Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+		"--b\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=broken.bin\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\nnot-base64!\r\n--b--\r\n")
+	skipped, err := parseMIMEDocument(bytes.NewReader(source), false, false, true)
+	if err != nil {
+		t.Fatalf("skip parse error = %v", err)
+	}
+	part, exists := skipped.Parts["2"]
+	if !exists || !skipped.Complete || len(skipped.MissingParts) != 0 || !part.Complete || part.Size != -1 {
+		t.Fatalf("skip document = %#v, part = %#v, exists = %t; want source-complete unverified metadata", skipped, part, exists)
+	}
+	full, err := parseMIMEDocument(bytes.NewReader(source), false, false, false)
+	if err != nil {
+		t.Fatalf("full parse error = %v", err)
+	}
+	if full.Complete || len(full.MissingParts) != 1 || full.MissingParts[0] != "2" {
+		t.Fatalf("full document = %#v; want corrupt attachment completeness", full)
+	}
+}
+
 func skipBenchFixture(b *testing.B, attachmentBytes int) []byte {
 	b.Helper()
 	payload := bytes.Repeat([]byte{0xAB, 0xCD, 0xEF, 0x01}, attachmentBytes/4)
