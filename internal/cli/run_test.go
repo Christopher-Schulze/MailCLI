@@ -702,8 +702,10 @@ func TestSyncCheckJSON(t *testing.T) {
 				{
 					MailboxRef:     "mbx_1",
 					AccountRef:     "acct_1",
+					State:          mail.MailboxDeltaStateMatched,
 					Name:           "INBOX",
 					Path:           []string{"INBOX"},
+					ServerName:     "INBOX",
 					LocalMessages:  10,
 					ServerMessages: 15,
 					Delta:          5,
@@ -719,7 +721,8 @@ func TestSyncCheckJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"sync_check"`) || !strings.Contains(stdout.String(), `"delta":5`) {
+	if !strings.Contains(stdout.String(), `"sync_check"`) || !strings.Contains(stdout.String(), `"delta":5`) ||
+		!strings.Contains(stdout.String(), `"state":"matched"`) || !strings.Contains(stdout.String(), `"server_name":"INBOX"`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
 	}
 }
@@ -761,6 +764,10 @@ func TestSyncCheckJSONReportsFailures(t *testing.T) {
 func TestSyncCheckHumanPrintsFailuresSection(t *testing.T) {
 	gw := syncCheckGateway{
 		result: mail.SyncCheckResult{
+			Mailboxes: []mail.MailboxDelta{{
+				AccountRef: "acct_1", Name: "Projects", Path: []string{"Projects"},
+				State: mail.MailboxDeltaStateServerOnly, ServerName: "Projects",
+			}},
 			Failures: []mail.SyncCheckFailure{
 				{Account: "a@gmail.com", Mailbox: "Archive", Code: "imap_timeout", Message: "IMAP STATUS deadline"},
 			},
@@ -776,7 +783,8 @@ func TestSyncCheckHumanPrintsFailuresSection(t *testing.T) {
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "complete\tfalse") || !strings.Contains(out, "failures") ||
-		!strings.Contains(out, "imap_timeout") || !strings.Contains(out, "Archive") {
+		!strings.Contains(out, "imap_timeout") || !strings.Contains(out, "Archive") ||
+		!strings.Contains(out, "server_only") || !strings.Contains(out, "server_name") {
 		t.Fatalf("unexpected stdout: %s", out)
 	}
 }
