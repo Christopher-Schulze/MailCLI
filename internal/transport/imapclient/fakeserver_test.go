@@ -32,6 +32,8 @@ type fakeServerConfig struct {
 	uidSearchResponse       []string
 	appendOK                bool
 	dropAppendResponse      bool
+	appendReadStartedEvents chan<- struct{}
+	appendReadContinue      <-chan struct{}
 	searchDelay             time.Duration
 	searchStarted           chan struct{}
 	searchStartedEvents     chan<- struct{}
@@ -379,8 +381,21 @@ func (s *fakeServer) handle(conn net.Conn) {
 			}
 			s.writeLine(bw, "+ go ahead")
 			data := make([]byte, n)
-			if _, err := io.ReadFull(br, data); err != nil {
-				return
+			if n > 0 {
+				if _, err := io.ReadFull(br, data[:1]); err != nil {
+					return
+				}
+				if s.config.appendReadStartedEvents != nil {
+					s.config.appendReadStartedEvents <- struct{}{}
+				}
+				if s.config.appendReadContinue != nil {
+					<-s.config.appendReadContinue
+				}
+				if n > 1 {
+					if _, err := io.ReadFull(br, data[1:]); err != nil {
+						return
+					}
+				}
 			}
 			crlf := make([]byte, 2)
 			if _, err := io.ReadFull(br, crlf); err != nil || crlf[0] != '\r' || crlf[1] != '\n' {

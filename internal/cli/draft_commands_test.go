@@ -11,6 +11,7 @@ import (
 
 	"mailcli/internal/compose"
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 type postflightSaveGateway struct{ testGateway }
@@ -226,6 +227,12 @@ func TestDraftSendRequiresConfirmation(t *testing.T) {
 	)
 	if code != 1 || !strings.Contains(stdout.String(), `"code":"confirmation_required"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestDraftReconcileTimeoutCoversTransferBudget(t *testing.T) {
+	if draftReconcileTimeout < transport.TransferBudgetCap {
+		t.Fatalf("draft reconcile timeout = %v, want at least transfer cap %v", draftReconcileTimeout, transport.TransferBudgetCap)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -289,6 +290,114 @@ func TestAppendToSentReaderRejectsNegativeSize(t *testing.T) {
 	}
 }
 
+type imapDeadlineRecorder struct {
+	net.Conn
+	deadlines []time.Time
+}
+
+func (d *imapDeadlineRecorder) SetDeadline(deadline time.Time) error {
+	d.deadlines = append(d.deadlines, deadline)
+	return d.Conn.SetDeadline(deadline)
+}
+
+// A 10 MiB literal earns a transfer budget above the short command budget.
+// The recorder proves APPEND uses that budget only while writing the literal
+// and restores the short budget before reading the final tagged response.
+func TestDoAppendSetsSizeAwareTransferDeadline(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
+	recorder := &imapDeadlineRecorder{Conn: clientConn}
+	sess := &session{
+		conn: recorder,
+		br:   bufio.NewReader(recorder),
+		bw:   bufio.NewWriter(recorder),
+		nextTag: func() string {
+			return "A001"
+		},
+	}
+	message := bytes.Repeat([]byte{'x'}, 10<<20)
+	serverErr := make(chan error, 1)
+	go func() {
+		defer func() { _ = serverConn.Close() }()
+		br := bufio.NewReader(serverConn)
+		line, err := br.ReadString('\n')
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			serverErr <- errors.New("APPEND command has no tag")
+			return
+		}
+		if _, err := io.WriteString(serverConn, "+ go ahead\r\n"); err != nil {
+			serverErr <- err
+			return
+		}
+		payload := make([]byte, len(message))
+		if _, err := io.ReadFull(br, payload); err != nil {
+			serverErr <- err
+			return
+		}
+		trailer := make([]byte, 2)
+		if _, err := io.ReadFull(br, trailer); err != nil {
+			serverErr <- err
+			return
+		}
+		if !bytes.Equal(payload, message) || trailer[0] != '\r' || trailer[1] != '\n' {
+			serverErr <- errors.New("APPEND literal mismatch")
+			return
+		}
+		_, err = io.WriteString(serverConn, fields[0]+" OK APPEND completed\r\n")
+		serverErr <- err
+	}()
+
+	started := time.Now()
+	if err := (&Client{}).doAppend(
+		context.Background(), sess, "A001", "Sent", bytes.NewReader(message), int64(len(message)),
+	); err != nil {
+		t.Fatalf("doAppend() error = %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake APPEND peer: %v", err)
+	}
+	if len(recorder.deadlines) != 3 {
+		t.Fatalf("SetDeadline calls = %d, want command, transfer, final reply", len(recorder.deadlines))
+	}
+	if !recorder.deadlines[1].After(recorder.deadlines[0]) ||
+		recorder.deadlines[1].Sub(recorder.deadlines[0]) < 5*time.Second {
+		t.Fatalf("transfer deadline = %v, command deadline = %v, want a materially larger transfer budget", recorder.deadlines[1].Sub(started), recorder.deadlines[0].Sub(started))
+	}
+	if !recorder.deadlines[2].Before(recorder.deadlines[1]) {
+		t.Fatalf("final reply deadline = %v, transfer deadline = %v, want restored command budget", recorder.deadlines[2], recorder.deadlines[1])
+	}
+}
+
+func TestSetTransferDeadlineHonorsContextDeadline(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
+	recorder := &imapDeadlineRecorder{Conn: clientConn}
+	sess := &session{conn: recorder}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second))
+	defer cancel()
+
+	if err := (&Client{}).setTransferDeadline(ctx, sess, int64(1<<62)); err != nil {
+		t.Fatalf("setTransferDeadline() error = %v", err)
+	}
+	if len(recorder.deadlines) != 1 {
+		t.Fatalf("SetDeadline calls = %d, want 1", len(recorder.deadlines))
+	}
+	contextDeadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("context has no deadline")
+	}
+	if deadline := recorder.deadlines[0]; deadline.After(contextDeadline) {
+		t.Fatalf("transfer deadline = %v, exceeds context deadline %v", deadline, contextDeadline)
+	}
+}
+
 func TestMessageOperationsRejectZeroUIDBeforeConnection(t *testing.T) {
 	client := New()
 	cfg := transport.ImapConfig{}
@@ -369,6 +478,55 @@ func TestAppendToSentContextCancel(t *testing.T) {
 	}
 	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
 		t.Fatalf("expected code %s, got %s: %v", transport.CodeIMAPTimeout, code, err)
+	}
+}
+
+func TestAppendToSentCancellationDuringLiteralRetainsUnknown(t *testing.T) {
+	started := make(chan struct{}, 1)
+	continueReading := make(chan struct{})
+	defer close(continueReading)
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:                  true,
+		sentMboxes:              []string{"Sent"},
+		appendOK:                true,
+		appendReadStartedEvents: started,
+		appendReadContinue:      continueReading,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, callErr := client.AppendToSent(ctx, cfg, bytes.Repeat([]byte{'x'}, 1<<20), "<cancel@example.com>")
+		result <- callErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("APPEND literal did not start")
+	}
+	startedAt := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if transport.ErrorCode(err) != transport.CodeIMAPAppendOutcomeUnknown {
+			t.Fatalf("canceled APPEND error = %v, want %s", err, transport.CodeIMAPAppendOutcomeUnknown)
+		}
+		if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+			t.Fatalf("canceled APPEND took %v after cancellation", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled APPEND did not return promptly")
 	}
 }
 

@@ -27,14 +27,10 @@ const (
 	dialTimeout = 10 * time.Second
 	// commandBudget caps every short SMTP command (greeting, EHLO,
 	// STARTTLS, AUTH, MAIL, RCPT, DATA start, final reply).
-	commandBudget = 30 * time.Second
-	// bandwidthFloorBytesPerSec is the conservative uplink assumed when
-	// sizing the DATA transfer budget: 1 MiB/s sits below typical
-	// broadband uplinks, so normal links finish long before the budget.
-	bandwidthFloorBytesPerSec = int64(1 << 20)
+	commandBudget = transport.TransferCommandBudget
 	// transferCap bounds the DATA phase even for the largest messages:
 	// 512 MiB at the floor needs ~542 s, inside the 15 min cap.
-	transferCap = 15 * time.Minute
+	transferCap = transport.TransferBudgetCap
 )
 
 // Client submits fully composed RFC 5322 messages to an SMTP submission
@@ -293,14 +289,7 @@ func bumpDeadline(conn net.Conn, ctx context.Context) error {
 // bandwidthFloorBytesPerSec of payload, capped at transferCap. Small
 // messages keep the flat command budget; large ones scale with size.
 func transferBudgetForSize(size int64) time.Duration {
-	budget := commandBudget
-	if size > 0 && bandwidthFloorBytesPerSec > 0 {
-		budget += time.Duration(size/bandwidthFloorBytesPerSec) * time.Second
-	}
-	if budget > transferCap {
-		budget = transferCap
-	}
-	return budget
+	return transport.TransferBudgetForSize(size)
 }
 
 // bumpTransferDeadline applies the size-aware budget to the DATA payload
