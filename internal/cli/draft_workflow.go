@@ -19,6 +19,7 @@ import (
 
 type draftPreview struct {
 	Ref         string                 `json:"ref"`
+	AccountRef  string                 `json:"account_ref,omitempty"`
 	From        string                 `json:"from,omitempty"`
 	To          []mail.Recipient       `json:"to"`
 	CC          []mail.Recipient       `json:"cc"`
@@ -157,13 +158,16 @@ func makeDraftPreview(draft mail.Draft, view string) (draftPreview, error) {
 		return draftPreview{}, invalidDraftInput("preview format must be plain, source, or html")
 	}
 	return draftPreview{
-		Ref: draft.Ref, From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
+		Ref: draft.Ref, AccountRef: draft.AccountRef, From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
 		Subject: draft.Subject, BodyFormat: draft.BodyFormat, View: view, Body: body,
 		Attachments: draft.Attachments,
 	}, nil
 }
 
 func writeHumanDraftPreview(writer io.Writer, preview draftPreview) {
+	if preview.AccountRef != "" {
+		writeFormat(writer, "Account: %s\n", preview.AccountRef)
+	}
 	writeFormat(writer, "From: %s\n", preview.From)
 	writeFormat(writer, "To: %s\n", formatRecipients(preview.To))
 	if len(preview.CC) > 0 {
@@ -352,7 +356,7 @@ func draftInputFromStored(draft mail.Draft) mail.DraftInput {
 		attachments = append(attachments, attachment.Path)
 	}
 	return mail.DraftInput{
-		From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
+		AccountRef: draft.AccountRef, From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
 		Subject: draft.Subject, Body: body, BodyFormat: draft.BodyFormat,
 		Attachments: attachments,
 	}

@@ -45,6 +45,9 @@ func prepareDraftWithAttachmentsObserver(
 	if request.Kind == DraftKindForward && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("forward drafts require at least one explicit recipient")
 	}
+	if strings.ContainsAny(request.Input.AccountRef, "\r\n\x00") {
+		return Draft{}, validationError("account ref contains control characters")
+	}
 	if err := validateDraftLimits(request.Input); err != nil {
 		return Draft{}, err
 	}
@@ -66,6 +69,7 @@ func prepareDraftWithAttachmentsObserver(
 	now := time.Now().UTC()
 	return Draft{
 		Ref: ref, Kind: request.Kind, SourceRef: request.SourceRef,
+		AccountRef:      request.Input.AccountRef,
 		ReplyAll:        request.ReplyAll,
 		SourceMessageID: request.SourceMessageID, SourceReferences: request.SourceReferences,
 		From: request.Input.From,

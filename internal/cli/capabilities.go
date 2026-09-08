@@ -192,6 +192,7 @@ func capabilities() capabilityManifest {
 				string(mail.SenderIdentityCoverageStateNotObserved),
 				string(mail.SenderIdentityCoverageStateNoValidSender),
 				string(mail.SenderIdentityCoverageStateNoSentMailbox),
+				string(mail.SenderIdentityCoverageStateConfigured),
 				string(mail.SenderIdentityCoverageStateUnavailable),
 				string(mail.SenderIdentityCoverageStateNotApplicable),
 			},

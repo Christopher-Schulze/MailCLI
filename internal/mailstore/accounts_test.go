@@ -95,6 +95,46 @@ func TestListAccountCatalogKeepsGlobalSchemaFailureHardAndWrapped(t *testing.T) 
 	}
 }
 
+func TestListAccountCatalogResolvesExplicitBindingWithoutSentHistory(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	accountRoot := filepath.Join(store.versionRoot, testAccountID)
+	if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+		t.Fatalf("MkdirAll(account root) error = %v", err)
+	}
+	cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>INBOX</key><dict>
+<key>MailboxPathComponent</key><string>INBOX</string>
+<key>IMAPMailboxChildren</key><dict/>
+</dict></dict></dict></plist>`)
+	if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), cache, 0o600); err != nil {
+		t.Fatalf("WriteFile(mailbox cache) error = %v", err)
+	}
+	bindingStore := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	if err := bindingStore.UpsertAccountBinding(mail.AccountBinding{
+		AccountID: testAccountID, SenderAliases: []string{"alias@gmail.com"}, CredentialAccount: "login@gmail.com",
+	}); err != nil {
+		t.Fatalf("UpsertAccountBinding() error = %v", err)
+	}
+	store.accountBindings = bindingStore
+	catalog, err := store.ListAccountCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountCatalog() error = %v", err)
+	}
+	if !catalog.Complete || len(catalog.Accounts) != 1 {
+		t.Fatalf("catalog = %+v", catalog)
+	}
+	account := catalog.Accounts[0]
+	if account.State != "ok" || account.Type != mail.AccountTypeIMAP || account.DisplayName != "alias@gmail.com" ||
+		len(account.DiscoveredSenderIdentities) != 0 || len(account.ConfiguredSenderAliases) != 1 ||
+		account.ConfiguredSenderAliases[0] != "alias@gmail.com" || len(account.EmailAddresses) != 1 ||
+		account.EmailAddresses[0] != "alias@gmail.com" ||
+		account.IdentityCoverage.Source != mail.SenderIdentityCoverageSourceAccountBinding ||
+		account.IdentityCoverage.State != mail.SenderIdentityCoverageStateConfigured {
+		t.Fatalf("account = %+v", account)
+	}
+}
+
 func TestAccountCatalogErrorPreservesCause(t *testing.T) {
 	cause := errors.New("sentinel catalog cause")
 	err := accountCatalogError("account-id", cause)

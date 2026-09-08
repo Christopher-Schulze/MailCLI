@@ -20,6 +20,7 @@ type Config struct {
 	MailRoot          string
 	PreferencesPath   string
 	ActiveAccountURLs []string
+	AccountBindings   mail.AccountBindingStore
 	// SenderIdentityScanLimit optionally increases the bounded Sent-history
 	// scan. Zero uses mail.DefaultSenderIdentityScanLimit; values above
 	// mail.MaximumSenderIdentityScanLimit are rejected.

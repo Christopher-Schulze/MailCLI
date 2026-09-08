@@ -45,7 +45,7 @@ type mimeIdentity struct {
 
 func envelopeFingerprint(draft Draft, messageID string) string {
 	hash := sha256.New()
-	parts := []string{messageID, draft.From, draft.Subject}
+	parts := []string{messageID, draft.AccountRef, draft.From, draft.Subject}
 	for _, recipient := range draft.To {
 		parts = append(parts, recipient.Address)
 	}

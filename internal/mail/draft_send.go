@@ -94,10 +94,11 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := s.send.available(); err != nil {
 		return SendResult{}, err
 	}
-	sender, err := sendSender(draft.From)
+	identity, err := s.resolveSendIdentity(ctx, draft)
 	if err != nil {
 		return SendResult{}, err
 	}
+	sender := identity.Sender
 	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
 	if err != nil {
 		return SendResult{}, err
@@ -119,9 +120,9 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	password, err := s.send.Credentials.Load(sender)
+	password, err := s.send.Credentials.Load(identity.Credential)
 	if err != nil || password == "" {
-		return SendResult{}, missingCredentialsError(sender)
+		return SendResult{}, missingCredentialsErrorFor(sender, identity.Credential)
 	}
 	mimeFingerprint, err := draftMIMEFingerprint(draft)
 	if err != nil {
@@ -141,7 +142,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	submitEvidence, err := submitComposedMessage(
 		ctx,
 		s.send.Submitter,
-		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
+		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: identity.Credential, Password: password},
 		sender, envelopeRecipients, message,
 	)
 	if err != nil {
@@ -192,7 +193,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,
 		s.send.Mirror,
-		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password},
 		message,
 		attempt.MessageID,
 	)
@@ -459,19 +460,20 @@ func (s *Service) reconcileUnknownViaImap(
 			Message: "direct send transport has no IMAP operator; reconciliation over the Sent mailbox is unavailable",
 		}
 	}
-	sender, err := sendSender(draft.From)
+	identity, err := s.resolveSendIdentity(ctx, draft)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
+	sender := identity.Sender
 	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
-	password, err := s.send.Credentials.Load(sender)
+	password, err := s.send.Credentials.Load(identity.Credential)
 	if err != nil || password == "" {
-		return resultForReconcile(ref, attempt), missingCredentialsError(sender)
+		return resultForReconcile(ref, attempt), missingCredentialsErrorFor(sender, identity.Credential)
 	}
-	cfg := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password}
+	cfg := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password}
 	mailboxes, err := imap.ListMailboxes(ctx, cfg)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
@@ -583,20 +585,21 @@ func (s *Service) reconcileMirrorPending(
 	if err := verifyDraftAttachments(draft.Attachments); err != nil {
 		return result, err
 	}
-	sender, err := sendSender(draft.From)
+	identity, err := s.resolveSendIdentity(ctx, draft)
 	if err != nil {
 		return result, err
 	}
+	sender := identity.Sender
 	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
 	if err != nil {
 		return result, err
 	}
-	password, err := s.send.Credentials.Load(sender)
+	password, err := s.send.Credentials.Load(identity.Credential)
 	if err != nil || password == "" {
-		return result, missingCredentialsError(sender)
+		return result, missingCredentialsErrorFor(sender, identity.Credential)
 	}
 	imap := s.send.ImapClient()
-	sentConfig := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password}
+	sentConfig := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password}
 	sentBox := ""
 	if imap != nil {
 		mailboxes, listErr := imap.ListMailboxes(ctx, sentConfig)

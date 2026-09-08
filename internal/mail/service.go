@@ -15,10 +15,11 @@ import (
 // passwords. A Service created without them rejects sends with
 // send_transport_unavailable instead of panicking.
 type SendTransport struct {
-	Submitter   transport.Submitter
-	Mirror      transport.SentMirror
-	Credentials transport.CredentialStore
-	Imap        transport.ImapOperator
+	Submitter       transport.Submitter
+	Mirror          transport.SentMirror
+	Credentials     transport.CredentialStore
+	AccountBindings AccountBindingStore
+	Imap            transport.ImapOperator
 }
 
 // InvalidateCredentials advances the IMAP pool generation for account after
@@ -81,6 +82,12 @@ func NewServiceWithTransport(gateway Gateway, draftRoot string, send SendTranspo
 // configured direct-send transport.
 func (s *Service) InvalidateCredentials(account string) {
 	s.send.InvalidateCredentials(account)
+}
+
+// AccountBindingStore exposes the configured private account identity store
+// to command setup code without exposing the transport internals.
+func (s *Service) AccountBindingStore() AccountBindingStore {
+	return s.send.AccountBindings
 }
 
 func (e *ValidationError) Error() string {

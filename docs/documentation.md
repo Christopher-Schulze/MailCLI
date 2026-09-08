@@ -1,6 +1,7 @@
 # MailCLI Documentation
 
 - [Architecture](#architecture)
+- [Account identity bindings](#account-identity-bindings)
 - [CLI contract](#cli-contract)
 - [Composition](#composition)
 - [Data model](#data-model)
@@ -75,7 +76,7 @@ Command surface:
 | `mailcli capabilities` | Implemented | Return the versioned machine-readable command, effect, dependency, result, and limitation contract |
 | `mailcli update` | Implemented | Verify a pinned Ed25519 release signature and checksum, then install with rollback |
 | `mailcli doctor` | Implemented | Validate platform, Mail.app, scripting support, permissions, and optional live access |
-| `mailcli send setup` | Implemented | Store or remove the per-account app-specific SMTP password in the macOS Keychain |
+| `mailcli send setup` | Implemented | Store or remove the per-account app-specific password in the macOS Keychain; `--account REF` binds a sender alias and `--credential-account EMAIL` selects the credential lookup identity |
 | `mailcli accounts list` | Implemented | List enabled local Mail accounts and sender identities derived from a bounded Sent-history scan; each account exposes `identity_coverage` with its source, state, observed-message count, configured limit, and `more_available` marker. The default limit is 2,000 and supported configuration can raise it only to the hard 10,000 maximum. Account-local cache, special-use, or sender-data failures stay listed with `state:"degraded"`, a stable `degraded_reason`, and `degraded_remediation`, while `data.complete:false` records degraded catalog coverage and `data.identity_coverage_complete:false` records bounded or unavailable identity history; global SQL/schema failures still fail with `account_catalog_incomplete` |
 | `mailcli mailboxes list` | Implemented | Recursively list every mailbox with stable account-relative paths in deterministic account-reference then path order |
 | `mailcli mailboxes resolve` | Implemented | Resolve an exact account-relative mailbox path to its stable reference |
@@ -170,6 +171,12 @@ The primary worktree is single-writer. Parallel analysis stays read-only; indepe
 After the edit, only allowlisted paths are staged. `manage-write-lease.sh review TOKEN` rejects unstaged, untracked, or out-of-scope changes and records the exact patch identity. `manage-write-lease.sh gate TOKEN` runs `scripts/tests/test.sh` and records evidence only when the full suite returns success against the unchanged staged patch and baseline HEAD; failure or interruption preserves the exact nonzero status and leaves no commit proof. After the manual `TASK NNN:` commit, `manage-write-lease.sh release TOKEN` requires one commit over the acquired HEAD, the same tested patch bytes, an allowlisted commit path set, and a clean worktree. `abort TOKEN` is available only while HEAD and worktree match the clean baseline. The lease does not authorize pushes, tags, releases, external actions, or cleanup.
 
 `docs/tasks.md` and `docs/tasks/` are the private local task control plane and remain ignored because the GitHub repository is public. They may contain task metadata and technical evidence, but never credentials, tokens, message bodies, or private session transcripts. Git status, a TASK commit, and the public remote are not backup proof for these ignored files. `scripts/utils/export-task-history.sh create` atomically copies only the board and canonical Markdown detail files to a new owner-only snapshot under `~/Library/Application Support/MailCLI/task-history-backups` by default, after proving that the source file set and hashes stayed unchanged during the copy. The snapshot and its directories use mode `0700`, its files use `0600`, and `MANIFEST.sha256` binds the complete file set and bytes. An explicit destination must be an absolute owner-only directory outside the repository. `export-task-history.sh verify ABSOLUTE_SNAPSHOT_DIRECTORY` rejects added, missing, modified, symlinked, noncanonical, or permission-widened content. A verified external or backup-system copy of that snapshot is required for off-device recovery; MailCLI does not upload private task history.
+
+## Account identity bindings
+
+The account catalog separates the transport `type`, stable `display_name`, `discovered_sender_identities`, and `configured_sender_aliases`; `email_addresses` remains their compatibility union. Explicit bindings live in a private versioned JSON file under the MailCLI application-support directory and contain only the stable account ID, permitted sender aliases, and the credential lookup identity. Passwords remain in the macOS Keychain.
+
+Configure a supported account with `mailcli send setup --account ACCOUNT_REF --from ALIAS [--credential-account LOGIN]`. The command validates that all aliases and the credential identity resolve to the same supported provider, stores the password under the credential identity, and atomically upserts the alias binding. Re-running setup for an existing binding preserves its credential identity unless `--credential-account` is supplied; `--remove` deletes the selected Keychain credential and leaves the binding available for reconfiguration. A configured IMAP account can therefore resolve with no Sent history; its coverage is reported as `identity_coverage.source:"account_binding"` and `state:"configured"`, while discovered history remains in `discovered_sender_identities`. If an alias is shared by multiple bindings, send and mutation resolution returns `account_binding_ambiguous` until an explicit account ref is supplied. A binding whose account is no longer enabled returns `account_binding_stale`; malformed files and unsupported providers retain typed validation errors.
 
 ## Local security and permissions
 
@@ -270,6 +277,7 @@ mailcli doctor --live --json
 ./bin/mailcli attachments list --message MSG_REF --json
 ./bin/mailcli attachments save --message MSG_REF --attachment ATTACHMENT_ID --output /absolute/path/file.pdf --json
 printf '%s' '{"from":"me@example.com","to":[{"address":"recipient@example.com"}],"cc":[],"bcc":[],"subject":"Subject","body":"Readable plain text.\n","attachments":[]}' | ./bin/mailcli drafts create --input - --json
+./bin/mailcli drafts create --account ACCOUNT_REF --from alias@icloud.com --to recipient@example.com --subject Subject --body 'Readable plain text.' --json
 ./bin/mailcli drafts create --to recipient@example.com --subject Subject --body-file /absolute/path/body.md --format markdown --json
 ./bin/mailcli drafts inspect --ref DRAFT_REF --json
 ./bin/mailcli drafts preview --ref DRAFT_REF --format plain

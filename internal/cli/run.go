@@ -348,7 +348,7 @@ var commandRegistry = map[string]commandSpec{
 		if service == nil {
 			return runSend(args, stdout, stderr)
 		}
-		return runSendWithInvalidator(args, stdout, stderr, service.InvalidateCredentials)
+		return runSendWithBindings(args, stdout, stderr, service.InvalidateCredentials, service.AccountBindingStore())
 	}},
 	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runSync(ctx, service, args, stdout, stderr)

@@ -113,6 +113,59 @@ func TestResolveAccountEmailFromCatalog(t *testing.T) {
 	}
 }
 
+func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount("TARGET-ACCOUNT")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	sender, credential, err := resolveAccountIdentityFromCatalog(
+		[]mail.Account{{Ref: accountRef, State: "ok", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
+		"TARGET-ACCOUNT",
+		strictCredentials{"login@icloud.com": "secret"},
+		mail.AccountBindingFile{
+			Version:  mail.AccountBindingVersion,
+			Bindings: []mail.AccountBinding{{AccountID: "TARGET-ACCOUNT", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com"}},
+		},
+	)
+	if err != nil || sender != "alias@icloud.com" || credential != "login@icloud.com" {
+		t.Fatalf("resolveAccountIdentityFromCatalog() = sender:%q credential:%q error:%v", sender, credential, err)
+	}
+}
+
+func TestResolveAccountIdentityBindingRejectsRemovedAccount(t *testing.T) {
+	_, _, err := resolveAccountIdentityFromCatalog(
+		nil,
+		"REMOVED-ACCOUNT",
+		strictCredentials{"login@icloud.com": "secret"},
+		mail.AccountBindingFile{
+			Version:  mail.AccountBindingVersion,
+			Bindings: []mail.AccountBinding{{AccountID: "REMOVED-ACCOUNT", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com"}},
+		},
+	)
+	if errorCodeForTest(err) != accountBindingStaleCode {
+		t.Fatalf("resolveAccountIdentityFromCatalog() error = %v, want %s", err, accountBindingStaleCode)
+	}
+}
+
+func TestResolveAccountIdentityBindingPreservesDegradedAccountState(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount("DEGRADED-ACCOUNT")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	_, _, err = resolveAccountIdentityFromCatalog(
+		[]mail.Account{{Ref: accountRef, State: "degraded", DegradedReason: "mailbox_cache_unreadable", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
+		"DEGRADED-ACCOUNT",
+		strictCredentials{"login@icloud.com": "secret"},
+		mail.AccountBindingFile{
+			Version:  mail.AccountBindingVersion,
+			Bindings: []mail.AccountBinding{{AccountID: "DEGRADED-ACCOUNT", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com"}},
+		},
+	)
+	if errorCodeForTest(err) != "account_degraded" {
+		t.Fatalf("resolveAccountIdentityFromCatalog() error = %v, want account_degraded", err)
+	}
+}
+
 func containsText(err error, text string) bool {
 	return err != nil && text != "" && strings.Contains(err.Error(), text)
 }

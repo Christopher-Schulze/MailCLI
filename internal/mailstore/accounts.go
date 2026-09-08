@@ -83,6 +83,10 @@ func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, er
 		}
 		return mail.AccountCatalog{}, accountCatalogError("", err)
 	}
+	bindings, err := s.loadAccountBindings()
+	if err != nil {
+		return mail.AccountCatalog{}, err
+	}
 	recordsByPath := make(map[string]mailboxRecord, len(records))
 	for _, record := range records {
 		recordsByPath[record.pathKey] = record
@@ -91,7 +95,7 @@ func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, er
 	for _, location := range s.activeAccounts {
 		// Degraded accounts stay listed (state+reason on the Account); only
 		// hard SQL failures abort discovery for everyone.
-		account, err := s.loadAccount(ctx, location, recordsByPath)
+		account, err := s.loadAccountWithBindings(ctx, location, recordsByPath, bindings)
 		if err != nil {
 			var issue *accountCatalogIssue
 			if errors.As(err, &issue) {
@@ -115,14 +119,49 @@ func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, er
 	return mail.AccountCatalog{Accounts: accounts, Complete: complete}, nil
 }
 
+func (s *Store) loadAccountBindings() (mail.AccountBindingFile, error) {
+	if s.accountBindings == nil {
+		return mail.AccountBindingFile{Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{}}, nil
+	}
+	return s.accountBindings.LoadAccountBindings()
+}
+
 func (s *Store) loadAccount(
 	ctx context.Context,
 	location mailboxLocation,
 	records map[string]mailboxRecord,
 ) (mail.Account, error) {
+	return s.loadAccountWithBindings(ctx, location, records, mail.AccountBindingFile{
+		Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{},
+	})
+}
+
+func (s *Store) loadAccountWithBindings(
+	ctx context.Context,
+	location mailboxLocation,
+	records map[string]mailboxRecord,
+	bindings mail.AccountBindingFile,
+) (mail.Account, error) {
 	ref, err := mailref.EncodeAccount(location.AccountID)
 	if err != nil {
 		return mail.Account{}, accountCatalogError(location.AccountID, err)
+	}
+	binding, bindingFound, err := mail.FindAccountBinding(bindings, location.AccountID)
+	if err != nil {
+		return mail.Account{}, err
+	}
+	accountType := mail.AccountType(location.Scheme)
+	displayName := "On My Mac"
+	if accountType == mail.AccountTypeIMAP {
+		displayName = "IMAP account"
+	}
+	baseAccount := mail.Account{
+		Ref: ref, Name: displayName, Type: accountType, DisplayName: displayName,
+		EmailAddresses: []string{}, DiscoveredSenderIdentities: []string{},
+		ConfiguredSenderAliases: []string{}, State: "ok",
+	}
+	if bindingFound && accountType == mail.AccountTypeIMAP {
+		baseAccount.ConfiguredSenderAliases = append([]string(nil), binding.SenderAliases...)
 	}
 	limit := s.senderIdentityLimit()
 	unavailableCoverage := senderIdentityCoverage(
@@ -134,12 +173,11 @@ func (s *Store) loadAccount(
 		coverage mail.SenderIdentityCoverage,
 		cause error,
 	) (mail.Account, error) {
-		account := mail.Account{
-			Ref: ref, Name: "On My Mac", EmailAddresses: []string{},
-			State: "degraded", DegradedReason: reason,
-			DegradedRemediation: remediation,
-			IdentityCoverage:    coverage,
-		}
+		account := baseAccount
+		account.State = "degraded"
+		account.DegradedReason = reason
+		account.DegradedRemediation = remediation
+		account.IdentityCoverage = coverage
 		return mail.Account{}, &accountCatalogIssue{
 			accountID: location.AccountID, account: account, cause: cause,
 		}
@@ -160,13 +198,11 @@ func (s *Store) loadAccount(
 		return degraded(accountDegradedSpecialUse, accountRemediationSpecialUse, unavailableCoverage, err)
 	}
 	if location.Scheme != "imap" && !foundSent {
-		return mail.Account{
-			Ref: ref, Name: "On My Mac", EmailAddresses: []string{}, State: "ok",
-			IdentityCoverage: mail.SenderIdentityCoverage{
-				Source: mail.SenderIdentityCoverageSourceNotApplicable,
-				State:  mail.SenderIdentityCoverageStateNotApplicable,
-			},
-		}, nil
+		baseAccount.IdentityCoverage = mail.SenderIdentityCoverage{
+			Source: mail.SenderIdentityCoverageSourceNotApplicable,
+			State:  mail.SenderIdentityCoverageStateNotApplicable,
+		}
+		return baseAccount, nil
 	}
 	identityResult := senderIdentityResult{
 		coverage: senderIdentityCoverage(
@@ -188,30 +224,58 @@ func (s *Store) loadAccount(
 			return mail.Account{}, accountCatalogError(location.AccountID, err)
 		}
 	}
-	if location.Scheme == "imap" && !foundSent {
+	if location.Scheme == "imap" && !foundSent && !bindingFound {
 		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, identityResult.coverage, nil)
 	}
-	if location.Scheme == "imap" && len(identityResult.identities) == 0 {
+	if location.Scheme == "imap" && len(identityResult.identities) == 0 && !bindingFound {
 		if identityResult.coverage.State == mail.SenderIdentityCoverageStateNotObserved {
 			return degraded(accountDegradedSenderNotObserved, accountRemediationSenderNotObserved, identityResult.coverage, nil)
 		}
 		return degraded(accountDegradedNoSenderIdentity, accountRemediationNoSenderIdentity, identityResult.coverage, nil)
 	}
-	name := "On My Mac"
-	addresses := make([]string, len(identityResult.identities))
+	discovered := make([]string, len(identityResult.identities))
 	for index, identity := range identityResult.identities {
-		addresses[index] = identity.Address
+		discovered[index] = identity.Address
 	}
 	if len(identityResult.identities) > 0 {
-		name = identityResult.identities[0].Name
-		if name == "" {
-			name = identityResult.identities[0].Address
+		baseAccount.DisplayName = identityResult.identities[0].Name
+		if baseAccount.DisplayName == "" {
+			baseAccount.DisplayName = identityResult.identities[0].Address
+		}
+	} else if bindingFound && len(binding.SenderAliases) > 0 {
+		baseAccount.DisplayName = binding.SenderAliases[0]
+	}
+	baseAccount.Name = baseAccount.DisplayName
+	baseAccount.DiscoveredSenderIdentities = discovered
+	baseAccount.EmailAddresses = mergeAccountAddresses(discovered, baseAccount.ConfiguredSenderAliases)
+	baseAccount.IdentityCoverage = identityResult.coverage
+	if bindingFound && accountType == mail.AccountTypeIMAP {
+		baseAccount.IdentityCoverage.Source = mail.SenderIdentityCoverageSourceAccountBinding
+		baseAccount.IdentityCoverage.State = mail.SenderIdentityCoverageStateConfigured
+	}
+	return baseAccount, nil
+}
+
+func mergeAccountAddresses(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	addresses := make([]string, 0)
+	for _, group := range groups {
+		for _, address := range group {
+			key := strings.ToLower(strings.TrimSpace(address))
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			addresses = append(addresses, address)
 		}
 	}
-	return mail.Account{
-		Ref: ref, Name: name, EmailAddresses: addresses, State: "ok",
-		IdentityCoverage: identityResult.coverage,
-	}, nil
+	sort.Slice(addresses, func(left, right int) bool {
+		return strings.ToLower(addresses[left]) < strings.ToLower(addresses[right])
+	})
+	return addresses
 }
 
 func strictSpecialMailboxIDs(

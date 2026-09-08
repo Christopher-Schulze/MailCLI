@@ -121,6 +121,7 @@ func draftSummaryFrom(draft Draft) DraftSummary {
 	return DraftSummary{
 		Ref:             draft.Ref,
 		Kind:            draft.Kind,
+		AccountRef:      draft.AccountRef,
 		Subject:         draft.Subject,
 		From:            draft.From,
 		To:              draft.To,

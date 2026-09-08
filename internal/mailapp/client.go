@@ -280,7 +280,9 @@ func (c *Client) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 			return nil, err
 		}
 		accounts = append(accounts, mail.Account{
-			Ref: ref, Name: item.Name, EmailAddresses: item.EmailAddresses, State: "ok",
+			Ref: ref, Name: item.Name, Type: mail.AccountTypeUnknown, DisplayName: item.Name,
+			EmailAddresses: item.EmailAddresses, DiscoveredSenderIdentities: append([]string(nil), item.EmailAddresses...),
+			ConfiguredSenderAliases: []string{}, State: "ok",
 			IdentityCoverage: mail.SenderIdentityCoverage{
 				Source: mail.SenderIdentityCoverageSourceMailApp,
 				State:  mail.SenderIdentityCoverageStateComplete,

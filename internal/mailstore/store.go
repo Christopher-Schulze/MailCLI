@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"mailcli/internal/mail"
 )
 
 type Store struct {
@@ -19,6 +21,7 @@ type Store struct {
 	storeUUID               string
 	activeAccounts          []mailboxLocation
 	activeAccountKeys       map[string]struct{}
+	accountBindings         mail.AccountBindingStore
 	capability              schemaCapability
 	senderIdentityScanLimit int
 
@@ -89,10 +92,15 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 		joinCloseError(&resultErr, versionDirectory, "Mail store root")
 		return nil, resultErr
 	}
+	accountBindings := config.AccountBindings
+	if accountBindings == nil {
+		accountBindings = mail.DefaultAccountBindingStore()
+	}
 	return &Store{
 		database: database, versionRoot: versionRoot, databasePath: databasePath, storeUUID: capability.StoreUUID,
 		versionDirectory: versionDirectory,
-		activeAccounts:   activeAccounts, activeAccountKeys: activeKeys, capability: capability,
+		activeAccounts:   activeAccounts, activeAccountKeys: activeKeys, accountBindings: accountBindings,
+		capability:              capability,
 		senderIdentityScanLimit: senderIdentityScanLimit,
 	}, nil
 }

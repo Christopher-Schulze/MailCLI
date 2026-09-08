@@ -25,16 +25,19 @@ type SenderIdentityCoverageSource string
 type SenderIdentityCoverageState string
 
 const (
-	SenderIdentityCoverageSourceSentHistory   SenderIdentityCoverageSource = "sent_history"
-	SenderIdentityCoverageSourceMailApp       SenderIdentityCoverageSource = "mail_app"
-	SenderIdentityCoverageSourceUnknown       SenderIdentityCoverageSource = "unknown"
-	SenderIdentityCoverageSourceNotApplicable SenderIdentityCoverageSource = "not_applicable"
+	SenderIdentityCoverageSourceSentHistory    SenderIdentityCoverageSource = "sent_history"
+	SenderIdentityCoverageSourceMailApp        SenderIdentityCoverageSource = "mail_app"
+	SenderIdentityCoverageSourceAccountBinding SenderIdentityCoverageSource = "account_binding"
+	SenderIdentityCoverageSourceConfigured     SenderIdentityCoverageSource = SenderIdentityCoverageSourceAccountBinding
+	SenderIdentityCoverageSourceUnknown        SenderIdentityCoverageSource = "unknown"
+	SenderIdentityCoverageSourceNotApplicable  SenderIdentityCoverageSource = "not_applicable"
 
 	SenderIdentityCoverageStateComplete      SenderIdentityCoverageState = "complete"
 	SenderIdentityCoverageStateBounded       SenderIdentityCoverageState = "bounded"
 	SenderIdentityCoverageStateNotObserved   SenderIdentityCoverageState = "not_observed"
 	SenderIdentityCoverageStateNoValidSender SenderIdentityCoverageState = "no_valid_sender"
 	SenderIdentityCoverageStateNoSentMailbox SenderIdentityCoverageState = "no_sent_mailbox"
+	SenderIdentityCoverageStateConfigured    SenderIdentityCoverageState = "configured"
 	SenderIdentityCoverageStateUnavailable   SenderIdentityCoverageState = "unavailable"
 	SenderIdentityCoverageStateNotApplicable SenderIdentityCoverageState = "not_applicable"
 )
@@ -46,6 +49,14 @@ type SenderIdentityCoverage struct {
 	Limit            int                          `json:"limit"`
 	MoreAvailable    bool                         `json:"more_available"`
 }
+
+type AccountType string
+
+const (
+	AccountTypeIMAP    AccountType = "imap"
+	AccountTypeLocal   AccountType = "local"
+	AccountTypeUnknown AccountType = "unknown"
+)
 
 type Check struct {
 	Name   string `json:"name"`
@@ -64,10 +75,14 @@ type DiagnosticTiming struct {
 }
 
 type Account struct {
-	Ref              string                 `json:"ref"`
-	Name             string                 `json:"name"`
-	EmailAddresses   []string               `json:"email_addresses"`
-	IdentityCoverage SenderIdentityCoverage `json:"identity_coverage"`
+	Ref                        string                 `json:"ref"`
+	Name                       string                 `json:"name"`
+	Type                       AccountType            `json:"type"`
+	DisplayName                string                 `json:"display_name"`
+	EmailAddresses             []string               `json:"email_addresses"`
+	DiscoveredSenderIdentities []string               `json:"discovered_sender_identities"`
+	ConfiguredSenderAliases    []string               `json:"configured_sender_aliases"`
+	IdentityCoverage           SenderIdentityCoverage `json:"identity_coverage"`
 	// State is "ok" or "degraded"; degraded accounts carry a reason and
 	// keep empty identities rather than breaking the whole listing. The
 	// remediation tells callers how to restore a usable account state.
@@ -128,6 +143,7 @@ const (
 )
 
 type DraftInput struct {
+	AccountRef  string          `json:"account_ref,omitempty"`
 	From        string          `json:"from,omitempty"`
 	To          []Recipient     `json:"to,omitempty"`
 	CC          []Recipient     `json:"cc,omitempty"`
@@ -148,6 +164,7 @@ type DraftAttachment struct {
 type Draft struct {
 	Ref                           string                   `json:"ref"`
 	Kind                          DraftKind                `json:"kind"`
+	AccountRef                    string                   `json:"account_ref,omitempty"`
 	SourceRef                     string                   `json:"source_ref,omitempty"`
 	ReplyAll                      bool                     `json:"reply_all,omitempty"`
 	SourceMessageID               string                   `json:"source_message_id,omitempty"`
@@ -185,6 +202,7 @@ type SavedDraft struct {
 type DraftSummary struct {
 	Ref             string                   `json:"ref"`
 	Kind            DraftKind                `json:"kind"`
+	AccountRef      string                   `json:"account_ref,omitempty"`
 	Subject         string                   `json:"subject,omitempty"`
 	From            string                   `json:"from,omitempty"`
 	To              []Recipient              `json:"to"`

@@ -28,6 +28,22 @@ func missingCredentialsError(sender string) error {
 	}
 }
 
+func missingCredentialsErrorFor(sender, credential string) error {
+	if strings.EqualFold(sender, credential) {
+		return missingCredentialsError(sender)
+	}
+	account := sender
+	setup := "'mailcli send setup --from " + sender + "'"
+	if !strings.EqualFold(sender, credential) {
+		account = credential
+		setup = "'mailcli send setup --from " + sender + " --credential-account " + credential + "'"
+	}
+	return &OperationError{
+		Code:    "smtp_credentials_missing",
+		Message: "no app-specific password is stored for " + account + "; run " + setup + " to store one",
+	}
+}
+
 func mirrorPendingError(err error) error {
 	message := "SMTP submission was accepted, but the Sent copy was not observed because mirroring failed; " +
 		"recipient delivery is unverified, the draft is retained, and the submission will not be retried"
@@ -127,17 +143,18 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	sender, err := sendSender(draft.From)
+	identity, err := resolveTransportIdentity(send, draft)
 	if err != nil {
 		return TransportEvidence{}, err
 	}
+	sender := identity.Sender
 	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
 	if err != nil {
 		return TransportEvidence{}, err
 	}
-	password, err := send.Credentials.Load(sender)
+	password, err := send.Credentials.Load(identity.Credential)
 	if err != nil || password == "" {
-		return TransportEvidence{}, missingCredentialsError(sender)
+		return TransportEvidence{}, missingCredentialsErrorFor(sender, identity.Credential)
 	}
 	messageID, err := newMessageID(sender)
 	if err != nil {
@@ -155,7 +172,7 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	submitEvidence, err := submitComposedMessage(
 		ctx,
 		send.Submitter,
-		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: sender, Password: password},
+		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: identity.Credential, Password: password},
 		sender, envelopeRecipients, message,
 	)
 	if err != nil {
@@ -169,7 +186,7 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,
 		send.Mirror,
-		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: sender, Password: password},
+		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password},
 		message,
 		submitEvidence.MessageID,
 	)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -165,6 +166,87 @@ func sendTransportStubs() (*stubSubmitter, *stubMirror) {
 		evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK", MessageID: "<abc123@icloud.com>"},
 	}, &stubMirror{
 		evidence: transport.AppendEvidence{Mailbox: "Sent", Appended: true},
+	}
+}
+
+type bindingSubmitter struct {
+	stubSubmitter
+	username string
+}
+
+func (s *bindingSubmitter) Submit(
+	ctx context.Context,
+	cfg transport.SubmitConfig,
+	from string,
+	rcpts []string,
+	message []byte,
+) (transport.SubmitEvidence, error) {
+	s.username = cfg.Username
+	return s.stubSubmitter.Submit(ctx, cfg, from, rcpts, message)
+}
+
+type bindingMirror struct {
+	stubMirror
+	username string
+}
+
+func (s *bindingMirror) AppendToSent(
+	ctx context.Context,
+	cfg transport.ImapConfig,
+	message []byte,
+	messageID string,
+) (transport.AppendEvidence, error) {
+	s.username = cfg.Username
+	return s.stubMirror.AppendToSent(ctx, cfg, message, messageID)
+}
+
+type bindingCredentials struct {
+	passwords map[string]string
+	lookups   []string
+}
+
+func (c *bindingCredentials) Load(account string) (string, error) {
+	c.lookups = append(c.lookups, account)
+	return c.passwords[account], nil
+}
+
+func (c *bindingCredentials) Store(account, password string) error {
+	if c.passwords == nil {
+		c.passwords = make(map[string]string)
+	}
+	c.passwords[account] = password
+	return nil
+}
+
+func (c *bindingCredentials) Delete(account string) error {
+	delete(c.passwords, account)
+	return nil
+}
+
+func TestDeliverViaTransportUsesBoundCredentialForAlias(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	submitter := &bindingSubmitter{stubSubmitter: stubSubmitter{evidence: transport.SubmitEvidence{MessageID: "<bound@icloud.com>"}}}
+	mirror := &bindingMirror{stubMirror: stubMirror{evidence: transport.AppendEvidence{Mailbox: "Sent", Appended: true}}}
+	credentials := &bindingCredentials{passwords: map[string]string{"login@icloud.com": "secret"}}
+	bindings := &memoryAccountBindingStore{document: AccountBindingFile{
+		Version:  AccountBindingVersion,
+		Bindings: []AccountBinding{{AccountID: "ACCOUNT-1", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com"}},
+	}}
+	_, err = DeliverViaTransport(context.Background(), SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: credentials, AccountBindings: bindings,
+	}, Draft{
+		AccountRef: accountRef, From: "alias@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Bound", Body: "Body",
+	})
+	if err != nil {
+		t.Fatalf("DeliverViaTransport() error = %v", err)
+	}
+	if submitter.username != "login@icloud.com" || mirror.username != "login@icloud.com" ||
+		len(credentials.lookups) != 1 || credentials.lookups[0] != "login@icloud.com" {
+		t.Fatalf("credential identity submit=%q mirror=%q lookups=%v", submitter.username, mirror.username, credentials.lookups)
 	}
 }
 
