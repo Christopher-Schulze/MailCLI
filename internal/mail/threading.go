@@ -52,7 +52,7 @@ func (s *Service) ThreadSource(ctx context.Context, ref string) (ThreadSource, e
 // to the source Reply-To (preferred) or From address; reply --all promotes the
 // source To/CC recipients into CC minus the reply target; the thread chain is
 // the source References plus the source Message-ID, bounded to
-// maximumThreadReferences and free of control characters.
+// maximumThreadReferences, deduplicated, and free of control characters.
 func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input DraftInput) (DraftInput, string, string, error) {
 	subject := threadSubject(source.Subject, kind)
 	if input.Subject != "" {
@@ -137,10 +137,16 @@ func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string) [
 	return promoted
 }
 
-// threadChain builds the outgoing References value: source References entries
-// plus the source Message-ID, newest last, capped to the newest
-// maximumThreadReferences entries.
+// threadChain builds the outgoing References value from the source headers.
 func threadChain(references string, messageID string) (string, error) {
+	return canonicalThreadReferences(references, messageID)
+}
+
+// canonicalThreadReferences validates and canonicalizes a References chain.
+// Valid entries remain in first-seen order, the direct parent is removed from
+// any historical position and appended exactly once, and the final chain is
+// capped to the newest maximumThreadReferences entries.
+func canonicalThreadReferences(references, messageID string) (string, error) {
 	// Control characters must be checked on the RAW header values:
 	// strings.Fields treats CR/LF as whitespace and would hide them.
 	if strings.ContainsAny(references, "\r\n") || strings.ContainsAny(messageID, "\r\n") {
@@ -149,11 +155,56 @@ func threadChain(references string, messageID string) (string, error) {
 			Message: "source thread headers contain control characters",
 		}
 	}
-	fields := append(strings.Fields(references), strings.Fields(messageID)...)
-	if len(fields) > maximumThreadReferences {
-		fields = fields[len(fields)-maximumThreadReferences:]
+
+	parent := ""
+	if messageID != "" {
+		if strings.TrimSpace(messageID) != messageID {
+			return "", invalidThreadMessageID("source message ID must be one standalone angle-bracket Message-ID")
+		}
+		if err := validateThreadMessageID(messageID); err != nil {
+			return "", err
+		}
+		parent = messageID
 	}
-	return strings.Join(fields, " "), nil
+
+	fields := strings.Fields(references)
+	chain := make([]string, 0, len(fields)+1)
+	seen := make(map[string]struct{}, len(fields)+1)
+	for _, field := range fields {
+		if err := validateThreadMessageID(field); err != nil {
+			return "", err
+		}
+		if field == parent {
+			continue
+		}
+		if _, duplicate := seen[field]; duplicate {
+			continue
+		}
+		seen[field] = struct{}{}
+		chain = append(chain, field)
+	}
+	if parent != "" {
+		chain = append(chain, parent)
+	}
+	if len(chain) > maximumThreadReferences {
+		chain = chain[len(chain)-maximumThreadReferences:]
+	}
+	return strings.Join(chain, " "), nil
+}
+
+func validateThreadMessageID(value string) error {
+	if value == "" || !strings.HasPrefix(value, "<") || !strings.HasSuffix(value, ">") {
+		return invalidThreadMessageID("source thread header contains a malformed Message-ID")
+	}
+	parsed, err := stdmail.ParseAddress(value)
+	if err != nil || parsed.Address == "" {
+		return invalidThreadMessageID("source thread header contains a malformed Message-ID")
+	}
+	return nil
+}
+
+func invalidThreadMessageID(message string) error {
+	return &OperationError{Code: "invalid_message_source", Message: message}
 }
 
 func recipientFromFormatted(formatted string) (Recipient, error) {

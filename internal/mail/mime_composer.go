@@ -115,7 +115,9 @@ func composeMessageSpoolContext(
 	}
 
 	header := &bytes.Buffer{}
-	writeComposerHeaders(header, draft, messageID, contentType)
+	if err := writeComposerHeaders(header, draft, messageID, contentType); err != nil {
+		return nil, err
+	}
 	header.WriteString(composerCRLF)
 	alternative := &bytes.Buffer{}
 	writeAlternativeMultipart(alternative, alternativeBoundary, draft)
@@ -365,7 +367,17 @@ func (lw *base64LineWriter) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentType string) {
+func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentType string) error {
+	threadingKind := draft.Kind == DraftKindReply || draft.Kind == DraftKindForward
+	threaded := threadingKind && draft.SourceMessageID != ""
+	references := ""
+	if threadingKind {
+		var err error
+		references, err = canonicalThreadReferences(draft.SourceReferences, draft.SourceMessageID)
+		if err != nil {
+			return &ComposerError{Message: "validate thread headers", Err: err}
+		}
+	}
 	writeHeader(buffer, "From", draft.From)
 	writeHeader(buffer, "To", formatAddressList(draft.To))
 	if len(draft.CC) > 0 {
@@ -375,11 +387,12 @@ func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentT
 	writeHeader(buffer, "Date", time.Now().Format(time.RFC1123Z))
 	writeHeader(buffer, "Message-ID", messageID)
 	writeHeader(buffer, "MIME-Version", "1.0")
-	if (draft.Kind == DraftKindReply || draft.Kind == DraftKindForward) && draft.SourceMessageID != "" {
+	if threaded {
 		writeHeader(buffer, "In-Reply-To", draft.SourceMessageID)
-		writeHeader(buffer, "References", threadReferences(draft.SourceReferences, draft.SourceMessageID))
+		writeHeader(buffer, "References", references)
 	}
 	writeHeader(buffer, "Content-Type", contentType)
+	return nil
 }
 
 func writeHeader(buffer *bytes.Buffer, name, value string) {
@@ -446,13 +459,13 @@ func encodeHeaderValue(value string) string {
 	return mime.QEncoding.Encode("UTF-8", value)
 }
 
-// threadReferences appends the replied-to message to the prior References chain.
+// threadReferences returns the canonical References chain for valid inputs.
 func threadReferences(references, sourceMessageID string) string {
-	prior := strings.TrimSpace(references)
-	if prior == "" {
-		return sourceMessageID
+	canonical, err := canonicalThreadReferences(references, sourceMessageID)
+	if err != nil {
+		return ""
 	}
-	return prior + " " + sourceMessageID
+	return canonical
 }
 
 // randomBoundary returns a cryptographically random boundary unique per message.
