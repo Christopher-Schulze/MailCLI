@@ -12,7 +12,7 @@ import (
 type ThreadSource struct {
 	Subject    string
 	From       string
-	ReplyTo    string
+	ReplyTo    []Recipient
 	To         []Recipient
 	CC         []Recipient
 	MessageID  string
@@ -49,11 +49,11 @@ func (s *Service) ThreadSource(ctx context.Context, ref string) (ThreadSource, e
 // DeriveReplyInput merges source-derived defaults with the caller input.
 // Explicit input fields win (documented last-wins). The subject gains exactly
 // one Re:/Fwd: prefix after stripping existing ones; reply recipients default
-// to the source Reply-To (preferred) or From address; reply --all promotes the
-// source To/CC recipients into CC minus the reply target and final To roles;
-// the thread chain is the source References plus the source Message-ID,
-// bounded to maximumThreadReferences, deduplicated, and free of control
-// characters.
+// to the complete source Reply-To list (preferred) or From address; reply --all
+// promotes the source To/CC recipients into CC minus the reply targets and
+// final To roles; the thread chain is the source References plus the source
+// Message-ID, bounded to maximumThreadReferences, deduplicated, and free of
+// control characters.
 func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input DraftInput) (DraftInput, string, string, error) {
 	subject := threadSubject(source.Subject, kind)
 	if input.SubjectSet || input.Subject != "" {
@@ -63,28 +63,15 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 	out.Subject = subject
 
 	if kind == DraftKindReply {
-		target := source.ReplyTo
-		if target == "" {
-			target = source.From
-		}
-		if target == "" {
-			return DraftInput{}, "", "", &OperationError{
-				Code:    "invalid_message_source",
-				Message: "source message has no reply target",
-			}
+		targets, err := replyTargetRecipients(source)
+		if err != nil {
+			return DraftInput{}, "", "", err
 		}
 		if !input.ToSet && len(out.To) == 0 {
-			recipient, err := recipientFromFormatted(target)
-			if err != nil {
-				return DraftInput{}, "", "", &OperationError{
-					Code:    "invalid_message_source",
-					Message: fmt.Sprintf("source reply target is not a valid address: %v", err),
-				}
-			}
-			out.To = []Recipient{recipient}
+			out.To = append([]Recipient(nil), targets...)
 		}
 		if replyAll && !input.CCSet && len(out.CC) == 0 {
-			out.CC = promotedReplyAllRecipients(source.To, source.CC, target, out.To)
+			out.CC = promotedReplyAllRecipients(source.To, source.CC, targets, out.To)
 		}
 		if replyAll {
 			out.CC = deduplicateRecipientsAgainst(out.CC, out.To)
@@ -122,10 +109,12 @@ func threadSubject(subject string, kind DraftKind) string {
 	return prefix + trimmed
 }
 
-func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string, existingTo []Recipient) []Recipient {
-	seen := make(map[string]struct{}, len(existingTo)+1)
-	if key := strings.ToLower(addressOnly(target)); key != "" {
-		seen[key] = struct{}{}
+func promotedReplyAllRecipients(to []Recipient, cc []Recipient, targets []Recipient, existingTo []Recipient) []Recipient {
+	seen := make(map[string]struct{}, len(existingTo)+len(targets))
+	for _, target := range targets {
+		if key, err := recipientAddressKey(target); err == nil {
+			seen[key] = struct{}{}
+		}
 	}
 	for _, recipient := range existingTo {
 		if key, err := recipientAddressKey(recipient); err == nil {
@@ -151,6 +140,26 @@ func promotedReplyAllRecipients(to []Recipient, cc []Recipient, target string, e
 		}
 	}
 	return promoted
+}
+
+func replyTargetRecipients(source ThreadSource) ([]Recipient, error) {
+	if len(source.ReplyTo) > 0 {
+		return append([]Recipient(nil), source.ReplyTo...), nil
+	}
+	if source.From != "" {
+		recipient, err := recipientFromFormatted(source.From)
+		if err != nil {
+			return nil, &OperationError{
+				Code:    "invalid_message_source",
+				Message: fmt.Sprintf("source reply target is not a valid address: %v", err),
+			}
+		}
+		return []Recipient{recipient}, nil
+	}
+	return nil, &OperationError{
+		Code:    "invalid_message_source",
+		Message: "source message has no reply target",
+	}
 }
 
 func deduplicateRecipientsAgainst(recipients []Recipient, existing []Recipient) []Recipient {
@@ -267,11 +276,4 @@ func recipientFromFormatted(formatted string) (Recipient, error) {
 		return Recipient{}, err
 	}
 	return Recipient{Name: parsed.Name, Address: parsed.Address}, nil
-}
-
-func addressOnly(formatted string) string {
-	if parsed, err := stdmail.ParseAddress(formatted); err == nil {
-		return parsed.Address
-	}
-	return formatted
 }

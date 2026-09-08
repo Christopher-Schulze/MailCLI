@@ -96,13 +96,14 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 // sourceHeaders carries the header-block values reply/forward derivation and
 // mutation targeting need, without parsing the MIME body.
 type sourceHeaders struct {
-	MessageID  string
-	References string
-	Subject    string
-	From       string
-	ReplyTo    string
-	To         []mail.Recipient
-	CC         []mail.Recipient
+	MessageID    string
+	References   string
+	Subject      string
+	From         string
+	ReplyTo      []mail.Recipient
+	ReplyToError error
+	To           []mail.Recipient
+	CC           []mail.Recipient
 }
 
 // sourceHeadersFromReader reads only the header block of a raw RFC 5322
@@ -126,9 +127,9 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 		out.Subject = subject
 	}
 	out.From, _ = firstFormattedAddress(&header, "From")
-	out.ReplyTo, _ = firstFormattedAddress(&header, "Reply-To")
-	out.To, _ = headerRecipients(&header, "To")
-	out.CC, _ = headerRecipients(&header, "Cc")
+	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
+	out.To, _, _ = headerRecipients(&header, "To")
+	out.CC, _, _ = headerRecipients(&header, "Cc")
 	out.References = strings.TrimSpace(header.Get("References"))
 	return out, nil
 }
@@ -409,26 +410,26 @@ func markMissingPart(document *mimeDocument, identifier string) {
 }
 
 func documentRecipients(document *mimeDocument, header *messageMail.Header, key string) []mail.Recipient {
-	recipients, complete := headerRecipients(header, key)
+	recipients, complete, _ := headerRecipients(header, key)
 	if !complete {
 		markMissingPart(document, "header:"+strings.ToLower(key))
 	}
 	return recipients
 }
 
-func headerRecipients(header *messageMail.Header, key string) ([]mail.Recipient, bool) {
+func headerRecipients(header *messageMail.Header, key string) ([]mail.Recipient, bool, error) {
 	if strings.TrimSpace(header.Get(key)) == "" {
-		return []mail.Recipient{}, true
+		return []mail.Recipient{}, true, nil
 	}
 	addresses, err := header.AddressList(key)
 	if err != nil {
-		return []mail.Recipient{}, false
+		return []mail.Recipient{}, false, err
 	}
 	recipients := make([]mail.Recipient, 0, len(addresses))
 	for _, address := range addresses {
 		recipients = append(recipients, mail.Recipient{Name: address.Name, Address: address.Address})
 	}
-	return recipients, true
+	return recipients, true, nil
 }
 
 func firstFormattedAddress(header *messageMail.Header, key string) (string, bool) {

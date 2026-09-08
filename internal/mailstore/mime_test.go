@@ -521,6 +521,46 @@ func TestMessageIDFromSourceMissingHeader(t *testing.T) {
 	}
 }
 
+func TestSourceHeadersPreservesReplyToListAndStopsAtHeaders(t *testing.T) {
+	t.Parallel()
+	raw := "From: Alice <alice@example.com>\r\n" +
+		"Reply-To: =?UTF-8?Q?B=C3=B6b?= <bob@example.com>, \"Carol Example\" <carol@example.com>\r\n" +
+		"Message-ID: <reply@example.com>\r\n\r\n" + strings.Repeat("x", 1<<20)
+	reader := &countingSourceReader{reader: strings.NewReader(raw)}
+	headers, err := sourceHeadersFromReader(reader)
+	if err != nil {
+		t.Fatalf("sourceHeadersFromReader() error = %v", err)
+	}
+	if headers.ReplyToError != nil || len(headers.ReplyTo) != 2 {
+		t.Fatalf("reply-to headers = %+v", headers)
+	}
+	if headers.ReplyTo[0].Name != "Böb" || headers.ReplyTo[0].Address != "bob@example.com" ||
+		headers.ReplyTo[1].Name != "Carol Example" || headers.ReplyTo[1].Address != "carol@example.com" {
+		t.Fatalf("reply-to recipients = %+v", headers.ReplyTo)
+	}
+	if reader.count > int64(len(raw))/2 {
+		t.Fatalf("read %d bytes, want header block only (< %d)", reader.count, len(raw)/2)
+	}
+}
+
+func TestSourceHeadersPreservesMissingAndMalformedReplyToState(t *testing.T) {
+	t.Parallel()
+	missing, err := sourceHeadersFromReader(strings.NewReader(
+		"From: Alice <alice@example.com>\r\nMessage-ID: <missing@example.com>\r\n\r\nBody\r\n"))
+	if err != nil || missing.ReplyToError != nil || len(missing.ReplyTo) != 0 {
+		t.Fatalf("missing Reply-To = %+v, error = %v", missing, err)
+	}
+	malformed, err := sourceHeadersFromReader(strings.NewReader(
+		"From: Alice <alice@example.com>\r\nReply-To: Bob <bob@example.com>, <broken\r\n" +
+			"Message-ID: <malformed@example.com>\r\n\r\nBody\r\n"))
+	if err != nil {
+		t.Fatalf("malformed sourceHeadersFromReader() error = %v", err)
+	}
+	if malformed.ReplyToError == nil {
+		t.Fatalf("malformed Reply-To state = %+v, want parser error", malformed)
+	}
+}
+
 type countingSourceReader struct {
 	reader io.Reader
 	count  int64
