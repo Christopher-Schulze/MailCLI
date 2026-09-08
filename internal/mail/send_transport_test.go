@@ -594,6 +594,45 @@ func TestReconcileMirrorPendingVerifiesExistingSentIdentity(t *testing.T) {
 	}
 }
 
+func TestReconcileMirrorRetryUsesResolvedSentMailbox(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	imap := &reconcileImapStub{
+		mailboxes:     []transport.MailboxInfo{{Name: "Sent Messages", Flags: []string{"\\Sent"}}},
+		uid:           42,
+		searchResults: []int{0, 1},
+	}
+	service.send.Imap = imap
+	draft := createTransportDraft(t, service)
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+		t.Fatalf("SendDraft() error = %v", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil {
+		t.Fatalf("GetDraft() = %+v, error = %v", retained, err)
+	}
+	messageID := retained.SendAttempt.MessageID
+	imap.fetchRaw = []byte("From: sender@icloud.com\r\n" +
+		"To: recipient@example.com\r\n" +
+		"Message-ID: " + messageID + "\r\n" +
+		"Subject: Send test\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n")
+	mirror.err = nil
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || result.DraftRetained {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
+	}
+	if imap.searchCalls != 2 || imap.searchBox != "Sent Messages" || imap.fetchBox != "Sent Messages" {
+		t.Fatalf("IMAP mailbox flow = searches:%d search:%q fetch:%q", imap.searchCalls, imap.searchBox, imap.fetchBox)
+	}
+	if mirror.calls != 2 {
+		t.Fatalf("mirror calls = %d, want initial failure plus one retry", mirror.calls)
+	}
+}
+
 func TestReconcileDraftMirrorFailureKeepsClaim(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()
@@ -688,16 +727,19 @@ func (g *reconcileOnlyGateway) ReconcileSend(
 
 type reconcileImapStub struct {
 	transport.ImapOperator
-	mailboxes   []transport.MailboxInfo
-	uid         uint32
-	searchErr   error
-	searchID    string
-	searchBox   string
-	searchCalls int
-	matchCount  int
-	fetchRaw    []byte
-	fetchErr    error
-	fetchCalls  int
+	mailboxes     []transport.MailboxInfo
+	uid           uint32
+	searchErr     error
+	searchID      string
+	searchBox     string
+	searchCalls   int
+	searchResults []int
+	searchIndex   int
+	matchCount    int
+	fetchRaw      []byte
+	fetchErr      error
+	fetchBox      string
+	fetchCalls    int
 }
 
 func (s *reconcileImapStub) ListMailboxes(context.Context, transport.ImapConfig) ([]transport.MailboxInfo, error) {
@@ -710,16 +752,20 @@ func (s *reconcileImapStub) SearchUID(
 	s.searchCalls++
 	s.searchBox, s.searchID = mailbox, messageID
 	matchCount := s.matchCount
-	if matchCount == 0 {
+	if s.searchIndex < len(s.searchResults) {
+		matchCount = s.searchResults[s.searchIndex]
+		s.searchIndex++
+	} else if matchCount == 0 {
 		matchCount = 1
 	}
 	return s.uid, 77, matchCount, s.searchErr
 }
 
 func (s *reconcileImapStub) FetchMessage(
-	_ context.Context, _ transport.ImapConfig, _ string, _ uint32, _ uint32, _ int64,
+	_ context.Context, _ transport.ImapConfig, mailbox string, _ uint32, _ uint32, _ int64,
 ) ([]byte, error) {
 	s.fetchCalls++
+	s.fetchBox = mailbox
 	return s.fetchRaw, s.fetchErr
 }
 
