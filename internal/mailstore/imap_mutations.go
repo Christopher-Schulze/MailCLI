@@ -372,6 +372,7 @@ func cloneMailboxInfos(boxes []transport.MailboxInfo) []transport.MailboxInfo {
 	clone := make([]transport.MailboxInfo, len(boxes))
 	for index, box := range boxes {
 		clone[index] = box
+		clone[index].DisplayPath = append([]string(nil), box.DisplayPath...)
 		clone[index].Flags = append([]string(nil), box.Flags...)
 	}
 	return clone

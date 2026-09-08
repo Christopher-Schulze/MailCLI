@@ -20,39 +20,41 @@ import (
 )
 
 type fakeServerConfig struct {
-	authOK                  bool
-	authPassword            string
-	sentMboxes              []string
-	trashMboxes             []string
-	otherMboxes             []string
-	listResponse            []byte
-	searchMatchID           string
-	searchUID               uint32
-	searchUIDs              []uint32
-	uidSearchResponse       []string
-	appendOK                bool
-	dropAppendResponse      bool
-	appendReadStartedEvents chan<- struct{}
-	appendReadContinue      <-chan struct{}
-	searchDelay             time.Duration
-	searchStarted           chan struct{}
-	searchStartedEvents     chan<- struct{}
-	searchContinue          chan struct{}
-	statusStartedEvents     chan<- struct{}
-	statusContinue          chan struct{}
-	deliverAfterFirstSearch bool
-	moveSupported           bool
-	uidExpungeSupported     bool
-	dropCopyResponse        bool
-	rejectStore             bool
-	initialDeletedUIDs      []uint32
-	fetchPayload            []byte
-	fetchPayloadByUID       map[uint32][]byte
-	fetchResponse           []byte
-	fetchResponseUID        uint32
-	selectFailBox           string
-	dropAfterCommands       int
-	omitUIDValidity         bool
+	authOK                   bool
+	authPassword             string
+	capabilities             []string
+	omitGreetingCapabilities bool
+	sentMboxes               []string
+	trashMboxes              []string
+	otherMboxes              []string
+	listResponse             []byte
+	searchMatchID            string
+	searchUID                uint32
+	searchUIDs               []uint32
+	uidSearchResponse        []string
+	appendOK                 bool
+	dropAppendResponse       bool
+	appendReadStartedEvents  chan<- struct{}
+	appendReadContinue       <-chan struct{}
+	searchDelay              time.Duration
+	searchStarted            chan struct{}
+	searchStartedEvents      chan<- struct{}
+	searchContinue           chan struct{}
+	statusStartedEvents      chan<- struct{}
+	statusContinue           chan struct{}
+	deliverAfterFirstSearch  bool
+	moveSupported            bool
+	uidExpungeSupported      bool
+	dropCopyResponse         bool
+	rejectStore              bool
+	initialDeletedUIDs       []uint32
+	fetchPayload             []byte
+	fetchPayloadByUID        map[uint32][]byte
+	fetchResponse            []byte
+	fetchResponseUID         uint32
+	selectFailBox            string
+	dropAfterCommands        int
+	omitUIDValidity          bool
 	// changedUIDValidityAfter, when non-zero, makes every SELECT after the
 	// first report this UIDVALIDITY instead of 12345, simulating a mailbox
 	// rebuild between resolution and mutation.
@@ -181,6 +183,9 @@ func (s *fakeServer) Commands() []string {
 }
 
 func (s *fakeServer) recordCommand(command string) {
+	if command == "CAPABILITY" || command == "ENABLE" {
+		return
+	}
 	s.mu.Lock()
 	s.commands = append(s.commands, command)
 	s.mu.Unlock()
@@ -239,7 +244,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 	}()
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
-	s.writeLine(bw, "* OK [CAPABILITY IMAP4rev1] fake ready")
+	capabilities := append([]string(nil), s.config.capabilities...)
+	greeting := "* OK fake ready"
+	if !s.config.omitGreetingCapabilities {
+		if len(capabilities) == 0 {
+			capabilities = []string{"IMAP4rev1"}
+		}
+		greeting = "* OK [CAPABILITY " + strings.Join(capabilities, " ") + "] fake ready"
+	}
+	s.writeLine(bw, greeting)
 	commands := 0
 	for {
 		line, err := br.ReadString('\n')
@@ -251,9 +264,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 			continue
 		}
 		if s.config.dropAfterCommands > 0 {
-			commands++
-			if commands >= s.config.dropAfterCommands {
-				return
+			fields := strings.Fields(line)
+			if len(fields) < 2 || !strings.EqualFold(fields[1], "CAPABILITY") {
+				commands++
+				if commands >= s.config.dropAfterCommands {
+					return
+				}
 			}
 		}
 		tag, cmd, args, perr := splitCommand(line)
@@ -264,6 +280,16 @@ func (s *fakeServer) handle(conn net.Conn) {
 		s.recordCommand(protocolCommandName(cmd, args))
 
 		switch strings.ToUpper(cmd) {
+		case "CAPABILITY":
+			capabilities := append([]string(nil), s.config.capabilities...)
+			if len(capabilities) == 0 {
+				capabilities = []string{"IMAP4rev1"}
+			}
+			s.writeLine(bw, "* CAPABILITY "+strings.Join(capabilities, " "))
+			s.writeLine(bw, tag+" OK CAPABILITY completed")
+		case "ENABLE":
+			s.writeLine(bw, "* ENABLED UTF8=ACCEPT")
+			s.writeLine(bw, tag+" OK ENABLE completed")
 		case "LOGIN":
 			s.mu.Lock()
 			authOK, authPassword := s.config.authOK, s.config.authPassword

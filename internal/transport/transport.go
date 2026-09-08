@@ -41,10 +41,28 @@ type AppendEvidence struct {
 	UID         uint32 // UID of the verified Sent message
 }
 
-// MailboxInfo carries the parsed name and special-use flags for an IMAP mailbox.
+// MailboxEncoding identifies the character encoding negotiated for mailbox
+// names on one IMAP session.
+type MailboxEncoding string
+
+const (
+	MailboxEncodingModifiedUTF7 MailboxEncoding = "modified_utf7"
+	MailboxEncodingUTF8         MailboxEncoding = "utf8"
+)
+
+// MailboxInfo preserves the server identity and decoded hierarchy of an IMAP
+// mailbox. Name remains the historical wire-name field; WireName is the
+// explicit form used by new callers. An empty Delimiter represents a NIL LIST
+// delimiter and therefore a flat namespace. DisplayPath is decoded hierarchy
+// metadata and must not be reconstructed from DisplayName by callers.
 type MailboxInfo struct {
-	Name  string
-	Flags []string
+	Name        string
+	WireName    string
+	DisplayName string
+	DisplayPath []string
+	Delimiter   string
+	Encoding    MailboxEncoding
+	Flags       []string
 }
 
 // MutationEvidence records server proof for an IMAP message mutation.

@@ -3,7 +3,7 @@
 //
 // Implemented subset:
 //   - Implicit TLS connection over port 993.
-//   - Initial greeting (ignored).
+//   - Initial greeting and capability negotiation for mailbox encoding.
 //   - LOGIN with quoted credentials.
 //   - LIST "" "*" for mailbox discovery.
 //   - SELECT to make a mailbox active for SEARCH and UID SEARCH.
@@ -114,7 +114,14 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return fmt.Sprintf("%s%04d", prefix, cmdNum)
 	}
 
+	if err := c.readGreeting(ctx, sess); err != nil {
+		return empty, err
+	}
+
 	if err := c.doLogin(ctx, sess, sess.nextTag(), cfg); err != nil {
+		return empty, err
+	}
+	if err := c.enableUTF8(ctx, sess); err != nil {
 		return empty, err
 	}
 
@@ -280,10 +287,15 @@ func messageIDNotFoundError(uid uint32, messageID string) error {
 	}
 }
 
-// mailbox carries the parsed name and special-use flags for a LIST response.
+// mailbox carries the parsed server identity and hierarchy for a LIST response.
 type mailbox struct {
-	name  string
-	flags []string
+	name        string // historical alias for wireName in package-local tests
+	wireName    string
+	displayName string
+	displayPath []string
+	delimiter   string
+	encoding    transport.MailboxEncoding
+	flags       []string
 }
 
 func (c *Client) dial(ctx context.Context, cfg transport.ImapConfig) (net.Conn, error) {
@@ -315,6 +327,99 @@ func (c *Client) tlsConfig(host string) *tls.Config {
 		return cfg
 	}
 	return &tls.Config{ServerName: host}
+}
+
+func (c *Client) readGreeting(ctx context.Context, sess *session) error {
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP greeting deadline")
+	}
+	line, err := c.readLine(sess)
+	if err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP greeting read")
+	}
+	if !strings.HasPrefix(line, "* ") {
+		sess.dirty = true
+		return &transport.TransportError{
+			Code:    transport.CodeIMAPResponseMalformed,
+			Message: "IMAP greeting is malformed",
+			Err:     fmt.Errorf("got %q", line),
+		}
+	}
+	sess.mailboxEncoding = transport.MailboxEncodingModifiedUTF7
+	sess.utf8Accept = greetingAdvertisesUTF8(line)
+	sess.utf8Only = capabilityLineRequiresUTF8(line)
+	return nil
+}
+
+func (c *Client) enableUTF8(ctx context.Context, sess *session) error {
+	if !sess.utf8Accept {
+		if err := c.refreshCapabilities(ctx, sess); err != nil {
+			return err
+		}
+	}
+	if !sess.utf8Accept {
+		return nil
+	}
+	tag := sess.nextTag()
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP ENABLE UTF8 deadline")
+	}
+	if err := c.writeLine(sess, tag+" ENABLE UTF8=ACCEPT"); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP ENABLE UTF8 write")
+	}
+	enabled := false
+	for {
+		line, err := c.readLine(sess)
+		if err != nil {
+			return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP ENABLE UTF8 read")
+		}
+		if strings.HasPrefix(strings.ToUpper(line), "* ENABLED ") {
+			for _, capability := range strings.Fields(line[len("* ENABLED "):]) {
+				if strings.EqualFold(capability, "UTF8=ACCEPT") {
+					enabled = true
+				}
+			}
+			continue
+		}
+		if !strings.HasPrefix(line, tag+" ") {
+			continue
+		}
+		if parseStatus(line, tag) == "OK" && enabled {
+			sess.mailboxEncoding = transport.MailboxEncodingUTF8
+		}
+		if sess.utf8Only && sess.mailboxEncoding != transport.MailboxEncodingUTF8 {
+			return &transport.TransportError{
+				Code:    transport.CodeIMAPResponseMalformed,
+				Message: "IMAP UTF8=ONLY capability was not enabled",
+				Err:     fmt.Errorf("ENABLE UTF8=ACCEPT returned %s without UTF8=ACCEPT", parseStatus(line, tag)),
+			}
+		}
+		return nil
+	}
+}
+
+func (c *Client) refreshCapabilities(ctx context.Context, sess *session) error {
+	tag := sess.nextTag()
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP CAPABILITY deadline")
+	}
+	if err := c.writeLine(sess, tag+" CAPABILITY"); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP CAPABILITY write")
+	}
+	for {
+		line, err := c.readLine(sess)
+		if err != nil {
+			return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP CAPABILITY read")
+		}
+		if capabilityLineAdvertisesUTF8(line) {
+			sess.utf8Accept = true
+			sess.utf8Only = capabilityLineRequiresUTF8(line)
+		}
+		if !strings.HasPrefix(line, tag+" ") {
+			continue
+		}
+		return nil
+	}
 }
 
 func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg transport.ImapConfig) error {
@@ -379,12 +484,12 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 		if !strings.HasPrefix(line, "* LIST ") {
 			continue
 		}
-		name, flags, perr := parseListLine(line, literals...)
+		parsed, perr := parseListMailbox(line, sess.mailboxEncoding, literals...)
 		if perr != nil {
 			sess.dirty = true
 			return nil, listResponseMalformed(perr)
 		}
-		mailboxes = append(mailboxes, mailbox{name: name, flags: flags})
+		mailboxes = append(mailboxes, parsed)
 	}
 }
 
@@ -858,14 +963,22 @@ func safeQuoteIMAP(s string) (string, error) {
 }
 
 func parseListLine(line string, literals ...[]byte) (string, []string, error) {
+	parsed, err := parseListMailbox(line, transport.MailboxEncodingModifiedUTF7, literals...)
+	if err != nil {
+		return "", nil, err
+	}
+	return parsed.wireName, parsed.flags, nil
+}
+
+func parseListMailbox(line string, encoding transport.MailboxEncoding, literals ...[]byte) (mailbox, error) {
 	parser := imapValueParser{literals: literals}
 	const prefix = "* LIST "
 	if !strings.HasPrefix(line, prefix) {
-		return "", nil, fmt.Errorf("not a LIST response")
+		return mailbox{}, fmt.Errorf("not a LIST response")
 	}
 	s := line[len(prefix):]
 	if !strings.HasPrefix(s, "(") {
-		return "", nil, fmt.Errorf("no attribute list")
+		return mailbox{}, fmt.Errorf("no attribute list")
 	}
 
 	depth := 0
@@ -888,32 +1001,39 @@ func parseListLine(line string, literals ...[]byte) (string, []string, error) {
 		}
 	}
 	if end == 0 {
-		return "", nil, fmt.Errorf("unterminated attribute list")
+		return mailbox{}, fmt.Errorf("unterminated attribute list")
 	}
 
 	attrs := s[1 : end-1]
 	flags, err := parser.parseValues(attrs)
 	if err != nil {
-		return "", nil, err
+		return mailbox{}, err
 	}
 
 	rest := strings.TrimSpace(s[end:])
-	_, rest, err = parser.parse(rest)
+	delimiter, rest, err := parser.parse(rest)
 	if err != nil {
-		return "", nil, err
+		return mailbox{}, err
 	}
 
-	name, rest, err := parser.parse(rest)
+	wireName, rest, err := parser.parse(rest)
 	if err != nil {
-		return "", nil, err
+		return mailbox{}, err
 	}
 	if strings.TrimSpace(rest) != "" {
-		return "", nil, fmt.Errorf("trailing LIST response data")
+		return mailbox{}, fmt.Errorf("trailing LIST response data")
 	}
 	if parser.nextLiteral != len(literals) {
-		return "", nil, fmt.Errorf("unused IMAP response literal")
+		return mailbox{}, fmt.Errorf("unused IMAP response literal")
 	}
-	return name, flags, nil
+	displayName, displayPath, err := decodeMailboxWireName(wireName, delimiter, encoding)
+	if err != nil {
+		return mailbox{}, err
+	}
+	return mailbox{
+		name: wireName, wireName: wireName, displayName: displayName, displayPath: displayPath,
+		delimiter: delimiter, encoding: normalizedMailboxEncoding(encoding), flags: flags,
+	}, nil
 }
 
 type imapValueParser struct {
@@ -998,7 +1118,16 @@ func parseQuoted(s string) (string, string, error) {
 func pickSent(mailboxes []mailbox) (string, error) {
 	infos := make([]transport.MailboxInfo, len(mailboxes))
 	for index, candidate := range mailboxes {
-		infos[index] = transport.MailboxInfo{Name: candidate.name, Flags: candidate.flags}
+		wireName := candidate.wireName
+		if wireName == "" {
+			wireName = candidate.name
+		}
+		infos[index] = transport.MailboxInfo{
+			Name: wireName, WireName: wireName,
+			DisplayName: candidate.displayName, DisplayPath: append([]string(nil), candidate.displayPath...),
+			Delimiter: candidate.delimiter, Encoding: candidate.encoding,
+			Flags: append([]string(nil), candidate.flags...),
+		}
 	}
 	return transport.ResolveSentMailbox(infos)
 }
@@ -1068,10 +1197,13 @@ func isTimeout(err error) bool {
 }
 
 type session struct {
-	conn    net.Conn
-	br      *bufio.Reader
-	bw      *bufio.Writer
-	nextTag func() string
+	conn            net.Conn
+	br              *bufio.Reader
+	bw              *bufio.Writer
+	nextTag         func() string
+	mailboxEncoding transport.MailboxEncoding
+	utf8Accept      bool
+	utf8Only        bool
 	// dirty marks an IO-level failure (read, write, deadline, cancel): the
 	// connection state is no longer trustworthy and the pooled session must
 	// be discarded. Protocol rejections (NO/BAD) do not set it.
@@ -1103,7 +1235,15 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 		cmdNum++
 		return fmt.Sprintf("%s%04d", prefix, cmdNum)
 	}
+	if err := c.readGreeting(ctx, sess); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	if err := c.doLogin(ctx, sess, sess.nextTag(), cfg); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := c.enableUTF8(ctx, sess); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -1192,7 +1332,16 @@ func (c *Client) listMailboxes(ctx context.Context, ps *pooledSession) ([]transp
 	}
 	infos := make([]transport.MailboxInfo, len(mboxes))
 	for i, m := range mboxes {
-		infos[i] = transport.MailboxInfo{Name: m.name, Flags: m.flags}
+		wireName := m.wireName
+		if wireName == "" {
+			wireName = m.name
+		}
+		infos[i] = transport.MailboxInfo{
+			Name: wireName, WireName: wireName,
+			DisplayName: m.displayName, DisplayPath: append([]string(nil), m.displayPath...),
+			Delimiter: m.delimiter, Encoding: m.encoding,
+			Flags: append([]string(nil), m.flags...),
+		}
 	}
 	return infos, nil
 }

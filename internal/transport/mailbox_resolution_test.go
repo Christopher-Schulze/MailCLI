@@ -122,3 +122,76 @@ func TestResolveSpecialMailboxRejectsAmbiguousCandidates(t *testing.T) {
 		t.Fatalf("ResolveSentMailbox() error = %v, want %s", err, CodeIMAPAmbiguousMailbox)
 	}
 }
+
+func TestResolveMailboxPathUsesServerHierarchyAndExactCase(t *testing.T) {
+	mailboxes := []MailboxInfo{
+		{
+			Name: "A.B", WireName: "A.B", DisplayName: "A.B",
+			DisplayPath: []string{"A", "B"}, Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+		{
+			Name: "A/B", WireName: "A/B", DisplayName: "A/B",
+			DisplayPath: []string{"A/B"}, Encoding: MailboxEncodingModifiedUTF7,
+		},
+		{
+			Name: "Sent", WireName: "Sent", DisplayName: "Sent",
+			DisplayPath: []string{"Sent"}, Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+		{
+			Name: "sent", WireName: "sent", DisplayName: "sent",
+			DisplayPath: []string{"sent"}, Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+		{
+			Name: "Custom", WireName: "Custom", DisplayName: "Custom",
+			DisplayPath: []string{"Custom"}, Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+		{
+			Name: "custom", WireName: "custom", DisplayName: "custom",
+			DisplayPath: []string{"custom"}, Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"A", "B"}); err != nil || got != "A.B" {
+		t.Fatalf("dot hierarchy = %q, %v; want A.B", got, err)
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"A/B"}); err != nil || got != "A/B" {
+		t.Fatalf("flat mailbox = %q, %v; want A/B", got, err)
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"sent"}); err != nil || got != "sent" {
+		t.Fatalf("case-distinct lowercase mailbox = %q, %v; want sent", got, err)
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"custom"}); err != nil || got != "custom" {
+		t.Fatalf("case-distinct custom mailbox = %q, %v; want custom", got, err)
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"Sent"}); err != nil || got != "Sent" {
+		t.Fatalf("case-distinct Sent mailbox = %q, %v; want Sent", got, err)
+	}
+}
+
+func TestResolveMailboxPathDoesNotInventHierarchyForNILDelimiter(t *testing.T) {
+	mailboxes := []MailboxInfo{{
+		Name: "A/B", WireName: "A/B", DisplayName: "A/B", DisplayPath: []string{"A/B"},
+		Delimiter: "", Encoding: MailboxEncodingModifiedUTF7,
+	}}
+	if _, err := ResolveMailboxPath(mailboxes, []string{"A", "B"}); ErrorCode(err) != CodeIMAPMailboxNotFound {
+		t.Fatalf("NIL delimiter synthetic hierarchy error = %v, want %s", err, CodeIMAPMailboxNotFound)
+	}
+}
+
+func TestResolveSpecialUseKeepsCaseDistinctWireNames(t *testing.T) {
+	mailboxes := []MailboxInfo{
+		{
+			Name: "Sent", WireName: "Sent", DisplayName: "Sent", DisplayPath: []string{"Sent"},
+			Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7, Flags: []string{"\\Sent"},
+		},
+		{
+			Name: "sent", WireName: "sent", DisplayName: "sent", DisplayPath: []string{"sent"},
+			Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+		},
+	}
+	if got, err := ResolveSentMailbox(mailboxes); err != nil || got != "Sent" {
+		t.Fatalf("special-use Sent = %q, %v; want Sent", got, err)
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{"sent"}); err != nil || got != "sent" {
+		t.Fatalf("explicit lowercase Sent = %q, %v; want sent", got, err)
+	}
+}

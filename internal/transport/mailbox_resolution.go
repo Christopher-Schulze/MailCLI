@@ -64,7 +64,7 @@ var mailboxRoleFallbacks = map[mailboxRole][]string{
 // every ambiguous candidate set is rejected with its sorted evidence.
 func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) {
 	if len(path) == 0 || (len(path) == 1 && strings.EqualFold(path[0], "INBOX")) {
-		return "INBOX", nil
+		return resolveInboxMailbox(mailboxes)
 	}
 	if invalidMailboxPath(path) {
 		return "", &TransportError{
@@ -86,7 +86,7 @@ func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) 
 		}
 		fallbacks := mailboxRoleFallbacks[role]
 		if heuristic := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
-			return containsMailboxName(fallbacks, mailbox.Name)
+			return containsMailboxName(fallbacks, mailbox)
 		}); len(heuristic) > 0 {
 			return chooseMailbox(heuristic, string(role)+" localized mailbox name", CodeIMAPMailboxNotFound)
 		}
@@ -95,7 +95,7 @@ func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) 
 	if len(path) == 1 {
 		leaf := path[0]
 		if heuristic := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
-			return strings.EqualFold(mailboxLeaf(mailbox.Name), leaf)
+			return mailboxLegacy(mailbox) && strings.EqualFold(mailboxLeaf(mailboxWireName(mailbox)), leaf)
 		}); len(heuristic) > 0 {
 			return chooseMailbox(heuristic, "mailbox leaf name", CodeIMAPMailboxNotFound)
 		}
@@ -129,7 +129,7 @@ func resolveRoleMailbox(mailboxes []MailboxInfo, role mailboxRole, missingCode s
 		return chooseMailbox(flagged, string(role)+" special-use mailbox", missingCode)
 	}
 	fallback := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
-		return containsMailboxName(mailboxRoleFallbacks[role], mailbox.Name)
+		return containsMailboxName(mailboxRoleFallbacks[role], mailbox)
 	})
 	return chooseMailbox(fallback, string(role)+" mailbox name", missingCode)
 }
@@ -172,34 +172,49 @@ func mailboxRoleForPath(path []string) (mailboxRole, bool) {
 func matchingMailboxNames(mailboxes []MailboxInfo, predicate func(MailboxInfo) bool) []string {
 	matches := make([]string, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
-		if mailbox.Name != "" && predicate(mailbox) {
-			matches = append(matches, mailbox.Name)
+		if mailboxWireName(mailbox) != "" && predicate(mailbox) {
+			matches = append(matches, mailboxWireName(mailbox))
 		}
 	}
-	sort.Slice(matches, func(left, right int) bool {
-		foldedLeft := strings.ToLower(matches[left])
-		foldedRight := strings.ToLower(matches[right])
-		if foldedLeft == foldedRight {
-			return matches[left] < matches[right]
-		}
-		return foldedLeft < foldedRight
-	})
+	sort.Strings(matches)
 	return matches
 }
 
 func exactMailboxPathMatches(mailboxes []MailboxInfo, path []string) []string {
-	pathNames := []string{strings.Join(path, "/")}
-	if len(path) > 1 {
-		pathNames = append(pathNames, strings.Join(path, "."))
-	}
 	return matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
-		for _, pathName := range pathNames {
-			if strings.EqualFold(mailbox.Name, pathName) {
+		for _, candidate := range mailboxDisplayPaths(mailbox) {
+			if equalMailboxPath(candidate, path) {
 				return true
+			}
+		}
+		if mailboxLegacy(mailbox) {
+			legacyNames := []string{strings.Join(path, "/")}
+			if len(path) > 1 {
+				legacyNames = append(legacyNames, strings.Join(path, "."))
+			}
+			for _, name := range legacyNames {
+				if strings.EqualFold(mailboxWireName(mailbox), name) {
+					return true
+				}
 			}
 		}
 		return false
 	})
+}
+
+func resolveInboxMailbox(mailboxes []MailboxInfo) (string, error) {
+	candidates := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
+		return strings.EqualFold(mailboxWireName(mailbox), "INBOX")
+	})
+	if len(candidates) == 0 {
+		return "INBOX", nil
+	}
+	for _, candidate := range candidates {
+		if candidate == "INBOX" {
+			return candidate, nil
+		}
+	}
+	return chooseMailbox(candidates, "INBOX mailbox", CodeIMAPMailboxNotFound)
 }
 
 func chooseMailbox(candidates []string, source string, missingCode string) (string, error) {
@@ -227,13 +242,57 @@ func hasMailboxFlag(mailbox MailboxInfo, want string) bool {
 	return false
 }
 
-func containsMailboxName(names []string, candidate string) bool {
+func containsMailboxName(names []string, candidate MailboxInfo) bool {
+	candidateName := mailboxDisplayName(candidate)
 	for _, name := range names {
-		if strings.EqualFold(name, candidate) {
+		if candidateName == name || (mailboxLegacy(candidate) && strings.EqualFold(name, candidateName)) {
 			return true
 		}
 	}
 	return false
+}
+
+func mailboxWireName(mailbox MailboxInfo) string {
+	if mailbox.WireName != "" {
+		return mailbox.WireName
+	}
+	return mailbox.Name
+}
+
+func mailboxDisplayName(mailbox MailboxInfo) string {
+	if mailbox.DisplayName != "" {
+		return mailbox.DisplayName
+	}
+	return mailboxWireName(mailbox)
+}
+
+func mailboxLegacy(mailbox MailboxInfo) bool {
+	return mailbox.WireName == "" && mailbox.DisplayName == "" &&
+		len(mailbox.DisplayPath) == 0 && mailbox.Delimiter == "" && mailbox.Encoding == ""
+}
+
+func mailboxDisplayPaths(mailbox MailboxInfo) [][]string {
+	path := append([]string(nil), mailbox.DisplayPath...)
+	if len(path) == 0 {
+		path = []string{mailboxDisplayName(mailbox)}
+	}
+	paths := [][]string{path}
+	if len(path) > 1 && path[0] == "[Gmail]" {
+		paths = append(paths, append([]string(nil), path[1:]...))
+	}
+	return paths
+}
+
+func equalMailboxPath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func mailboxLeaf(name string) string {
