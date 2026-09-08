@@ -138,15 +138,10 @@ func validateDraftAddresses(input DraftInput) error {
 	seen := make(map[string]struct{})
 	for _, group := range [][]Recipient{input.To, input.CC, input.BCC} {
 		for _, recipient := range group {
-			address := recipient.Address
-			if recipient.Name != "" {
-				address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
-			}
-			parsed, err := stdmail.ParseAddress(address)
+			normalized, err := recipientAddressKey(recipient)
 			if err != nil {
 				return validationError("invalid recipient address")
 			}
-			normalized := strings.ToLower(parsed.Address)
 			if _, duplicate := seen[normalized]; duplicate {
 				return validationError("duplicate recipient address")
 			}

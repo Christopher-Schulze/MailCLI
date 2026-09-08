@@ -72,15 +72,10 @@ func validateStoredDraftAddresses(draft Draft) error {
 	seen := make(map[string]struct{}, len(draft.To)+len(draft.CC)+len(draft.BCC))
 	for _, group := range [][]Recipient{draft.To, draft.CC, draft.BCC} {
 		for _, recipient := range group {
-			address := recipient.Address
-			if recipient.Name != "" {
-				address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
-			}
-			parsed, err := stdmail.ParseAddress(address)
-			if err != nil || parsed.Address == "" {
+			normalized, err := recipientAddressKey(recipient)
+			if err != nil {
 				return validationError("invalid recipient address")
 			}
-			normalized := strings.ToLower(parsed.Address)
 			if _, duplicate := seen[normalized]; duplicate {
 				return validationError("duplicate recipient address")
 			}

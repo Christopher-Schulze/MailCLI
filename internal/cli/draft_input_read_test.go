@@ -69,3 +69,38 @@ func TestParseRecipientFlagsRejectsInvalid(t *testing.T) {
 		t.Fatalf("got = %#v", got)
 	}
 }
+
+func TestDraftInputPresenceNativeAndJSONEquivalent(t *testing.T) {
+	t.Parallel()
+
+	flags := newFlagSet("test", &bytes.Buffer{})
+	native := registerDraftInputFlags(flags)
+	if err := flags.Parse([]string{"--subject", "", "--cc", "", "--body", "Body"}); err != nil {
+		t.Fatal(err)
+	}
+	nativeInput, err := native.read()
+	if err != nil {
+		t.Fatalf("native.read() error = %v", err)
+	}
+	jsonInput, err := decodeDraftInput(strings.NewReader(`{"subject":"","cc":[],"body":"Body"}`))
+	if err != nil {
+		t.Fatalf("decodeDraftInput() error = %v", err)
+	}
+	if !nativeInput.SubjectSet || !nativeInput.CCSet || len(nativeInput.CC) != 0 {
+		t.Fatalf("native input = %+v, want explicit empty subject and CC", nativeInput)
+	}
+	if !jsonInput.SubjectSet || !jsonInput.CCSet || len(jsonInput.CC) != 0 {
+		t.Fatalf("JSON input = %+v, want explicit empty subject and CC", jsonInput)
+	}
+}
+
+func TestDecodeDraftInputRejectsNullDerivableFields(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{"subject", "to", "cc"} {
+		t.Run(field, func(t *testing.T) {
+			if _, err := decodeDraftInput(strings.NewReader(`{"` + field + `":null,"body":"Body"}`)); err == nil {
+				t.Fatalf("decodeDraftInput(%s) error = nil", field)
+			}
+		})
+	}
+}

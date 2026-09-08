@@ -43,6 +43,24 @@ func (values *repeatableStringFlag) Set(value string) error {
 	return nil
 }
 
+type repeatableRecipientFlag struct {
+	values []string
+	set    bool
+}
+
+func (values *repeatableRecipientFlag) String() string {
+	return strings.Join(values.values, ",")
+}
+
+func (values *repeatableRecipientFlag) Set(value string) error {
+	values.set = true
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	values.values = append(values.values, value)
+	return nil
+}
+
 type draftInputFlags struct {
 	input       trackedStringFlag
 	account     trackedStringFlag
@@ -51,9 +69,9 @@ type draftInputFlags struct {
 	body        trackedStringFlag
 	bodyFile    trackedStringFlag
 	bodyFormat  trackedStringFlag
-	to          repeatableStringFlag
-	cc          repeatableStringFlag
-	bcc         repeatableStringFlag
+	to          repeatableRecipientFlag
+	cc          repeatableRecipientFlag
+	bcc         repeatableRecipientFlag
 	attachments repeatableStringFlag
 }
 
@@ -95,15 +113,15 @@ func (options *draftInputFlags) read() (mailmodel.DraftInput, error) {
 			return mailmodel.DraftInput{}, err
 		}
 	}
-	to, err := parseRecipientFlags(options.to)
+	to, err := parseRecipientFlags(options.to.values)
 	if err != nil {
 		return mailmodel.DraftInput{}, err
 	}
-	cc, err := parseRecipientFlags(options.cc)
+	cc, err := parseRecipientFlags(options.cc.values)
 	if err != nil {
 		return mailmodel.DraftInput{}, err
 	}
-	bcc, err := parseRecipientFlags(options.bcc)
+	bcc, err := parseRecipientFlags(options.bcc.values)
 	if err != nil {
 		return mailmodel.DraftInput{}, err
 	}
@@ -121,12 +139,13 @@ func (options *draftInputFlags) read() (mailmodel.DraftInput, error) {
 		AccountRef: options.account.value, From: options.from.value, To: to, CC: cc, BCC: bcc,
 		Subject: options.subject.value, Body: body, BodyFormat: format,
 		Attachments: append([]string(nil), options.attachments...),
+		SubjectSet:  options.subject.set, ToSet: options.to.set, CCSet: options.cc.set,
 	}, nil
 }
 
 func (options *draftInputFlags) nativeMode() bool {
 	return options.account.set || options.from.set || options.subject.set || options.body.set || options.bodyFile.set ||
-		options.bodyFormat.set || len(options.to)+len(options.cc)+len(options.bcc)+len(options.attachments) > 0
+		options.bodyFormat.set || options.to.set || options.cc.set || options.bcc.set || len(options.attachments) > 0
 }
 
 func parseRecipientFlags(values []string) ([]mailmodel.Recipient, error) {
@@ -205,6 +224,11 @@ func decodeDraftInput(reader io.Reader) (mailmodel.DraftInput, error) {
 	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
 		return mailmodel.DraftInput{}, invalidDraftInput("draft input body must be a string")
 	}
+	for _, field := range []string{"subject", "to", "cc"} {
+		if draftJSONFieldIsNull(fields, field) {
+			return mailmodel.DraftInput{}, invalidDraftInput("draft input " + field + " must not be null")
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var input mailmodel.DraftInput
@@ -215,7 +239,28 @@ func decodeDraftInput(reader io.Reader) (mailmodel.DraftInput, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return mailmodel.DraftInput{}, invalidDraftInput("draft input must contain exactly one JSON object")
 	}
+	input.SubjectSet = draftJSONFieldPresent(fields, "subject")
+	input.ToSet = draftJSONFieldPresent(fields, "to")
+	input.CCSet = draftJSONFieldPresent(fields, "cc")
 	return input, nil
+}
+
+func draftJSONFieldPresent(fields map[string]json.RawMessage, name string) bool {
+	for field := range fields {
+		if strings.EqualFold(field, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func draftJSONFieldIsNull(fields map[string]json.RawMessage, name string) bool {
+	for field, value := range fields {
+		if strings.EqualFold(field, name) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return true
+		}
+	}
+	return false
 }
 
 func invalidDraftInput(message string) error {
