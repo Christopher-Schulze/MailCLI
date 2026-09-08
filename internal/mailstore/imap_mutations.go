@@ -73,30 +73,44 @@ func (c *Client) resolveImapTargetWithOptions(
 
 	target.accountID = resolved.Reference.AccountID
 	target.messageID = resolved.Reference.ExpectedMessageID
-	if target.messageID == "" {
-		_, source, err := c.store.openMessageSource(ctx, messageRef)
-		if err != nil {
-			return target, fmt.Errorf("resolve IMAP message identity: %w", err)
-		}
-		target.messageID, err = messageIDFromSource(source.Reader())
-		closeErr := source.Close()
-		if err != nil {
-			return target, fmt.Errorf("read IMAP message identity: %w", err)
-		}
-		if closeErr != nil {
-			return target, fmt.Errorf("close IMAP message source: %w", closeErr)
+	var localIdentityErr error
+	imapOp := c.send.ImapClient()
+	if resolved.Reference.ExpectedIMAPUID != 0 {
+		uid, uidval, usable, directErr := c.directIMAPIdentity(ctx, resolved)
+		if directErr != nil {
+			var stale *Error
+			if errors.As(directErr, &stale) && stale.Code == "stale_reference" {
+				return target, directErr
+			}
+			localIdentityErr = directErr
+		} else if usable {
+			target.uid, target.uidvalidity, target.duplicateMatches = uid, uidval, 1
 		}
 	}
-	if target.messageID == "" {
-		return target, &transport.TransportError{
-			Code:    transport.CodeIMAPMessageUIDUnknown,
-			Message: fmt.Sprintf("cannot resolve IMAP UID for %s: message has no Message-ID", messageRef),
+	if target.messageID == "" && target.uid == 0 {
+		target.messageID, localIdentityErr = c.readLocalMessageID(ctx, messageRef)
+		if localIdentityErr != nil && !safeTargetedFallback(localIdentityErr) {
+			return target, fmt.Errorf("resolve IMAP message identity: %w", localIdentityErr)
 		}
 	}
 	if resolved.PhysicalLocation.Scheme != "imap" || resolved.Reference.AccountID == "local" {
 		return target, &transport.TransportError{
 			Code:    transport.CodeLocalOnlyMailbox,
 			Message: "mutations are not supported on local-only mailboxes (On My Mac)",
+		}
+	}
+	if target.uid == 0 && target.messageID == "" {
+		if imapOp == nil {
+			return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
+				Code:    transport.CodeIMAPMessageUIDUnknown,
+				Message: "IMAP identity discovery is unavailable; refresh the local catalog or provide a fresh Message-ID-backed reference",
+			})
+		}
+		if _, supported := imapOp.(transport.MessageIdentityResolver); !supported {
+			return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
+				Code:    transport.CodeIMAPMessageUIDUnknown,
+				Message: "message has no Message-ID or independent server UID mapping, and this IMAP transport has no bounded metadata resolver; refresh the local catalog",
+			})
 		}
 	}
 
@@ -143,7 +157,6 @@ func (c *Client) resolveImapTargetWithOptions(
 	}
 	target.cfg = cfg
 
-	imapOp := c.send.ImapClient()
 	if imapOp == nil {
 		return target, &transport.TransportError{
 			Code:    transport.CodeIMAPMutationFailed,
@@ -174,7 +187,26 @@ func (c *Client) resolveImapTargetWithOptions(
 		}
 	}
 
-	if target.messageID != "" {
+	if target.uid == 0 && target.messageID == "" {
+		resolver, supported := imapOp.(transport.MessageIdentityResolver)
+		if supported {
+			identity, err := resolver.ResolveMessageIdentity(ctx, cfg, imapBox, transport.MessageIdentityHint{
+				Subject: resolved.Record.Subject, SenderAddress: resolved.Record.SenderAddress,
+			})
+			if err != nil {
+				return target, identityResolutionError(messageRef, localIdentityErr, err)
+			}
+			if identity.UID == 0 || identity.UIDValidity == 0 {
+				return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
+					Code:    transport.CodeIMAPMessageUIDUnknown,
+					Message: "server metadata resolver returned an incomplete UID identity",
+				})
+			}
+			target.uid, target.uidvalidity, target.duplicateMatches = identity.UID, identity.UIDValidity, 1
+			target.messageID = identity.MessageID
+		}
+	}
+	if target.messageID != "" && target.uid == 0 {
 		uid, uidval, matchCount, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
 		if err != nil {
 			return target, err
@@ -195,15 +227,101 @@ func (c *Client) resolveImapTargetWithOptions(
 			}
 		}
 	}
+	if target.uid == 0 || target.uidvalidity == 0 {
+		return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageUIDUnknown,
+			Message: "no independently verified IMAP UID and UIDVALIDITY are available; refresh the local Mail catalog or provide a fresh Message-ID-backed reference",
+		})
+	}
 
 	// Build base summary
 	mailboxRef, _ := mailref.EncodeMailbox(resolved.Reference.AccountID, resolved.Reference.MailboxPath)
 	if s, err := mapMessageSummary(resolved.Record, mailboxRef, resolved.Reference.AccountID, resolved.Reference.MailboxPath, c.store.storeUUID); err == nil {
 		s.MessageID = target.messageID
+		s.Ref = updateSummaryIdentity(s.Ref, target.messageID, target.uid, target.uidvalidity)
 		target.summary = s
 	}
 
 	return target, nil
+}
+
+func (c *Client) readLocalMessageID(ctx context.Context, messageRef string) (string, error) {
+	_, source, err := c.store.openMessageSource(ctx, messageRef)
+	if err != nil {
+		return "", fmt.Errorf("open local message source: %w", err)
+	}
+	messageID, readErr := messageIDFromSource(source.Reader())
+	closeErr := source.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read IMAP message identity: %w", readErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close IMAP message source: %w", closeErr)
+	}
+	return messageID, nil
+}
+
+func (c *Client) directIMAPIdentity(
+	ctx context.Context,
+	resolved resolvedMessage,
+) (uint32, uint32, bool, error) {
+	ref := resolved.Reference
+	if ref.ExpectedIMAPUID == 0 {
+		return 0, 0, false, nil
+	}
+	if resolved.Record.RemoteID != int64(ref.ExpectedIMAPUID) {
+		return 0, 0, false, operationError("stale_reference", "message server UID mapping changed")
+	}
+	if ref.ExpectedIMAPMailboxID != 0 && resolved.Record.RemoteMailboxID != ref.ExpectedIMAPMailboxID {
+		return 0, 0, false, operationError("stale_reference", "message server mailbox mapping changed")
+	}
+	localValidity, err := c.store.mailboxUIDValidity(ctx, resolved.PhysicalLocation)
+	if err != nil && ref.ExpectedIMAPUIDValidity == 0 {
+		return 0, 0, false, err
+	}
+	if ref.ExpectedIMAPUIDValidity != 0 && localValidity != 0 &&
+		ref.ExpectedIMAPUIDValidity != localValidity {
+		return 0, 0, false, operationError("stale_reference", "message mailbox UIDVALIDITY changed locally")
+	}
+	validity := ref.ExpectedIMAPUIDValidity
+	if validity == 0 {
+		validity = localValidity
+	}
+	return ref.ExpectedIMAPUID, validity, validity != 0, nil
+}
+
+func identityResolutionError(messageRef string, localErr, remoteErr error) error {
+	if remoteErr == nil {
+		return localErr
+	}
+	var typed *transport.TransportError
+	if errors.As(remoteErr, &typed) {
+		message := fmt.Sprintf("cannot resolve IMAP identity for %s: %s", messageRef, typed.Message)
+		if localErr != nil {
+			message += "; local source evidence: " + localErr.Error()
+		}
+		return &transport.TransportError{Code: typed.Code, Message: message, Err: errors.Join(localErr, remoteErr)}
+	}
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPMessageUIDUnknown,
+		Message: fmt.Sprintf("cannot resolve IMAP identity for %s: %v", messageRef, remoteErr),
+		Err:     errors.Join(localErr, remoteErr),
+	}
+}
+
+func updateSummaryIdentity(refValue, messageID string, uid, uidvalidity uint32) string {
+	ref, err := mailref.DecodeMessage(refValue)
+	if err != nil {
+		return refValue
+	}
+	ref.ExpectedMessageID = messageID
+	ref.ExpectedIMAPUID = uid
+	ref.ExpectedIMAPUIDValidity = uidvalidity
+	updated, err := mailref.EncodeMessage(ref)
+	if err != nil {
+		return refValue
+	}
+	return updated
 }
 
 // resolveAccountEmail returns the stored-credential-backed sender address for

@@ -107,6 +107,7 @@ func requiredColumnCapabilities() map[string]map[string]string {
 		},
 		"messages": {
 			"ROWID": "INTEGER", "message_id": "INTEGER", "global_message_id": "INTEGER",
+			"remote_id": "INTEGER", "remote_mailbox": "INTEGER",
 			"sender": "INTEGER", "subject": "INTEGER", "summary": "INTEGER",
 			"date_sent": "INTEGER", "date_received": "INTEGER", "mailbox": "INTEGER",
 			"flags": "INTEGER", "read": "INTEGER", "flagged": "INTEGER",

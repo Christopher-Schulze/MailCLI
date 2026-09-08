@@ -87,6 +87,7 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 	row := s.database.QueryRowContext(ctx, `
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
 			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
@@ -129,6 +130,10 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 		record.StoreGlobalID != ref.ExpectedStoreGlobalID {
 		return resolvedMessage{}, operationError("stale_reference", "message store identity changed")
 	}
+	if ref.ExpectedIMAPUID != 0 && (record.RemoteID != int64(ref.ExpectedIMAPUID) ||
+		(ref.ExpectedIMAPMailboxID != 0 && record.RemoteMailboxID != ref.ExpectedIMAPMailboxID)) {
+		return resolvedMessage{}, operationError("stale_reference", "message server identity changed")
+	}
 	if err := s.validateReferenceMembership(ctx, ref); err != nil {
 		return resolvedMessage{}, err
 	}
@@ -161,17 +166,20 @@ func (s *Store) referenceMembershipMatches(ctx context.Context, ref mailref.Mess
 func (s *Store) messageStillMatches(ctx context.Context, resolved resolvedMessage) (bool, error) {
 	var messageID int64
 	var globalID int64
+	var remoteID int64
+	var remoteMailboxID int64
 	var mailboxID int64
 	var mailboxURL string
 	var subject string
 	err := s.database.QueryRowContext(ctx, `
 		SELECT COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url, subject.subject
 		FROM messages m
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
 		JOIN subjects subject ON subject.ROWID = m.subject
 		WHERE m.ROWID = ? AND m.deleted = 0
-	`, resolved.Record.RowID).Scan(&messageID, &globalID, &mailboxID, &mailboxURL, &subject)
+	`, resolved.Record.RowID).Scan(&messageID, &globalID, &remoteID, &remoteMailboxID, &mailboxID, &mailboxURL, &subject)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -180,6 +188,7 @@ func (s *Store) messageStillMatches(ctx context.Context, resolved resolvedMessag
 	}
 	physicalMatch := messageID == resolved.Record.StoreMessageID &&
 		globalID == resolved.Record.StoreGlobalID &&
+		remoteID == resolved.Record.RemoteID && remoteMailboxID == resolved.Record.RemoteMailboxID &&
 		mailboxID == resolved.Record.StoreMailboxID &&
 		mailboxURL == resolved.Record.PhysicalURL && subject == resolved.Record.Subject
 	if !physicalMatch {

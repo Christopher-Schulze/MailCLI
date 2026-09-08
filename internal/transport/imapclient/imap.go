@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	mail "net/mail"
 	"os"
@@ -49,6 +50,7 @@ const (
 	maxFetchNestingDepth     = 128
 	maxUIDSearchResults      = 100000
 	maxMessageIDHeaderBytes  = 1 << 20
+	maxIdentitySearchResults = 128
 )
 
 // AppendToSent implements transport.SentMirror. It runs on its own dedicated
@@ -1386,6 +1388,197 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 	return exactUID, info.uidvalidity, exactMatches, nil
 }
 
+// ResolveMessageIdentity discovers one message from exact local metadata. The
+// server search is deliberately capped, and every candidate is verified from
+// header fields before a UID is returned. No message body is fetched.
+func (c *Client) ResolveMessageIdentity(
+	ctx context.Context,
+	cfg transport.ImapConfig,
+	mailbox string,
+	hint transport.MessageIdentityHint,
+) (transport.MessageIdentity, error) {
+	var identity transport.MessageIdentity
+	subject := strings.TrimSpace(hint.Subject)
+	if subject == "" {
+		return identity, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageUIDUnknown,
+			Message: "cannot discover IMAP identity without a non-empty subject; refresh the local message catalog",
+		}
+	}
+	ps, release, err := c.acquire(ctx, cfg)
+	if err != nil {
+		return identity, err
+	}
+	defer release()
+	info, err := c.ensureSelected(ctx, ps, mailbox)
+	if err != nil {
+		return identity, err
+	}
+	if info.uidvalidity == 0 {
+		return identity, &transport.TransportError{
+			Code:    transport.CodeIMAPUIDValidityUnknown,
+			Message: fmt.Sprintf("mailbox %s returned no UIDVALIDITY; refresh mailbox state and retry", mailbox),
+		}
+	}
+	criteria, err := metadataSearchCriteria(subject, hint.SenderAddress)
+	if err != nil {
+		return identity, err
+	}
+	uids, err := c.doUIDSearchCriteriaBounded(
+		ctx, ps.sess, ps.sess.nextTag(), criteria, maxIdentitySearchResults,
+	)
+	if err != nil {
+		return identity, err
+	}
+	var matches []transport.MessageIdentity
+	for _, uid := range uids {
+		messageID, candidateSubject, senderAddress, err := c.readIdentityHeaders(ctx, ps.sess, uid)
+		if err != nil {
+			if transport.ErrorCode(err) == transport.CodeIMAPMessageNotFound {
+				continue
+			}
+			return identity, err
+		}
+		if !identityMetadataMatches(candidateSubject, senderAddress, subject, hint.SenderAddress) {
+			continue
+		}
+		matches = append(matches, transport.MessageIdentity{
+			UID: uid, UIDValidity: info.uidvalidity, MessageID: messageID,
+		})
+	}
+	if len(matches) == 0 {
+		return identity, &transport.TransportError{
+			Code: transport.CodeIMAPMessageUIDUnknown,
+			Message: fmt.Sprintf(
+				"no unique IMAP message matched subject %q in mailbox %s within the bounded %d-candidate search; refresh the local catalog or provide a fresh reference",
+				subject, mailbox, maxIdentitySearchResults,
+			),
+		}
+	}
+	if len(matches) > 1 {
+		return identity, &transport.TransportError{
+			Code: transport.CodeIMAPAmbiguousMessageID,
+			Message: fmt.Sprintf(
+				"metadata matched %d IMAP messages in mailbox %s; refusing to guess a UID; provide a fresh Message-ID-backed reference",
+				len(matches), mailbox,
+			),
+		}
+	}
+	return matches[0], nil
+}
+
+func metadataSearchCriteria(subject, senderAddress string) (string, error) {
+	quotedSubject, err := safeQuoteIMAP(subject)
+	if err != nil {
+		return "", err
+	}
+	criteria := "HEADER SUBJECT " + quotedSubject
+	if strings.TrimSpace(senderAddress) == "" {
+		return criteria, nil
+	}
+	quotedSender, err := safeQuoteIMAP(strings.TrimSpace(senderAddress))
+	if err != nil {
+		return "", err
+	}
+	return criteria + " HEADER FROM " + quotedSender, nil
+}
+
+func (c *Client) readIdentityHeaders(ctx context.Context, sess *session, uid uint32) (string, string, string, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return "", "", "", err
+	}
+	tag := sess.nextTag()
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return "", "", "", wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP identity FETCH deadline")
+	}
+	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)])", tag, uid)
+	if err := c.writeLine(sess, cmd); err != nil {
+		return "", "", "", wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP identity FETCH write")
+	}
+	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes)
+	if err != nil {
+		return "", "", "", err
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return "", "", "", messageIDNotFoundError(uid, "metadata candidate")
+	}
+	messageID := ""
+	if values := headerValues(message.Header, "Message-ID"); len(values) > 0 {
+		messageID, err = exactHeaderMessageID(message.Header)
+		if err != nil {
+			return "", "", "", messageIDNotFoundError(uid, "metadata candidate")
+		}
+	}
+	subject, err := exactHeaderSubject(message.Header)
+	if err != nil {
+		return "", "", "", messageIDNotFoundError(uid, "metadata candidate")
+	}
+	sender, err := exactHeaderSender(message.Header)
+	if err != nil {
+		return "", "", "", messageIDNotFoundError(uid, "metadata candidate")
+	}
+	return messageID, subject, sender, nil
+}
+
+func exactHeaderMessageID(header mail.Header) (string, error) {
+	values := headerValues(header, "Message-ID")
+	if len(values) != 1 {
+		return "", errors.New("metadata candidate has no unique Message-ID")
+	}
+	return normalizeMessageID(strings.TrimSpace(values[0]))
+}
+
+func exactHeaderSubject(header mail.Header) (string, error) {
+	values := headerValues(header, "Subject")
+	if len(values) != 1 {
+		return "", errors.New("metadata candidate has no unique Subject")
+	}
+	decoded, err := (&mime.WordDecoder{}).DecodeHeader(strings.TrimSpace(values[0]))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(decoded), nil
+}
+
+func exactHeaderSender(header mail.Header) (string, error) {
+	values := headerValues(header, "From")
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 {
+		return "", errors.New("metadata candidate has no unique From")
+	}
+	address, err := mail.ParseAddress(strings.TrimSpace(values[0]))
+	if err != nil || address.Address == "" {
+		if err == nil {
+			err = errors.New("from address is empty")
+		}
+		return "", err
+	}
+	return strings.ToLower(address.Address), nil
+}
+
+func headerValues(header mail.Header, wanted string) []string {
+	var values []string
+	for key, candidates := range header {
+		if strings.EqualFold(key, wanted) {
+			values = append(values, candidates...)
+		}
+	}
+	return values
+}
+
+func identityMetadataMatches(actualSubject, actualSender, expectedSubject, expectedSender string) bool {
+	if strings.TrimSpace(actualSubject) != strings.TrimSpace(expectedSubject) {
+		return false
+	}
+	if strings.TrimSpace(expectedSender) == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(actualSender), strings.TrimSpace(expectedSender))
+}
+
 func (c *Client) verifySearchCandidates(
 	ctx context.Context,
 	sess *session,
@@ -1515,6 +1708,22 @@ func (c *Client) doUIDSearchDeleted(ctx context.Context, sess *session, tag stri
 }
 
 func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, criteria string) ([]uint32, error) {
+	return c.doUIDSearchCriteriaBounded(ctx, sess, tag, criteria, maxUIDSearchResults)
+}
+
+func (c *Client) doUIDSearchCriteriaBounded(
+	ctx context.Context,
+	sess *session,
+	tag string,
+	criteria string,
+	resultLimit int,
+) ([]uint32, error) {
+	if resultLimit < 1 {
+		return nil, &transport.TransportError{
+			Code:    transport.CodeIMAPInvalidValue,
+			Message: "IMAP UID SEARCH result limit must be positive",
+		}
+	}
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
 	}
@@ -1559,10 +1768,20 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 						sess, fmt.Sprintf("IMAP UID SEARCH returned invalid UID %q", field),
 					)
 				}
-				if len(uids) >= maxUIDSearchResults {
-					return nil, malformedUIDSearchResponse(
-						sess, fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
-					)
+				if len(uids) >= resultLimit {
+					sess.dirty = true
+					if resultLimit == maxUIDSearchResults {
+						return nil, malformedUIDSearchResponse(
+							sess, fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
+						)
+					}
+					return nil, &transport.TransportError{
+						Code: transport.CodeIMAPMessageUIDUnknown,
+						Message: fmt.Sprintf(
+							"IMAP metadata search exceeded the bounded %d-candidate limit; refusing to guess a UID",
+							resultLimit,
+						),
+					}
 				}
 				parsedUID := uint32(uid)
 				if _, duplicate := seenUIDs[parsedUID]; duplicate {

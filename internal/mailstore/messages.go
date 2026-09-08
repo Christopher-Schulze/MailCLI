@@ -21,6 +21,8 @@ type messageRecord struct {
 	StoreMessageID   int64
 	StoreGlobalID    int64
 	StoreMailboxID   int64
+	RemoteID         int64
+	RemoteMailboxID  int64
 	PhysicalURL      string
 	Subject          string
 	SenderAddress    string
@@ -148,6 +150,7 @@ func mailboxMessagesSQL(cursorClause string) string {
 		)
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
 			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
@@ -178,7 +181,8 @@ type rowScanner interface {
 func scanMessageRecord(row rowScanner) (messageRecord, error) {
 	var item messageRecord
 	if err := row.Scan(
-		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
+		&item.StoreMailboxID,
 		&item.PhysicalURL,
 		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 		&item.DateSent, &item.DateReceived, &item.Read, &item.Flagged, &item.Deleted,
@@ -193,7 +197,8 @@ func scanMessageRecordWithDateNull(row rowScanner) (messageRecord, error) {
 	var item messageRecord
 	var dateNull bool
 	if err := row.Scan(
-		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
+		&item.StoreMailboxID,
 		&item.PhysicalURL,
 		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 		&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
@@ -266,13 +271,21 @@ func encodeMessageReference(
 	mailboxPath []string,
 	storeUUID string,
 ) (string, error) {
-	return mailref.EncodeMessage(mailref.Message{
+	if item.RemoteID < 0 || item.RemoteID > int64(^uint32(0)) || item.RemoteMailboxID < 0 {
+		return "", operationError("unsupported_mail_store_schema", "message has an invalid IMAP server identity")
+	}
+	ref := mailref.Message{
 		AccountID: accountID, MailboxPath: mailboxPath, LibraryID: strconv.FormatInt(item.RowID, 10),
 		ExpectedSubject: item.Subject, ExpectedStoreUUID: storeUUID,
 		ExpectedStoreMailboxID: item.StoreMailboxID,
 		ExpectedStoreMessageID: item.StoreMessageID,
 		ExpectedStoreGlobalID:  item.StoreGlobalID,
-	})
+	}
+	if item.RemoteID > 0 {
+		ref.ExpectedIMAPUID = uint32(item.RemoteID)
+		ref.ExpectedIMAPMailboxID = item.RemoteMailboxID
+	}
+	return mailref.EncodeMessage(ref)
 }
 
 func formatSender(name string, address string) string {
