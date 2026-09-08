@@ -95,6 +95,7 @@ func accountIdentityCoverageComplete(accounts []mail.Account) bool {
 		case mail.SenderIdentityCoverageStateComplete,
 			mail.SenderIdentityCoverageStateNoValidSender,
 			mail.SenderIdentityCoverageStateNoSentMailbox,
+			mail.SenderIdentityCoverageStateConfigured,
 			mail.SenderIdentityCoverageStateNotApplicable:
 			continue
 		case mail.SenderIdentityCoverageStateBounded,

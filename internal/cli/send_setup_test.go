@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -90,6 +92,77 @@ func TestSendSetupStoresPasswordWithoutEchoingIt(t *testing.T) {
 	if strings.Contains(stdout.String(), "app-specific-secret") ||
 		strings.Contains(stderr.String(), "app-specific-secret") {
 		t.Fatal("the secret leaked into command output")
+	}
+}
+
+func TestSendSetupPersistsExplicitAccountBinding(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	previousCredentials := sendSetupCredentials
+	previousStdin := sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("secret\n")
+	t.Cleanup(func() {
+		sendSetupCredentials = previousCredentials
+		sendSetupStdin = previousStdin
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSendWithBindings([]string{
+		"setup", "--from", "alias@icloud.com", "--account", accountRef,
+		"--credential-account", "login@icloud.com", "--json",
+	}, &stdout, &stderr, nil, bindings)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stderr = %q, stdout = %q", code, stderr.String(), stdout.String())
+	}
+	if credentials.stored["login@icloud.com"] != "secret" || credentials.stored["alias@icloud.com"] != "" {
+		t.Fatalf("stored credentials = %#v", credentials.stored)
+	}
+	document, err := bindings.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
+	if err != nil || !found || binding.CredentialAccount != "login@icloud.com" || len(binding.SenderAliases) != 1 || binding.SenderAliases[0] != "alias@icloud.com" {
+		t.Fatalf("binding = %+v, found=%t, error=%v", binding, found, err)
+	}
+}
+
+func TestSendSetupPreservesExistingBindingCredential(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	if err := bindings.UpsertAccountBinding(mail.AccountBinding{
+		AccountID: "ACCOUNT-1", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com",
+	}); err != nil {
+		t.Fatalf("UpsertAccountBinding() error = %v", err)
+	}
+	previousCredentials := sendSetupCredentials
+	previousStdin := sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("rotated\n")
+	t.Cleanup(func() {
+		sendSetupCredentials = previousCredentials
+		sendSetupStdin = previousStdin
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSendWithBindings([]string{"setup", "--from", "alias@icloud.com", "--account", accountRef, "--json"}, &stdout, &stderr, nil, bindings)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stderr = %q, stdout = %q", code, stderr.String(), stdout.String())
+	}
+	if credentials.stored["login@icloud.com"] != "rotated" {
+		t.Fatalf("existing binding credential was not rotated: %#v", credentials.stored)
+	}
+	if _, exists := credentials.stored["alias@icloud.com"]; exists {
+		t.Fatalf("setup unexpectedly created an alias credential: %#v", credentials.stored)
 	}
 }
 

@@ -52,9 +52,11 @@ func runWithFallbackFactory(newFallback func() mail.FallbackGateway) int {
 		fallback = newFallback()
 	}
 	storeCtx, cancelStoreOpen := context.WithTimeout(ctx, 15*time.Second)
-	client := mailstore.NewClient(storeCtx, fallback, config, sendTransport())
+	transport := sendTransport()
+	config.AccountBindings = transport.AccountBindings
+	client := mailstore.NewClient(storeCtx, fallback, config, transport)
 	cancelStoreOpen()
-	mailService := mail.NewServiceWithTransport(client, "", sendTransport())
+	mailService := mail.NewServiceWithTransport(client, "", transport)
 	code := cli.Run(ctx, mailService, args, os.Stdout, os.Stderr)
 	if err := client.Close(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, "close Mail store:", err)
@@ -68,9 +70,10 @@ func runWithFallbackFactory(newFallback func() mail.FallbackGateway) int {
 func sendTransport() mail.SendTransport {
 	imap := imapclient.New()
 	return mail.SendTransport{
-		Submitter:   smtpclient.New(),
-		Mirror:      imap,
-		Credentials: keychain.New(),
-		Imap:        imap,
+		Submitter:       smtpclient.New(),
+		Mirror:          imap,
+		Credentials:     keychain.New(),
+		AccountBindings: mail.DefaultAccountBindingStore(),
+		Imap:            imap,
 	}
 }

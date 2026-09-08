@@ -45,6 +45,7 @@ func (values *repeatableStringFlag) Set(value string) error {
 
 type draftInputFlags struct {
 	input       trackedStringFlag
+	account     trackedStringFlag
 	from        trackedStringFlag
 	subject     trackedStringFlag
 	body        trackedStringFlag
@@ -59,6 +60,7 @@ type draftInputFlags struct {
 func registerDraftInputFlags(flags *flag.FlagSet) *draftInputFlags {
 	options := &draftInputFlags{}
 	flags.Var(&options.input, "input", "JSON input file or - for standard input")
+	flags.Var(&options.account, "account", "account ref for the sender identity")
 	flags.Var(&options.from, "from", "sender address")
 	flags.Var(&options.to, "to", "recipient address; repeat for multiple recipients")
 	flags.Var(&options.cc, "cc", "CC recipient address; repeat for multiple recipients")
@@ -116,14 +118,14 @@ func (options *draftInputFlags) read() (mailmodel.DraftInput, error) {
 			fmt.Sprintf("invalid body format %q; use plain, markdown, or html", options.bodyFormat.value))
 	}
 	return mailmodel.DraftInput{
-		From: options.from.value, To: to, CC: cc, BCC: bcc,
+		AccountRef: options.account.value, From: options.from.value, To: to, CC: cc, BCC: bcc,
 		Subject: options.subject.value, Body: body, BodyFormat: format,
 		Attachments: append([]string(nil), options.attachments...),
 	}, nil
 }
 
 func (options *draftInputFlags) nativeMode() bool {
-	return options.from.set || options.subject.set || options.body.set || options.bodyFile.set ||
+	return options.account.set || options.from.set || options.subject.set || options.body.set || options.bodyFile.set ||
 		options.bodyFormat.set || len(options.to)+len(options.cc)+len(options.bcc)+len(options.attachments) > 0
 }
 

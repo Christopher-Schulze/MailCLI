@@ -32,7 +32,13 @@ type Client struct {
 
 func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config, send mail.SendTransport) *Client {
 	started := time.Now()
+	if config.AccountBindings == nil && send.AccountBindings != nil {
+		config.AccountBindings = send.AccountBindings
+	}
 	store, err := Open(ctx, config)
+	if store != nil && send.AccountBindings == nil {
+		send.AccountBindings = store.accountBindings
+	}
 	return &Client{
 		store: store, storeErr: err, fallback: fallback, send: send,
 		storeOpenDuration: time.Since(started),
