@@ -11,19 +11,25 @@ import (
 	"path/filepath"
 )
 
-func fingerprintAttachmentsWithPrevious(paths []string, previous []DraftAttachment) ([]DraftAttachment, error) {
+func fingerprintAttachmentsWithPreviousContext(
+	ctx context.Context,
+	paths []string,
+	previous []DraftAttachment,
+) ([]DraftAttachment, error) {
+	_ = previous
 	attachments := make([]DraftAttachment, 0, len(paths))
 	remaining := MaximumDraftAttachmentBytes
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !filepath.IsAbs(path) {
 			return nil, validationError("draft attachment paths must be absolute")
 		}
-		if reused, ok := reuseAttachmentFingerprint(path, previous); ok && reused.Size <= remaining {
-			attachments = append(attachments, reused)
-			remaining -= reused.Size
-			continue
-		}
-		attachment, err := fingerprintAttachment(path, remaining)
+		// A stored size and modification time are useful metadata, but they do
+		// not prove that the bytes are unchanged. Re-fingerprint every path so
+		// an update can never carry stale evidence into a later send.
+		attachment, err := fingerprintAttachmentContext(ctx, path, remaining)
 		if err != nil {
 			return nil, err
 		}
@@ -31,20 +37,6 @@ func fingerprintAttachmentsWithPrevious(paths []string, previous []DraftAttachme
 		remaining -= attachment.Size
 	}
 	return attachments, nil
-}
-
-func reuseAttachmentFingerprint(path string, previous []DraftAttachment) (DraftAttachment, bool) {
-	for _, attachment := range previous {
-		if attachment.Path != path || attachment.ModTimeNanos == 0 || attachment.SHA256 == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() != attachment.Size || info.ModTime().UnixNano() != attachment.ModTimeNanos {
-			return DraftAttachment{}, false
-		}
-		return attachment, true
-	}
-	return DraftAttachment{}, false
 }
 
 func fingerprintAttachment(path string, maximumSize int64) (DraftAttachment, error) {
@@ -55,34 +47,67 @@ func fingerprintAttachmentContext(
 	ctx context.Context,
 	path string,
 	maximumSize int64,
-) (DraftAttachment, error) {
-	file, err := os.Open(path)
+) (result DraftAttachment, resultErr error) {
+	return fingerprintAttachmentContextWithObserver(ctx, path, maximumSize, nil)
+}
+
+func fingerprintAttachmentContextWithObserver(
+	ctx context.Context,
+	path string,
+	maximumSize int64,
+	afterRead func(int),
+) (result DraftAttachment, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return DraftAttachment{}, err
+	}
+	if maximumSize < 0 {
+		return DraftAttachment{}, validationError("draft attachments exceed 512 MiB total")
+	}
+	file, info, err := openRegularAttachment(path)
 	if err != nil {
+		if errors.Is(err, errAttachmentNotRegular) {
+			return DraftAttachment{}, validationError("draft attachment must be a regular file")
+		}
 		return DraftAttachment{}, fmt.Errorf("open draft attachment: %w", err)
 	}
-	info, err := file.Stat()
-	if err != nil {
-		return DraftAttachment{}, errors.Join(fmt.Errorf("stat draft attachment: %w", err), file.Close())
-	}
-	if !info.Mode().IsRegular() {
-		return DraftAttachment{}, errors.Join(
-			validationError("draft attachment must be a regular file"), file.Close(),
-		)
-	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close draft attachment: %w", err))
+		}
+	}()
 	if info.Size() < 0 || info.Size() > maximumSize {
-		return DraftAttachment{}, errors.Join(
-			validationError("draft attachments exceed 512 MiB total"), file.Close(),
-		)
+		return DraftAttachment{}, validationError("draft attachments exceed 512 MiB total")
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, contextReader{ctx: ctx, reader: file}); err != nil {
-		return DraftAttachment{}, errors.Join(fmt.Errorf("hash draft attachment: %w", err), file.Close())
+	limit := maximumSize
+	if maximumSize < 1<<63-1 {
+		limit++
+	}
+	reader := attachmentFingerprintReader{ctx: ctx, reader: file, afterRead: afterRead}
+	written, err := io.Copy(hash, io.LimitReader(reader, limit))
+	if err != nil {
+		return DraftAttachment{}, fmt.Errorf("hash draft attachment: %w", err)
+	}
+	if written > maximumSize {
+		return DraftAttachment{}, validationError("draft attachments exceed 512 MiB total")
 	}
 	if err := ctx.Err(); err != nil {
-		return DraftAttachment{}, errors.Join(err, file.Close())
+		return DraftAttachment{}, err
 	}
-	if err := file.Close(); err != nil {
-		return DraftAttachment{}, fmt.Errorf("close draft attachment: %w", err)
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return DraftAttachment{}, fmt.Errorf("stat draft attachment after hashing: %w", err)
+	}
+	currentInfo, err := os.Lstat(path)
+	if err != nil {
+		return DraftAttachment{}, fmt.Errorf("recheck draft attachment after hashing: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !currentInfo.Mode().IsRegular() ||
+		!os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, currentInfo) ||
+		written != info.Size() || openedInfo.Size() != info.Size() || currentInfo.Size() != info.Size() ||
+		openedInfo.ModTime().UnixNano() != info.ModTime().UnixNano() ||
+		currentInfo.ModTime().UnixNano() != info.ModTime().UnixNano() {
+		return DraftAttachment{}, validationError("draft attachment changed while it was fingerprinted")
 	}
 	return DraftAttachment{
 		Path: path, Size: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)),
@@ -90,11 +115,31 @@ func fingerprintAttachmentContext(
 	}, nil
 }
 
+type attachmentFingerprintReader struct {
+	ctx       context.Context
+	reader    io.Reader
+	afterRead func(int)
+}
+
+func (r attachmentFingerprintReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	read, err := r.reader.Read(buffer)
+	if read > 0 && r.afterRead != nil {
+		r.afterRead(read)
+	}
+	return read, err
+}
+
 func verifyDraftAttachments(attachments []DraftAttachment) error {
 	return verifyDraftAttachmentsContext(context.Background(), attachments)
 }
 
 func verifyDraftAttachmentsContext(ctx context.Context, attachments []DraftAttachment) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(attachments) > MaximumDraftAttachments {
 		return validationError("draft exceeds 100 attachments")
 	}
@@ -122,6 +167,9 @@ func verifyDraftAttachmentsContext(ctx context.Context, attachments []DraftAttac
 }
 
 func preflightDraftAttachmentsContext(ctx context.Context, attachments []DraftAttachment) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(attachments) > MaximumDraftAttachments {
 		return validationError("draft exceeds 100 attachments")
 	}
@@ -133,12 +181,16 @@ func preflightDraftAttachmentsContext(ctx context.Context, attachments []DraftAt
 		if expected.Size < 0 || expected.Size > remaining {
 			return validationError("draft attachments exceed 512 MiB total")
 		}
-		info, err := os.Stat(expected.Path)
+		file, info, err := openRegularAttachment(expected.Path)
 		if err != nil {
+			if errors.Is(err, errAttachmentNotRegular) {
+				return validationError("draft attachment must be a regular file")
+			}
 			return fmt.Errorf("stat draft attachment: %w", err)
 		}
-		if !info.Mode().IsRegular() {
-			return validationError("draft attachment must be a regular file")
+		closeErr := file.Close()
+		if closeErr != nil {
+			return fmt.Errorf("close draft attachment preflight: %w", closeErr)
 		}
 		if info.Size() != expected.Size {
 			return validationError("draft attachment " + filepath.Base(expected.Path) + " changed after review; update the draft before sending")

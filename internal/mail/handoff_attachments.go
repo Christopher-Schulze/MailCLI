@@ -21,6 +21,9 @@ func StageDraftAttachments(
 	ctx context.Context,
 	attachments []DraftAttachment,
 ) (paths []string, cleanup func() error, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if len(attachments) > MaximumDraftAttachments {
 		return nil, nil, validationError("draft exceeds 100 attachments")
 	}
@@ -140,51 +143,14 @@ func stageDraftAttachment(
 }
 
 func openHandoffAttachment(path string) (*os.File, os.FileInfo, error) {
-	info, err := os.Lstat(path)
+	file, info, err := openRegularAttachment(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, handoffAttachmentMissing(path, err)
 		}
 		return nil, nil, handoffAttachmentUnreadable(path, err)
 	}
-	if !info.Mode().IsRegular() {
-		return nil, nil, handoffAttachmentUnreadable(path, errors.New("attachment is not a regular file"))
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, handoffAttachmentMissing(path, err)
-		}
-		return nil, nil, handoffAttachmentUnreadable(path, err)
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, nil, errors.Join(
-			handoffAttachmentUnreadable(path, err),
-			closeHandoffAttachment(file),
-		)
-	}
-	currentInfo, err := os.Lstat(path)
-	if err != nil {
-		return nil, nil, errors.Join(
-			handoffAttachmentChanged(path, err),
-			closeHandoffAttachment(file),
-		)
-	}
-	if !currentInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
-		return nil, nil, errors.Join(
-			handoffAttachmentChanged(path, errors.New("attachment path changed while it was opened")),
-			closeHandoffAttachment(file),
-		)
-	}
-	return file, openedInfo, nil
-}
-
-func closeHandoffAttachment(file *os.File) error {
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close handoff attachment source: %w", err)
-	}
-	return nil
+	return file, info, nil
 }
 
 func handoffAttachmentMissing(path string, err error) error {

@@ -10,8 +10,18 @@ import (
 )
 
 func (s *Service) CreateDraft(request CreateDraftRequest) (Draft, error) {
-	draft, err := prepareDraftWithObserver(request, s.contentObserver)
+	return s.CreateDraftContext(context.Background(), request)
+}
+
+func (s *Service) CreateDraftContext(ctx context.Context, request CreateDraftRequest) (Draft, error) {
+	if err := draftContextError(ctx, "create"); err != nil {
+		return Draft{}, err
+	}
+	draft, err := prepareDraftWithAttachmentsObserverContext(ctx, request, nil, s.contentObserver)
 	if err != nil {
+		return Draft{}, classifyDraftContextError(ctx, err, "create")
+	}
+	if err := draftContextError(ctx, "create"); err != nil {
 		return Draft{}, err
 	}
 	root, err := s.resolveDraftRoot()
@@ -55,8 +65,18 @@ func (s *Service) GetSendReceipt(ref string) (SendReceipt, error) {
 }
 
 func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
+	return s.PrepareDraftHandoffContext(context.Background(), ref)
+}
+
+func (s *Service) PrepareDraftHandoffContext(ctx context.Context, ref string) (Draft, error) {
+	if err := draftContextError(ctx, "handoff"); err != nil {
+		return Draft{}, err
+	}
 	draft, err := s.GetDraft(ref)
 	if err != nil {
+		return Draft{}, err
+	}
+	if err := draftContextError(ctx, "handoff"); err != nil {
 		return Draft{}, err
 	}
 	if err := rejectClaimedDraft(draft); err != nil {
@@ -74,8 +94,8 @@ func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
 	if len(draft.To) == 0 {
 		return Draft{}, validationError("visible compose handoff requires at least one recipient")
 	}
-	if err := verifyDraftAttachments(draft.Attachments); err != nil {
-		return Draft{}, err
+	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
+		return Draft{}, classifyDraftContextError(ctx, err, "handoff")
 	}
 	return draft, nil
 }
@@ -207,13 +227,13 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	if err := rejectClaimedDraft(current); err != nil {
 		return Draft{}, err
 	}
-	replacement, err := prepareDraftWithAttachmentsObserver(CreateDraftRequest{
+	replacement, err := prepareDraftWithAttachmentsObserverContext(ctx, CreateDraftRequest{
 		Kind: current.Kind, SourceRef: current.SourceRef,
 		ReplyAll: current.ReplyAll, SourceMessageID: current.SourceMessageID,
 		SourceReferences: current.SourceReferences, Input: request.Input,
 	}, current.Attachments, s.contentObserver)
 	if err != nil {
-		return Draft{}, err
+		return Draft{}, classifyDraftContextError(ctx, err, "update")
 	}
 	if err := draftContextError(ctx, "update"); err != nil {
 		return Draft{}, err

@@ -65,7 +65,9 @@ func runDraftHandoffWith(
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	draft, err := service.PrepareDraftHandoff(*ref)
+	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	draft, err := service.PrepareDraftHandoffContext(operationCtx, *ref)
 	if err != nil {
 		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
 	}
@@ -73,8 +75,6 @@ func runDraftHandoffWith(
 	for _, recipient := range draft.To {
 		recipients = append(recipients, recipient.Address)
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	attachments, cleanup, err := mail.StageDraftAttachments(operationCtx, draft.Attachments)
 	if err != nil {
 		if cleanup != nil {

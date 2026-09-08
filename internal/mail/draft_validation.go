@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	stdmail "net/mail"
 	"strings"
 	"time"
@@ -21,6 +22,18 @@ func prepareDraftWithAttachmentsObserver(
 	previous []DraftAttachment,
 	observer draftContentObserver,
 ) (Draft, error) {
+	return prepareDraftWithAttachmentsObserverContext(context.Background(), request, previous, observer)
+}
+
+func prepareDraftWithAttachmentsObserverContext(
+	ctx context.Context,
+	request CreateDraftRequest,
+	previous []DraftAttachment,
+	observer draftContentObserver,
+) (Draft, error) {
+	if err := ctx.Err(); err != nil {
+		return Draft{}, err
+	}
 	if request.Kind == "" {
 		request.Kind = DraftKindNew
 	}
@@ -63,8 +76,14 @@ func prepareDraftWithAttachmentsObserver(
 	if err != nil {
 		return Draft{}, err
 	}
-	attachments, err := fingerprintAttachmentsWithPrevious(request.Input.Attachments, previous)
+	if err := ctx.Err(); err != nil {
+		return Draft{}, err
+	}
+	attachments, err := fingerprintAttachmentsWithPreviousContext(ctx, request.Input.Attachments, previous)
 	if err != nil {
+		return Draft{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return Draft{}, err
 	}
 	ref, err := newDraftReference()
