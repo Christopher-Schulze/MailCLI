@@ -905,6 +905,54 @@ func TestSearchUID(t *testing.T) {
 	}
 }
 
+func TestSearchUIDRejectsSubstringCandidate(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+		uidSearchResponse: []string{
+			"* SEARCH 77",
+			"<tag> OK SEARCH completed",
+		},
+		fetchPayload: []byte("Message-ID: <requested-extra@example.com>\r\n\r\nBody\r\n"),
+	})
+	client, cfg := newFakeClient(t, srv)
+	_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<requested@example.com>")
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPMessageNotFound {
+		t.Fatalf("SearchUID() code = %s, want %s: %v", code, transport.CodeIMAPMessageNotFound, err)
+	}
+}
+
+func TestSearchUIDCountsOnlyExactCandidates(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, searchMatchID: "<requested@example.com>",
+		searchUIDs: []uint32{41, 77},
+		fetchPayloadByUID: map[uint32][]byte{
+			41: []byte("Message-ID: <requested-extra@example.com>\r\n\r\nBody\r\n"),
+			77: []byte("Message-ID: <requested@example.com>\r\n\r\nBody\r\n"),
+		},
+	})
+	client, cfg := newFakeClient(t, srv)
+	uid, _, matchCount, err := client.SearchUID(context.Background(), cfg, "INBOX", "<requested@example.com>")
+	if err != nil {
+		t.Fatalf("SearchUID() error = %v", err)
+	}
+	if uid != 77 || matchCount != 1 {
+		t.Fatalf("SearchUID() = uid:%d matches:%d, want 77/1", uid, matchCount)
+	}
+}
+
+func TestSearchUIDRejectsDuplicateMessageIDHeader(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, searchMatchID: "<duplicate-header@example.com>",
+		fetchPayload: []byte("Message-ID: <duplicate-header@example.com>\r\nMessage-ID: <duplicate-header@example.com>\r\n\r\nBody\r\n"),
+	})
+	client, cfg := newFakeClient(t, srv)
+	_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<duplicate-header@example.com>")
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPMessageNotFound {
+		t.Fatalf("SearchUID() code = %s, want %s: %v", code, transport.CodeIMAPMessageNotFound, err)
+	}
+}
+
 func TestNormalizeMessageID(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1541,7 +1589,7 @@ func TestFetchFailsClosedOnUIDValidityChangeBeforeLiteral(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK: true, otherMboxes: []string{"INBOX"}, searchMatchID: "<x@example.com>",
 		changedUIDValidityAfter: 1, changedUIDValidityValue: 99999,
-		fetchPayload: []byte("must not be read"),
+		fetchPayload: []byte("Message-ID: <x@example.com>\r\n\r\nheaders only\r\n"),
 	})
 	host, portStr, _ := net.SplitHostPort(srv.Addr())
 	port, _ := strconv.Atoi(portStr)

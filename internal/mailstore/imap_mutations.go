@@ -44,7 +44,7 @@ type mailboxCacheEntry struct {
 }
 
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false, false)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true)
 }
 
 func (c *Client) resolveImapTargetForMutation(ctx context.Context, messageRef string) (imapTarget, error) {
