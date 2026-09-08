@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +26,8 @@ var (
 	attachmentClose = func(file *os.File) error {
 		return file.Close()
 	}
-	attachmentPublicationHook = func(string, string) error { return nil }
+	attachmentPublicationHook     = func(string, string) error { return nil }
+	attachmentPublicationReadHook = func(int64) {}
 )
 
 type attachmentPublication struct {
@@ -38,10 +38,12 @@ type attachmentPublication struct {
 	temporaryName     string
 	temporaryIdentity os.FileInfo
 	temporary         *os.File
+	temporaryEvidence *AttachmentEvidence
 	outputPath        string
 	outputName        string
 	outputIdentity    os.FileInfo
 	output            *os.File
+	publishedEvidence *AttachmentEvidence
 	outputOwned       bool
 	retainOutput      bool
 }
@@ -65,11 +67,27 @@ func (s *Service) SaveAttachment(
 		resultErr = errors.Join(resultErr, publication.cleanup())
 		resultErr = errors.Join(resultErr, publication.close())
 	}()
-	if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, temporaryPath); err != nil {
-		return SavedAttachment{}, err
-	}
-	if err := publication.captureTemporary(); err != nil {
-		return SavedAttachment{}, err
+	if saver, ok := s.gateway.(AttachmentEvidenceGateway); ok {
+		evidence, err := saver.SaveAttachmentToWithEvidence(
+			ctx, request.MessageRef, request.AttachmentID, temporaryPath,
+		)
+		if err != nil {
+			return SavedAttachment{}, err
+		}
+		evidence, err = normalizeAttachmentEvidence(evidence, temporaryPath)
+		if err != nil {
+			return SavedAttachment{}, err
+		}
+		if err := publication.captureTemporary(&evidence); err != nil {
+			return SavedAttachment{}, err
+		}
+	} else {
+		if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, temporaryPath); err != nil {
+			return SavedAttachment{}, err
+		}
+		if err := publication.captureTemporary(nil); err != nil {
+			return SavedAttachment{}, err
+		}
 	}
 	if err := publication.publish(); err != nil {
 		return SavedAttachment{}, err
@@ -102,6 +120,20 @@ func validateAttachmentRequest(request SaveAttachmentRequest) error {
 		return validationError("attachment output parent is not a directory")
 	}
 	return nil
+}
+
+func normalizeAttachmentEvidence(evidence AttachmentEvidence, path string) (AttachmentEvidence, error) {
+	if evidence.Path != path || evidence.Size < 0 || evidence.Identity == nil ||
+		!evidence.Identity.Mode().IsRegular() || evidence.Identity.Size() != evidence.Size ||
+		len(evidence.SHA256) != sha256.Size*2 {
+		return AttachmentEvidence{}, attachmentChangedError("attachment evidence is not bound to the written output")
+	}
+	digest, err := hex.DecodeString(evidence.SHA256)
+	if err != nil || len(digest) != sha256.Size {
+		return AttachmentEvidence{}, attachmentChangedError("attachment evidence has an invalid SHA-256 digest")
+	}
+	evidence.SHA256 = hex.EncodeToString(digest)
+	return evidence, nil
 }
 
 func attachmentTemporaryPath(outputPath string) (string, error) {
@@ -173,7 +205,7 @@ func (p *attachmentPublication) verifyParent() error {
 	return nil
 }
 
-func (p *attachmentPublication) captureTemporary() error {
+func (p *attachmentPublication) captureTemporary(evidence *AttachmentEvidence) error {
 	if err := p.verifyParent(); err != nil {
 		return err
 	}
@@ -201,6 +233,25 @@ func (p *attachmentPublication) captureTemporary() error {
 	}
 	p.temporary = file
 	p.temporaryIdentity = identity
+	if evidence != nil {
+		normalized, evidenceErr := normalizeAttachmentEvidence(*evidence, p.temporaryPath)
+		if evidenceErr != nil {
+			return evidenceErr
+		}
+		if !os.SameFile(normalized.Identity, identity) {
+			p.temporary = nil
+			p.temporaryIdentity = nil
+			closeErr := attachmentClose(file)
+			return errors.Join(
+				attachmentChangedError("temporary attachment was replaced before evidence capture"),
+				closeErr,
+			)
+		}
+		if identity.Size() != normalized.Size {
+			return attachmentChangedError("temporary attachment size differs from verified evidence")
+		}
+		p.temporaryEvidence = &normalized
+	}
 	return nil
 }
 
@@ -227,6 +278,12 @@ func (p *attachmentPublication) verifyTemporary() error {
 		!os.SameFile(p.temporaryIdentity, identity) {
 		return attachmentChangedError("temporary attachment changed")
 	}
+	if p.temporaryEvidence != nil &&
+		(identity.Size() != p.temporaryEvidence.Size ||
+			p.temporaryEvidence.Identity == nil ||
+			!os.SameFile(p.temporaryEvidence.Identity, identity)) {
+		return attachmentChangedError("temporary attachment differs from verified evidence")
+	}
 	return nil
 }
 
@@ -244,6 +301,7 @@ func (p *attachmentPublication) publish() error {
 	if err := p.openPublished(); err != nil {
 		return err
 	}
+	p.adoptPublishedEvidence()
 	if err := attachmentPublicationHook("after-link", p.outputPath); err != nil {
 		return err
 	}
@@ -370,10 +428,30 @@ func (p *attachmentPublication) copyTemporaryBytes() error {
 	if err != nil {
 		return fmt.Errorf("verify published attachment copy: %w", err)
 	}
-	if copied != written || !bytes.Equal(sourceHash.Sum(nil), outputHash.Sum(nil)) {
+	sourceDigest := hex.EncodeToString(sourceHash.Sum(nil))
+	if p.temporaryEvidence != nil &&
+		(written != p.temporaryEvidence.Size || sourceDigest != p.temporaryEvidence.SHA256) {
+		return attachmentChangedError("temporary attachment bytes differ from verified evidence")
+	}
+	outputDigest := hex.EncodeToString(outputHash.Sum(nil))
+	if copied != written || sourceDigest != outputDigest {
 		return attachmentChangedError("attachment bytes changed while copying")
 	}
+	p.adoptPublishedEvidenceWithDigest(written, sourceDigest)
 	return nil
+}
+
+func (p *attachmentPublication) adoptPublishedEvidence() {
+	if p.temporaryEvidence == nil {
+		return
+	}
+	p.adoptPublishedEvidenceWithDigest(p.temporaryEvidence.Size, p.temporaryEvidence.SHA256)
+}
+
+func (p *attachmentPublication) adoptPublishedEvidenceWithDigest(size int64, digest string) {
+	p.publishedEvidence = &AttachmentEvidence{
+		Path: p.outputPath, Size: size, SHA256: digest, Identity: p.outputIdentity,
+	}
 }
 
 func (p *attachmentPublication) verifyPublishedAndTemporary() error {
@@ -410,6 +488,12 @@ func (p *attachmentPublication) verifyPublished() error {
 		!os.SameFile(p.outputIdentity, identity) {
 		return attachmentChangedError("published attachment changed")
 	}
+	if p.publishedEvidence != nil &&
+		(identity.Size() != p.publishedEvidence.Size ||
+			p.publishedEvidence.Identity == nil ||
+			!os.SameFile(p.publishedEvidence.Identity, identity)) {
+		return attachmentChangedError("published attachment differs from verified evidence")
+	}
 	return nil
 }
 
@@ -435,35 +519,36 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 	if err := attachmentPublicationHook("before-inspect", p.outputPath); err != nil {
 		return SavedAttachment{}, err
 	}
-	if _, err := p.output.Seek(0, io.SeekStart); err != nil {
-		return SavedAttachment{}, fmt.Errorf("rewind saved attachment: %w", err)
-	}
-	hash := sha256.New()
-	size, err := io.Copy(hash, p.output)
-	if err != nil {
-		return SavedAttachment{}, fmt.Errorf("hash saved attachment: %w", err)
-	}
-	if err := attachmentPublicationHook("after-inspect", p.outputPath); err != nil {
+	if p.publishedEvidence == nil {
+		if _, err := p.output.Seek(0, io.SeekStart); err != nil {
+			return SavedAttachment{}, fmt.Errorf("rewind saved attachment: %w", err)
+		}
+		hash := sha256.New()
+		size, err := io.Copy(hash, p.output)
+		if err != nil {
+			return SavedAttachment{}, fmt.Errorf("hash saved attachment: %w", err)
+		}
+		attachmentPublicationReadHook(size)
+		p.adoptPublishedEvidenceWithDigest(size, hex.EncodeToString(hash.Sum(nil)))
+	} else if err := p.verifyPublished(); err != nil {
+		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
 	}
-	identity, err := p.output.Stat()
-	if err != nil {
-		return SavedAttachment{}, fmt.Errorf("inspect hashed attachment: %w", err)
-	}
-	if identity.Size() != size || !os.SameFile(p.outputIdentity, identity) {
-		err := attachmentChangedError("published attachment changed while hashing")
-		p.disownOutputOnChange(err)
+	if err := attachmentPublicationHook("after-inspect", p.outputPath); err != nil {
 		return SavedAttachment{}, err
 	}
 	if err := p.verifyPublishedMode(); err != nil {
 		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
 	}
+	if p.publishedEvidence == nil {
+		return SavedAttachment{}, attachmentChangedError("published attachment evidence is unavailable")
+	}
 	return SavedAttachment{
 		AttachmentID: attachmentID,
 		Path:         p.outputPath,
-		Size:         size,
-		SHA256:       hex.EncodeToString(hash.Sum(nil)),
+		Size:         p.publishedEvidence.Size,
+		SHA256:       p.publishedEvidence.SHA256,
 	}, nil
 }
 

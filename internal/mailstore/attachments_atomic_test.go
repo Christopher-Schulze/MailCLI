@@ -3,6 +3,7 @@ package mailstore
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,6 +110,44 @@ func TestCopyExternalAttachmentCopiesAndVerifiesBytes(t *testing.T) {
 	}
 	if !bytes.Equal(got, source) {
 		t.Fatalf("output bytes = %q, want %q", got, source)
+	}
+}
+
+func TestCopyExternalAttachmentReturnsVerifiedEvidence(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rootDirectory, err := openVersionDirectory(root)
+	if err != nil {
+		t.Fatalf("openVersionDirectory() error = %v", err)
+	}
+	closeTestResource(t, rootDirectory, "test root")
+	store := &Store{versionRoot: root, versionDirectory: rootDirectory}
+	source := []byte("external attachment evidence")
+	path := filepath.Join(root, "attachment.bin")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatalf("WriteFile() source error = %v", err)
+	}
+	identity, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat() source error = %v", err)
+	}
+	output := filepath.Join(root, "output.bin")
+	evidence, err := store.copyExternalAttachmentWithEvidence(
+		externalAttachment{Path: path, Size: identity.Size(), identity: identity}, output,
+	)
+	if err != nil {
+		t.Fatalf("copyExternalAttachmentWithEvidence() error = %v", err)
+	}
+	digest := sha256.Sum256(source)
+	outputInfo, err := os.Lstat(output)
+	if err != nil {
+		t.Fatalf("Lstat() output error = %v", err)
+	}
+	if evidence.Path != output || evidence.Size != int64(len(source)) ||
+		evidence.SHA256 != hex.EncodeToString(digest[:]) ||
+		evidence.Identity == nil || evidence.Identity.Size() != int64(len(source)) ||
+		!os.SameFile(outputInfo, evidence.Identity) {
+		t.Fatalf("evidence = %+v, want path %q, size %d, sha256 %s", evidence, output, len(source), hex.EncodeToString(digest[:]))
 	}
 }
 
