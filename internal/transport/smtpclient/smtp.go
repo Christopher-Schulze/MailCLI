@@ -3,6 +3,7 @@
 package smtpclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -15,6 +16,7 @@ import (
 	"net/textproto"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -211,11 +213,70 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg io.Re
 	if err := bumpDeadline(conn, ctx); err != nil {
 		return "", submissionUnknownError(ctx, "final reply", sessionError(ctx, "final reply", err))
 	}
-	code, text, err := client.Text.ReadResponse(250)
+	code, text, err := readFinalSMTPResponse(client.Text.R)
 	if err != nil {
-		return "", submissionUnknownError(ctx, "final reply", sessionError(ctx, "final reply", err))
+		return "", classifyFinalReplyError(ctx, err)
 	}
 	return fmt.Sprintf("%d %s", code, text), nil
+}
+
+func readFinalSMTPResponse(reader *bufio.Reader) (int, string, error) {
+	line, err := readCRLFLine(reader)
+	if err != nil {
+		return 0, "", err
+	}
+	code, continued, message, err := parseSMTPResponseLine(line)
+	if err != nil {
+		return 0, "", err
+	}
+	var builder strings.Builder
+	builder.WriteString(message)
+	for continued {
+		line, err = readCRLFLine(reader)
+		if err != nil {
+			return 0, "", err
+		}
+		lineCode, lineContinued, lineMessage, lineErr := parseSMTPResponseLine(line)
+		if lineErr != nil {
+			return 0, "", lineErr
+		}
+		if lineCode != code {
+			return 0, "", textproto.ProtocolError(fmt.Sprintf("SMTP multiline response code changed from %03d to %03d", code, lineCode))
+		}
+		builder.WriteByte('\n')
+		builder.WriteString(lineMessage)
+		continued = lineContinued
+	}
+	message = builder.String()
+	if code != 250 {
+		return code, message, &textproto.Error{Code: code, Msg: message}
+	}
+	return code, message, nil
+}
+
+func readCRLFLine(reader *bufio.Reader) (string, error) {
+	line, err := reader.ReadSlice('\n')
+	if err != nil {
+		if len(line) > 0 && errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("SMTP final reply ended before CRLF: %w", err)
+		}
+		return "", err
+	}
+	if len(line) < 2 || line[len(line)-2] != '\r' {
+		return "", textproto.ProtocolError("SMTP final reply line is not CRLF-terminated")
+	}
+	return string(line[:len(line)-2]), nil
+}
+
+func parseSMTPResponseLine(line string) (int, bool, string, error) {
+	if len(line) < 4 || (line[3] != ' ' && line[3] != '-') {
+		return 0, false, "", textproto.ProtocolError(fmt.Sprintf("invalid SMTP response line: %q", line))
+	}
+	code, err := strconv.Atoi(line[:3])
+	if err != nil || code < 100 || code > 599 {
+		return 0, false, "", textproto.ProtocolError(fmt.Sprintf("invalid SMTP response code: %q", line))
+	}
+	return code, line[3] == '-', line[4:], nil
 }
 
 // bumpDeadline caps the next command at commandBudget or the ctx deadline,
@@ -276,6 +337,22 @@ func submissionUnknownError(ctx context.Context, stage string, err error) error 
 		err = timeoutError(ctx, stage)
 	}
 	return &transport.SubmissionError{Stage: stage, Err: err}
+}
+
+func classifyFinalReplyError(ctx context.Context, err error) error {
+	var responseErr *textproto.Error
+	if errors.As(err, &responseErr) && responseErr.Code >= 400 && responseErr.Code < 600 {
+		guidance := "transient final rejection; resolve the server condition before an explicit retry"
+		if responseErr.Code >= 500 {
+			guidance = "permanent final rejection; correct the message or recipients before an explicit retry"
+		}
+		return &transport.TransportError{
+			Code:    transport.CodeSMTPRejected,
+			Message: fmt.Sprintf("final reply rejected: %03d %s; %s", responseErr.Code, responseErr.Msg, guidance),
+			Err:     err,
+		}
+	}
+	return submissionUnknownError(ctx, "final reply", sessionError(ctx, "final reply", err))
 }
 
 // sessionError classifies an in-session failure: server rejections become

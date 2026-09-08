@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"os"
 	"reflect"
 	"strconv"
@@ -71,6 +72,94 @@ func TestSubmitReaderSuccess(t *testing.T) {
 	defer srv.mu.Unlock()
 	if string(srv.data) != testMessage {
 		t.Fatalf("payload = %q, want %q", srv.data, testMessage)
+	}
+}
+
+func TestSubmitFinalReplyRejectsTransientAndPermanent(t *testing.T) {
+	cases := []struct {
+		name       string
+		reply      string
+		wantStatus string
+		guidance   string
+	}{
+		{name: "transient", reply: "451 4.3.0 Greylisted", wantStatus: "4.3.0 Greylisted", guidance: "transient final rejection"},
+		{name: "permanent", reply: "550 5.7.1 Policy rejection", wantStatus: "5.7.1 Policy rejection", guidance: "permanent final rejection"},
+		{name: "multiline transient", reply: "451-4.3.0 Greylisted\r\n451 4.3.0 Try later", wantStatus: "4.3.0 Greylisted\n4.3.0 Try later", guidance: "transient final rejection"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) { s.finalReply = tc.reply })
+			cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+
+			_, err := testClient().Submit(context.Background(), cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+			if err == nil {
+				t.Fatal("Submit: want explicit rejection, got nil")
+			}
+			if got := transport.ErrorCode(err); got != transport.CodeSMTPRejected {
+				t.Fatalf("error code = %q, want %q: %v", got, transport.CodeSMTPRejected, err)
+			}
+			var unknown *transport.SubmissionError
+			if errors.As(err, &unknown) {
+				t.Fatalf("error = %v, complete negative reply must not be submission-unknown", err)
+			}
+			var responseErr *textproto.Error
+			if !errors.As(err, &responseErr) || responseErr.Code < 400 || responseErr.Code >= 600 {
+				t.Fatalf("error = %v, want preserved negative textproto response", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantStatus) || !strings.Contains(err.Error(), tc.guidance) {
+				t.Fatalf("error = %q, want status %q and guidance %q", err, tc.wantStatus, tc.guidance)
+			}
+		})
+	}
+}
+
+func TestSubmitFinalReplyAcceptsCRLFMultilineResponse(t *testing.T) {
+	srv := newFakeSMTPServer(t, func(s *fakeSMTPServer) {
+		s.finalReply = "250-first accepted line\r\n250 2.0.0 queued"
+	})
+	cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+
+	ev, err := testClient().Submit(context.Background(), cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if got, want := ev.ServerResponse, "250 first accepted line\n2.0.0 queued"; got != want {
+		t.Fatalf("ServerResponse = %q, want %q", got, want)
+	}
+}
+
+func TestSubmitFinalReplyUncertaintyRetainsUnknownOutcome(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*fakeSMTPServer)
+	}{
+		{name: "dropped", setup: func(s *fakeSMTPServer) { s.dropFinalReply = true }},
+		{name: "malformed", setup: func(s *fakeSMTPServer) { s.finalReplyBytes = []byte("not-an-smtp-response\r\n") }},
+		{name: "truncated", setup: func(s *fakeSMTPServer) { s.finalReplyBytes = []byte("451 4.3.0 temporary") }},
+		{name: "mismatched multiline", setup: func(s *fakeSMTPServer) {
+			s.finalReply = "451-4.3.0 temporary\r\n550 5.7.1 policy\r\n451 4.3.0 try later"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeSMTPServer(t, tc.setup)
+			cfg := transport.SubmitConfig{Host: srv.host(), Port: srv.port(), Username: "user", Password: "s3cret-app-pw"}
+
+			_, err := testClient().Submit(context.Background(), cfg, "a@b.c", []string{"d@e.f"}, []byte(testMessage))
+			if err == nil {
+				t.Fatal("Submit: want unknown outcome, got nil")
+			}
+			if got := transport.ErrorCode(err); got != transport.CodeSMTPSubmissionUnknown {
+				t.Fatalf("error code = %q, want %q: %v", got, transport.CodeSMTPSubmissionUnknown, err)
+			}
+			var unknown *transport.SubmissionError
+			if !errors.As(err, &unknown) {
+				t.Fatalf("error = %v, want SubmissionError", err)
+			}
+			if strings.Contains(err.Error(), "transient final rejection") || strings.Contains(err.Error(), "permanent final rejection") {
+				t.Fatalf("error = %v, uncertain reply must not carry rejection guidance", err)
+			}
+		})
 	}
 }
 

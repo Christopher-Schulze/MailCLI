@@ -47,6 +47,12 @@ type fakeSMTPServer struct {
 	// stallFinalReply withholds the 250 reply after DATA until the server
 	// closes, simulating a hung server for ctx-cancel tests.
 	stallFinalReply bool
+	// dropFinalReply closes the connection after DATA without sending a reply.
+	dropFinalReply bool
+	// finalReply overrides the complete final response line; it excludes CRLF.
+	finalReply string
+	// finalReplyBytes writes raw bytes and then closes, for malformed or partial replies.
+	finalReplyBytes []byte
 }
 
 // newFakeSMTPServer starts the fake; configure runs before the accept loop
@@ -216,7 +222,19 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 					return
 				}
 			}
-			if !writeLine(conn, "250 2.0.0 OK: queued") {
+			if s.dropFinalReply {
+				return
+			}
+			if s.finalReplyBytes != nil {
+				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_, _ = conn.Write(s.finalReplyBytes)
+				return
+			}
+			finalReply := s.finalReply
+			if finalReply == "" {
+				finalReply = "250 2.0.0 OK: queued"
+			}
+			if !writeLine(conn, finalReply) {
 				return
 			}
 		case upper == "QUIT":
