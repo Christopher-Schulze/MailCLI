@@ -32,6 +32,26 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	}
 	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.Code == "not_found" {
+			receipt, receiptErr := readActiveSendReceipt(root, ref)
+			if receiptErr == nil && receipt != nil {
+				result := resultForReceipt(*receipt)
+				if cleanupErr := errors.Join(removeDraftClaims(root, ref), lease.removeLock()); cleanupErr != nil {
+					return result, &OperationError{
+						Code:    "send_cleanup_failed",
+						Message: fmt.Sprintf("terminal send evidence was found, but stale local claims could not be removed: %v", cleanupErr),
+					}
+				}
+				return result, nil
+			}
+			if receiptErr != nil {
+				var receiptOperation *OperationError
+				if !errors.As(receiptErr, &receiptOperation) || receiptOperation.Code != "not_found" {
+					return SendResult{}, receiptErr
+				}
+			}
+		}
 		return SendResult{}, err
 	}
 	if err := validateStoredDraftLimits(draft); err != nil {
@@ -48,6 +68,22 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	}
 	if draft.SendAttempt != nil {
 		return replaySendAttempt(lease, root, ref, *draft.SendAttempt)
+	}
+	if receipt, receiptErr := readActiveSendReceipt(root, ref); receiptErr != nil {
+		var operation *OperationError
+		if !errors.As(receiptErr, &operation) || operation.Code != "not_found" {
+			return SendResult{}, receiptErr
+		}
+	} else if receipt != nil {
+		result := resultForReceipt(*receipt)
+		if cleanupErr := discardDraftFiles(lease, root, ref); cleanupErr != nil {
+			return result, &OperationError{
+				Code:    "send_cleanup_failed",
+				Message: fmt.Sprintf("terminal send evidence was found, but the duplicate local draft could not be removed: %v", cleanupErr),
+			}
+		}
+		result.DraftRetained = false
+		return result, nil
 	}
 	if draft.Kind == DraftKindNew && strings.TrimSpace(draft.From) == "" {
 		return SendResult{}, validationError("sending a new draft requires an explicit from address")
@@ -176,6 +212,8 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	}
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
+	attempt.Transport.MirrorUIDValidity = appendEvidence.UIDValidity
+	attempt.Transport.MirrorUID = appendEvidence.UID
 	attempt.Transport.MirrorAppended = appendEvidence.Appended
 	attempt.Transport.MirrorOutcomeUnknown = false
 	attempt.Outcome = SendOutcomeSent
@@ -187,14 +225,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			Message: fmt.Sprintf("the message was sent and mirrored, but its local send state could not be recorded safely: %v", err),
 		}
 	}
-	if err := discardDraftFiles(lease, root, ref); err != nil {
-		return result, &OperationError{
-			Code:    "send_cleanup_failed",
-			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
-		}
-	}
-	result.DraftRetained = false
-	return result, nil
+	return finishObservedSend(lease, root, ref, attempt, false)
 }
 
 func (s *Service) adoptObservedSentMessage(
@@ -231,6 +262,8 @@ func (s *Service) adoptObservedSentMessage(
 	}
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = sentBox
+	attempt.Transport.MirrorUIDValidity = uidValidity
+	attempt.Transport.MirrorUID = uid
 	attempt.Transport.MirrorAppended = false
 	attempt.Transport.MirrorAttempted = true
 	attempt.Transport.MirrorOutcomeUnknown = false
@@ -243,14 +276,7 @@ func (s *Service) adoptObservedSentMessage(
 			Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
 		}
 	}
-	if cleanupErr := discardDraftFiles(lease, root, ref); cleanupErr != nil {
-		return result, &OperationError{
-			Code:    "send_cleanup_failed",
-			Message: fmt.Sprintf("the existing Sent message was verified, but local draft cleanup failed: %v", cleanupErr),
-		}
-	}
-	result.DraftRetained = false
-	return result, nil
+	return finishObservedSend(lease, root, ref, attempt, true)
 }
 
 func mirrorOutcomeUnknownError(attempt SendAttempt) error {
@@ -287,9 +313,44 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	}
 	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.Code == "not_found" {
+			receipt, receiptErr := readActiveSendReceipt(root, ref)
+			if receiptErr == nil && receipt != nil {
+				result := resultForReceipt(*receipt)
+				result.Reconciled = true
+				if cleanupErr := errors.Join(removeDraftClaims(root, ref), lease.removeLock()); cleanupErr != nil {
+					return result, &OperationError{
+						Code:    "send_cleanup_failed",
+						Message: fmt.Sprintf("terminal send evidence was found, but stale local claims could not be removed: %v", cleanupErr),
+					}
+				}
+				return result, nil
+			}
+			if receiptErr != nil {
+				var receiptOperation *OperationError
+				if !errors.As(receiptErr, &receiptOperation) || receiptOperation.Code != "not_found" {
+					return SendResult{}, receiptErr
+				}
+			}
+		}
 		return SendResult{}, err
 	}
 	if draft.SendAttempt == nil {
+		if receipt, receiptErr := readActiveSendReceipt(root, ref); receiptErr != nil {
+			return SendResult{}, receiptErr
+		} else if receipt != nil {
+			result := resultForReceipt(*receipt)
+			result.Reconciled = true
+			if cleanupErr := discardDraftFiles(lease, root, ref); cleanupErr != nil {
+				return result, &OperationError{
+					Code:    "send_cleanup_failed",
+					Message: fmt.Sprintf("terminal send evidence was found, but the duplicate local draft could not be removed: %v", cleanupErr),
+				}
+			}
+			result.DraftRetained = false
+			return result, nil
+		}
 		return SendResult{}, &OperationError{Code: "send_reconcile_unavailable", Message: "draft has no send attempt to reconcile"}
 	}
 	attempt := *draft.SendAttempt
@@ -359,14 +420,7 @@ func persistReconciledSend(
 			Message: fmt.Sprintf("sent message was observed, but the reconciled state could not be recorded: %v", err),
 		}
 	}
-	if err := discardDraftFiles(lease, root, ref); err != nil {
-		return result, &OperationError{
-			Code:    "send_cleanup_failed",
-			Message: fmt.Sprintf("sent message was observed, but local draft cleanup failed: %v", err),
-		}
-	}
-	result.DraftRetained = false
-	return result, nil
+	return finishObservedSend(lease, root, ref, attempt, true)
 }
 
 // reconcileUnknownViaImap resolves a crash-stranded unknown claim: the claim
@@ -451,7 +505,10 @@ func (s *Service) reconcileUnknownViaImap(
 		attempt.AcceptedByMail = true
 		attempt.SentStoreObserved = true
 		attempt.Outcome = SendOutcomeSent
-		attempt.Transport = &TransportEvidence{MessageID: attempt.MessageID, MirrorMailbox: sentBox}
+		attempt.Transport = &TransportEvidence{
+			MessageID: attempt.MessageID, MirrorMailbox: sentBox,
+			MirrorUIDValidity: uidValidity, MirrorUID: uid,
+		}
 		attempt.UpdatedAt = time.Now().UTC()
 		result := resultForReconcile(ref, attempt)
 		result.Reconciled = true
@@ -461,7 +518,7 @@ func (s *Service) reconcileUnknownViaImap(
 				Message: fmt.Sprintf("the sent message was located over IMAP, but the reconciled state could not be recorded: %v", err),
 			}
 		}
-		return result, nil
+		return finishObservedSend(lease, root, ref, attempt, true)
 	}
 	return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "the Sent mailbox contains no message with the claimed Message-ID")
 }
@@ -656,6 +713,8 @@ func (s *Service) reconcileMirrorPending(
 	}
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
+	attempt.Transport.MirrorUIDValidity = appendEvidence.UIDValidity
+	attempt.Transport.MirrorUID = appendEvidence.UID
 	attempt.Transport.MirrorAppended = appendEvidence.Appended
 	attempt.Transport.MirrorOutcomeUnknown = false
 	attempt.Outcome = SendOutcomeSent
@@ -667,14 +726,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: fmt.Sprintf("the sent message was mirrored, but the reconciled state could not be recorded: %v", err),
 		}
 	}
-	if err := discardDraftFiles(lease, root, ref); err != nil {
-		return result, &OperationError{
-			Code:    "send_cleanup_failed",
-			Message: fmt.Sprintf("sent message was mirrored, but local draft cleanup failed: %v", err),
-		}
-	}
-	result.DraftRetained = false
-	return result, nil
+	return finishObservedSend(lease, root, ref, attempt, true)
 }
 
 func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAttempt) error {

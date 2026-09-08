@@ -170,6 +170,8 @@ func sendTransportStubs() (*stubSubmitter, *stubMirror) {
 
 func TestDeliverViaTransportExposesDirectSendBoundary(t *testing.T) {
 	submitter, mirror := sendTransportStubs()
+	mirror.evidence.UIDValidity = 77
+	mirror.evidence.UID = 42
 	evidence, err := DeliverViaTransport(context.Background(), SendTransport{
 		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"},
 	}, Draft{
@@ -181,7 +183,8 @@ func TestDeliverViaTransportExposesDirectSendBoundary(t *testing.T) {
 	}
 	if submitter.calls != 1 || mirror.calls != 1 ||
 		evidence.ServerResponse != "250 2.0.0 OK" ||
-		evidence.MessageID == "" || evidence.MirrorMailbox != "Sent" || !evidence.MirrorAppended {
+		evidence.MessageID == "" || evidence.MirrorMailbox != "Sent" || !evidence.MirrorAppended ||
+		evidence.MirrorUIDValidity != 77 || evidence.MirrorUID != 42 {
 		t.Fatalf("DeliverViaTransport() evidence = %+v, submitter = %+v, mirror = %+v", evidence, submitter, mirror)
 	}
 }
@@ -336,6 +339,137 @@ func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 		t.Fatal("sent draft still exists")
 	}
 	assertNoSendClaim(t, root, draft.Ref)
+}
+
+func TestSendDraftReplaysImmutableReceiptWithoutTransport(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.evidence.UIDValidity = 77
+	mirror.evidence.UID = 42
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	first, err := service.SendDraft(context.Background(), draft.Ref)
+	if err != nil || first.Receipt == nil {
+		t.Fatalf("first SendDraft() = %+v, error = %v", first, err)
+	}
+	receiptPath, err := sendReceiptPath(root, draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatalf("ReadFile(receipt) error = %v", err)
+	}
+	if strings.Contains(string(payload), "Body") || strings.Contains(string(payload), "recipient@example.com") {
+		t.Fatalf("receipt contains draft content: %s", payload)
+	}
+
+	second, err := service.SendDraft(context.Background(), draft.Ref)
+	if err != nil || !second.Replayed || second.Receipt == nil || submitter.calls != 1 || mirror.calls != 1 {
+		t.Fatalf("replayed SendDraft() = %+v, error = %v, submitter = %d, mirror = %d", second, err, submitter.calls, mirror.calls)
+	}
+	if !sendReceiptsEqual(*first.Receipt, *second.Receipt) || second.Receipt.UIDValidity != 77 || second.Receipt.UID != 42 {
+		t.Fatalf("receipt changed across replay: first = %+v, second = %+v", first.Receipt, second.Receipt)
+	}
+	inspected, err := service.GetSendReceipt(draft.Ref)
+	if err != nil || !sendReceiptsEqual(inspected, *first.Receipt) {
+		t.Fatalf("GetSendReceipt() = %+v, error = %v", inspected, err)
+	}
+}
+
+func TestSendDraftRecoversReceiptPersistedBeforeDraftCleanup(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	attempt, err := beginSendAttempt(root, draft.Ref, "<recovered@example.com>", envelopeFingerprint(draft, "<recovered@example.com>"))
+	if err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+	attempt.InvocationStarted = true
+	attempt.AcceptedByMail = true
+	attempt.SentStoreObserved = true
+	attempt.Outcome = SendOutcomeSent
+	attempt.Transport = &TransportEvidence{
+		MessageID: "<recovered@example.com>", ServerResponse: "250 2.0.0 OK",
+		MirrorMailbox: "Sent", MirrorUIDValidity: 77, MirrorUID: 42,
+	}
+	attempt.UpdatedAt = time.Now().UTC()
+	if err := replaceSendAttempt(root, draft.Ref, attempt); err != nil {
+		t.Fatalf("replaceSendAttempt() error = %v", err)
+	}
+	written, err := ensureSendReceipt(root, draft.Ref, attempt)
+	if err != nil {
+		t.Fatalf("ensureSendReceipt() error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, draft.Ref+".json")); err != nil {
+		t.Fatalf("Remove(draft) error = %v", err)
+	}
+
+	result, err := service.SendDraft(context.Background(), draft.Ref)
+	if err != nil || !result.Replayed || result.Receipt == nil || !sendReceiptsEqual(*result.Receipt, *written) {
+		t.Fatalf("recovery SendDraft() = %+v, error = %v", result, err)
+	}
+	if _, err := service.GetDraft(draft.Ref); errorCode(err) != "not_found" {
+		t.Fatalf("recovered draft error = %v, want not_found", err)
+	}
+	assertNoSendClaim(t, root, draft.Ref)
+}
+
+func TestSendDraftRejectsMalformedReceiptWithoutSubmission(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	path, err := sendReceiptPath(root, draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"draft_ref":"broken"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(receipt) error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_receipt_invalid" {
+		t.Fatalf("SendDraft() error = %v, want send_receipt_invalid", err)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("submission calls = %d, mirror calls = %d", submitter.calls, mirror.calls)
+	}
+}
+
+func TestExpiredSendReceiptIsBlockedAndPruned(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	completed := time.Now().UTC().Add(-SendReceiptRetention - time.Hour)
+	receipt := SendReceipt{
+		DraftRef: draft.Ref, AttemptID: "send_expired", StartedAt: completed.Add(-time.Minute),
+		CompletedAt: completed, ExpiresAt: completed.Add(SendReceiptRetention), Outcome: SendOutcomeSent,
+		Accepted: true, MessageID: "<expired@example.com>",
+	}
+	if err := os.Remove(filepath.Join(root, draft.Ref+".json")); err != nil {
+		t.Fatalf("Remove(draft) error = %v", err)
+	}
+	if err := persistSendReceipt(root, draft.Ref, receipt); err != nil {
+		t.Fatalf("persistSendReceipt() error = %v", err)
+	}
+	if _, err := service.GetSendReceipt(draft.Ref); errorCode(err) != "not_found" {
+		t.Fatalf("GetSendReceipt() error = %v, want not_found", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_receipt_expired" {
+		t.Fatalf("SendDraft() error = %v, want send_receipt_expired", err)
+	}
+	result, err := service.PruneDraftsContext(context.Background(), PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true})
+	if err != nil || len(result.ExpiredReceipts) != 1 || result.ExpiredReceipts[0] != draft.Ref {
+		t.Fatalf("PruneDraftsContext() = %+v, error = %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, draft.Ref+".send-receipt")); !os.IsNotExist(err) {
+		t.Fatalf("expired receipt still exists: %v", err)
+	}
 }
 
 func TestSendDraftRetainsClaimWhenContextIsCanceledDuringMirror(t *testing.T) {
@@ -803,16 +937,18 @@ func TestReconcileUnknownClaimFindsSentMessage(t *testing.T) {
 	service.send.Imap = imap
 
 	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
-	if err != nil || result.Outcome != SendOutcomeSent || !result.Reconciled || !result.DraftRetained {
+	if err != nil || result.Outcome != SendOutcomeSent || !result.Reconciled || result.DraftRetained || result.Receipt == nil {
 		t.Fatalf("ReconcileDraft() = %+v, error = %v", result, err)
 	}
 	if imap.searchCalls != 1 || imap.searchBox != "Sent Messages" || imap.searchID != "<claim@example.com>" {
 		t.Fatalf("IMAP search = %q in %q after %d calls", imap.searchID, imap.searchBox, imap.searchCalls)
 	}
-	claim, err := readSendAttempt(root, draft.Ref)
-	if err != nil || claim.Outcome != SendOutcomeSent || claim.Transport == nil ||
-		claim.Transport.MessageID != "<claim@example.com>" || claim.Transport.MirrorMailbox != "Sent Messages" {
-		t.Fatalf("claim after reconcile = %+v, error = %v", claim, err)
+	if _, err := service.GetDraft(draft.Ref); errorCode(err) != "not_found" {
+		t.Fatalf("reconciled draft error = %v, want not_found", err)
+	}
+	receipt, err := service.GetSendReceipt(draft.Ref)
+	if err != nil || receipt.MessageID != "<claim@example.com>" || receipt.SentMailbox != "Sent Messages" {
+		t.Fatalf("receipt after reconcile = %+v, error = %v", receipt, err)
 	}
 }
 

@@ -63,6 +63,13 @@ func sendClaimPath(root string, ref string) (string, error) {
 	return filepath.Join(root, ref+".send-claim"), nil
 }
 
+func sendReceiptPath(root string, ref string) (string, error) {
+	if _, err := draftPath(root, ref); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, ref+".send-receipt"), nil
+}
+
 func saveClaimPath(root string, ref string) (string, error) {
 	if _, err := draftPath(root, ref); err != nil {
 		return "", err
@@ -145,11 +152,50 @@ func resultForAttempt(ref string, attempt SendAttempt, draftRetained bool) SendR
 	}
 }
 
+func finishObservedSend(
+	lease *draftLease,
+	root string,
+	ref string,
+	attempt SendAttempt,
+	reconciled bool,
+) (SendResult, error) {
+	result := resultForAttempt(ref, attempt, true)
+	result.Reconciled = reconciled
+	receipt, err := ensureSendReceipt(root, ref, attempt)
+	if err != nil {
+		return result, &OperationError{
+			Code:    "send_receipt_persist_failed",
+			Message: fmt.Sprintf("terminal send evidence could not be retained safely: %v", err),
+		}
+	}
+	result.Receipt = receipt
+	if err := discardDraftFiles(lease, root, ref); err != nil {
+		return result, &OperationError{
+			Code:    "send_cleanup_failed",
+			Message: fmt.Sprintf("terminal send evidence was retained, but local draft cleanup failed: %v", err),
+		}
+	}
+	result.DraftRetained = false
+	return result, nil
+}
+
+func removeDraftClaims(root string, ref string) error {
+	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref))
+}
+
 func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendAttempt) (SendResult, error) {
 	result := resultForAttempt(ref, attempt, true)
 	result.Replayed = true
 	switch attempt.Outcome {
 	case SendOutcomeObserved, SendOutcomeSent:
+		receipt, err := ensureSendReceipt(root, ref, attempt)
+		if err != nil {
+			return result, &OperationError{
+				Code:    "send_receipt_unavailable",
+				Message: fmt.Sprintf("terminal send evidence could not be loaded safely: %v", err),
+			}
+		}
+		result.Receipt = receipt
 		if err := discardDraftFiles(lease, root, ref); err != nil {
 			return result, &OperationError{
 				Code: "send_cleanup_failed",
@@ -196,7 +242,7 @@ func discardDraftFiles(lease *draftLease, root string, ref string) error {
 	if err := syncDirectory(root); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), lease.removeLock())
+	return errors.Join(removeDraftClaims(root, ref), lease.removeLock())
 }
 
 func nonNilRecipients(recipients []Recipient) []Recipient {

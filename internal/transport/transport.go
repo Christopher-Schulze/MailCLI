@@ -31,9 +31,11 @@ type SubmitEvidence struct {
 
 // AppendEvidence records the result of mirroring a message into the Sent mailbox.
 type AppendEvidence struct {
-	Mailbox    string // Sent mailbox that holds (or already held) the message
-	Appended   bool   // false means the message was already present (provider auto-filed)
-	MatchCount int    // Message-ID matches proven by the mirror search; zero means not checked
+	Mailbox     string // Sent mailbox that holds (or already held) the message
+	Appended    bool   // false means the message was already present (provider auto-filed)
+	MatchCount  int    // Message-ID matches proven by the mirror search; zero means not checked
+	UIDValidity uint32 // SELECT-time UIDVALIDITY of the verified Sent message
+	UID         uint32 // UID of the verified Sent message
 }
 
 // MailboxInfo carries the parsed name and special-use flags for an IMAP mailbox.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -255,13 +256,16 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.prune", responseData{PruneResult: &result})
 	}
-	if len(result.Candidates) == 0 && len(result.SweptLocks) == 0 {
+	if len(result.Candidates) == 0 && len(result.ExpiredReceipts) == 0 && len(result.SweptLocks) == 0 {
 		writeLine(stdout, "no stale never-sent drafts")
 		return 0
 	}
 	if !*confirm {
 		for _, candidate := range result.Candidates {
 			writeFormat(stdout, "would remove\t%s\t%d days\t%s\n", candidate.Ref, candidate.AgeDays, oneLine(candidate.Subject))
+		}
+		for _, ref := range result.ExpiredReceipts {
+			writeFormat(stdout, "would remove receipt\t%s\n", ref)
 		}
 		return 0
 	}
@@ -270,6 +274,9 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 	}
 	for _, ref := range result.SweptLocks {
 		writeFormat(stdout, "swept_lock\t%s\n", ref)
+	}
+	for _, ref := range result.ExpiredReceipts {
+		writeFormat(stdout, "removed receipt\t%s\n", ref)
 	}
 	for _, failure := range result.Failed {
 		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, failure.Error)
@@ -289,9 +296,43 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 	}
 	draft, err := service.GetDraft(*ref)
 	if err != nil {
+		var operation interface{ ErrorCode() string }
+		if errors.As(err, &operation) && operation.ErrorCode() == "not_found" {
+			receipt, receiptErr := service.GetSendReceipt(*ref)
+			if receiptErr == nil {
+				return writeSendReceiptResponse(stdout, "drafts.inspect", receipt, *jsonOutput)
+			}
+			var receiptOperation interface{ ErrorCode() string }
+			if !errors.As(receiptErr, &receiptOperation) || receiptOperation.ErrorCode() != "not_found" {
+				return failCommand("drafts.inspect", *jsonOutput, receiptErr, stdout, stderr)
+			}
+		}
 		return failCommand("drafts.inspect", *jsonOutput, err, stdout, stderr)
 	}
 	return writeDraftResponse(stdout, "drafts.inspect", draft, *jsonOutput)
+}
+
+func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.SendReceipt, jsonOutput bool) int {
+	if jsonOutput {
+		return writeSuccess(stdout, command, responseData{SendReceipt: &receipt})
+	}
+	writeFormat(stdout, "Draft: %s\nOutcome: %s\nAttempt: %s\nAccepted: %t\nStarted: %s\nCompleted: %s\nExpires: %s\n",
+		receipt.DraftRef, receipt.Outcome, receipt.AttemptID, receipt.Accepted,
+		receipt.StartedAt.Format(time.RFC3339), receipt.CompletedAt.Format(time.RFC3339),
+		receipt.ExpiresAt.Format(time.RFC3339))
+	if receipt.MessageID != "" {
+		writeFormat(stdout, "Message-ID: %s\n", receipt.MessageID)
+	}
+	if receipt.ServerResponse != "" {
+		writeFormat(stdout, "SMTP response: %s\n", receipt.ServerResponse)
+	}
+	if receipt.SentMailbox != "" {
+		writeFormat(stdout, "Sent mailbox: %s\n", receipt.SentMailbox)
+	}
+	if receipt.UIDValidity != 0 || receipt.UID != 0 {
+		writeFormat(stdout, "Sent UIDVALIDITY/UID: %d/%d\n", receipt.UIDValidity, receipt.UID)
+	}
+	return 0
 }
 
 func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

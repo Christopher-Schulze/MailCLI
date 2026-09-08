@@ -17,6 +17,7 @@ const (
 	MaximumDraftAttachmentBytes    = int64(512 * 1024 * 1024)
 	MaximumComposeBodyBytes        = 16 * 1024 * 1024
 	MaximumRawSourceBytes          = int64(64 * 1024 * 1024)
+	SendReceiptRetention           = 30 * 24 * time.Hour
 )
 
 type SenderIdentityCoverageSource string
@@ -287,6 +288,8 @@ type TransportEvidence struct {
 	MessageID            string `json:"message_id,omitempty"`
 	SubmissionStage      string `json:"submission_stage,omitempty"`
 	MirrorMailbox        string `json:"mirror_mailbox,omitempty"`
+	MirrorUIDValidity    uint32 `json:"mirror_uidvalidity,omitempty"`
+	MirrorUID            uint32 `json:"mirror_uid,omitempty"`
 	MirrorAttemptID      string `json:"mirror_attempt_id,omitempty"`
 	MirrorAppended       bool   `json:"mirror_appended,omitempty"`
 	MirrorAttempted      bool   `json:"mirror_attempted,omitempty"`
@@ -312,6 +315,26 @@ type SendEvidence struct {
 	Materialized        *SendMaterialization
 }
 
+// SendReceipt is the compact terminal proof retained after a successfully
+// observed send has removed the local draft and transient send claim. It never
+// contains message bodies or attachment bytes.
+type SendReceipt struct {
+	DraftRef           string      `json:"draft_ref"`
+	AttemptID          string      `json:"attempt_id"`
+	StartedAt          time.Time   `json:"started_at"`
+	CompletedAt        time.Time   `json:"completed_at"`
+	ExpiresAt          time.Time   `json:"expires_at"`
+	Outcome            SendOutcome `json:"outcome"`
+	Accepted           bool        `json:"accepted"`
+	ObservedMessageRef string      `json:"observed_message_ref,omitempty"`
+	MessageID          string      `json:"message_id,omitempty"`
+	ServerResponse     string      `json:"server_response,omitempty"`
+	SentMailbox        string      `json:"sent_mailbox,omitempty"`
+	UIDValidity        uint32      `json:"uidvalidity,omitempty"`
+	UID                uint32      `json:"uid,omitempty"`
+	SentAppended       bool        `json:"sent_appended,omitempty"`
+}
+
 type DraftSaveAttempt struct {
 	ID                  string                   `json:"id"`
 	StartedAt           time.Time                `json:"started_at"`
@@ -332,17 +355,18 @@ type DraftSaveEvidence struct {
 }
 
 type SendResult struct {
-	DraftRef           string      `json:"draft_ref"`
-	AttemptID          string      `json:"attempt_id"`
-	Outcome            SendOutcome `json:"outcome"`
-	Accepted           bool        `json:"accepted"`
-	InvocationStarted  bool        `json:"invocation_started"`
-	AcceptedByMail     bool        `json:"accepted_by_mail"`
-	SentStoreObserved  bool        `json:"sent_store_observed"`
-	ObservedMessageRef string      `json:"observed_message_ref,omitempty"`
-	DraftRetained      bool        `json:"draft_retained"`
-	Replayed           bool        `json:"replayed"`
-	Reconciled         bool        `json:"reconciled"`
+	DraftRef           string       `json:"draft_ref"`
+	AttemptID          string       `json:"attempt_id"`
+	Outcome            SendOutcome  `json:"outcome"`
+	Accepted           bool         `json:"accepted"`
+	InvocationStarted  bool         `json:"invocation_started"`
+	AcceptedByMail     bool         `json:"accepted_by_mail"`
+	SentStoreObserved  bool         `json:"sent_store_observed"`
+	ObservedMessageRef string       `json:"observed_message_ref,omitempty"`
+	DraftRetained      bool         `json:"draft_retained"`
+	Replayed           bool         `json:"replayed"`
+	Reconciled         bool         `json:"reconciled"`
+	Receipt            *SendReceipt `json:"receipt,omitempty"`
 }
 
 type ServerMutationEvidence struct {

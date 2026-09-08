@@ -32,6 +32,28 @@ func (s *Service) GetDraft(ref string) (Draft, error) {
 	return readDraftFileWithObserver(root, ref, s.contentObserver)
 }
 
+// GetSendReceipt returns the compact terminal proof for a consumed draft.
+// Expired receipts are treated as absent; unresolved send claims are never
+// represented by this method.
+func (s *Service) GetSendReceipt(ref string) (SendReceipt, error) {
+	root, err := s.resolveDraftRoot()
+	if err != nil {
+		return SendReceipt{}, err
+	}
+	receipt, err := readActiveSendReceipt(root, ref)
+	if err != nil {
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.Code == "send_receipt_expired" {
+			return SendReceipt{}, &OperationError{Code: "not_found", Message: "send receipt expired"}
+		}
+		return SendReceipt{}, err
+	}
+	if receipt == nil {
+		return SendReceipt{}, &OperationError{Code: "not_found", Message: "send receipt not found"}
+	}
+	return *receipt, nil
+}
+
 func (s *Service) PrepareDraftHandoff(ref string) (Draft, error) {
 	draft, err := s.GetDraft(ref)
 	if err != nil {

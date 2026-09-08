@@ -176,6 +176,8 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 		return evidence, err
 	}
 	evidence.MirrorMailbox = appendEvidence.Mailbox
+	evidence.MirrorUIDValidity = appendEvidence.UIDValidity
+	evidence.MirrorUID = appendEvidence.UID
 	evidence.MirrorAppended = appendEvidence.Appended
 	return evidence, nil
 }
