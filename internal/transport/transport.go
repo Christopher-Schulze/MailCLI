@@ -152,6 +152,29 @@ type ImapOperator interface {
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }
 
+// MessageIdentityHint contains local metadata used for bounded server-side
+// identity discovery when a store-bound reference has no Message-ID or UID.
+type MessageIdentityHint struct {
+	Subject       string
+	SenderAddress string
+}
+
+// MessageIdentity is a verified server identity. UID and UIDVALIDITY are
+// always populated together; MessageID is the exact header value when the
+// server returned one.
+type MessageIdentity struct {
+	UID         uint32
+	UIDValidity uint32
+	MessageID   string
+}
+
+// MessageIdentityResolver is an optional IMAP extension. Keeping it separate
+// from ImapOperator preserves existing transport stubs while allowing the
+// mail store to request bounded metadata discovery.
+type MessageIdentityResolver interface {
+	ResolveMessageIdentity(ctx context.Context, cfg ImapConfig, mailbox string, hint MessageIdentityHint) (MessageIdentity, error)
+}
+
 // Submitter submits a fully composed RFC 5322 message.
 type Submitter interface {
 	Submit(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, msg []byte) (SubmitEvidence, error)

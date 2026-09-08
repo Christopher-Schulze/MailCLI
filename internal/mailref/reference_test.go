@@ -42,6 +42,12 @@ func TestMessageReferenceKindsUseInitialFormat(t *testing.T) {
 				LibraryID: "42", ExpectedStoreUUID: "store-uuid", ExpectedStoreMailboxID: 5,
 				ExpectedStoreMessageID: 7, ExpectedStoreGlobalID: 9},
 		},
+		{
+			name: "independent IMAP identity",
+			input: Message{AccountID: "account-id", MailboxPath: []string{"Inbox"},
+				LibraryID: "42", ExpectedIMAPUID: 77, ExpectedIMAPUIDValidity: 12345,
+				ExpectedIMAPMailboxID: 9},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -74,5 +80,18 @@ func TestDecodeMessageRejectsIncompleteStoreIdentity(t *testing.T) {
 	payload := []byte(`{"version":1,"account_id":"a","mailbox_path":["Inbox"],"library_id":"1","expected_store_mailbox_id":2}`)
 	if _, err := DecodeMessage(encodeToken("msg_", payload)); err == nil {
 		t.Fatal("DecodeMessage() error = nil")
+	}
+}
+
+func TestDecodeMessageRejectsIncompleteIMAPIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		`{"version":1,"account_id":"a","mailbox_path":["Inbox"],"library_id":"1","expected_imap_uid_validity":12}`,
+		`{"version":1,"account_id":"a","mailbox_path":["Inbox"],"library_id":"1","expected_imap_mailbox_id":2}`,
+	}
+	for _, payload := range tests {
+		if _, err := DecodeMessage(encodeToken("msg_", []byte(payload))); err == nil {
+			t.Fatalf("DecodeMessage(%s) error = nil", payload)
+		}
 	}
 }

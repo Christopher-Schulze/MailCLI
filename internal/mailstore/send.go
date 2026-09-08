@@ -281,6 +281,7 @@ func mailboxCandidateQuery(
 		)
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
 			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),

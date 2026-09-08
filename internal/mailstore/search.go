@@ -334,6 +334,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 	}
 	query := `SELECT
 		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+		COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
@@ -376,7 +377,8 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 		var item messageRecord
 		var dateNull int
 		if err := rows.Scan(
-			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
+			&item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
@@ -587,6 +589,7 @@ func (s *Store) querySearchRecords(
 ) (result []messageRecord, total int, resultErr error) {
 	query := `SELECT
 		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
+		COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
@@ -607,7 +610,8 @@ func (s *Store) querySearchRecords(
 		var item messageRecord
 		var dateNull bool
 		if err := rows.Scan(
-			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.StoreMailboxID,
+			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
+			&item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,

@@ -52,16 +52,19 @@ type Mailbox struct {
 }
 
 type Message struct {
-	Version                int      `json:"version"`
-	AccountID              string   `json:"account_id"`
-	MailboxPath            []string `json:"mailbox_path"`
-	LibraryID              string   `json:"library_id"`
-	ExpectedMessageID      string   `json:"expected_message_id"`
-	ExpectedSubject        string   `json:"expected_subject,omitempty"`
-	ExpectedStoreUUID      string   `json:"expected_store_uuid,omitempty"`
-	ExpectedStoreMailboxID int64    `json:"expected_store_mailbox_id,omitempty"`
-	ExpectedStoreMessageID int64    `json:"expected_store_message_id,omitempty"`
-	ExpectedStoreGlobalID  int64    `json:"expected_store_global_id,omitempty"`
+	Version                 int      `json:"version"`
+	AccountID               string   `json:"account_id"`
+	MailboxPath             []string `json:"mailbox_path"`
+	LibraryID               string   `json:"library_id"`
+	ExpectedMessageID       string   `json:"expected_message_id"`
+	ExpectedIMAPUID         uint32   `json:"expected_imap_uid,omitempty"`
+	ExpectedIMAPUIDValidity uint32   `json:"expected_imap_uid_validity,omitempty"`
+	ExpectedIMAPMailboxID   int64    `json:"expected_imap_mailbox_id,omitempty"`
+	ExpectedSubject         string   `json:"expected_subject,omitempty"`
+	ExpectedStoreUUID       string   `json:"expected_store_uuid,omitempty"`
+	ExpectedStoreMailboxID  int64    `json:"expected_store_mailbox_id,omitempty"`
+	ExpectedStoreMessageID  int64    `json:"expected_store_message_id,omitempty"`
+	ExpectedStoreGlobalID   int64    `json:"expected_store_global_id,omitempty"`
 }
 
 type ListCursor struct {
@@ -123,6 +126,9 @@ func EncodeMessage(ref Message) (string, error) {
 	if ref.hasAnyStoreIdentity() && !ref.IsStoreBound() {
 		return "", fmt.Errorf("invalid message ref store identity")
 	}
+	if err := ref.validateIMAPIdentity(); err != nil {
+		return "", err
+	}
 	payload, err := json.Marshal(ref)
 	if err != nil {
 		return "", fmt.Errorf("encode message ref: %w", err)
@@ -144,6 +150,9 @@ func DecodeMessage(value string) (Message, error) {
 	if ref.hasAnyStoreIdentity() && !ref.IsStoreBound() {
 		return Message{}, fmt.Errorf("invalid message ref store identity")
 	}
+	if err := ref.validateIMAPIdentity(); err != nil {
+		return Message{}, err
+	}
 	return ref, nil
 }
 
@@ -154,6 +163,19 @@ func (m Message) IsStoreBound() bool {
 func (m Message) hasAnyStoreIdentity() bool {
 	return m.ExpectedStoreUUID != "" || m.ExpectedStoreMailboxID != 0 ||
 		m.ExpectedStoreMessageID != 0 || m.ExpectedStoreGlobalID != 0
+}
+
+func (m Message) validateIMAPIdentity() error {
+	if m.ExpectedIMAPUID == 0 && m.ExpectedIMAPUIDValidity != 0 {
+		return fmt.Errorf("invalid message ref IMAP identity: UIDVALIDITY requires a UID")
+	}
+	if m.ExpectedIMAPUID == 0 && m.ExpectedIMAPMailboxID != 0 {
+		return fmt.Errorf("invalid message ref IMAP identity: mailbox ID requires a UID")
+	}
+	if m.ExpectedIMAPMailboxID < 0 {
+		return fmt.Errorf("invalid message ref IMAP identity: mailbox ID must be non-negative")
+	}
+	return nil
 }
 
 func EncodeListCursor(ref ListCursor) (string, error) {
