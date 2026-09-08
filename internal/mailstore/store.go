@@ -43,15 +43,9 @@ func Open(ctx context.Context, config Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	versionRoot, err := discoverVersionRoot(config.MailRoot)
+	versionRoot, err := selectVersionRoot(config)
 	if err != nil {
 		return nil, err
-	}
-	if filepath.Base(versionRoot) != "V10" {
-		return nil, operationError(
-			"unsupported_mail_store_schema",
-			fmt.Sprintf("Mail store layout %q is unsupported; supported layout is V10", filepath.Base(versionRoot)),
-		)
 	}
 	accountURLs, err := loadActiveAccountURLs(ctx, config)
 	if err != nil {
