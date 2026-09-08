@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	stdmail "net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -257,6 +258,46 @@ func TestThreadReferencesWithWhitespace(t *testing.T) {
 	want := "<msg-1@example.com> <msg-2@example.com>"
 	if got != want {
 		t.Errorf("threadReferences(whitespace) = %q, want %q", got, want)
+	}
+}
+
+func TestThreadReferencesDeduplicatesAndMovesParentToEnd(t *testing.T) {
+	prior := "<msg-1@example.com> <msg-2@example.com> <msg-1@example.com> <msg-3@example.com>"
+	got := threadReferences(prior, "<msg-2@example.com>")
+	want := "<msg-1@example.com> <msg-3@example.com> <msg-2@example.com>"
+	if got != want {
+		t.Errorf("threadReferences(duplicate parent) = %q, want %q", got, want)
+	}
+}
+
+func TestBuildMessageRejectsMalformedThreadReferences(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Re: Original", Body: "Reply body", Kind: DraftKindReply,
+		SourceMessageID: "<original@example.com>", SourceReferences: "<valid@example.com> malformed",
+	}
+	_, err := BuildMessage(draft, "<reply@example.com>")
+	if errorCode(err) != "invalid_message_source" {
+		t.Fatalf("BuildMessage() error = %v, want invalid_message_source", err)
+	}
+}
+
+func TestBuildMessageLeavesMissingThreadSourceUnthreaded(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Reply", Body: "Reply body", Kind: DraftKindReply,
+		SourceReferences: "<historical@example.com>",
+	}
+	message, err := BuildMessage(draft, "<reply@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	parsed, err := stdmail.ReadMessage(strings.NewReader(string(message)))
+	if err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+	if parsed.Header.Get("In-Reply-To") != "" || parsed.Header.Get("References") != "" {
+		t.Fatalf("missing source ID produced threading headers: In-Reply-To=%q References=%q", parsed.Header.Get("In-Reply-To"), parsed.Header.Get("References"))
 	}
 }
 

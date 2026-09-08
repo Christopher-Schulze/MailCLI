@@ -38,6 +38,11 @@ func prepareDraftWithAttachmentsObserver(
 		if err := validateThreadSource(request.SourceMessageID, request.SourceReferences); err != nil {
 			return Draft{}, err
 		}
+		canonicalReferences, err := canonicalThreadReferences(request.SourceReferences, request.SourceMessageID)
+		if err != nil {
+			return Draft{}, err
+		}
+		request.SourceReferences = canonicalReferences
 	}
 	if request.Kind == DraftKindNew && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("new drafts require at least one recipient")
@@ -81,8 +86,8 @@ func prepareDraftWithAttachmentsObserver(
 	}, nil
 }
 
-// validateThreadSource keeps control characters out of the threading headers
-// written into drafts (the composer copies them verbatim into the message).
+// validateThreadSource keeps malformed or control-containing source threading
+// values out of drafts before the composer serializes them.
 func validateThreadSource(sourceMessageID, sourceReferences string) error {
 	if strings.ContainsAny(sourceMessageID, "\r\n") {
 		return validationError("source message id contains control characters")
@@ -91,7 +96,8 @@ func validateThreadSource(sourceMessageID, sourceReferences string) error {
 	if strings.ContainsAny(sourceReferences, "\r\n") {
 		return validationError("source references contain control characters")
 	}
-	return nil
+	_, err := canonicalThreadReferences(sourceReferences, sourceMessageID)
+	return err
 }
 
 func validateDraftLimits(input DraftInput) error {
