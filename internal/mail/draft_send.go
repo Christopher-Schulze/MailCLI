@@ -130,20 +130,17 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
 	attempt.Transport = &TransportEvidence{
-		ServerResponse:       submitEvidence.ServerResponse,
-		MessageID:            attempt.MessageID,
-		MirrorAttempted:      true,
-		MirrorOutcomeUnknown: true,
+		ServerResponse: submitEvidence.ServerResponse,
+		MessageID:      attempt.MessageID,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
-	attempt.UpdatedAt = time.Now().UTC()
-	result = resultForAttempt(ref, attempt, true)
-	if err := replaceSendAttempt(root, ref, attempt); err != nil {
-		return result, &OperationError{
-			Code:    "send_outcome_unknown",
-			Message: fmt.Sprintf("the server accepted the message, but its local send state could not be recorded safely: %v", err),
+	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
+		return resultForAttempt(ref, attempt, true), &OperationError{
+			Code:    "send_state_unknown",
+			Message: fmt.Sprintf("the server accepted the message, but its Sent mirror state could not be armed safely: %v", err),
 		}
 	}
+	result = resultForAttempt(ref, attempt, true)
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,
 		s.send.Mirror,
@@ -152,8 +149,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		attempt.MessageID,
 	)
 	if err != nil {
-		attempt.Transport.MirrorOutcomeUnknown = transport.ErrorCode(err) == transport.CodeIMAPAppendOutcomeUnknown ||
-			transport.ErrorCode(err) == transport.CodeIMAPAmbiguousMessageID
+		attempt.Transport.MirrorOutcomeUnknown = mirrorOutcomeUnknown(err)
 		attempt.UpdatedAt = time.Now().UTC()
 		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
 			result = resultForAttempt(ref, attempt, true)
@@ -496,7 +492,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: "the send attempt carries no Message-ID; the Sent mirror cannot be completed safely",
 		}
 	}
-	mirrorOutcomeUnknown := attempt.Transport.MirrorOutcomeUnknown
+	outcomeUnknown := attempt.Transport.MirrorOutcomeUnknown
 	if s.send.Mirror == nil || s.send.Credentials == nil {
 		return result, &OperationError{
 			Code:    "send_transport_unavailable",
@@ -566,7 +562,7 @@ func (s *Service) reconcileMirrorPending(
 			)
 		}
 	}
-	if mirrorOutcomeUnknown {
+	if outcomeUnknown {
 		return result, mirrorOutcomeUnknownError(attempt)
 	}
 	message, err := composeDraftSpool(ctx, draft, attempt.MessageID)
@@ -578,6 +574,12 @@ func (s *Service) reconcileMirrorPending(
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
+	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
+		return resultForReconcile(ref, attempt), &OperationError{
+			Code:    "send_reconcile_state_failed",
+			Message: fmt.Sprintf("the Sent mirror attempt could not be armed safely: %v", err),
+		}
+	}
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,
 		s.send.Mirror,
@@ -586,6 +588,15 @@ func (s *Service) reconcileMirrorPending(
 		attempt.MessageID,
 	)
 	if err != nil {
+		attempt.Transport.MirrorOutcomeUnknown = mirrorOutcomeUnknown(err)
+		attempt.UpdatedAt = time.Now().UTC()
+		result = resultForReconcile(ref, attempt)
+		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+			return result, &OperationError{
+				Code:    "send_reconcile_state_failed",
+				Message: fmt.Sprintf("Sent mirroring failed, but its outcome could not be recorded safely: %v", stateErr),
+			}
+		}
 		return result, mirrorPendingError(err)
 	}
 	if imap != nil {
@@ -640,6 +651,26 @@ func (s *Service) reconcileMirrorPending(
 	}
 	result.DraftRetained = false
 	return result, nil
+}
+
+func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAttempt) error {
+	if attempt == nil || attempt.Transport == nil {
+		return fmt.Errorf("send attempt has no transport evidence")
+	}
+	mirrorAttemptID, err := newMirrorAttemptID()
+	if err != nil {
+		return err
+	}
+	attempt.Transport.MirrorAttemptID = mirrorAttemptID
+	attempt.Transport.MirrorAttempted = true
+	attempt.Transport.MirrorOutcomeUnknown = true
+	attempt.UpdatedAt = time.Now().UTC()
+	return replaceSendAttempt(root, ref, *attempt)
+}
+
+func mirrorOutcomeUnknown(err error) bool {
+	code := transport.ErrorCode(err)
+	return code == transport.CodeIMAPAppendOutcomeUnknown || code == transport.CodeIMAPAmbiguousMessageID
 }
 
 // envelopeFingerprint identifies the exact claimed envelope: Message-ID,
