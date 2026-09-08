@@ -1347,6 +1347,104 @@ func TestFetchMessage(t *testing.T) {
 	}
 }
 
+func TestFetchMessageAcceptsUIDAfterBody(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:      true,
+		otherMboxes: []string{"INBOX"},
+		fetchResponse: []byte(
+			"* 1 FETCH (BODY[] {4}\r\nBody UID 42)\r\n" +
+				"<tag> OK FETCH completed\r\n",
+		),
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	payload, err := client.FetchMessage(context.Background(), cfg, "INBOX", 42, 12345, 1024)
+	if err != nil {
+		t.Fatalf("FetchMessage() error = %v", err)
+	}
+	if string(payload) != "Body" {
+		t.Fatalf("FetchMessage() payload = %q, want Body", payload)
+	}
+}
+
+func TestReadFetchLiteralAcceptsUIDAfterBodyAndUnsolicitedFlags(t *testing.T) {
+	response := "* 1 FETCH (UID 99 FLAGS (\\Seen))\r\n" +
+		"* 1 FETCH (UID 99 BODY[] {3}\r\nBad)\r\n" +
+		"* 2 FETCH (BODY[] {4}\r\nBody UID 42)\r\n" +
+		"A001 OK FETCH completed\r\n"
+	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
+
+	payload, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	if err != nil {
+		t.Fatalf("readFetchLiteral() error = %v", err)
+	}
+	if string(payload) != "Body" {
+		t.Fatalf("readFetchLiteral() payload = %q, want Body", payload)
+	}
+}
+
+func TestReadFetchLiteralRejectsDuplicateTargetBodies(t *testing.T) {
+	response := "* 1 FETCH (UID 42 BODY[] {4}\r\nBody)\r\n" +
+		"* 1 FETCH (BODY.PEEK[] {4}\r\nCopy UID 42)\r\n" +
+		"A001 OK FETCH completed\r\n"
+	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
+
+	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPResponseMalformed {
+		t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
+			code, transport.CodeIMAPResponseMalformed, err)
+	}
+	if !sess.dirty {
+		t.Fatal("duplicate target bodies did not dirty the session")
+	}
+}
+
+func TestParseFetchResponseRejectsDuplicateBodiesInOneResponse(t *testing.T) {
+	line := "* 1 FETCH (UID 42 BODY[] \x00 BODY.PEEK[] \x00)"
+	_, err := parseFetchResponse(line, [][]byte{[]byte("one"), []byte("two")})
+	if err == nil || !strings.Contains(err.Error(), "duplicate FETCH BODY") {
+		t.Fatalf("parseFetchResponse() error = %v, want duplicate BODY error", err)
+	}
+}
+
+func TestParseFetchResponseSkipsGrammarAwareUnknownAttributes(t *testing.T) {
+	line := "* 1 FETCH (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT)] \x00 " +
+		"X-CUSTOM (one (two three)) UID 42)"
+	parsed, err := parseFetchResponse(line, [][]byte{[]byte("headers")})
+	if err != nil {
+		t.Fatalf("parseFetchResponse() error = %v", err)
+	}
+	if !parsed.uidPresent || parsed.uid != 42 || !parsed.bodyLiteral || string(parsed.body) != "headers" {
+		t.Fatalf("parseFetchResponse() = %+v, want UID 42 and headers", parsed)
+	}
+}
+
+func TestParseFetchUIDUsesCompleteFetchGrammar(t *testing.T) {
+	uid, ok := parseFetchUID("* 1 FETCH (FLAGS (\\Seen) UID 42)")
+	if !ok || uid != 42 {
+		t.Fatalf("parseFetchUID() = %d, %v, want 42, true", uid, ok)
+	}
+}
+
+func FuzzParseFetchResponse(f *testing.F) {
+	f.Add("* 1 FETCH (UID 42 BODY[] ")
+	f.Add("* 1 FETCH (BODY[] \x00 UID 42)")
+	f.Add("* 1 FETCH (UID 42 FLAGS (\\Seen))")
+	f.Fuzz(func(t *testing.T, line string) {
+		_, _ = parseFetchResponse(line, nil)
+	})
+}
+
 func TestFetchRejectsNonPositiveLimitBeforeConnection(t *testing.T) {
 	client := New()
 	for _, limit := range []int64{0, -1} {
