@@ -2812,7 +2812,7 @@ func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
 		"From: Alice <alice@example.com>\r\n"+
 			"To: Christopher <christopher@example.com>\r\n"+
 			"Cc: Zoe <zoe@example.com>\r\n"+
-			"Reply-To: Bob <bob@example.com>\r\n"+
+			"Reply-To: Bob <bob@example.com>, Carol <carol@example.com>\r\n"+
 			"Subject: Threaded\r\n"+
 			"Message-ID: <reply-102@example.com>\r\n"+
 			"References: <root-1@example.com> <reply-101@example.com>\r\n"+
@@ -2822,14 +2822,25 @@ func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MessageThreadSource() error = %v", err)
 	}
-	if source.Subject != "Threaded" ||
-		!strings.Contains(source.ReplyTo, "bob@example.com") ||
+	if source.Subject != "Threaded" || len(source.ReplyTo) != 2 ||
+		source.ReplyTo[0].Address != "bob@example.com" || source.ReplyTo[1].Address != "carol@example.com" ||
 		source.MessageID != "<reply-102@example.com>" ||
 		source.References != "<root-1@example.com> <reply-101@example.com>" {
 		t.Fatalf("thread source = %+v", source)
 	}
 	if len(source.CC) != 1 || source.CC[0].Address != "zoe@example.com" {
 		t.Fatalf("cc = %+v", source.CC)
+	}
+
+	writeFixtureEMLX(t, store, 102, "imap://"+testAccountID+"/INBOX", []byte(
+		"From: Alice <alice@example.com>\r\n"+
+			"Reply-To: Bob <bob@example.com>, malformed\r\n"+
+			"Subject: Malformed Reply-To\r\n"+
+			"Message-ID: <reply-102@example.com>\r\n\r\nBody\r\n",
+	))
+	if _, err := client.MessageThreadSource(context.Background(), ref); err == nil ||
+		errorCodeForTest(err) != "invalid_message_source" {
+		t.Fatalf("malformed Reply-To error = %v", err)
 	}
 
 	writeFixtureEMLX(t, store, 102, "imap://"+testAccountID+"/INBOX", []byte(

@@ -14,7 +14,7 @@ func TestDeriveReplyInputDefaults(t *testing.T) {
 	source := ThreadSource{
 		Subject:    "Project update",
 		From:       "Alice <alice@example.com>",
-		ReplyTo:    "Bob <bob@example.com>",
+		ReplyTo:    []Recipient{{Name: "Bob", Address: "bob@example.com"}},
 		To:         []Recipient{{Address: "bob@example.com"}},
 		MessageID:  "<m1@example.com>",
 		References: "<m0@example.com>",
@@ -46,6 +46,45 @@ func TestDeriveReplyInputFallsBackToFrom(t *testing.T) {
 	}
 	if len(input.To) != 1 || input.To[0].Address != "alice@example.com" || input.To[0].Name != "Alice" {
 		t.Fatalf("to = %+v", input.To)
+	}
+}
+
+func TestDeriveReplyInputUsesCompleteReplyToList(t *testing.T) {
+	t.Parallel()
+	source := ThreadSource{
+		Subject: "s", From: "Alice <alice@example.com>",
+		ReplyTo: []Recipient{
+			{Name: "Bob", Address: "bob@example.com"},
+			{Name: "Carol", Address: "carol@example.com"},
+		},
+		MessageID: "<m1@example.com>",
+	}
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	if err != nil {
+		t.Fatalf("DeriveReplyInput() error = %v", err)
+	}
+	if len(input.To) != 2 || input.To[0].Address != "bob@example.com" || input.To[1].Address != "carol@example.com" {
+		t.Fatalf("to = %+v, want complete Reply-To list", input.To)
+	}
+	service := NewServiceWithDraftRoot(&gatewayStub{}, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(CreateDraftRequest{
+		Kind: DraftKindReply, SourceRef: storeBoundSourceRef(t), Input: input,
+		SourceMessageID: "<m1@example.com>", SourceReferences: "<m1@example.com>",
+	})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	payload, err := BuildMessage(draft, "<reply@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	message, err := stdmail.ReadMessage(strings.NewReader(string(payload)))
+	if err != nil {
+		t.Fatalf("ReadMessage() error = %v", err)
+	}
+	addresses, err := message.Header.AddressList("To")
+	if err != nil || len(addresses) != 2 || addresses[0].Address != "bob@example.com" || addresses[1].Address != "carol@example.com" {
+		t.Fatalf("composed To = %+v, error = %v", addresses, err)
 	}
 }
 
