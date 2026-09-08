@@ -47,6 +47,7 @@ type fakeServerConfig struct {
 	rejectStore             bool
 	initialDeletedUIDs      []uint32
 	fetchPayload            []byte
+	fetchResponse           []byte
 	fetchResponseUID        uint32
 	selectFailBox           string
 	dropAfterCommands       int
@@ -613,6 +614,16 @@ func (s *fakeServer) handle(conn net.Conn) {
 			case "FETCH":
 				if s.config.fetchDelay > 0 {
 					time.Sleep(s.config.fetchDelay)
+				}
+				if len(s.config.fetchResponse) > 0 {
+					response := strings.ReplaceAll(string(s.config.fetchResponse), "<tag>", tag)
+					if _, err := bw.WriteString(response); err != nil {
+						return
+					}
+					if err := bw.Flush(); err != nil {
+						return
+					}
+					continue
 				}
 				uid := 0
 				if len(args) > 1 {

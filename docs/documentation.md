@@ -14,6 +14,8 @@
 
 ## Architecture
 
+IMAP FETCH hydration parses each complete logical response across literal boundaries, accepts UID and BODY attributes in either order, ignores unrelated flag-only updates, and fails closed on duplicate or contradictory BODY values while retaining the raw-source and response bounds.
+
 MailCLI is a local Go executable for the accounts already configured in macOS Mail. Complete local reads never contact Gmail, iCloud, IMAP, SMTP, OAuth, or account-login endpoints; they use Mail's Envelope Index and `.emlx` sources. Incomplete-content hydration, mailbox mutations, `sync --check`, and sending use the provider's IMAP and SMTP endpoints with an app-specific password the user stores once in the macOS Keychain. MailCLI never uses OAuth and never asks for passwords in chat. Direct SMTP/IMAP support is limited to Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`); other domains fail with `transport_unsupported_provider` before credentials are stored or network connections begin.
 
 The implementation has these package boundaries:

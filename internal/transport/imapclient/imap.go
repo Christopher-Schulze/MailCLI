@@ -11,10 +11,10 @@
 //   - APPEND <mailbox> (\Seen) {length} with a synchronizing literal.
 //   - LOGOUT.
 //
-// Response parsing is intentionally minimal: untagged "* ..." lines,
+// Response parsing is intentionally bounded: untagged "* ..." lines,
 // continuation "+ ..." lines, and a final tagged "tag OK|NO|BAD ..." line.
-// Quoted strings are unescaped. LIST literals are reconstructed before their
-// mailbox values are parsed; malformed LIST responses fail the operation.
+// Quoted strings are unescaped. LIST and FETCH literals are reconstructed
+// before their values are parsed; malformed responses fail the operation.
 package imapclient
 
 import (
@@ -45,6 +45,8 @@ const (
 	maxListLiteralBytes      = 1 << 20
 	maxListResponseBytes     = 8 << 20
 	maxListLiteralCount      = 128
+	maxFetchLiteralCount     = 128
+	maxFetchNestingDepth     = 128
 	maxUIDSearchResults      = 100000
 	maxMessageIDHeaderBytes  = 1 << 20
 )
@@ -582,9 +584,53 @@ func listResponseMalformed(err error) *transport.TransportError {
 // returned text by imapLiteralMarker and kept separately so its bytes remain
 // raw when the value parser consumes it.
 func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
+	line, literals, err := c.readLogicalLineWithLiterals(
+		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount,
+	)
+	var limitErr *literalLimitError
+	if errors.As(err, &limitErr) {
+		return "", nil, &malformedResponseError{err: fmt.Errorf(
+			"IMAP LIST literal response exceeds %d bytes or %d bytes per literal",
+			maxListResponseBytes, maxListLiteralBytes,
+		)}
+	}
+	var readErr *literalReadError
+	if errors.As(err, &readErr) {
+		return "", nil, &malformedResponseError{err: readErr}
+	}
+	return line, literals, err
+}
+
+type literalLimitError struct {
+	size        int64
+	maxLiteral  int64
+	maxResponse int64
+}
+
+func (e *literalLimitError) Error() string {
+	return fmt.Sprintf(
+		"IMAP response literal exceeds %d bytes or response literal budget %d bytes: %d",
+		e.maxLiteral, e.maxResponse, e.size,
+	)
+}
+
+type literalReadError struct{ err error }
+
+func (e *literalReadError) Error() string {
+	return "IMAP response literal read failed: " + e.err.Error()
+}
+
+func (e *literalReadError) Unwrap() error { return e.err }
+
+func (c *Client) readLogicalLineWithLiterals(
+	sess *session,
+	maxLiteralBytes int64,
+	maxResponseBytes int64,
+	maxLiteralCount int,
+) (string, [][]byte, error) {
 	var reconstructed strings.Builder
 	var literals [][]byte
-	literalBytes := 0
+	var literalBytes int64
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
@@ -596,31 +642,32 @@ func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 			return "", nil, &malformedResponseError{err: err}
 		}
 		if !hasLiteral {
-			if reconstructed.Len()+len(line) > maxListResponseBytes {
+			if int64(reconstructed.Len()+len(line)) > maxResponseBytes {
 				sess.dirty = true
 				return "", nil, &malformedResponseError{err: fmt.Errorf(
-					"IMAP LIST response exceeds %d bytes", maxListResponseBytes,
+					"IMAP logical response exceeds %d bytes", maxResponseBytes,
 				)}
 			}
 			reconstructed.WriteString(line)
 			return reconstructed.String(), literals, nil
 		}
-		if len(literals) >= maxListLiteralCount {
+		if len(literals) >= maxLiteralCount {
 			sess.dirty = true
 			return "", nil, &malformedResponseError{err: fmt.Errorf(
-				"IMAP LIST literal count exceeds %d", maxListLiteralCount,
+				"IMAP response literal count exceeds %d", maxLiteralCount,
 			)}
 		}
-		if size > maxListLiteralBytes || literalBytes > maxListResponseBytes-size {
+		size64 := int64(size)
+		if size64 > maxLiteralBytes || size64 > maxResponseBytes-literalBytes {
 			sess.dirty = true
-			return "", nil, &malformedResponseError{err: fmt.Errorf(
-				"IMAP LIST literal response exceeds %d bytes", maxListResponseBytes,
-			)}
+			return "", nil, &literalLimitError{
+				size: size64, maxLiteral: maxLiteralBytes, maxResponse: maxResponseBytes,
+			}
 		}
-		if reconstructed.Len()+len(prefix)+1 > maxListResponseBytes {
+		if int64(reconstructed.Len()+len(prefix)+1) > maxResponseBytes {
 			sess.dirty = true
 			return "", nil, &malformedResponseError{err: fmt.Errorf(
-				"IMAP LIST response exceeds %d bytes", maxListResponseBytes,
+				"IMAP logical response exceeds %d bytes", maxResponseBytes,
 			)}
 		}
 
@@ -630,12 +677,12 @@ func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
 		if _, err := io.ReadFull(sess.br, literal); err != nil {
 			sess.dirty = true
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return "", nil, &malformedResponseError{err: err}
+				return "", nil, &literalReadError{err: err}
 			}
 			return "", nil, err
 		}
 		literals = append(literals, literal)
-		literalBytes += size
+		literalBytes += size64
 	}
 }
 
@@ -1875,20 +1922,68 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
+	responseLimit := maxBytes
+	if responseLimit <= int64(^uint64(0)>>1)-maxIMAPResponseLineBytes {
+		responseLimit += maxIMAPResponseLineBytes
+	}
 	var payload []byte
 	found := false
+	bodyReady := false
+	var mismatchedUID uint32
+	mismatchSeen := false
 	for {
-		line, err := c.readLine(sess)
+		line, literals, err := c.readLogicalLineWithLiterals(
+			sess, maxBytes, responseLimit, maxFetchLiteralCount,
+		)
 		if err != nil {
+			var limitErr *literalLimitError
+			if errors.As(err, &limitErr) {
+				return nil, &transport.TransportError{
+					Code: transport.CodeIMAPRawSourceTooLarge,
+					Message: fmt.Sprintf(
+						"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
+						limitErr.size, maxBytes,
+					),
+					Err: err,
+				}
+			}
+			var malformed *malformedResponseError
+			if errors.As(err, &malformed) {
+				return nil, &transport.TransportError{
+					Code:    transport.CodeIMAPResponseMalformed,
+					Message: "IMAP FETCH response malformed",
+					Err:     err,
+				}
+			}
+			var literalErr *literalReadError
+			if errors.As(err, &literalErr) {
+				return nil, wrapIOError(ctx, literalErr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
+			}
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			status := parseStatus(line, tag)
 			if status == "OK" {
 				if !found {
+					if mismatchSeen {
+						sess.dirty = true
+						return nil, &transport.TransportError{
+							Code: transport.CodeIMAPMessageUIDMismatch,
+							Message: fmt.Sprintf(
+								"IMAP FETCH returned UID %d for requested UID %d",
+								mismatchedUID, requestedUID,
+							),
+						}
+					}
 					return nil, &transport.TransportError{
 						Code:    transport.CodeIMAPMessageNotFound,
 						Message: "message not returned by IMAP FETCH",
+					}
+				}
+				if !bodyReady {
+					return nil, &transport.TransportError{
+						Code:    transport.CodeIMAPMessageNotFound,
+						Message: "message BODY value not returned by IMAP FETCH",
 					}
 				}
 				return payload, nil
@@ -1898,66 +1993,367 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 				Message: "IMAP FETCH failed: " + status,
 			}
 		}
-		if strings.HasPrefix(line, "* ") && strings.Contains(line, "FETCH ") {
-			responseUID, ok := parseFetchUID(line)
-			if !ok || responseUID != requestedUID {
-				sess.dirty = true
-				return nil, &transport.TransportError{
-					Code:    transport.CodeIMAPMessageUIDMismatch,
-					Message: fmt.Sprintf("IMAP FETCH returned UID %d for requested UID %d", responseUID, requestedUID),
-				}
+		if !isFetchResponseCandidate(line) {
+			continue
+		}
+		parsed, err := parseFetchResponse(line, literals)
+		if err != nil {
+			sess.dirty = true
+			return nil, &transport.TransportError{
+				Code:    transport.CodeIMAPResponseMalformed,
+				Message: "IMAP FETCH response malformed",
+				Err:     err,
 			}
-			idx := strings.LastIndex(line, "{")
-			if idx != -1 && strings.HasSuffix(line, "}") {
-				lenStr := line[idx+1 : len(line)-1]
-				length, perr := strconv.ParseInt(lenStr, 10, 64)
-				maxInt := int64(^uint(0) >> 1)
-				if perr != nil || length < 0 || length > maxInt {
-					sess.dirty = true
-					return nil, &transport.TransportError{
-						Code:    transport.CodeIMAPResponseMalformed,
-						Message: fmt.Sprintf("invalid IMAP FETCH literal length %q", lenStr),
-					}
-				}
-				if length > maxBytes {
-					// Refuse before buffering: the session is dirty
-					// (release discards it) and the unread literal is
-					// never parsed. Do not attempt to skip it.
-					sess.dirty = true
-					return nil, &transport.TransportError{
-						Code: transport.CodeIMAPRawSourceTooLarge,
-						Message: fmt.Sprintf(
-							"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
-							length, maxBytes,
-						),
-					}
-				}
-				buf := make([]byte, int(length))
-				if _, rerr := io.ReadFull(sess.br, buf); rerr != nil {
-					sess.dirty = true
-					return nil, wrapIOError(ctx, rerr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
-				}
-				payload = buf
-				found = true
+		}
+		if !parsed.bodyPresent {
+			continue
+		}
+		if !parsed.uidPresent || parsed.uid != requestedUID {
+			if !mismatchSeen {
+				mismatchedUID = parsed.uid
+				mismatchSeen = true
 			}
+			continue
+		}
+		if found {
+			sess.dirty = true
+			return nil, &transport.TransportError{
+				Code:    transport.CodeIMAPResponseMalformed,
+				Message: "IMAP FETCH returned duplicate BODY values for the requested UID",
+			}
+		}
+		found = true
+		if parsed.bodyLiteral {
+			payload = parsed.body
+			bodyReady = true
 		}
 	}
 }
 
 func parseFetchUID(line string) (uint32, bool) {
-	fields := strings.Fields(line)
-	for index := 0; index+1 < len(fields); index++ {
-		if strings.TrimLeft(fields[index], "(") != "UID" {
-			continue
-		}
-		value := strings.TrimRight(fields[index+1], ")")
-		uid, err := strconv.ParseUint(value, 10, 32)
-		if err != nil {
-			return 0, false
-		}
-		return uint32(uid), true
+	parsed, err := parseFetchResponse(line, nil)
+	if err != nil || !parsed.uidPresent {
+		return 0, false
 	}
-	return 0, false
+	return parsed.uid, true
+}
+
+type fetchResponse struct {
+	uid         uint32
+	uidPresent  bool
+	body        []byte
+	bodyPresent bool
+	bodyLiteral bool
+}
+
+type fetchValueKind uint8
+
+const (
+	fetchValueAtom fetchValueKind = iota
+	fetchValueQuoted
+	fetchValueNil
+	fetchValueLiteral
+	fetchValueList
+)
+
+type fetchValue struct {
+	kind    fetchValueKind
+	text    string
+	literal []byte
+}
+
+type fetchResponseParser struct {
+	input       string
+	literals    [][]byte
+	nextLiteral int
+	position    int
+}
+
+func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
+	parser := fetchResponseParser{input: line, literals: literals}
+	if err := parser.parsePrefix(); err != nil {
+		return fetchResponse{}, err
+	}
+	var response fetchResponse
+	for {
+		parser.skipSpace()
+		if parser.position >= len(parser.input) {
+			return fetchResponse{}, errors.New("unterminated FETCH attribute list")
+		}
+		if parser.input[parser.position] == ')' {
+			parser.position++
+			parser.skipSpace()
+			if parser.position != len(parser.input) {
+				return fetchResponse{}, errors.New("trailing FETCH response data")
+			}
+			if parser.nextLiteral != len(literals) {
+				return fetchResponse{}, errors.New("unused FETCH response literal")
+			}
+			return response, nil
+		}
+		key, err := parser.parseAttributeKey()
+		if err != nil {
+			return fetchResponse{}, err
+		}
+		if parser.position >= len(parser.input) || !isSpace(parser.input[parser.position]) {
+			return fetchResponse{}, fmt.Errorf("FETCH attribute %q has no separating space", key)
+		}
+		value, err := parser.parseValue(0)
+		if err != nil {
+			return fetchResponse{}, fmt.Errorf("FETCH attribute %q: %w", key, err)
+		}
+		if parser.position < len(parser.input) && !isSpace(parser.input[parser.position]) && parser.input[parser.position] != ')' {
+			return fetchResponse{}, fmt.Errorf("FETCH attribute %q value has no separator", key)
+		}
+		switch {
+		case strings.EqualFold(key, "UID"):
+			if response.uidPresent {
+				return fetchResponse{}, errors.New("duplicate FETCH UID attribute")
+			}
+			uid, err := parseFetchUIDValue(value)
+			if err != nil {
+				return fetchResponse{}, err
+			}
+			response.uid = uid
+			response.uidPresent = true
+		case isFetchBodyAttribute(key):
+			if response.bodyPresent {
+				return fetchResponse{}, fmt.Errorf("duplicate FETCH BODY attribute %q", key)
+			}
+			if value.kind != fetchValueLiteral && value.kind != fetchValueQuoted && value.kind != fetchValueNil {
+				return fetchResponse{}, fmt.Errorf("FETCH BODY value is not an nstring")
+			}
+			response.bodyPresent = true
+			switch value.kind {
+			case fetchValueLiteral:
+				response.body = value.literal
+				response.bodyLiteral = true
+			case fetchValueQuoted:
+				response.body = []byte(value.text)
+				response.bodyLiteral = true
+			}
+		}
+	}
+}
+
+func (p *fetchResponseParser) parsePrefix() error {
+	if len(p.input) < 2 || p.input[0] != '*' || !isSpace(p.input[1]) {
+		return errors.New("FETCH response does not start with an untagged response")
+	}
+	p.position = 2
+	sequence, err := p.parseAtom()
+	if err != nil {
+		return fmt.Errorf("FETCH response sequence: %w", err)
+	}
+	if _, err := strconv.ParseUint(sequence, 10, 32); err != nil {
+		return fmt.Errorf("invalid FETCH response sequence %q", sequence)
+	}
+	p.skipSpace()
+	command, err := p.parseAtom()
+	if err != nil || !strings.EqualFold(command, "FETCH") {
+		return fmt.Errorf("expected FETCH response command, got %q", command)
+	}
+	if p.position >= len(p.input) || !isSpace(p.input[p.position]) {
+		return errors.New("FETCH response command has no separating space")
+	}
+	p.skipSpace()
+	if p.position >= len(p.input) || p.input[p.position] != '(' {
+		return errors.New("FETCH response has no attribute list")
+	}
+	p.position++
+	return nil
+}
+
+func (p *fetchResponseParser) parseAttributeKey() (string, error) {
+	p.skipSpace()
+	start := p.position
+	if start >= len(p.input) || p.input[start] == '(' || p.input[start] == ')' || p.input[start] == imapLiteralMarker[0] {
+		return "", errors.New("FETCH attribute name is missing")
+	}
+	for p.position < len(p.input) {
+		c := p.input[p.position]
+		if isSpace(c) || c == '(' || c == ')' {
+			break
+		}
+		if c == '[' {
+			p.position++
+			if err := p.consumeBracketSection(); err != nil {
+				return "", err
+			}
+			if p.position < len(p.input) && p.input[p.position] == '<' {
+				if err := p.consumeAngleSection(); err != nil {
+					return "", err
+				}
+			}
+			break
+		}
+		p.position++
+	}
+	if start == p.position {
+		return "", errors.New("FETCH attribute name is empty")
+	}
+	return p.input[start:p.position], nil
+}
+
+func (p *fetchResponseParser) consumeBracketSection() error {
+	depth := 1
+	for p.position < len(p.input) {
+		c := p.input[p.position]
+		p.position++
+		switch c {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return nil
+			}
+		case '\\':
+			if p.position < len(p.input) {
+				p.position++
+			}
+		}
+	}
+	return errors.New("unterminated FETCH attribute section")
+}
+
+func (p *fetchResponseParser) consumeAngleSection() error {
+	start := p.position
+	p.position++
+	for p.position < len(p.input) {
+		if p.input[p.position] == '>' {
+			if p.position == start+1 {
+				return errors.New("empty FETCH partial section")
+			}
+			p.position++
+			return nil
+		}
+		if isSpace(p.input[p.position]) || p.input[p.position] == '(' || p.input[p.position] == ')' {
+			return errors.New("invalid FETCH partial section")
+		}
+		if p.input[p.position] < '0' || p.input[p.position] > '9' {
+			return errors.New("FETCH partial section is not decimal")
+		}
+		p.position++
+	}
+	return errors.New("unterminated FETCH partial section")
+}
+
+func (p *fetchResponseParser) parseValue(depth int) (fetchValue, error) {
+	p.skipSpace()
+	if p.position >= len(p.input) {
+		return fetchValue{}, errors.New("FETCH attribute value is missing")
+	}
+	if depth > maxFetchNestingDepth {
+		return fetchValue{}, fmt.Errorf("FETCH value nesting exceeds %d", maxFetchNestingDepth)
+	}
+	switch p.input[p.position] {
+	case imapLiteralMarker[0]:
+		if p.nextLiteral >= len(p.literals) {
+			return fetchValue{}, errors.New("missing FETCH response literal")
+		}
+		value := fetchValue{kind: fetchValueLiteral, literal: p.literals[p.nextLiteral]}
+		p.nextLiteral++
+		p.position++
+		return value, nil
+	case '"':
+		value, rest, err := parseQuoted(p.input[p.position:])
+		if err != nil {
+			return fetchValue{}, err
+		}
+		consumed := len(p.input[p.position:]) - len(rest)
+		p.position += consumed
+		return fetchValue{kind: fetchValueQuoted, text: value}, nil
+	case '(':
+		p.position++
+		for {
+			p.skipSpace()
+			if p.position >= len(p.input) {
+				return fetchValue{}, errors.New("unterminated FETCH value list")
+			}
+			if p.input[p.position] == ')' {
+				p.position++
+				return fetchValue{kind: fetchValueList}, nil
+			}
+			if _, err := p.parseValue(depth + 1); err != nil {
+				return fetchValue{}, err
+			}
+			if p.position < len(p.input) && !isSpace(p.input[p.position]) && p.input[p.position] != ')' {
+				return fetchValue{}, errors.New("FETCH list value has no separator")
+			}
+		}
+	case ')':
+		return fetchValue{}, errors.New("FETCH attribute value starts with closing parenthesis")
+	default:
+		atom, err := p.parseAtom()
+		if err != nil {
+			return fetchValue{}, err
+		}
+		if strings.EqualFold(atom, "NIL") {
+			return fetchValue{kind: fetchValueNil}, nil
+		}
+		return fetchValue{kind: fetchValueAtom, text: atom}, nil
+	}
+}
+
+func (p *fetchResponseParser) parseAtom() (string, error) {
+	start := p.position
+	for p.position < len(p.input) && !isSpace(p.input[p.position]) && p.input[p.position] != '(' && p.input[p.position] != ')' {
+		if p.input[p.position] == imapLiteralMarker[0] {
+			return "", errors.New("embedded FETCH response literal")
+		}
+		p.position++
+	}
+	if start == p.position {
+		return "", errors.New("FETCH atom is empty")
+	}
+	return p.input[start:p.position], nil
+}
+
+func (p *fetchResponseParser) skipSpace() {
+	for p.position < len(p.input) && isSpace(p.input[p.position]) {
+		p.position++
+	}
+}
+
+func parseFetchUIDValue(value fetchValue) (uint32, error) {
+	if value.kind != fetchValueAtom {
+		return 0, errors.New("FETCH UID value is not an atom")
+	}
+	uid, err := strconv.ParseUint(value.text, 10, 32)
+	if err != nil || uid == 0 {
+		if err == nil {
+			err = errors.New("value must be positive")
+		}
+		return 0, fmt.Errorf("invalid FETCH UID value %q: %w", value.text, err)
+	}
+	return uint32(uid), nil
+}
+
+func isFetchBodyAttribute(key string) bool {
+	upper := strings.ToUpper(key)
+	return strings.HasPrefix(upper, "BODY[") || strings.HasPrefix(upper, "BODY.PEEK[")
+}
+
+func isFetchResponseCandidate(line string) bool {
+	if len(line) < 3 || line[0] != '*' || !isSpace(line[1]) {
+		return false
+	}
+	position := 2
+	for position < len(line) && !isSpace(line[position]) {
+		position++
+	}
+	if position == len(line) {
+		return false
+	}
+	for position < len(line) && isSpace(line[position]) {
+		position++
+	}
+	start := position
+	for position < len(line) && !isSpace(line[position]) && line[position] != '(' && line[position] != ')' {
+		position++
+	}
+	return start != position && strings.EqualFold(line[start:position], "FETCH")
 }
 
 // CheckStatus queries server message counts, unseen count, and UIDs via IMAP STATUS.
