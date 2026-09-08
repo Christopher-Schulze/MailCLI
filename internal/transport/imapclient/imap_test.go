@@ -756,11 +756,97 @@ func TestListMailboxes(t *testing.T) {
 	}
 }
 
+func TestListMailboxesPreservesModifiedUTF7WireAndHierarchy(t *testing.T) {
+	const wireSent = "Projects.&AMQ-"
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK:   true,
+		appendOK: true,
+		listResponse: []byte(
+			"* LIST (\\Sent) \".\" {" + strconv.Itoa(len(wireSent)) + "}\r\n" + wireSent + "\r\n" +
+				"* LIST (\\HasNoChildren) NIL \"A/B\"\r\n",
+		),
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	boxes, err := client.ListMailboxes(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ListMailboxes() error = %v", err)
+	}
+	if len(boxes) != 2 {
+		t.Fatalf("ListMailboxes() count = %d, want 2", len(boxes))
+	}
+	if boxes[0].WireName != wireSent || boxes[0].Name != wireSent || boxes[0].DisplayName != "Projects.Ä" ||
+		strings.Join(boxes[0].DisplayPath, "/") != "Projects/Ä" || boxes[0].Delimiter != "." ||
+		boxes[0].Encoding != transport.MailboxEncodingModifiedUTF7 || !hasMailboxFlag(boxes[0].Flags, "\\Sent") {
+		t.Fatalf("modified UTF-7 mailbox = %+v", boxes[0])
+	}
+	if boxes[1].WireName != "A/B" || boxes[1].DisplayName != "A/B" ||
+		len(boxes[1].DisplayPath) != 1 || boxes[1].DisplayPath[0] != "A/B" || boxes[1].Delimiter != "" {
+		t.Fatalf("flat mailbox = %+v", boxes[1])
+	}
+}
+
+func TestListMailboxesNegotiatesUTF8FromPostLoginCapability(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, omitGreetingCapabilities: true,
+		capabilities: []string{"IMAP4rev1", "UTF8=ACCEPT"},
+		listResponse: []byte("* LIST (\\Sent) \".\" \"Entwürfe\"\r\n"),
+	})
+	client, cfg := newFakeClient(t, srv)
+	boxes, err := client.ListMailboxes(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ListMailboxes() error = %v", err)
+	}
+	if len(boxes) != 1 || boxes[0].Encoding != transport.MailboxEncodingUTF8 || boxes[0].DisplayName != "Entwürfe" {
+		t.Fatalf("post-login UTF-8 mailbox = %+v", boxes)
+	}
+}
+
+func TestAppendToSentUsesModifiedUTF7WireName(t *testing.T) {
+	const wireSent = "Gesendet.&AMQ-"
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, appendOK: true,
+		listResponse: []byte(
+			"* LIST (\\Sent) \".\" \"" + wireSent + "\"\r\n",
+		),
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+	messageID := "<wire-name@example.com>"
+	message := []byte("Message-ID: " + messageID + "\r\n\r\nbody\r\n")
+	if _, err := client.AppendToSent(context.Background(), cfg, message, messageID); err != nil {
+		t.Fatalf("AppendToSent() error = %v", err)
+	}
+	called, mailbox, _, _ := srv.AppendRecord()
+	if !called || mailbox != wireSent {
+		t.Fatalf("APPEND mailbox = called:%v name:%q, want wire name %q", called, mailbox, wireSent)
+	}
+}
+
 func TestListLiteralMailboxesAndMutations(t *testing.T) {
 	const sentName = "Entwürfe"
 	const trashName = "Papierkorb"
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:        true,
+		capabilities:  []string{"IMAP4rev1", "UTF8=ACCEPT"},
 		appendOK:      true,
 		fetchPayload:  []byte("Message-ID: <literal@example.com>\r\n\r\nmessage\r\n"),
 		moveSupported: true,
@@ -804,6 +890,12 @@ func TestListLiteralMailboxesAndMutations(t *testing.T) {
 	}
 	if !hasMailboxFlag(flagsByName[sentName], "\\Sent") || !hasMailboxFlag(flagsByName[trashName], "\\Trash") {
 		t.Fatalf("literal mailboxes = %+v, want Sent=%q and Trash=%q", flagsByName, sentName, trashName)
+	}
+	for _, mbox := range mboxes {
+		if mbox.Name == sentName && (mbox.WireName != sentName || mbox.DisplayName != sentName ||
+			mbox.Delimiter != "." || mbox.Encoding != transport.MailboxEncodingUTF8) {
+			t.Fatalf("UTF-8 LIST metadata = %+v", mbox)
+		}
 	}
 
 	if _, err := client.SetFlags(context.Background(), cfg, sentName, 42, 12345, []string{"\\Seen"}, nil); err != nil {
