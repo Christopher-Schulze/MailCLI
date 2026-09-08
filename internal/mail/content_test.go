@@ -53,6 +53,80 @@ func TestPrepareDraftContent(t *testing.T) {
 	}
 }
 
+func TestPrepareDraftContentReportsDeterministicLoss(t *testing.T) {
+	source := `<p style="color:red;background:url(https://remote.example/pixel)" onclick="alert(1)" data-label="ignored"><strong>Visible</strong></p>` +
+		`<p><img alt="Logo" src="https://remote.example/logo.png"></p>` +
+		`<p><script>alert(2)</script><a href="javascript:alert(3)">Link</a></p>`
+	wantDiagnostics := []ContentDiagnostic{
+		{Code: ContentDiagnosticUnsafeStyle, Element: "p", Attribute: "style"},
+		{Code: ContentDiagnosticUnsafeAttribute, Element: "p", Attribute: "onclick"},
+		{Code: ContentDiagnosticRemovedAttribute, Element: "p", Attribute: "data-label"},
+		{Code: ContentDiagnosticRemovedElement, Element: "img"},
+		{Code: ContentDiagnosticRemoteResource, Element: "img", Attribute: "src"},
+		{Code: ContentDiagnosticRemovedElement, Element: "script"},
+		{Code: ContentDiagnosticUnsafeURL, Element: "a", Attribute: "href"},
+	}
+	content, err := prepareDraftContent(DraftBodyHTML, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Plain != "Visible\nLogo\nLink" {
+		t.Fatalf("plain = %q, want %q", content.Plain, "Visible\nLogo\nLink")
+	}
+	if !contentDiagnosticsEqual(content.Diagnostics, wantDiagnostics) {
+		t.Fatalf("diagnostics = %+v, want %+v", content.Diagnostics, wantDiagnostics)
+	}
+	repeated, err := prepareDraftContent(DraftBodyHTML, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contentDiagnosticsEqual(content.Diagnostics, repeated.Diagnostics) || content.HTML != repeated.HTML || content.Plain != repeated.Plain {
+		t.Fatal("rich content transformation is not deterministic")
+	}
+	if strings.Contains(content.HTML, "script") || strings.Contains(content.HTML, "img") ||
+		strings.Contains(content.HTML, "onclick") || strings.Contains(content.HTML, "background") ||
+		strings.Contains(content.HTML, "remote.example") || strings.Contains(content.HTML, "javascript:") {
+		t.Fatalf("unsafe content survived: %q", content.HTML)
+	}
+}
+
+func TestRichDraftDiagnosticsPersistAndCompose(t *testing.T) {
+	content, err := prepareDraftContent(DraftBodyHTML, `<p><strong>Visible</strong></p><p><img alt="Logo" src="https://remote.example/logo.png"></p><table><tr><td>A</td><td>B</td></tr></table>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := Draft{
+		Ref: "draft_123456789012345678901234", Kind: DraftKindNew,
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Body: content.Plain, BodyFormat: content.Format, BodySource: content.Source,
+		BodyHTML: content.HTML, ContentDiagnostics: content.Diagnostics,
+	}
+	root := t.TempDir()
+	if err := writeDraftFile(root, draft); err != nil {
+		t.Fatalf("writeDraftFile() error = %v", err)
+	}
+	stored, err := readDraftFile(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("readDraftFile() error = %v", err)
+	}
+	if !contentDiagnosticsEqual(stored.ContentDiagnostics, content.Diagnostics) {
+		t.Fatalf("stored diagnostics = %+v, want %+v", stored.ContentDiagnostics, content.Diagnostics)
+	}
+	message, err := BuildMessage(stored, "<rich-content@mailcli.local>")
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	messageText := string(message)
+	for _, expected := range []string{"Visible", "Logo", "| A | B |", "Content-Type: text/html"} {
+		if !strings.Contains(messageText, expected) {
+			t.Errorf("composed MIME missing %q: %s", expected, messageText)
+		}
+	}
+	if strings.Contains(messageText, "<img") || strings.Contains(messageText, "remote.example") {
+		t.Fatalf("unsafe image survived composed MIME: %s", messageText)
+	}
+}
+
 func TestHTMLToPlainTextGolden(t *testing.T) {
 	source := `<p><a href="https://example.com/report">Read report</a>; <a href="https://example.com">https://example.com</a>; <a href="mailto:alice@example.com">alice@example.com</a>; <a href="mailto:alice@example.com?subject=Hello">alice@example.com</a></p>` +
 		`<p>Run <code>go  test</code></p><pre>  first` + "\n" + `    second` + "\n" + `</pre>` +
@@ -91,7 +165,7 @@ func TestHTMLToPlainTextSkipsUnsafeSubtreesAndEscapesTablePipes(t *testing.T) {
 	source := `<script>alert(1)</script><p><a href="javascript:alert(2)">Click</a> <a href="data:text/plain,hidden">Data</a></p>` +
 		`<img alt="must not be copied" src="https://example.com/pixel.png">` +
 		`<table><tr><td>A|B</td><td>1</td></tr></table>`
-	want := "Click Data\n| A\\|B | 1 |"
+	want := "Click Data\nmust not be copied\n| A\\|B | 1 |"
 	if got := HTMLToPlainText([]byte(source)); got != want {
 		t.Fatalf("HTMLToPlainText() = %q, want %q", got, want)
 	}

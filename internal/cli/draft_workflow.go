@@ -18,17 +18,18 @@ import (
 )
 
 type draftPreview struct {
-	Ref         string                 `json:"ref"`
-	AccountRef  string                 `json:"account_ref,omitempty"`
-	From        string                 `json:"from,omitempty"`
-	To          []mail.Recipient       `json:"to"`
-	CC          []mail.Recipient       `json:"cc"`
-	BCC         []mail.Recipient       `json:"bcc"`
-	Subject     string                 `json:"subject,omitempty"`
-	BodyFormat  mail.DraftBodyFormat   `json:"body_format"`
-	View        string                 `json:"view"`
-	Body        string                 `json:"body"`
-	Attachments []mail.DraftAttachment `json:"attachments"`
+	Ref                string                   `json:"ref"`
+	AccountRef         string                   `json:"account_ref,omitempty"`
+	From               string                   `json:"from,omitempty"`
+	To                 []mail.Recipient         `json:"to"`
+	CC                 []mail.Recipient         `json:"cc"`
+	BCC                []mail.Recipient         `json:"bcc"`
+	Subject            string                   `json:"subject,omitempty"`
+	BodyFormat         mail.DraftBodyFormat     `json:"body_format"`
+	View               string                   `json:"view"`
+	Body               string                   `json:"body"`
+	ContentDiagnostics []mail.ContentDiagnostic `json:"content_diagnostics,omitempty"`
+	Attachments        []mail.DraftAttachment   `json:"attachments"`
 }
 
 type draftHandoffResult struct {
@@ -160,7 +161,8 @@ func makeDraftPreview(draft mail.Draft, view string) (draftPreview, error) {
 	return draftPreview{
 		Ref: draft.Ref, AccountRef: draft.AccountRef, From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
 		Subject: draft.Subject, BodyFormat: draft.BodyFormat, View: view, Body: body,
-		Attachments: draft.Attachments,
+		ContentDiagnostics: draft.ContentDiagnostics,
+		Attachments:        draft.Attachments,
 	}, nil
 }
 
@@ -181,6 +183,19 @@ func writeHumanDraftPreview(writer io.Writer, preview draftPreview) {
 	writeRaw(writer, preview.Body)
 	if preview.Body != "" && !strings.HasSuffix(preview.Body, "\n") {
 		writeLine(writer)
+	}
+	if len(preview.ContentDiagnostics) > 0 {
+		writeLine(writer, "\nContent transformations:")
+		for _, diagnostic := range preview.ContentDiagnostics {
+			writeFormat(writer, "  %s", diagnostic.Code)
+			if diagnostic.Element != "" {
+				writeFormat(writer, " element=%s", diagnostic.Element)
+			}
+			if diagnostic.Attribute != "" {
+				writeFormat(writer, " attribute=%s", diagnostic.Attribute)
+			}
+			writeLine(writer)
+		}
 	}
 	if len(preview.Attachments) > 0 {
 		writeLine(writer, "\nAttachments:")

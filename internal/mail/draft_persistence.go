@@ -73,7 +73,7 @@ func readDraftFileWithObserver(root string, ref string, observer draftContentObs
 	if err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, err)
 	}
-	if err := validateStoredDraftContentWithObserver(draft, observer); err != nil {
+	if err := validateStoredDraftContentWithObserver(&draft, observer); err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, fmt.Errorf("validate draft content: %w", err))
 	}
 	if err := attachDraftAttempts(root, ref, &draft); err != nil {

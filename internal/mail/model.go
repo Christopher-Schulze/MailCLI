@@ -142,6 +142,24 @@ const (
 	DraftBodyHTML     DraftBodyFormat = "html"
 )
 
+const (
+	ContentDiagnosticRemovedElement   = "removed_element"
+	ContentDiagnosticRemovedAttribute = "removed_attribute"
+	ContentDiagnosticUnsafeAttribute  = "unsafe_attribute_removed"
+	ContentDiagnosticUnsafeURL        = "unsafe_url_removed"
+	ContentDiagnosticUnsafeStyle      = "unsafe_style_removed"
+	ContentDiagnosticRemoteResource   = "remote_resource_removed"
+)
+
+// ContentDiagnostic records a deterministic, value-free transformation made
+// while preparing a rich draft. It excludes source values so diagnostics are
+// safe to expose in structured output and logs.
+type ContentDiagnostic struct {
+	Code      string `json:"code"`
+	Element   string `json:"element,omitempty"`
+	Attribute string `json:"attribute,omitempty"`
+}
+
 type DraftInput struct {
 	AccountRef  string          `json:"account_ref,omitempty"`
 	From        string          `json:"from,omitempty"`
@@ -178,6 +196,7 @@ type Draft struct {
 	BodyFormat                    DraftBodyFormat          `json:"body_format"`
 	BodySource                    string                   `json:"body_source,omitempty"`
 	BodyHTML                      string                   `json:"body_html,omitempty"`
+	ContentDiagnostics            []ContentDiagnostic      `json:"content_diagnostics,omitempty"`
 	Attachments                   []DraftAttachment        `json:"attachments"`
 	CreatedAt                     time.Time                `json:"created_at"`
 	UpdatedAt                     time.Time                `json:"updated_at"`

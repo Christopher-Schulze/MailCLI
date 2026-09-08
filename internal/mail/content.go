@@ -23,10 +23,11 @@ type draftContentObserver interface {
 }
 
 type preparedDraftContent struct {
-	Format DraftBodyFormat
-	Source string
-	Plain  string
-	HTML   string
+	Format      DraftBodyFormat
+	Source      string
+	Plain       string
+	HTML        string
+	Diagnostics []ContentDiagnostic
 }
 
 func prepareDraftContent(format DraftBodyFormat, source string) (preparedDraftContent, error) {
@@ -60,13 +61,16 @@ func prepareDraftContentWithObserver(
 }
 
 func validateStoredDraftContent(draft Draft) error {
-	return validateStoredDraftContentWithObserver(draft, nil)
+	return validateStoredDraftContentWithObserver(&draft, nil)
 }
 
-func validateStoredDraftContentWithObserver(draft Draft, observer draftContentObserver) error {
+func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentObserver) error {
+	if draft == nil {
+		return validationError("stored draft is missing")
+	}
 	switch draft.BodyFormat {
 	case DraftBodyPlain:
-		if draft.BodySource != "" || draft.BodyHTML != "" {
+		if draft.BodySource != "" || draft.BodyHTML != "" || len(draft.ContentDiagnostics) > 0 {
 			return validationError("plain draft contains unexpected rich content")
 		}
 	case DraftBodyMarkdown, DraftBodyHTML:
@@ -80,10 +84,18 @@ func validateStoredDraftContentWithObserver(draft Draft, observer draftContentOb
 		if prepared.Plain != draft.Body || prepared.HTML != draft.BodyHTML {
 			return validationError("stored rich draft does not match its canonical rendering")
 		}
+		// Drafts written before diagnostics existed remain readable. New writes
+		// always carry the computed values, and a present value is integrity
+		// checked against the canonical transformation.
+		if len(draft.ContentDiagnostics) > 0 &&
+			!contentDiagnosticsEqual(prepared.Diagnostics, draft.ContentDiagnostics) {
+			return validationError("stored rich draft diagnostics do not match its canonical rendering")
+		}
+		draft.ContentDiagnostics = prepared.Diagnostics
 	default:
 		return validationError("stored draft has an unsupported body format")
 	}
-	return validateStoredDraftLimits(draft)
+	return validateStoredDraftLimits(*draft)
 }
 
 func renderMarkdownContent(source string) (preparedDraftContent, error) {
@@ -95,7 +107,7 @@ func renderMarkdownContent(source string) (preparedDraftContent, error) {
 }
 
 func canonicalRichContent(format DraftBodyFormat, source string, value []byte) (preparedDraftContent, error) {
-	sanitized, err := sanitizeEmailHTML(value)
+	sanitized, diagnostics, err := sanitizeEmailHTML(value)
 	if err != nil {
 		return preparedDraftContent{}, validationError("draft body contains invalid HTML")
 	}
@@ -110,45 +122,122 @@ func canonicalRichContent(format DraftBodyFormat, source string, value []byte) (
 	if len(plain) > MaximumDraftBodyBytes {
 		return preparedDraftContent{}, validationError("plain-text draft body exceeds 4 MiB")
 	}
-	return preparedDraftContent{Format: format, Source: source, Plain: plain, HTML: string(sanitized)}, nil
+	return preparedDraftContent{
+		Format: format, Source: source, Plain: plain, HTML: string(sanitized), Diagnostics: diagnostics,
+	}, nil
 }
 
-func sanitizeEmailHTML(value []byte) ([]byte, error) {
+type contentDiagnosticCollector struct {
+	values []ContentDiagnostic
+	seen   map[string]struct{}
+}
+
+func (collector *contentDiagnosticCollector) add(code, element, attribute string) {
+	if collector == nil || code == "" {
+		return
+	}
+	if collector.seen == nil {
+		collector.seen = make(map[string]struct{})
+	}
+	key := code + "\x00" + element + "\x00" + attribute
+	if _, exists := collector.seen[key]; exists {
+		return
+	}
+	collector.seen[key] = struct{}{}
+	collector.values = append(collector.values, ContentDiagnostic{
+		Code: code, Element: element, Attribute: attribute,
+	})
+}
+
+func contentDiagnosticsEqual(left, right []ContentDiagnostic) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizeEmailHTML(value []byte) ([]byte, []ContentDiagnostic, error) {
 	document, err := html.Parse(bytes.NewReader(value))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var output bytes.Buffer
+	var diagnostics contentDiagnosticCollector
 	body := findHTMLElement(document, "body")
 	if body == nil {
 		body = document
 	}
+	if head := findHTMLElement(document, "head"); head != nil {
+		for child := head.FirstChild; child != nil; child = child.NextSibling {
+			collectHTMLDiagnostics(child, &diagnostics)
+		}
+	}
+	if body.Type == html.ElementNode && strings.EqualFold(body.Data, "body") {
+		recordRemovedAttributes("body", body.Attr, &diagnostics)
+	}
 	for child := body.FirstChild; child != nil; child = child.NextSibling {
-		for _, sanitized := range sanitizeHTMLNode(child) {
+		for _, sanitized := range sanitizeHTMLNode(child, &diagnostics) {
 			if err := html.Render(&output, sanitized); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
-	return output.Bytes(), nil
+	return output.Bytes(), diagnostics.values, nil
 }
 
-func sanitizeHTMLNode(node *html.Node) []*html.Node {
+func collectHTMLDiagnostics(node *html.Node, diagnostics *contentDiagnosticCollector) {
+	if node == nil {
+		return
+	}
+	if node.Type != html.ElementNode {
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			collectHTMLDiagnostics(child, diagnostics)
+		}
+		return
+	}
+	name := strings.ToLower(node.Data)
+	if dropsHTMLSubtree(name) {
+		diagnostics.add(ContentDiagnosticRemovedElement, name, "")
+		recordDroppedResourceDiagnostics(name, node.Attr, diagnostics)
+		return
+	}
+	recordRemovedAttributes(name, node.Attr, diagnostics)
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		collectHTMLDiagnostics(child, diagnostics)
+	}
+}
+
+func sanitizeHTMLNode(node *html.Node, diagnostics *contentDiagnosticCollector) []*html.Node {
 	switch node.Type {
 	case html.TextNode:
 		return []*html.Node{{Type: html.TextNode, Data: node.Data}}
 	case html.ElementNode:
-		if dropsHTMLSubtree(node.Data) {
+		name := strings.ToLower(node.Data)
+		if dropsHTMLSubtree(name) {
+			diagnostics.add(ContentDiagnosticRemovedElement, name, "")
+			recordDroppedResourceDiagnostics(name, node.Attr, diagnostics)
+			if name == "img" {
+				if alt := htmlAttributeValue(node.Attr, "alt"); alt != "" {
+					return []*html.Node{{Type: html.TextNode, Data: alt}}
+				}
+			}
 			return nil
 		}
-		children := sanitizeHTMLChildren(node)
-		if !allowsHTMLElement(node.Data) {
+		children := sanitizeHTMLChildren(node, diagnostics)
+		if !allowsHTMLElement(name) {
+			recordRemovedAttributes(name, node.Attr, diagnostics)
+			if len(children) == 0 {
+				diagnostics.add(ContentDiagnosticRemovedElement, name, "")
+			}
 			return children
 		}
-		clean := &html.Node{Type: html.ElementNode, Data: node.Data}
-		if node.Data == "a" {
-			clean.Attr = sanitizeLinkAttributes(node.Attr)
-		}
+		clean := &html.Node{Type: html.ElementNode, Data: name}
+		clean.Attr = sanitizeElementAttributes(name, node.Attr, diagnostics)
 		for _, child := range children {
 			clean.AppendChild(child)
 		}
@@ -158,29 +247,122 @@ func sanitizeHTMLNode(node *html.Node) []*html.Node {
 	}
 }
 
-func sanitizeHTMLChildren(node *html.Node) []*html.Node {
+func sanitizeHTMLChildren(node *html.Node, diagnostics *contentDiagnosticCollector) []*html.Node {
 	var children []*html.Node
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		children = append(children, sanitizeHTMLNode(child)...)
+		children = append(children, sanitizeHTMLNode(child, diagnostics)...)
 	}
 	return children
 }
 
-func sanitizeLinkAttributes(attributes []html.Attribute) []html.Attribute {
+func sanitizeElementAttributes(name string, attributes []html.Attribute, diagnostics *contentDiagnosticCollector) []html.Attribute {
+	if name != "a" {
+		recordRemovedAttributes(name, attributes, diagnostics)
+		return nil
+	}
 	clean := make([]html.Attribute, 0, 3)
+	hrefSeen := false
+	titleSeen := false
 	for _, attribute := range attributes {
-		switch attribute.Key {
+		key := strings.ToLower(strings.TrimSpace(attribute.Key))
+		switch key {
 		case "href":
-			parsed, err := url.Parse(attribute.Val)
+			if hrefSeen {
+				diagnostics.add(ContentDiagnosticRemovedAttribute, name, key)
+				continue
+			}
+			parsed, err := url.Parse(strings.TrimSpace(attribute.Val))
 			if err == nil && parsed.IsAbs() && allowsLinkScheme(parsed.Scheme) {
-				clean = append(clean, html.Attribute{Key: "href", Val: attribute.Val})
+				clean = append(clean, html.Attribute{Key: key, Val: strings.TrimSpace(attribute.Val)})
+				hrefSeen = true
+			} else {
+				diagnostics.add(ContentDiagnosticUnsafeURL, name, key)
 			}
 		case "title":
-			clean = append(clean, html.Attribute{Key: "title", Val: attribute.Val})
+			if titleSeen {
+				diagnostics.add(ContentDiagnosticRemovedAttribute, name, key)
+				continue
+			}
+			clean = append(clean, html.Attribute{Key: key, Val: attribute.Val})
+			titleSeen = true
+		default:
+			recordRemovedAttribute(name, key, attribute.Val, diagnostics)
 		}
 	}
 	clean = append(clean, html.Attribute{Key: "rel", Val: "nofollow noreferrer"})
 	return clean
+}
+
+func recordRemovedAttributes(element string, attributes []html.Attribute, diagnostics *contentDiagnosticCollector) {
+	for _, attribute := range attributes {
+		recordRemovedAttribute(element, strings.ToLower(strings.TrimSpace(attribute.Key)), attribute.Val, diagnostics)
+	}
+}
+
+func recordRemovedAttribute(element, attribute, value string, diagnostics *contentDiagnosticCollector) {
+	if attribute == "" {
+		return
+	}
+	switch {
+	case strings.HasPrefix(attribute, "on"):
+		diagnostics.add(ContentDiagnosticUnsafeAttribute, element, attribute)
+	case attribute == "style":
+		diagnostics.add(ContentDiagnosticUnsafeStyle, element, attribute)
+	case isRemoteResourceAttribute(attribute) && isRemoteURL(value):
+		diagnostics.add(ContentDiagnosticRemoteResource, element, attribute)
+	default:
+		diagnostics.add(ContentDiagnosticRemovedAttribute, element, attribute)
+	}
+}
+
+func recordDroppedResourceDiagnostics(element string, attributes []html.Attribute, diagnostics *contentDiagnosticCollector) {
+	for _, attribute := range attributes {
+		key := strings.ToLower(strings.TrimSpace(attribute.Key))
+		if !isRemoteResourceAttribute(key) {
+			continue
+		}
+		if isRemoteURL(attribute.Val) {
+			diagnostics.add(ContentDiagnosticRemoteResource, element, key)
+			continue
+		}
+		if key == "src" || key == "srcset" || key == "poster" {
+			parsed, err := url.Parse(strings.TrimSpace(attribute.Val))
+			if err == nil && parsed.Scheme != "" && !allowsLinkScheme(parsed.Scheme) {
+				diagnostics.add(ContentDiagnosticUnsafeURL, element, key)
+			}
+		}
+	}
+}
+
+func isRemoteResourceAttribute(attribute string) bool {
+	switch attribute {
+	case "action", "background", "cite", "data", "formaction", "href", "poster", "src", "srcset":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRemoteURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || !parsed.IsAbs() {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+func htmlAttributeValue(attributes []html.Attribute, key string) string {
+	for _, attribute := range attributes {
+		if strings.EqualFold(attribute.Key, key) {
+			return attribute.Val
+		}
+	}
+	return ""
 }
 
 func allowsLinkScheme(value string) bool {
@@ -204,7 +386,7 @@ func allowsHTMLElement(value string) bool {
 
 func dropsHTMLSubtree(value string) bool {
 	switch value {
-	case "audio", "embed", "iframe", "img", "math", "object", "script", "style", "svg", "template", "video":
+	case "applet", "audio", "base", "button", "canvas", "embed", "form", "frame", "frameset", "iframe", "img", "input", "link", "math", "noscript", "object", "option", "script", "select", "source", "style", "template", "textarea", "track", "video":
 		return true
 	default:
 		return false
@@ -312,6 +494,12 @@ func (renderer *plainTextRenderer) ignoreStructuralWhitespace(node *html.Node) b
 
 func (renderer *plainTextRenderer) renderElement(node *html.Node) {
 	name := strings.ToLower(node.Data)
+	if name == "img" {
+		if alt := htmlAttributeValue(node.Attr, "alt"); alt != "" {
+			renderer.appendRaw(alt)
+		}
+		return
+	}
 	if dropsPlainTextSubtree(name) {
 		return
 	}
@@ -628,7 +816,7 @@ func containsLinkTarget(targets []string, target string) bool {
 
 func dropsPlainTextSubtree(name string) bool {
 	switch name {
-	case "audio", "embed", "head", "iframe", "img", "math", "meta", "object", "script", "style", "svg", "template", "video":
+	case "applet", "audio", "base", "button", "canvas", "embed", "form", "frame", "frameset", "head", "iframe", "input", "link", "math", "meta", "noscript", "object", "option", "script", "select", "source", "style", "svg", "template", "textarea", "track", "video":
 		return true
 	default:
 		return false
