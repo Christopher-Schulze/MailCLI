@@ -71,7 +71,7 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 	}
 	document := mimeDocument{Complete: readErr == nil && !partial, skipNonTextBodies: skipNonTextBodies}
 	if readErr != nil {
-		document.MissingParts = append(document.MissingParts, "mime-decoding")
+		markMissingPart(&document, "mime-decoding")
 	}
 	header := messageMail.Header{Header: entity.Header}
 	if messageID, err := header.MessageID(); err == nil {
@@ -80,8 +80,7 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 	var replyToComplete bool
 	document.ReplyTo, replyToComplete = firstFormattedAddress(&header, "Reply-To")
 	if !replyToComplete {
-		document.Complete = false
-		document.MissingParts = append(document.MissingParts, "header:reply-to")
+		markMissingPart(&document, "header:reply-to")
 	}
 	document.To = documentRecipients(&document, &header, "To")
 	document.CC = documentRecipients(&document, &header, "Cc")
@@ -90,8 +89,7 @@ func parseMIMEDocument(reader io.Reader, partial bool, hashAttachments bool, ski
 		entity, nil, readErr, partial, hashAttachments, &document,
 	)
 	if walkErr != nil {
-		document.Complete = false
-		document.MissingParts = append(document.MissingParts, "mime-structure")
+		markMissingPart(&document, "mime-structure")
 	}
 	document.Content = representation.Text
 	return document, nil
@@ -157,8 +155,7 @@ func parseMIMEEntity(
 	document *mimeDocument,
 ) (mimeTextRepresentation, error) {
 	if partErr != nil {
-		document.Complete = false
-		document.MissingParts = append(document.MissingParts, mimePartID(path))
+		markMissingPart(document, mimePartID(path))
 	}
 	mediaType, parameters, contentTypeErr := entity.Header.ContentType()
 	if contentTypeErr != nil {
@@ -195,7 +192,7 @@ func parseMIMEEntity(
 			return mimeTextRepresentation{}, nil
 		}
 		size, digest, err := consumeMIMEAttachment(entity.Body, hashAttachments)
-		complete := err == nil && !missingAppleContent(
+		complete := partErr == nil && err == nil && !missingAppleContent(
 			entity.Header.Get("X-Apple-Content-Length"), size, true,
 		)
 		if document.Parts == nil {
@@ -204,6 +201,9 @@ func parseMIMEEntity(
 		document.Parts[partID] = mimePart{
 			ID: partID, Name: filename, MIMEType: mediaType, Size: size,
 			SHA256: digest, Complete: complete,
+		}
+		if !complete {
+			markMissingPart(document, partID)
 		}
 		return mimeTextRepresentation{}, nil
 	}
@@ -226,8 +226,7 @@ func parseMIMEEntity(
 		document.Complete = false
 	}
 	if hasAppleLength && partial && appleLength > int64(len(body)) {
-		document.Complete = false
-		document.MissingParts = append(document.MissingParts, partID)
+		markMissingPart(document, partID)
 		return mimeTextRepresentation{}, nil
 	}
 	rank := mimeTextPlain
@@ -401,11 +400,20 @@ func mimePartID(path []int) string {
 	return string(buf)
 }
 
+func markMissingPart(document *mimeDocument, identifier string) {
+	document.Complete = false
+	for _, existing := range document.MissingParts {
+		if existing == identifier {
+			return
+		}
+	}
+	document.MissingParts = append(document.MissingParts, identifier)
+}
+
 func documentRecipients(document *mimeDocument, header *messageMail.Header, key string) []mail.Recipient {
 	recipients, complete := headerRecipients(header, key)
 	if !complete {
-		document.Complete = false
-		document.MissingParts = append(document.MissingParts, "header:"+strings.ToLower(key))
+		markMissingPart(document, "header:"+strings.ToLower(key))
 	}
 	return recipients
 }
