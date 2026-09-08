@@ -515,6 +515,50 @@ func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 	assertNoSendClaim(t, root, draft.Ref)
 }
 
+func TestReconcileMirrorRetryArmsUnknownOutcomeBeforeAppend(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
+	}
+	first, err := service.GetDraft(draft.Ref)
+	if err != nil || first.SendAttempt == nil || first.SendAttempt.Transport == nil {
+		t.Fatalf("GetDraft() = %+v, error = %v", first, err)
+	}
+	firstMirrorID := first.SendAttempt.Transport.MirrorAttemptID
+	if firstMirrorID == "" || first.SendAttempt.Transport.MirrorOutcomeUnknown {
+		t.Fatalf("initial mirror evidence = %+v, want armed ID and known failure", first.SendAttempt.Transport)
+	}
+
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendOutcomeUnknown, Message: "final response lost"}
+	if _, err := service.ReconcileDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendOutcomeUnknown {
+		t.Fatalf("ReconcileDraft() error = %v, want unknown APPEND outcome", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil {
+		t.Fatalf("retained draft = %+v, error = %v", retained, err)
+	}
+	if retained.SendAttempt.Transport.MirrorAttemptID == "" ||
+		retained.SendAttempt.Transport.MirrorAttemptID == firstMirrorID ||
+		!retained.SendAttempt.Transport.MirrorOutcomeUnknown {
+		t.Fatalf("retry mirror evidence = %+v, want a new durable unknown attempt", retained.SendAttempt.Transport)
+	}
+	if mirror.calls != 2 {
+		t.Fatalf("mirror calls = %d, want initial plus one retry", mirror.calls)
+	}
+
+	if _, err := service.ReconcileDraft(context.Background(), draft.Ref); errorCode(err) != "send_mirror_outcome_unknown" {
+		t.Fatalf("second ReconcileDraft() error = %v, want replay block", err)
+	}
+	if mirror.calls != 2 {
+		t.Fatalf("mirror calls after replay block = %d, want 2", mirror.calls)
+	}
+}
+
 func TestReconcileMirrorPendingVerifiesExistingSentIdentity(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()

@@ -92,6 +92,14 @@ func newSendAttemptID() (string, error) {
 	return "send_" + base64.RawURLEncoding.EncodeToString(value[:]), nil
 }
 
+func newMirrorAttemptID() (string, error) {
+	id, err := newSendAttemptID()
+	if err != nil {
+		return "", fmt.Errorf("generate mirror attempt id: %w", err)
+	}
+	return "mirror_" + strings.TrimPrefix(id, "send_"), nil
+}
+
 type storedSendAttempt struct {
 	Version  int         `json:"version"`
 	DraftRef string      `json:"draft_ref"`
