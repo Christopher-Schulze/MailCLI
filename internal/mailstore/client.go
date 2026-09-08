@@ -179,6 +179,11 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		}
 		// IMAP fallback failed. Preserve both local and remote causes so the
 		// caller sees the full picture.
+		if rawErr != nil && hasLocal {
+			remoteErr := typedHydrationFailure(rawErr)
+			local.Hydration = messageHydrationDiagnostic(ctx, local, remoteErr)
+			return local, newHydrationError("read message", incompleteMessageCause(local), remoteErr)
+		}
 		if rawErr != nil && localErr != nil {
 			return mail.Message{}, newHydrationError("read message", localErr, rawErr)
 		}

@@ -506,6 +506,115 @@ func TestClientUsesRawMIMEForIncompleteBodyAndAttachmentFallback(t *testing.T) {
 	}
 }
 
+func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
+	tests := []struct {
+		name      string
+		fetchErr  error
+		wantCode  string
+		wantState mail.HydrationState
+	}{
+		{
+			name:      "authentication",
+			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "AUTHENTICATIONFAILED secret-token"},
+			wantCode:  transport.CodeIMAPAuthFailed,
+			wantState: mail.HydrationStateFailed,
+		},
+		{
+			name:      "size limit",
+			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPRawSourceTooLarge, Message: "announced 128 MiB"},
+			wantCode:  transport.CodeIMAPRawSourceTooLarge,
+			wantState: mail.HydrationStateFailed,
+		},
+		{
+			name:      "canceled",
+			fetchErr:  context.Canceled,
+			wantCode:  operationCanceledCode,
+			wantState: mail.HydrationStateCanceled,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			account := "partial-hydration-" + strings.ReplaceAll(test.name, " ", "-") + "@gmail.com"
+			installImapIdentityFixture(t, store, account)
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+			if err != nil {
+				t.Fatalf("ListMessages() error = %v", err)
+			}
+			messageRef := messageRefWithExpectedID(t, messageRefWithSubject(t, page.Messages, "Quarterly Report"), "<101@example.com>")
+			writeFixtureEMLX(t, store, 101, "imap://"+testAccountID+"/%5BGmail%5D/All", []byte(
+				"From: Alice <alice@example.com>\r\nSubject: Quarterly Report\r\n"+
+					"Message-ID: <101@example.com>\r\nContent-Type: text/plain; charset=x-mailcli-unknown\r\n\r\n"+
+					"partial body\r\n",
+			))
+			location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+			if err != nil {
+				t.Fatalf("parseMailboxURL() error = %v", err)
+			}
+			base, err := store.messageBasePath(location, 101)
+			if err != nil {
+				t.Fatalf("messageBasePath() error = %v", err)
+			}
+			if err := os.Rename(base+".emlx", base+".partial.emlx"); err != nil {
+				t.Fatalf("rename partial source: %v", err)
+			}
+			fakeImap := &stubImapOperator{
+				boxes: []transport.MailboxInfo{{Name: "INBOX"}}, fetchErr: test.fetchErr,
+			}
+			client := &Client{store: store, send: mail.SendTransport{
+				Imap: fakeImap, Credentials: stubCredentials{account: "secret"},
+			}}
+			message, err := client.GetMessage(context.Background(), messageRef)
+			if err == nil || message.Content != "partial body" || message.ContentComplete {
+				t.Fatalf("GetMessage() = %+v, error = %v; want retained incomplete content and error", message, err)
+			}
+			if transport.ErrorCode(err) != test.wantCode {
+				t.Fatalf("GetMessage() error code = %q, want %q: %v", transport.ErrorCode(err), test.wantCode, err)
+			}
+			var combined *hydrationError
+			if !errors.As(err, &combined) {
+				t.Fatalf("GetMessage() error type = %T, want hydrationError", err)
+			}
+			if message.Hydration == nil || message.Hydration.State != test.wantState ||
+				message.Hydration.AttemptedSource != "imap" || message.Hydration.Local == nil ||
+				message.Hydration.Local.Code != "raw_source_partial" || message.Hydration.Remote == nil ||
+				message.Hydration.Remote.Code != test.wantCode || message.Hydration.Remediation == "" {
+				t.Fatalf("hydration diagnostic = %+v", message.Hydration)
+			}
+			if strings.Contains(message.Hydration.Remote.Message, "secret-token") {
+				t.Fatalf("hydration diagnostic leaked protocol authentication text: %+v", message.Hydration.Remote)
+			}
+			if test.name == "canceled" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("GetMessage() error = %v, want context.Canceled cause", err)
+			}
+		})
+	}
+}
+
+func TestClientCompleteLocalReadSkipsHydration(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 1})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("ListMessages() = %+v, error = %v", page, err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		err:   &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "must not be called"},
+	}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap: fakeImap, Credentials: stubCredentials{"test@gmail.com": "secret"},
+	}}
+	message, err := client.GetMessage(context.Background(), page.Messages[0].Ref)
+	if err != nil || !message.ContentComplete || message.Hydration != nil {
+		t.Fatalf("GetMessage() = %+v, error = %v; want complete local read", message, err)
+	}
+	if fakeImap.listCalls != 0 || fakeImap.searchCalls != 0 || fakeImap.lastFetchMax != 0 {
+		t.Fatalf("complete local read contacted IMAP: list=%d search=%d fetch=%d", fakeImap.listCalls, fakeImap.searchCalls, fakeImap.lastFetchMax)
+	}
+}
+
 // A missing local source hydrates over IMAP and the returned message keeps
 // the store record's summary (ref, subject, sender, dates) so follow-up
 // commands can still reference the message.

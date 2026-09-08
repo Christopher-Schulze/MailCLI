@@ -315,7 +315,7 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	defer cancel()
 	message, err := service.GetMessage(operationCtx, *ref)
 	if err != nil {
-		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
+		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.get", responseData{Message: &message})
@@ -324,6 +324,51 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 		return 1
 	}
 	return 0
+}
+
+func failMessageRead(
+	command string,
+	jsonOutput bool,
+	message mail.Message,
+	err error,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	if message.Hydration == nil {
+		return failCommand(command, jsonOutput, err, stdout, stderr)
+	}
+	safeErr := hydrationCommandError(message.Hydration, err)
+	if jsonOutput {
+		return failCommandWithData(command, true, responseData{Message: &message}, safeErr, stdout, stderr)
+	}
+	if writeErr := writeMessage(stdout, message); writeErr != nil {
+		return 1
+	}
+	writeLine(stderr, safeErr)
+	return commandExitCode(safeErr)
+}
+
+func hydrationCommandError(diagnostic *mail.HydrationDiagnostic, fallback error) error {
+	code := "hydration_failed"
+	if diagnostic != nil && diagnostic.Remote != nil && diagnostic.Remote.Code != "" {
+		code = diagnostic.Remote.Code
+	}
+	if code == "hydration_failed" {
+		var typed codedError
+		if errors.As(fallback, &typed) && typed.ErrorCode() != "" {
+			code = typed.ErrorCode()
+		}
+	}
+	message := "message content is incomplete"
+	if diagnostic != nil {
+		if diagnostic.State == mail.HydrationStateCanceled {
+			message = "message hydration was canceled"
+		}
+		if diagnostic.Remediation != "" {
+			message += "; " + diagnostic.Remediation
+		}
+	}
+	return &commandError{code: code, message: message}
 }
 
 func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -574,6 +619,27 @@ func writeMessage(stdout io.Writer, message mail.Message) error {
 	}
 	if len(message.MissingParts) > 0 {
 		if _, err := fmt.Fprintf(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", ")); err != nil {
+			return err
+		}
+	}
+	if message.Hydration != nil {
+		if _, err := fmt.Fprintf(stdout, "Hydration state: %s\n", message.Hydration.State); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stdout, "Hydration source: %s\n", message.Hydration.AttemptedSource); err != nil {
+			return err
+		}
+		if cause := message.Hydration.Local; cause != nil {
+			if _, err := fmt.Fprintf(stdout, "Hydration local: %s: %s\n", cause.Code, cause.Message); err != nil {
+				return err
+			}
+		}
+		if cause := message.Hydration.Remote; cause != nil {
+			if _, err := fmt.Fprintf(stdout, "Hydration remote: %s: %s\n", cause.Code, cause.Message); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(stdout, "Hydration remediation: %s\n", message.Hydration.Remediation); err != nil {
 			return err
 		}
 	}
