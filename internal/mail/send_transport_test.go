@@ -532,22 +532,34 @@ func TestSendDraftMissingCredentialsBlocksSubmission(t *testing.T) {
 }
 
 func TestSendDraftRejectedSubmissionClearsClaimAndAllowsRetry(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "drafts")
-	submitter, mirror := sendTransportStubs()
-	submitter.err = &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "550 rejected"}
-	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
-	draft := createTransportDraft(t, service)
-
-	result, err := service.SendDraft(context.Background(), draft.Ref)
-	if errorCode(err) != "smtp_rejected" || result.AttemptID != "" {
-		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
+	cases := []struct {
+		name     string
+		message  string
+		guidance string
+	}{
+		{name: "transient", message: "final reply rejected: 451 4.3.0 Greylisted; transient final rejection", guidance: "transient final rejection"},
+		{name: "permanent", message: "final reply rejected: 550 5.7.1 Policy rejection; permanent final rejection", guidance: "permanent final rejection"},
 	}
-	assertNoSendClaim(t, root, draft.Ref)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			submitter, mirror := sendTransportStubs()
+			submitter.err = &transport.TransportError{Code: transport.CodeSMTPRejected, Message: tc.message}
+			service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+			draft := createTransportDraft(t, service)
 
-	submitter.err = nil
-	retry, err := service.SendDraft(context.Background(), draft.Ref)
-	if err != nil || retry.Outcome != SendOutcomeSent || submitter.calls != 2 {
-		t.Fatalf("retry SendDraft() = %+v, error = %v, submits = %d", retry, err, submitter.calls)
+			result, err := service.SendDraft(context.Background(), draft.Ref)
+			if errorCode(err) != transport.CodeSMTPRejected || result.AttemptID != "" || !strings.Contains(err.Error(), tc.guidance) {
+				t.Fatalf("SendDraft() = %+v, error = %v", result, err)
+			}
+			assertNoSendClaim(t, root, draft.Ref)
+
+			submitter.err = nil
+			retry, err := service.SendDraft(context.Background(), draft.Ref)
+			if err != nil || retry.Outcome != SendOutcomeSent || submitter.calls != 2 {
+				t.Fatalf("retry SendDraft() = %+v, error = %v, submits = %d", retry, err, submitter.calls)
+			}
+		})
 	}
 }
 
