@@ -177,14 +177,15 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
 	attempt.Transport = &TransportEvidence{
-		ServerResponse: submitEvidence.ServerResponse,
-		MessageID:      attempt.MessageID,
+		ServerResponse:     submitEvidence.ServerResponse,
+		MessageID:          attempt.MessageID,
+		SubmissionAccepted: true,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
 	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
 		return resultForAttempt(ref, attempt, true), &OperationError{
 			Code:    "send_state_unknown",
-			Message: fmt.Sprintf("the server accepted the message, but its Sent mirror state could not be armed safely: %v", err),
+			Message: fmt.Sprintf("SMTP submission was accepted, but the Sent-copy state could not be armed safely: %v", err),
 		}
 	}
 	result = resultForAttempt(ref, attempt, true)
@@ -391,7 +392,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	if attempt.Outcome == SendOutcomeAccepted {
 		return result, &OperationError{
 			Code:    "send_not_observed",
-			Message: "Mail.app accepted the send, but Sent still does not prove the exact message; the draft is retained and retries remain blocked",
+			Message: "Mail.app accepted the send request, but SMTP submission and an exact Sent copy are still not evidenced; the draft is retained and retries remain blocked",
 		}
 	}
 	return result, &OperationError{
@@ -417,7 +418,7 @@ func persistReconciledSend(
 	if err := replaceSendAttempt(root, ref, attempt); err != nil {
 		return result, &OperationError{
 			Code:    "send_reconcile_state_failed",
-			Message: fmt.Sprintf("sent message was observed, but the reconciled state could not be recorded: %v", err),
+			Message: fmt.Sprintf("the Sent copy was observed, but the reconciled state could not be recorded: %v", err),
 		}
 	}
 	return finishObservedSend(lease, root, ref, attempt, true)
@@ -515,7 +516,7 @@ func (s *Service) reconcileUnknownViaImap(
 		if err := replaceSendAttempt(root, ref, attempt); err != nil {
 			return result, &OperationError{
 				Code:    "send_reconcile_state_failed",
-				Message: fmt.Sprintf("the sent message was located over IMAP, but the reconciled state could not be recorded: %v", err),
+				Message: fmt.Sprintf("the Sent copy was located over IMAP, but the reconciled state could not be recorded: %v", err),
 			}
 		}
 		return finishObservedSend(lease, root, ref, attempt, true)
@@ -534,7 +535,7 @@ func unverifiableSendError(attempt SendAttempt, draft Draft, finding string) err
 	return &OperationError{
 		Code: "send_outcome_unverifiable",
 		Message: fmt.Sprintf(
-			"send outcome unknown: %s (Message-ID %s, started %s, recipients %s); verify the message in the Sent or spam folder manually, or discard the draft to stop reconciliation",
+			"send outcome unknown: %s (Message-ID %s, started %s, recipients %s); SMTP submission and recipient delivery are unverified; verify the message in the Sent or spam folder manually, or discard the draft to stop reconciliation",
 			finding, attempt.MessageID, attempt.StartedAt.Format(time.RFC3339),
 			strings.Join(recipients, ", "),
 		),
@@ -723,7 +724,7 @@ func (s *Service) reconcileMirrorPending(
 	if err := replaceSendAttempt(root, ref, attempt); err != nil {
 		return result, &OperationError{
 			Code:    "send_reconcile_state_failed",
-			Message: fmt.Sprintf("the sent message was mirrored, but the reconciled state could not be recorded: %v", err),
+			Message: fmt.Sprintf("the Sent copy was mirrored, but the reconciled state could not be recorded: %v", err),
 		}
 	}
 	return finishObservedSend(lease, root, ref, attempt, true)

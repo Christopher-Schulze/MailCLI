@@ -29,8 +29,8 @@ func missingCredentialsError(sender string) error {
 }
 
 func mirrorPendingError(err error) error {
-	message := "the message was accepted by the SMTP server, but mirroring it into the Sent mailbox failed; " +
-		"the draft is retained and the send itself will not be retried"
+	message := "SMTP submission was accepted, but the Sent copy was not observed because mirroring failed; " +
+		"recipient delivery is unverified, the draft is retained, and the submission will not be retried"
 	code := transport.ErrorCode(err)
 	if code == "" {
 		code = "send_mirror_pending"
@@ -162,8 +162,9 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 		return TransportEvidence{}, err
 	}
 	evidence = TransportEvidence{
-		ServerResponse: submitEvidence.ServerResponse,
-		MessageID:      submitEvidence.MessageID,
+		ServerResponse:     submitEvidence.ServerResponse,
+		MessageID:          submitEvidence.MessageID,
+		SubmissionAccepted: true,
 	}
 	appendEvidence, err := mirrorComposedMessage(
 		ctx,

@@ -97,7 +97,7 @@ func runDraftReconcile(ctx context.Context, service *mail.Service, args []string
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.reconcile", responseData{SendResult: &result})
 	}
-	writeFormat(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
+	writeHumanSendResult(stdout, result)
 	return 0
 }
 
@@ -316,8 +316,8 @@ func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.Sen
 	if jsonOutput {
 		return writeSuccess(stdout, command, responseData{SendReceipt: &receipt})
 	}
-	writeFormat(stdout, "Draft: %s\nOutcome: %s\nAttempt: %s\nAccepted: %t\nStarted: %s\nCompleted: %s\nExpires: %s\n",
-		receipt.DraftRef, receipt.Outcome, receipt.AttemptID, receipt.Accepted,
+	writeFormat(stdout, "Draft: %s\nOutcome: %s\nAttempt: %s\nSMTP submission accepted: %t\nSent copy observed: %t\nStarted: %s\nCompleted: %s\nExpires: %s\n",
+		receipt.DraftRef, receipt.Outcome, receipt.AttemptID, receipt.SubmissionAccepted, receipt.SentCopyObserved,
 		receipt.StartedAt.Format(time.RFC3339), receipt.CompletedAt.Format(time.RFC3339),
 		receipt.ExpiresAt.Format(time.RFC3339))
 	if receipt.MessageID != "" {
@@ -384,8 +384,13 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.send", responseData{SendResult: &result})
 	}
-	writeFormat(stdout, "%s\t%s\n", result.Outcome, result.DraftRef)
+	writeHumanSendResult(stdout, result)
 	return 0
+}
+
+func writeHumanSendResult(stdout io.Writer, result mail.SendResult) {
+	writeFormat(stdout, "%s\t%s\tsubmission_accepted=%t\tsent_copy_observed=%t\n",
+		result.Outcome, result.DraftRef, result.SubmissionAccepted, result.SentCopyObserved)
 }
 
 func runDraftDiscard(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

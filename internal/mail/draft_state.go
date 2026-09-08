@@ -142,13 +142,22 @@ func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, er
 	return draft, err
 }
 
+func submissionAcceptedForAttempt(attempt SendAttempt) bool {
+	if attempt.Transport == nil {
+		return false
+	}
+	return attempt.Transport.SubmissionAccepted || strings.TrimSpace(attempt.Transport.ServerResponse) != ""
+}
+
 func resultForAttempt(ref string, attempt SendAttempt, draftRetained bool) SendResult {
 	return SendResult{
 		DraftRef: ref, AttemptID: attempt.ID, Outcome: attempt.Outcome,
-		Accepted:          attempt.AcceptedByMail,
-		InvocationStarted: attempt.InvocationStarted, AcceptedByMail: attempt.AcceptedByMail,
-		SentStoreObserved: attempt.SentStoreObserved, ObservedMessageRef: attempt.ObservedMessageRef,
-		DraftRetained: draftRetained,
+		Accepted:           attempt.AcceptedByMail,
+		SubmissionAccepted: submissionAcceptedForAttempt(attempt),
+		InvocationStarted:  attempt.InvocationStarted, AcceptedByMail: attempt.AcceptedByMail,
+		SentStoreObserved: attempt.SentStoreObserved, SentCopyObserved: attempt.SentStoreObserved,
+		ObservedMessageRef: attempt.ObservedMessageRef,
+		DraftRetained:      draftRetained,
 	}
 }
 
@@ -200,7 +209,7 @@ func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendA
 			return result, &OperationError{
 				Code: "send_cleanup_failed",
 				Message: fmt.Sprintf(
-					"sent message was already observed, but local draft cleanup failed: %v", err,
+					"the Sent copy was already observed, but local draft cleanup failed: %v", err,
 				),
 			}
 		}
@@ -209,13 +218,13 @@ func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendA
 	case SendOutcomeMirrorPending:
 		return result, &OperationError{
 			Code: "send_mirror_pending",
-			Message: "the message was accepted by SMTP but the Sent mirror is incomplete; " +
-				"run 'mailcli drafts reconcile --ref " + ref + "' to finish mirroring; the send itself will not be retried",
+			Message: "SMTP submission was accepted, but the Sent copy is not observed; " +
+				"recipient delivery is unverified; run 'mailcli drafts reconcile --ref " + ref + "' to finish mirroring; the submission will not be retried",
 		}
 	case SendOutcomeAccepted:
 		return result, &OperationError{
 			Code:    "send_not_observed",
-			Message: "Mail.app accepted the send, but Sent does not prove the exact message; the draft is retained and retries are blocked",
+			Message: "Mail.app accepted the send request, but SMTP submission and an exact Sent copy are not evidenced; the draft is retained and retries are blocked",
 		}
 	default:
 		return result, &OperationError{

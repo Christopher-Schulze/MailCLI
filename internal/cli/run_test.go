@@ -533,8 +533,30 @@ func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
 	if code := runDraftInspect(service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("runDraftInspect() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"send_receipt"`) || strings.Contains(stdout.String(), "private body") || strings.Contains(stdout.String(), `"draft"`) {
+	if !strings.Contains(stdout.String(), `"send_receipt"`) ||
+		!strings.Contains(stdout.String(), `"submission_accepted":true`) ||
+		!strings.Contains(stdout.String(), `"sent_copy_observed":true`) ||
+		strings.Contains(stdout.String(), "private body") || strings.Contains(stdout.String(), `"draft"`) {
 		t.Fatalf("consumed inspect output = %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDraftInspect(service, []string{"--ref", draft.Ref}, &stdout, &stderr); code != 0 {
+		t.Fatalf("human runDraftInspect() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SMTP submission accepted: true") ||
+		!strings.Contains(stdout.String(), "Sent copy observed: true") ||
+		strings.Contains(stdout.String(), "Accepted:") || strings.Contains(stdout.String(), "delivered") {
+		t.Fatalf("human consumed inspect output = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDraftSend(context.Background(), service, []string{"--ref", draft.Ref, "--confirm"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("human replay send code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "submission_accepted=true") ||
+		!strings.Contains(stdout.String(), "sent_copy_observed=true") || strings.Contains(stdout.String(), "delivered") {
+		t.Fatalf("human replay send output = %q", stdout.String())
 	}
 }
 
@@ -579,9 +601,19 @@ func TestDraftSendMirrorPendingJSONPreservesOutcomeEvidence(t *testing.T) {
 		!strings.Contains(stdout.String(), `"ok":false`) ||
 		!strings.Contains(stdout.String(), `"code":"imap_append_failed"`) ||
 		!strings.Contains(stdout.String(), `"outcome":"sent_mirror_pending"`) ||
+		!strings.Contains(stdout.String(), `"submission_accepted":true`) ||
+		!strings.Contains(stdout.String(), `"sent_copy_observed":false`) ||
 		!strings.Contains(stdout.String(), `"draft_retained":true`) ||
-		!strings.Contains(stdout.String(), `"attempt_id":"`) {
+		!strings.Contains(stdout.String(), `"attempt_id":"`) || strings.Contains(stdout.String(), "delivered") {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	summaries, err := service.ListDrafts()
+	if err != nil {
+		t.Fatalf("ListDrafts() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].SendAttempt == nil ||
+		!summaries[0].SendAttempt.SubmissionAccepted || summaries[0].SendAttempt.SentCopyObserved {
+		t.Fatalf("mirror-pending summary = %+v, want accepted submission without observed Sent copy", summaries)
 	}
 }
 

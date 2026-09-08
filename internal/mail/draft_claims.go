@@ -285,6 +285,8 @@ func receiptFromAttempt(ref string, attempt SendAttempt) SendReceipt {
 		CompletedAt:        attempt.UpdatedAt,
 		Outcome:            attempt.Outcome,
 		Accepted:           attempt.AcceptedByMail || attempt.SentStoreObserved,
+		SubmissionAccepted: submissionAcceptedForAttempt(attempt),
+		SentCopyObserved:   attempt.SentStoreObserved,
 		ObservedMessageRef: attempt.ObservedMessageRef,
 	}
 	receipt.ExpiresAt = receipt.CompletedAt.Add(SendReceiptRetention)
@@ -302,11 +304,24 @@ func receiptFromAttempt(ref string, attempt SendAttempt) SendReceipt {
 	return receipt
 }
 
+func normalizeSendReceipt(receipt SendReceipt) SendReceipt {
+	if !receipt.SubmissionAccepted && strings.TrimSpace(receipt.ServerResponse) != "" {
+		receipt.SubmissionAccepted = true
+	}
+	if !receipt.SentCopyObserved && (receipt.Outcome == SendOutcomeObserved || receipt.Outcome == SendOutcomeSent) {
+		receipt.SentCopyObserved = true
+	}
+	return receipt
+}
+
 func resultForReceipt(receipt SendReceipt) SendResult {
+	receipt = normalizeSendReceipt(receipt)
 	return SendResult{
 		DraftRef: receipt.DraftRef, AttemptID: receipt.AttemptID, Outcome: receipt.Outcome,
-		Accepted: receipt.Accepted, InvocationStarted: true, AcceptedByMail: receipt.Accepted,
-		SentStoreObserved: true, DraftRetained: false, Replayed: true,
+		Accepted: receipt.Accepted, SubmissionAccepted: receipt.SubmissionAccepted,
+		InvocationStarted: true, AcceptedByMail: receipt.Accepted,
+		SentStoreObserved: receipt.SentCopyObserved, SentCopyObserved: receipt.SentCopyObserved,
+		DraftRetained: false, Replayed: true,
 		Receipt: &receipt,
 	}
 }
@@ -354,6 +369,7 @@ func readSendReceipt(root string, ref string) (*SendReceipt, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt must contain exactly one JSON object"}
 	}
+	stored.Receipt = normalizeSendReceipt(stored.Receipt)
 	if !validSendReceipt(stored, ref) {
 		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt is invalid"}
 	}
@@ -395,7 +411,8 @@ func sendReceiptsEqual(left SendReceipt, right SendReceipt) bool {
 	return left.DraftRef == right.DraftRef && left.AttemptID == right.AttemptID &&
 		left.StartedAt.Equal(right.StartedAt) && left.CompletedAt.Equal(right.CompletedAt) &&
 		left.ExpiresAt.Equal(right.ExpiresAt) && left.Outcome == right.Outcome &&
-		left.Accepted == right.Accepted && left.ObservedMessageRef == right.ObservedMessageRef &&
+		left.Accepted == right.Accepted && left.SubmissionAccepted == right.SubmissionAccepted &&
+		left.SentCopyObserved == right.SentCopyObserved && left.ObservedMessageRef == right.ObservedMessageRef &&
 		left.MessageID == right.MessageID &&
 		left.ServerResponse == right.ServerResponse && left.SentMailbox == right.SentMailbox &&
 		left.UIDValidity == right.UIDValidity && left.UID == right.UID &&
@@ -403,6 +420,7 @@ func sendReceiptsEqual(left SendReceipt, right SendReceipt) bool {
 }
 
 func persistSendReceipt(root string, ref string, receipt SendReceipt) error {
+	receipt = normalizeSendReceipt(receipt)
 	if !validSendReceipt(storedSendReceipt{Version: 1, DraftRef: ref, Receipt: receipt}, ref) {
 		return &OperationError{Code: "send_receipt_invalid", Message: "terminal send receipt is invalid"}
 	}
@@ -453,7 +471,9 @@ func ensureSendReceipt(root string, ref string, attempt SendAttempt) (*SendRecei
 			return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send receipt has expired; the retained claim remains available for explicit recovery"}
 		}
 		if receipt.DraftRef != derived.DraftRef || receipt.AttemptID != derived.AttemptID ||
-			receipt.Outcome != derived.Outcome || receipt.Accepted != derived.Accepted {
+			receipt.Outcome != derived.Outcome || receipt.Accepted != derived.Accepted ||
+			receipt.SubmissionAccepted != derived.SubmissionAccepted ||
+			receipt.SentCopyObserved != derived.SentCopyObserved {
 			return nil, &OperationError{Code: "send_receipt_conflict", Message: "the terminal send receipt does not match the retained send attempt"}
 		}
 		return receipt, nil

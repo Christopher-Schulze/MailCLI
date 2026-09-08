@@ -255,7 +255,7 @@ mailcli send setup --from me@example.com
 mailcli drafts send --ref DRAFT_REF --confirm --json
 ```
 
-`send setup` prompts for the app-specific password once per account with no echo and stores it in the Keychain; MailCLI never displays, logs, or returns it, and `--remove` deletes the stored credential. A confirmed send reports outcome `sent` with the server's final SMTP response and the Message-ID as evidence. If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending`: the message was delivered, MailCLI never resends it, and the retained claim stays reconcilable with `drafts reconcile`. Missing credentials fail with `smtp_credentials_missing` and remediation naming `mailcli send setup`.
+`send setup` prompts for the app-specific password once per account with no echo and stores it in the Keychain; MailCLI never displays, logs, or returns it, and `--remove` deletes the stored credential. A confirmed send reports compatibility outcome `sent` with canonical `submission_accepted:true` (the SMTP server returned its final 2yz response after DATA) and `sent_copy_observed:true` (the exact message was persisted in Sent); neither field confirms recipient delivery. If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending` with `submission_accepted:true` and `sent_copy_observed:false`: recipient delivery is unverified, MailCLI never resends the submission, and the retained claim stays reconcilable with `drafts reconcile`. Missing credentials fail with `smtp_credentials_missing` and remediation naming `mailcli send setup`.
 
 ### Reply, forward, and organize
 
