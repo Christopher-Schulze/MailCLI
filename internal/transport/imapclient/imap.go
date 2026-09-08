@@ -6,8 +6,8 @@
 //   - Initial greeting (ignored).
 //   - LOGIN with quoted credentials.
 //   - LIST "" "*" for mailbox discovery.
-//   - SELECT to make a mailbox active for SEARCH.
-//   - SEARCH HEADER Message-ID "<id>".
+//   - SELECT to make a mailbox active for SEARCH and UID SEARCH.
+//   - SEARCH HEADER Message-ID "<id>" plus exact UID FETCH verification.
 //   - APPEND <mailbox> (\Seen) {length} with a synchronizing literal.
 //   - LOGOUT.
 //
@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	mail "net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ const (
 	maxListResponseBytes     = 8 << 20
 	maxListLiteralCount      = 128
 	maxUIDSearchResults      = 100000
+	maxMessageIDHeaderBytes  = 1 << 20
 )
 
 // AppendToSent implements transport.SentMirror. It runs on its own dedicated
@@ -132,7 +134,13 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		return empty, err
 	}
 
-	if matchCount > 0 {
+	if matchCount > 1 {
+		return empty, ambiguousMessageIDError(sentBox, messageID, matchCount)
+	}
+	if matchCount == 1 {
+		if err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID); err != nil {
+			return empty, err
+		}
 		_ = c.doLogout(ctx, sess, sess.nextTag())
 		return transport.AppendEvidence{
 			Mailbox: sentBox, Appended: false, MatchCount: matchCount,
@@ -152,16 +160,93 @@ func (c *Client) AppendToSentReader(ctx context.Context, cfg transport.ImapConfi
 		)
 	}
 	if matchCount > 1 {
-		return empty, &transport.TransportError{
-			Code:    transport.CodeIMAPAmbiguousMessageID,
-			Message: fmt.Sprintf("Sent mailbox contains %d messages with Message-ID %s after APPEND", matchCount, messageID),
+		return empty, ambiguousMessageIDError(sentBox, messageID, matchCount)
+	}
+	if err := c.verifySingleSentMatch(ctx, sess, sentBox, messageID); err != nil {
+		if transport.ErrorCode(err) == transport.CodeIMAPAmbiguousMessageID {
+			return empty, err
 		}
+		return empty, appendOutcomeUnknown(err)
 	}
 
 	_ = c.doLogout(ctx, sess, sess.nextTag())
 	return transport.AppendEvidence{
-		Mailbox: sentBox, Appended: true, MatchCount: matchCount,
+		Mailbox: sentBox, Appended: true, MatchCount: 1,
 	}, nil
+}
+
+func (c *Client) verifySingleSentMatch(ctx context.Context, sess *session, mailbox, messageID string) error {
+	uids, err := c.doUIDSearch(ctx, sess, sess.nextTag(), messageID)
+	if err != nil {
+		return err
+	}
+	if len(uids) != 1 {
+		if len(uids) > 1 {
+			return ambiguousMessageIDError(mailbox, messageID, len(uids))
+		}
+		return messageIDNotFoundError(0, messageID)
+	}
+	return c.verifyMessageID(ctx, sess, uids[0], messageID)
+}
+
+func ambiguousMessageIDError(mailbox, messageID string, count int) error {
+	return &transport.TransportError{
+		Code: transport.CodeIMAPAmbiguousMessageID,
+		Message: fmt.Sprintf(
+			"Sent mailbox %q contains %d messages with Message-ID %s",
+			mailbox, count, messageID,
+		),
+	}
+}
+
+func (c *Client) verifyMessageID(ctx context.Context, sess *session, uid uint32, messageID string) error {
+	if err := validateMessageUID(uid); err != nil {
+		return err
+	}
+	normalizedMessageID, err := normalizeMessageID(messageID)
+	if err != nil {
+		return err
+	}
+	tag := sess.nextTag()
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH deadline")
+	}
+	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])", tag, uid)
+	if err := c.writeLine(sess, cmd); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH write")
+	}
+	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes)
+	if err != nil {
+		return err
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return messageIDNotFoundError(uid, normalizedMessageID)
+	}
+	var values []string
+	for key, headers := range message.Header {
+		if strings.EqualFold(key, "Message-ID") {
+			values = append(values, headers...)
+		}
+	}
+	if len(values) != 1 {
+		return messageIDNotFoundError(uid, normalizedMessageID)
+	}
+	actual, err := normalizeMessageID(strings.TrimSpace(values[0]))
+	if err != nil || actual != normalizedMessageID {
+		return messageIDNotFoundError(uid, normalizedMessageID)
+	}
+	return nil
+}
+
+func messageIDNotFoundError(uid uint32, messageID string) error {
+	return &transport.TransportError{
+		Code: transport.CodeIMAPMessageNotFound,
+		Message: fmt.Sprintf(
+			"IMAP candidate UID %d did not contain the exact Message-ID %s",
+			uid, messageID,
+		),
+	}
 }
 
 // mailbox carries the parsed name and special-use flags for a LIST response.
