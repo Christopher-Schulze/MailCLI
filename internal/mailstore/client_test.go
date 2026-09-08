@@ -131,7 +131,9 @@ type stubImapOperator struct {
 	searchCalls   int
 	// statusErr scripts per-mailbox CheckStatus failures for sync-check
 	// tests; absent mailboxes report s.status.
-	statusErr map[string]error
+	statusErr         map[string]error
+	statusByMailbox   map[string]transport.MailboxStatus
+	listErrByUsername map[string]error
 	// fetchErr scripts an IMAP fetch failure for raw-source tests.
 	fetchErr error
 	// lastFetchMax records the bound the last FetchMessage carried.
@@ -164,6 +166,9 @@ func (s *stubImapOperator) AppendToSent(ctx context.Context, cfg transport.ImapC
 
 func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
 	s.listCalls++
+	if err, ok := s.listErrByUsername[cfg.Username]; ok {
+		return s.boxes, err
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -301,6 +306,9 @@ func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapCo
 	}
 	if err, ok := s.statusErr[mailbox]; ok {
 		return transport.MailboxStatus{}, err
+	}
+	if status, ok := s.statusByMailbox[mailbox]; ok {
+		return status, nil
 	}
 	return s.status, nil
 }
@@ -1215,6 +1223,298 @@ func TestSyncCheckReportsFailingMailbox(t *testing.T) {
 	}
 }
 
+// A mailbox returned only by IMAP still gets a server count and exact wire
+// identity, but its missing local side keeps coverage incomplete.
+func TestSyncCheckReportsServerOnlyMailbox(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "server-only-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+			{
+				Name: "Projects.2026", WireName: "Projects.2026", DisplayName: "Projects.2026",
+				DisplayPath: []string{"Projects", "2026"}, Delimiter: ".",
+			},
+		},
+		statusByMailbox: map[string]transport.MailboxStatus{
+			"Projects.2026": {Messages: 7, Unseen: 2},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"server-only-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	var found *mail.MailboxDelta
+	for index := range result.Mailboxes {
+		if result.Mailboxes[index].State == mail.MailboxDeltaStateServerOnly {
+			found = &result.Mailboxes[index]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("Mailboxes = %+v, want server-only entry", result.Mailboxes)
+	}
+	if found.Name != "2026" || strings.Join(found.Path, "/") != "Projects/2026" ||
+		found.ServerName != "Projects.2026" || found.LocalMessagesAvailable ||
+		!found.ServerMessagesAvailable || found.ServerMessages != 7 || found.Unseen != 2 ||
+		found.MailboxRef == "" {
+		t.Fatalf("server-only delta = %+v, want missing-local state with exact server identity", *found)
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite a server-only mailbox")
+	}
+	missingLocal := false
+	for _, failure := range result.Failures {
+		if failure.Mailbox == "Projects.2026" && failure.Code == syncCheckMissingLocalMailboxCode {
+			missingLocal = true
+		}
+	}
+	if !missingLocal {
+		t.Fatalf("Failures = %+v, want missing-local evidence", result.Failures)
+	}
+}
+
+// A local mailbox absent from a complete server list remains visible as a
+// local-only identity instead of being dropped with its local count.
+func TestSyncCheckReportsLocalOnlyMailbox(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "local-only-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"local-only-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	found := false
+	for _, delta := range result.Mailboxes {
+		if delta.State == mail.MailboxDeltaStateLocalOnly && delta.Name == "All" {
+			found = true
+			if delta.LocalMessages != 1 || !delta.LocalMessagesAvailable || delta.ServerMessagesAvailable {
+				t.Fatalf("local-only delta = %+v, want local evidence only", delta)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Mailboxes = %+v, want local-only All entry", result.Mailboxes)
+	}
+	if result.Complete {
+		t.Fatal("Complete = true despite a local-only mailbox")
+	}
+}
+
+// A cached local identity without an Envelope Index count is retained, but a
+// server STATUS count cannot be presented as a comparable delta.
+func TestSyncCheckReportsUnavailableLocalCount(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "unavailable-local-sync@gmail.com")
+	cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>[Gmail]</key><dict>
+<key>MailboxPathComponent</key><string>[Gmail]</string>
+<key>IMAPMailboxChildren</key><dict><key>Archive</key><dict>
+<key>MailboxPathComponent</key><string>Archive</string>
+<key>IMAPMailboxChildren</key><dict/></dict><key>Sent</key><dict>
+<key>MailboxPathComponent</key><string>Sent</string>
+<key>IMAPMailboxAttributes</key><integer>32768</integer>
+<key>IMAPMailboxChildren</key><dict/></dict></dict></dict></dict></dict></plist>`)
+	accountRoot := filepath.Join(store.versionRoot, testAccountID)
+	if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), cache, 0o600); err != nil {
+		t.Fatalf("write unavailable-count mailbox cache: %v", err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}, {Name: "Sent"}, {Name: "Archive"}},
+		statusByMailbox: map[string]transport.MailboxStatus{
+			"Archive": {Messages: 9, Unseen: 3},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"unavailable-local-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	var found bool
+	for _, delta := range result.Mailboxes {
+		if delta.Name != "Archive" {
+			continue
+		}
+		found = true
+		if delta.State != mail.MailboxDeltaStateUnresolved || delta.LocalMessagesAvailable ||
+			!delta.ServerMessagesAvailable || delta.ServerMessages != 9 || delta.Unseen != 3 || delta.Delta != 0 {
+			t.Fatalf("Archive delta = %+v, want unresolved server evidence without a delta", delta)
+		}
+	}
+	if !found || result.Complete {
+		t.Fatalf("SyncCheck() = %+v, want unresolved Archive and incomplete coverage", result)
+	}
+	for _, failure := range result.Failures {
+		if failure.Mailbox == "Archive" && failure.Code == syncCheckLocalMessagesUnavailableCode {
+			return
+		}
+	}
+	t.Fatalf("Failures = %+v, want unavailable-local-count evidence", result.Failures)
+}
+
+// A server LIST failure makes the account catalog incomplete before any
+// mailbox pairing is attempted.
+func TestSyncCheckReportsServerCatalogFailure(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "list-failure-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		listErrByUsername: map[string]error{
+			"list-failure-sync@gmail.com": &transport.TransportError{
+				Code: transport.CodeIMAPTimeout, Message: "IMAP LIST deadline",
+			},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"list-failure-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Mailboxes) == 0 || len(result.Failures) != 1 ||
+		result.Failures[0].Code != transport.CodeIMAPTimeout || result.Complete {
+		t.Fatalf("SyncCheck() = %+v, want unresolved local evidence plus one server-list failure", result)
+	}
+	for _, delta := range result.Mailboxes {
+		if delta.State != mail.MailboxDeltaStateUnresolved || !delta.LocalMessagesAvailable ||
+			delta.ServerMessagesAvailable {
+			t.Fatalf("mailbox delta = %+v, want unresolved local evidence only", delta)
+		}
+	}
+}
+
+// A transport may retain mailbox entries parsed before a LIST failure. Those
+// known entries remain useful, while local identities missing from the partial
+// catalog stay unresolved and the account remains incomplete.
+func TestSyncCheckRetainsPartialServerCatalogOnFailure(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "partial-list-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		listErrByUsername: map[string]error{
+			"partial-list-sync@gmail.com": &transport.TransportError{
+				Code: transport.CodeIMAPTimeout, Message: "partial IMAP LIST deadline",
+			},
+		},
+		statusByMailbox: map[string]transport.MailboxStatus{
+			"INBOX": {Messages: 4, Unseen: 1},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap:        fakeImap,
+			Credentials: stubCredentials{"partial-list-sync@gmail.com": "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	var matchedInbox, unresolvedLocal bool
+	for _, delta := range result.Mailboxes {
+		switch {
+		case delta.State == mail.MailboxDeltaStateMatched && delta.Name == "INBOX":
+			matchedInbox = delta.ServerMessages == 4 && delta.Unseen == 1 &&
+				delta.ServerName == "INBOX"
+		case delta.State == mail.MailboxDeltaStateUnresolved:
+			unresolvedLocal = delta.LocalMessagesAvailable && !delta.ServerMessagesAvailable
+		}
+	}
+	if !matchedInbox || !unresolvedLocal || result.Complete {
+		t.Fatalf("SyncCheck() = %+v, want retained matched evidence, unresolved local evidence and incomplete coverage", result)
+	}
+	if len(result.Failures) == 0 || result.Failures[0].Code != transport.CodeIMAPTimeout {
+		t.Fatalf("Failures = %+v, want partial LIST timeout evidence", result.Failures)
+	}
+}
+
+// A healthy account remains useful when a later account cannot complete its
+// server LIST. The result keeps the successful mailbox evidence and marks the
+// global coverage incomplete.
+func TestSyncCheckRetainsOtherAccountsWhenOneServerCatalogFails(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "multi-primary-sync@gmail.com")
+	secondaryRef := addSyncImapAccount(t, store, "multi-secondary-sync@gmail.com")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+		},
+		listErrByUsername: map[string]error{
+			"multi-secondary-sync@gmail.com": &transport.TransportError{
+				Code: transport.CodeIMAPTimeout, Message: "secondary IMAP LIST deadline",
+			},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap: fakeImap,
+			Credentials: stubCredentials{
+				"multi-primary-sync@gmail.com":   "secret",
+				"multi-secondary-sync@gmail.com": "secret",
+			},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	foundPrimary := false
+	for _, delta := range result.Mailboxes {
+		if delta.AccountRef != secondaryRef && delta.State == mail.MailboxDeltaStateMatched {
+			foundPrimary = true
+			break
+		}
+	}
+	if !foundPrimary {
+		t.Fatalf("Mailboxes = %+v, want successful primary-account evidence", result.Mailboxes)
+	}
+	foundSecondaryFailure := false
+	for _, failure := range result.Failures {
+		if failure.Account == "multi-secondary-sync@gmail.com" && failure.Code == transport.CodeIMAPTimeout {
+			foundSecondaryFailure = true
+		}
+	}
+	if !foundSecondaryFailure || result.Complete {
+		t.Fatalf("SyncCheck() = %+v, want retained primary evidence and incomplete secondary coverage", result)
+	}
+}
+
 func TestSyncCheckReportsAmbiguousSpecialMailboxMapping(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -1408,6 +1708,67 @@ func TestFailureCodeMapping(t *testing.T) {
 	if got := failureCode(ctx, errTestPlain{}); got != "sync_check_failed" {
 		t.Fatalf("plain error = %q, want sync_check_failed", got)
 	}
+}
+
+const secondarySyncAccountID = "CCCCCCCC-DDDD-4EEE-8FFF-000000000000"
+
+func addSyncImapAccount(t *testing.T, store *Store, address string) string {
+	t.Helper()
+	location, err := parseAccountRoot("imap://" + secondarySyncAccountID + "/")
+	if err != nil {
+		t.Fatalf("parse secondary sync account: %v", err)
+	}
+	store.activeAccounts = append(store.activeAccounts, location)
+	store.activeAccountKeys[location.rootKey()] = struct{}{}
+	accountRoot := filepath.Join(store.versionRoot, secondarySyncAccountID)
+	if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+		t.Fatalf("create secondary sync account root: %v", err)
+	}
+	cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>[Gmail]</key><dict>
+<key>MailboxPathComponent</key><string>[Gmail]</string>
+<key>IMAPMailboxChildren</key><dict><key>Sent</key><dict>
+<key>MailboxPathComponent</key><string>Sent</string>
+<key>IMAPMailboxAttributes</key><integer>32768</integer>
+<key>IMAPMailboxChildren</key><dict/>
+</dict></dict></dict></dict></dict></plist>`)
+	if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), cache, 0o600); err != nil {
+		t.Fatalf("write secondary sync mailbox cache: %v", err)
+	}
+	databasePath := filepath.Join(store.versionRoot, "MailData", envelopeIndexName)
+	writer := openTestWriter(t, databasePath)
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{
+			query: `INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source)
+				VALUES (5,'imap://` + secondarySyncAccountID + `/%5BGmail%5D/Sent',0,0,0,1)`,
+		},
+		{query: `INSERT INTO addresses(ROWID,address,comment) VALUES (4,?,?)`, args: []any{address, "Secondary"}},
+		{query: `INSERT INTO subjects(ROWID,subject) VALUES (1901,'Secondary sent identity')`},
+		{query: `INSERT INTO summaries(ROWID,summary) VALUES (2901,'secondary sent identity')`},
+		{
+			query: `INSERT INTO messages(
+				ROWID,message_id,global_message_id,sender,subject,summary,date_sent,date_received,
+				mailbox,flags,read,flagged,deleted,size,conversation_id,type,display_date,flag_color
+			) VALUES (901,3901,4901,4,1901,2901,50,50,5,0,1,0,0,100,901,0,50,0)`,
+		},
+	}
+	for _, statement := range statements {
+		if _, err := writer.Exec(statement.query, statement.args...); err != nil {
+			closeTestResourceNow(t, writer, "secondary sync account writer")
+			t.Fatalf("execute secondary sync account fixture: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close secondary sync account writer: %v", err)
+	}
+	ref, err := mailref.EncodeAccount(secondarySyncAccountID)
+	if err != nil {
+		t.Fatalf("encode secondary sync account ref: %v", err)
+	}
+	return ref
 }
 
 type errTestPlain struct{}

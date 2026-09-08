@@ -455,15 +455,32 @@ type SyncResult struct {
 	Triggered  bool   `json:"triggered"`
 }
 
+// MailboxDeltaState describes how a mailbox identity was covered by a sync
+// check. Counts are comparable only for matched entries with both catalogs
+// available; the other states retain the evidence that prevented comparison.
+type MailboxDeltaState string
+
+const (
+	MailboxDeltaStateMatched      MailboxDeltaState = "matched"
+	MailboxDeltaStateLocalOnly    MailboxDeltaState = "local_only"
+	MailboxDeltaStateServerOnly   MailboxDeltaState = "server_only"
+	MailboxDeltaStateInaccessible MailboxDeltaState = "inaccessible"
+	MailboxDeltaStateUnresolved   MailboxDeltaState = "unresolved"
+)
+
 type MailboxDelta struct {
-	MailboxRef     string   `json:"mailbox_ref"`
-	AccountRef     string   `json:"account_ref"`
-	Name           string   `json:"name"`
-	Path           []string `json:"path"`
-	LocalMessages  int      `json:"local_messages"`
-	ServerMessages int      `json:"server_messages"`
-	Delta          int      `json:"delta"`
-	Unseen         int      `json:"unseen"`
+	MailboxRef              string            `json:"mailbox_ref"`
+	AccountRef              string            `json:"account_ref"`
+	State                   MailboxDeltaState `json:"state"`
+	Name                    string            `json:"name"`
+	Path                    []string          `json:"path"`
+	ServerName              string            `json:"server_name,omitempty"`
+	LocalMessagesAvailable  bool              `json:"local_messages_available"`
+	ServerMessagesAvailable bool              `json:"server_messages_available"`
+	LocalMessages           int               `json:"local_messages"`
+	ServerMessages          int               `json:"server_messages"`
+	Delta                   int               `json:"delta"`
+	Unseen                  int               `json:"unseen"`
 }
 
 type SyncCheckResult struct {

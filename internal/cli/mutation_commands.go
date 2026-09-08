@@ -164,10 +164,11 @@ func runSync(ctx context.Context, service *mail.Service, args []string, stdout i
 			return exitCode
 		}
 		writeFormat(stdout, "complete\t%t\n", checkResult.Complete)
-		writeLine(stdout, "account\tmailbox\tlocal\tserver\tdelta\tunseen")
+		writeLine(stdout, "account\tmailbox\tstate\tlocal\tserver\tdelta\tunseen\tserver_name")
 		for _, mbx := range checkResult.Mailboxes {
-			writeFormat(stdout, "%s\t%s\t%d\t%d\t%+d\t%d\n",
-				mbx.AccountRef, mbx.Name, mbx.LocalMessages, mbx.ServerMessages, mbx.Delta, mbx.Unseen)
+			writeFormat(stdout, "%s\t%s\t%s\t%d\t%d\t%+d\t%d\t%s\n",
+				mbx.AccountRef, mbx.Name, mbx.State, mbx.LocalMessages, mbx.ServerMessages,
+				mbx.Delta, mbx.Unseen, mbx.ServerName)
 		}
 		if len(checkResult.Failures) > 0 {
 			writeLine(stdout, "failures")
