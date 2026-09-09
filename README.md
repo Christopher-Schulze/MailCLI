@@ -104,17 +104,74 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 The published `v1.3.0` archive installs both the native CLI and its companion agent skill:
 
+Before downloading release files, install and independently verify an OpenSSL 3 binary with Ed25519 support through a trusted package-management workflow. With Homebrew, for example, install `openssl@3` and set `OPENSSL_BIN` to `$(brew --prefix openssl@3)/bin/openssl`, then verify that binary before continuing. macOS `/usr/bin/openssl` is LibreSSL and does not provide the required verifier. The commands below authenticate the exact signed `SHA256SUMS` bytes before downloading the archive, then verify the exact `darwin/arm64` archive digest before extraction or installer execution.
+
 ```bash
+set -euo pipefail
 VERSION=1.3.0
-curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/mailcli_${VERSION}_darwin_arm64.tar.gz"
-curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS"
-curl -fLO "https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}/SHA256SUMS.sig"
-shasum -a 256 -c SHA256SUMS
-tar -xzf "mailcli_${VERSION}_darwin_arm64.tar.gz"
-"./mailcli_${VERSION}_darwin_arm64/install.sh"
+if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'Release version must use MAJOR.MINOR.PATCH: %s\n' "${VERSION}" >&2
+  exit 1
+fi
+OPENSSL_BIN="${OPENSSL_BIN:-}"
+if [[ -z "${OPENSSL_BIN}" ]] && command -v brew >/dev/null 2>&1; then
+  BREW_OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
+  if [[ -n "${BREW_OPENSSL_PREFIX}" ]]; then
+    OPENSSL_BIN="${BREW_OPENSSL_PREFIX}/bin/openssl"
+  fi
+fi
+if [[ -z "${OPENSSL_BIN}" || ! -x "${OPENSSL_BIN}" ]]; then
+  printf 'A trusted OpenSSL 3 binary is required; set OPENSSL_BIN before continuing\n' >&2
+  exit 1
+fi
+OPENSSL_VERSION="$("${OPENSSL_BIN}" version 2>/dev/null || true)"
+if [[ "${OPENSSL_VERSION}" != OpenSSL\ 3.* ]]; then
+  printf 'OPENSSL_BIN must provide OpenSSL 3 with Ed25519 support: %s\n' "${OPENSSL_BIN}" >&2
+  exit 1
+fi
+BASE64_BIN="/usr/bin/base64"
+if [[ ! -x "${BASE64_BIN}" ]]; then
+  printf 'Required macOS base64 utility is missing: %s\n' "${BASE64_BIN}" >&2
+  exit 1
+fi
+ARCHIVE_NAME="mailcli_${VERSION}_darwin_arm64.tar.gz"
+ARCHIVE_ROOT="mailcli_${VERSION}_darwin_arm64"
+RELEASE_BASE="https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-bootstrap.XXXXXX")"
+trap 'rm -rf -- "${WORK_DIR}"' EXIT
+curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/SHA256SUMS" "${RELEASE_BASE}/SHA256SUMS"
+curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/SHA256SUMS.sig" "${RELEASE_BASE}/SHA256SUMS.sig"
+RELEASE_PUBLIC_KEY_DER_B64='MCowBQYDK2VwAyEAVjVSufeZlmmMshZYeMB9u1xKoMvRavstpFqByv8Vzqg='
+printf '%s' "${RELEASE_PUBLIC_KEY_DER_B64}" | "${BASE64_BIN}" -D -o "${WORK_DIR}/release-public-key.der"
+"${OPENSSL_BIN}" pkey -pubin -inform DER -in "${WORK_DIR}/release-public-key.der" -out "${WORK_DIR}/release-public-key.pem" >/dev/null
+"${BASE64_BIN}" -D -i "${WORK_DIR}/SHA256SUMS.sig" -o "${WORK_DIR}/SHA256SUMS.sig.raw"
+if [[ "$(wc -c <"${WORK_DIR}/SHA256SUMS.sig.raw" | tr -d '[:space:]')" != 64 ]]; then
+  printf 'Release signature must decode to exactly 64 bytes\n' >&2
+  exit 1
+fi
+"${OPENSSL_BIN}" pkeyutl -verify -pubin -inkey "${WORK_DIR}/release-public-key.pem" -sigfile "${WORK_DIR}/SHA256SUMS.sig.raw" -in "${WORK_DIR}/SHA256SUMS" >/dev/null
+curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/${ARCHIVE_NAME}" "${RELEASE_BASE}/${ARCHIVE_NAME}"
+ARCHIVE_DIGEST="$(awk -v archive="${ARCHIVE_NAME}" '{ file_name = $2; sub(/^\*/, "", file_name); if (NF == 2 && file_name == archive) { count++; digest = $1 } } END { if (count != 1 || digest !~ /^[[:xdigit:]]{64}$/) exit 1; print digest }' "${WORK_DIR}/SHA256SUMS")" || {
+  printf 'SHA256SUMS must contain exactly one valid entry for %s\n' "${ARCHIVE_NAME}" >&2
+  exit 1
+}
+printf '%s  %s\n' "${ARCHIVE_DIGEST}" "${ARCHIVE_NAME}" >"${WORK_DIR}/archive.SHA256SUMS"
+(cd "${WORK_DIR}" && shasum -a 256 -c archive.SHA256SUMS)
+if ! tar -tvzf "${WORK_DIR}/${ARCHIVE_NAME}" | awk -v root="${ARCHIVE_ROOT}" 'BEGIN { valid = 1; count = 0 } { name = $NF; sub(/\/$/, "", name); if ($1 !~ /^[-d]/ || (name != root && index(name, root "/") != 1) || name ~ /(^|\/)\.\.?($|\/)/ || name ~ /^\//) valid = 0; count++ } END { exit !(valid && count > 0) }'; then
+  printf 'Verified archive contains an unsafe path or unsupported entry type\n' >&2
+  exit 1
+fi
+tar -xzf "${WORK_DIR}/${ARCHIVE_NAME}" -C "${WORK_DIR}"
+if [[ ! -x "${WORK_DIR}/${ARCHIVE_ROOT}/install.sh" ]]; then
+  printf 'Verified archive has no executable installer: %s\n' "${ARCHIVE_ROOT}/install.sh" >&2
+  exit 1
+fi
+"${WORK_DIR}/${ARCHIVE_ROOT}/install.sh"
 command -v mailcli
 mailcli version --json
 ```
+
+`set -euo pipefail` and the explicit signature, signature-length, archive-name, and checksum checks stop the shell before `tar` or `install.sh` when any prerequisite or verification fails. Never replace the pinned key, OpenSSL path, release host, archive name, or signed-manifest bytes with values obtained from the downloaded archive.
 
 The release installer copies the verified binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`. It stages and verifies both before any live rename, records a durable transaction manifest, commits each target with identity-checked rollback, and deterministically recovers interrupted installs before accepting a new one. It rejects unsafe parent or destination symlinks and unresolved backup paths, and never removes macOS security attributes. Start a new agent session after installation so the skill is discovered.
 
@@ -319,14 +376,7 @@ JSON startup, execution, and teardown are finalized before stdout is written. A 
 
 The repository includes a companion skill at [`skills/mailcli`](skills/mailcli). It teaches Codex and compatible agents when to invoke MailCLI, how to paginate every mailbox, how to interpret incomplete search coverage, and how to honor the Mail 16 compose boundary.
 
-The release installer places it at `~/.agents/skills/mailcli`, the personal skill location discovered by Codex. For a source checkout, link the repository copy manually:
-
-```bash
-mkdir -p "${HOME}/.agents/skills"
-ln -s "$(pwd)/skills/mailcli" "${HOME}/.agents/skills/mailcli"
-```
-
-The link command refuses if a skill already exists at that destination. It does not overwrite an installed skill. `scripts/tests/test.sh` fails if the installed copy drifts from `skills/mailcli`. Start a new agent session after either installation method.
+The release installer and `scripts/build/install-local.sh` place the matching skill at `~/.agents/skills/mailcli`, the personal skill location discovered by Codex. The source installer can redirect it with `MAILCLI_SKILL_DESTINATION`; it stages and verifies the binary and skill together. `scripts/tests/test.sh` fails if the installed copy drifts from `skills/mailcli`. Start a new agent session after either installation method.
 
 ## Safety model
 
@@ -369,6 +419,8 @@ MAILCLI_LIVE_TESTS=1 go test -count=1 -run '^TestLive' -v ./internal/mailstore
 ```
 
 The main gate checks every shell script's syntax and executable bit, then runs `gofmt`, module verification, Staticcheck, `go vet`, `golangci-lint`, `govulncheck`, uncached race tests, coverage, forbidden-path architecture checks, and isolated release installation tests. It fails if the installed companion skill (`MAILCLI_SKILL_DESTINATION` or `~/.agents/skills/mailcli`) differs from `skills/mailcli`. It defaults to `GOMAXPROCS=4` and two concurrent Go packages so verification cannot consume every logical CPU or fan out unbounded package builds; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` provide explicit positive-integer overrides. Keychain tests stay off the login keychain; compose Handoff tests stay off AppKit. MIME regression tests lock Parts, To/CC roles, BCC parsing and wire exclusion, multipart alternatives, attachment structure, and threading. `scripts/tests/test-commit-authority.sh` proves a failed child test preserves its exact exit status, cannot reach a later commit step, and rejects `git add` or `git commit` in normal scripts and workflows. `scripts/tests/test-release.sh` is the repeatable macOS `darwin/arm64` release gate: it checks Go 1.27+, required tools, module integrity, `go build ./...`, the native stripped build, generated-key signatures, checksums, archive contents, installation, and SIGKILL rollback recovery. It uses a temporary release directory and test home; it does not publish or overwrite `dist/` assets. `scripts/tests/test-release-authority.sh` rejects tag creation or deletion, pushes, release mutation or upload commands, direct GitHub API access, and release-publishing workflow actions anywhere in normal scripts or workflows. The main gate snapshots all local branch, remote-tracking, and tag refs around release verification and fails on any change. The release builder refuses to overwrite assets and writes the archive, `SHA256SUMS`, and `SHA256SUMS.sig` to `dist/` unless `MAILCLI_RELEASE_DIRECTORY` selects an empty absolute directory. Release binaries use `-trimpath -ldflags='-s -w -extldflags=-dead_strip'`. The release test rejects DWARF sections and binaries above the enforced 11 MiB size budget. `scripts/tests/report-release-state.sh` is a separate read-only comparison of source version, HEAD, tag, `dist/`, checksums, checkout binary, installed binary, and installed skill; add `--remote-required` to compare the origin tag and GitHub release assets, and `--strict` to turn drift or unavailable evidence into a failing status. A missing or older artifact is reported, never silently treated as current proof. Use `./scripts/tests/report-release-state.sh --strict --remote-required` only when the release artifacts, installed targets, and remote release are intentionally expected to match the current HEAD. Live tests are opt-in. Build the binary before running the responsiveness gate; it executes three bounded read-only live probes, requires the exact same Mail process identity and compose-object count, rejects residual `mailcli` or `osascript` processes and Mail-held repository handles, and verifies that the post-operation probe remains within the measured and absolute latency bounds. On the supported release host, bypassing store startup reduced process-inclusive `drafts list --json` peak RSS from 10.13-10.45 MB to 6.59-6.78 MB; this is a host-specific reference measurement, not a platform guarantee.
+
+Bootstrap authenticity is covered by `scripts/tests/test-bootstrap.sh`, which signs a local fixture with Ed25519 and proves tampered manifests, signatures, keys, archive bytes, names, and duplicate entries cannot reach extraction or installer execution.
 
 Release builds outline `internal/mail` to keep typed operation guidance within the enforced 11 MiB binary limit; debug and test builds use the default compiler settings.
 

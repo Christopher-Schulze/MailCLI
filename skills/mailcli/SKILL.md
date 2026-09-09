@@ -7,6 +7,8 @@ description: Read, search, draft, reply, forward, send, save received attachment
 
 Use MailCLI as the only boundary to the user's configured mail accounts. Reads use Mail's existing local store; direct SMTP/IMAP operations use the Keychain credential selected by the sender binding; never ask the user to paste account passwords, app-specific passwords, OAuth tokens, or cookies. Send users to `mailcli send setup`.
 
+Before running a downloaded release installer, follow the README bootstrap path: use an independently trusted OpenSSL 3 binary to verify the pinned Ed25519 signature over the exact `SHA256SUMS` bytes and the expected archive digest before extraction or `install.sh` execution. Never run a downloaded installer before both checks succeed.
+
 ## Start and preflight
 
 1. Resolve one executable: `command -v mailcli`, or `./bin/mailcli` after `./scripts/build/build.sh` in a checkout. Keep that path and its identity for the workflow.
