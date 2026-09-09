@@ -36,6 +36,10 @@ type Store struct {
 	// searchCandidateCountQueries is per-store test instrumentation. Normal
 	// searches never touch it; bounded explicit exact-count requests increment it.
 	searchCandidateCountQueries atomic.Int64
+	// searchCandidateRowsLoaded is per-store test instrumentation. It counts
+	// candidate records returned by body-search stream queries, including
+	// bounded lookahead rows.
+	searchCandidateRowsLoaded atomic.Int64
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {
