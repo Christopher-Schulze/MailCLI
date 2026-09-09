@@ -137,6 +137,8 @@ cd MailCLI
 
 The source installer builds a native `darwin/arm64` executable and copies only the binary to `~/.local/bin/mailcli` by default. Pass an explicit destination as the first argument to install elsewhere, then install or link [`skills/mailcli`](skills/mailcli) separately when agent support is needed.
 
+For repeated agent commands in a source checkout, `scripts/utils/mailcli-preflight.sh capabilities` caches the validated capabilities envelope by the executable's SHA-256 and schema version. `scripts/utils/mailcli-preflight.sh doctor` caches a healthy local-store check for five minutes under the same identity; use `--refresh` or `invalidate` after installation, a binary/schema change, or any relevant failure. Live `doctor --live` checks are never cached.
+
 The published release binary is ad-hoc signed but not Apple-notarized because no Developer ID identity is available. A browser download can therefore be quarantined by Gatekeeper. Verify `SHA256SUMS` first; if macOS still blocks the verified binary, explicitly remove only that binary's quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`. The installer never performs this bypass automatically.
 
 ### Grant permissions
