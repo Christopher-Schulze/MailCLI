@@ -223,31 +223,13 @@ func commandNeedsMainThreadFor(contract commandContract) bool {
 func commandCapabilityFor(contract commandContract) commandCapability {
 	return commandCapability{
 		ID:                contract.ID,
+		Schema:            schemaForCommand(contract.ID),
 		EffectClass:       contractTextString(contract.metadata[metadataEffectClass]),
 		Confirmation:      contractTextString(contract.metadata[metadataConfirmation]),
 		StoreDependency:   contractTextString(contract.metadata[metadataStoreDependency]),
 		MailAppDependency: contractTextString(contract.metadata[metadataMailAppDependency]),
 		ResultStates:      resultStateValues(contract.metadata[metadataResultStates]),
 	}
-}
-
-func newDispatchOnlyContract(
-	id string,
-	effectClass uint8,
-	confirmation uint8,
-	storeDependency uint8,
-	mailAppDependency uint8,
-	mailService uint8,
-	requiresSignal bool,
-	requiresMainThread bool,
-	resultStates uint8,
-) commandContract {
-	contract := newCommandContract(
-		id, effectClass, confirmation, storeDependency, mailAppDependency,
-		mailService, requiresSignal, requiresMainThread, resultStates,
-	)
-	contract.metadata[metadataFlags] &^= commandPublished
-	return contract
 }
 
 // commandContracts stays ordered so the human and JSON manifests remain
@@ -258,7 +240,7 @@ var commandContracts = []commandContract{
 	newCommandContract("version", textRead, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultAvailable),
 	newCommandContract("update", textLocalWrite, textNone, textNone, textNone, mailServiceNotRequired, true, false, resultUpdated),
 	newCommandContract("doctor", textRead, textNone, textMailStore, textOptionalAutomation, mailServiceAlwaysRequired, false, false, resultHealthy),
-	newDispatchOnlyContract("batch", textBatch, textNone, textMailStore, textNone, mailServiceForArguments, false, false, resultComplete),
+	newCommandContract("batch", textBatch, textNone, textMailStore, textNone, mailServiceForArguments, false, false, resultCompletePartial),
 	newCommandContract("accounts.list", textRead, textNone, textMailStore, textFallbackAutomation, mailServiceAlwaysRequired, false, false, resultAccounts),
 	newCommandContract("mailboxes.list", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultComplete),
 	newCommandContract("mailboxes.resolve", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultResolved),
@@ -312,10 +294,16 @@ func commandContractForArgs(args []string) (*commandContract, []string) {
 	return nil, nil
 }
 
-func capabilityCommands() []commandCapability {
+func capabilityCommandsForScope(command, family string) []commandCapability {
 	commands := make([]commandCapability, 0, len(commandContracts))
 	for _, contract := range commandContracts {
 		if !commandIsPublished(contract) {
+			continue
+		}
+		if command != "" && contract.ID != command {
+			continue
+		}
+		if family != "" && !strings.HasPrefix(contract.ID, family+".") && contract.ID != family {
 			continue
 		}
 		commands = append(commands, commandCapabilityFor(contract))
