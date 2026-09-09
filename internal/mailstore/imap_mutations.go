@@ -67,6 +67,12 @@ type syncStatusResult struct {
 	err    error
 }
 
+type syncStatusPlanItem struct {
+	statusJobIndex int
+	delta          mail.MailboxDelta
+	failures       []mail.SyncCheckFailure
+}
+
 type mailboxCacheEntry struct {
 	boxes     []transport.MailboxInfo
 	expiresAt time.Time
@@ -1712,6 +1718,7 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 
 		matchedServer := make([]bool, len(serverBoxes))
 		statusJobs := make([]syncStatusJob, 0, len(localBoxes)+len(serverBoxes))
+		statusPlan := make([]syncStatusPlanItem, 0, len(localBoxes)+len(serverBoxes))
 		for _, lb := range localBoxes {
 			imapName, resolveErr := mapPathToIMAP(serverBoxes, lb.Path)
 			if resolveErr != nil {
@@ -1719,12 +1726,15 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 				if !serverCatalogComplete || transport.ErrorCode(resolveErr) != transport.CodeIMAPMailboxNotFound {
 					state = mail.MailboxDeltaStateUnresolved
 				}
-				result.Mailboxes = append(result.Mailboxes, localMailboxDelta(acct.Ref, lb, state))
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: strings.Join(lb.Path, "/"),
-					Code:    failureCode(ctx, resolveErr),
-					Message: resolveErr.Error(),
+				statusPlan = append(statusPlan, syncStatusPlanItem{
+					statusJobIndex: -1,
+					delta:          localMailboxDelta(acct.Ref, lb, state),
+					failures: []mail.SyncCheckFailure{{
+						Account: email,
+						Mailbox: strings.Join(lb.Path, "/"),
+						Code:    failureCode(ctx, resolveErr),
+						Message: resolveErr.Error(),
+					}},
 				})
 				continue
 			}
@@ -1738,12 +1748,15 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 				if !serverCatalogComplete {
 					state = mail.MailboxDeltaStateUnresolved
 				}
-				result.Mailboxes = append(result.Mailboxes, localMailboxDelta(acct.Ref, lb, state))
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: strings.Join(lb.Path, "/"),
-					Code:    failureCode(ctx, resolveErr),
-					Message: resolveErr.Error(),
+				statusPlan = append(statusPlan, syncStatusPlanItem{
+					statusJobIndex: -1,
+					delta:          localMailboxDelta(acct.Ref, lb, state),
+					failures: []mail.SyncCheckFailure{{
+						Account: email,
+						Mailbox: strings.Join(lb.Path, "/"),
+						Code:    failureCode(ctx, resolveErr),
+						Message: resolveErr.Error(),
+					}},
 				})
 				continue
 			}
@@ -1752,39 +1765,51 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 					Code:    transport.CodeIMAPAmbiguousMailbox,
 					Message: fmt.Sprintf("multiple local mailbox identities resolve to IMAP mailbox %q", imapName),
 				}
-				result.Mailboxes = append(result.Mailboxes, localMailboxDelta(
-					acct.Ref, lb, mail.MailboxDeltaStateUnresolved,
-				))
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: strings.Join(lb.Path, "/"),
-					Code:    failureCode(ctx, resolveErr),
-					Message: resolveErr.Error(),
+				statusPlan = append(statusPlan, syncStatusPlanItem{
+					statusJobIndex: -1,
+					delta:          localMailboxDelta(acct.Ref, lb, mail.MailboxDeltaStateUnresolved),
+					failures: []mail.SyncCheckFailure{{
+						Account: email,
+						Mailbox: strings.Join(lb.Path, "/"),
+						Code:    failureCode(ctx, resolveErr),
+						Message: resolveErr.Error(),
+					}},
 				})
 				continue
 			}
 			matchedServer[serverIndex] = true
 			serverName := syncServerMailboxWireName(serverBoxes[serverIndex])
+			statusJobIndex := len(statusJobs)
 			statusJobs = append(statusJobs, syncStatusJob{
 				kind: syncStatusLocal, mailbox: imapName, local: lb, serverName: serverName,
 			})
+			statusPlan = append(statusPlan, syncStatusPlanItem{statusJobIndex: statusJobIndex})
 		}
 		for index, serverBox := range serverBoxes {
 			if matchedServer[index] || !syncServerMailboxSelectable(serverBox) {
 				continue
 			}
 			serverName := syncServerMailboxWireName(serverBox)
+			statusJobIndex := len(statusJobs)
 			statusJobs = append(statusJobs, syncStatusJob{
 				kind: syncStatusServerOnly, mailbox: serverName, server: serverBox,
 			})
+			statusPlan = append(statusPlan, syncStatusPlanItem{statusJobIndex: statusJobIndex})
 		}
 		statusResults := runSyncStatusJobs(ctx, imapOp, cfg, statusJobs)
-		for index, job := range statusJobs {
-			if job.kind == syncStatusLocal {
-				appendMatchedSyncStatusResult(ctx, &result, acct.Ref, email, job, statusResults[index])
+		for _, planItem := range statusPlan {
+			if planItem.statusJobIndex < 0 {
+				result.Mailboxes = append(result.Mailboxes, planItem.delta)
+				result.Failures = append(result.Failures, planItem.failures...)
 				continue
 			}
-			appendServerOnlySyncStatusResult(ctx, &result, acct.Ref, email, job, statusResults[index])
+			job := statusJobs[planItem.statusJobIndex]
+			status := statusResults[planItem.statusJobIndex]
+			if job.kind == syncStatusLocal {
+				appendMatchedSyncStatusResult(ctx, &result, acct.Ref, email, job, status)
+				continue
+			}
+			appendServerOnlySyncStatusResult(ctx, &result, acct.Ref, email, job, status)
 		}
 	}
 	sortSyncCheckMailboxes(result.Mailboxes)
