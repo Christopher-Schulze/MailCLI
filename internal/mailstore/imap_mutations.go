@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"mailcli/internal/mail"
@@ -44,6 +46,26 @@ const (
 	syncCheckServerCatalogIncompleteCode  = "sync_check_server_catalog_incomplete"
 	syncCheckLocalMessagesUnavailableCode = "sync_check_local_messages_unavailable"
 )
+
+type syncStatusJobKind uint8
+
+const (
+	syncStatusLocal syncStatusJobKind = iota
+	syncStatusServerOnly
+)
+
+type syncStatusJob struct {
+	kind       syncStatusJobKind
+	mailbox    string
+	local      mail.Mailbox
+	server     transport.MailboxInfo
+	serverName string
+}
+
+type syncStatusResult struct {
+	status transport.MailboxStatus
+	err    error
+}
 
 type mailboxCacheEntry struct {
 	boxes     []transport.MailboxInfo
@@ -1406,6 +1428,151 @@ func syncIdentityWithBindings(
 	return "", "", 0, "", lastErr
 }
 
+func syncStatusWorkerLimit(op transport.ImapOperator) int {
+	const fallback = 1
+	provider, ok := op.(transport.ImapConcurrencyProvider)
+	if !ok {
+		return fallback
+	}
+	limit := provider.MaxConnectionsPerAccount()
+	if limit <= 0 {
+		return fallback
+	}
+	return limit
+}
+
+func runSyncStatusJobs(
+	ctx context.Context,
+	op transport.ImapOperator,
+	cfg transport.ImapConfig,
+	jobs []syncStatusJob,
+) []syncStatusResult {
+	results := make([]syncStatusResult, len(jobs))
+	workerCount := min(syncStatusWorkerLimit(op), len(jobs))
+	if workerCount == 0 {
+		return results
+	}
+	var next atomic.Int64
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				index := int(next.Add(1)) - 1
+				if index >= len(jobs) {
+					return
+				}
+				if err := ctx.Err(); err != nil {
+					results[index].err = err
+					continue
+				}
+				status, err := op.CheckStatus(ctx, cfg, jobs[index].mailbox)
+				results[index] = syncStatusResult{status: status, err: err}
+			}
+		}()
+	}
+	workers.Wait()
+	return results
+}
+
+func appendMatchedSyncStatusResult(
+	ctx context.Context,
+	result *mail.SyncCheckResult,
+	accountRef string,
+	account string,
+	job syncStatusJob,
+	status syncStatusResult,
+) {
+	if status.err != nil {
+		delta := localMailboxDelta(accountRef, job.local, mail.MailboxDeltaStateInaccessible)
+		delta.ServerName = job.serverName
+		result.Mailboxes = append(result.Mailboxes, delta)
+		result.Failures = append(result.Failures, mail.SyncCheckFailure{
+			Account: account,
+			Mailbox: job.mailbox,
+			Code:    failureCode(ctx, status.err),
+			Message: status.err.Error(),
+		})
+		return
+	}
+	if !job.local.LocalMessagesAvailable {
+		delta := localMailboxDelta(accountRef, job.local, mail.MailboxDeltaStateUnresolved)
+		delta.ServerName = job.serverName
+		delta.ServerMessagesAvailable = true
+		delta.ServerMessages = status.status.Messages
+		delta.Unseen = status.status.Unseen
+		result.Mailboxes = append(result.Mailboxes, delta)
+		result.Failures = append(result.Failures, mail.SyncCheckFailure{
+			Account: account,
+			Mailbox: job.mailbox,
+			Code:    syncCheckLocalMessagesUnavailableCode,
+			Message: "local mailbox message count is unavailable; count delta cannot be compared",
+		})
+		return
+	}
+	result.Mailboxes = append(result.Mailboxes, mail.MailboxDelta{
+		MailboxRef:              job.local.Ref,
+		AccountRef:              accountRef,
+		State:                   mail.MailboxDeltaStateMatched,
+		Name:                    job.local.Name,
+		Path:                    append([]string(nil), job.local.Path...),
+		ServerName:              job.serverName,
+		LocalMessagesAvailable:  job.local.LocalMessagesAvailable,
+		ServerMessagesAvailable: true,
+		LocalMessages:           job.local.MessageCount,
+		ServerMessages:          status.status.Messages,
+		Delta:                   status.status.Messages - job.local.MessageCount,
+		Unseen:                  status.status.Unseen,
+	})
+}
+
+func appendServerOnlySyncStatusResult(
+	ctx context.Context,
+	result *mail.SyncCheckResult,
+	accountRef string,
+	account string,
+	job syncStatusJob,
+	status syncStatusResult,
+) {
+	serverName := syncServerMailboxWireName(job.server)
+	if status.err != nil {
+		delta := serverMailboxDelta(accountRef, job.server, mail.MailboxDeltaStateInaccessible)
+		result.Mailboxes = append(result.Mailboxes, delta)
+		result.Failures = append(result.Failures,
+			mail.SyncCheckFailure{
+				Account: account, Mailbox: serverName,
+				Code: failureCode(ctx, status.err), Message: status.err.Error(),
+			},
+			mail.SyncCheckFailure{
+				Account: account, Mailbox: serverName,
+				Code:    syncCheckMissingLocalMailboxCode,
+				Message: fmt.Sprintf("server mailbox %q has no matching local mailbox", serverName),
+			},
+		)
+		return
+	}
+	path := syncServerMailboxPath(job.server)
+	result.Mailboxes = append(result.Mailboxes, mail.MailboxDelta{
+		MailboxRef:              syncServerMailboxRef(accountRef, path),
+		AccountRef:              accountRef,
+		State:                   mail.MailboxDeltaStateServerOnly,
+		Name:                    syncServerMailboxName(job.server, path),
+		Path:                    path,
+		ServerName:              serverName,
+		LocalMessagesAvailable:  false,
+		ServerMessagesAvailable: true,
+		ServerMessages:          status.status.Messages,
+		Unseen:                  status.status.Unseen,
+	})
+	result.Failures = append(result.Failures, mail.SyncCheckFailure{
+		Account: account,
+		Mailbox: serverName,
+		Code:    syncCheckMissingLocalMailboxCode,
+		Message: fmt.Sprintf("server mailbox %q has no matching local mailbox", serverName),
+	})
+}
+
 func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncCheckResult, error) {
 	var result mail.SyncCheckResult
 	result.AccountRef = accountRef
@@ -1544,6 +1711,7 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 		}
 
 		matchedServer := make([]bool, len(serverBoxes))
+		statusJobs := make([]syncStatusJob, 0, len(localBoxes)+len(serverBoxes))
 		for _, lb := range localBoxes {
 			imapName, resolveErr := mapPathToIMAP(serverBoxes, lb.Path)
 			if resolveErr != nil {
@@ -1597,48 +1765,8 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			}
 			matchedServer[serverIndex] = true
 			serverName := syncServerMailboxWireName(serverBoxes[serverIndex])
-			st, err := imapOp.CheckStatus(ctx, cfg, imapName)
-			if err != nil {
-				delta := localMailboxDelta(acct.Ref, lb, mail.MailboxDeltaStateInaccessible)
-				delta.ServerName = serverName
-				result.Mailboxes = append(result.Mailboxes, delta)
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: imapName,
-					Code:    failureCode(ctx, err),
-					Message: err.Error(),
-				})
-				continue
-			}
-			if !lb.LocalMessagesAvailable {
-				delta := localMailboxDelta(acct.Ref, lb, mail.MailboxDeltaStateUnresolved)
-				delta.ServerName = serverName
-				delta.ServerMessagesAvailable = true
-				delta.ServerMessages = st.Messages
-				delta.Unseen = st.Unseen
-				result.Mailboxes = append(result.Mailboxes, delta)
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: imapName,
-					Code:    syncCheckLocalMessagesUnavailableCode,
-					Message: "local mailbox message count is unavailable; count delta cannot be compared",
-				})
-				continue
-			}
-			delta := st.Messages - lb.MessageCount
-			result.Mailboxes = append(result.Mailboxes, mail.MailboxDelta{
-				MailboxRef:              lb.Ref,
-				AccountRef:              acct.Ref,
-				State:                   mail.MailboxDeltaStateMatched,
-				Name:                    lb.Name,
-				Path:                    append([]string(nil), lb.Path...),
-				ServerName:              serverName,
-				LocalMessagesAvailable:  lb.LocalMessagesAvailable,
-				ServerMessagesAvailable: true,
-				LocalMessages:           lb.MessageCount,
-				ServerMessages:          st.Messages,
-				Delta:                   delta,
-				Unseen:                  st.Unseen,
+			statusJobs = append(statusJobs, syncStatusJob{
+				kind: syncStatusLocal, mailbox: imapName, local: lb, serverName: serverName,
 			})
 		}
 		for index, serverBox := range serverBoxes {
@@ -1646,43 +1774,17 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 				continue
 			}
 			serverName := syncServerMailboxWireName(serverBox)
-			path := syncServerMailboxPath(serverBox)
-			st, statusErr := imapOp.CheckStatus(ctx, cfg, serverName)
-			if statusErr != nil {
-				delta := serverMailboxDelta(acct.Ref, serverBox, mail.MailboxDeltaStateInaccessible)
-				result.Mailboxes = append(result.Mailboxes, delta)
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: serverName,
-					Code:    failureCode(ctx, statusErr),
-					Message: statusErr.Error(),
-				})
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: email,
-					Mailbox: serverName,
-					Code:    syncCheckMissingLocalMailboxCode,
-					Message: fmt.Sprintf("server mailbox %q has no matching local mailbox", serverName),
-				})
+			statusJobs = append(statusJobs, syncStatusJob{
+				kind: syncStatusServerOnly, mailbox: serverName, server: serverBox,
+			})
+		}
+		statusResults := runSyncStatusJobs(ctx, imapOp, cfg, statusJobs)
+		for index, job := range statusJobs {
+			if job.kind == syncStatusLocal {
+				appendMatchedSyncStatusResult(ctx, &result, acct.Ref, email, job, statusResults[index])
 				continue
 			}
-			result.Mailboxes = append(result.Mailboxes, mail.MailboxDelta{
-				MailboxRef:              syncServerMailboxRef(acct.Ref, path),
-				AccountRef:              acct.Ref,
-				State:                   mail.MailboxDeltaStateServerOnly,
-				Name:                    syncServerMailboxName(serverBox, path),
-				Path:                    path,
-				ServerName:              serverName,
-				LocalMessagesAvailable:  false,
-				ServerMessagesAvailable: true,
-				ServerMessages:          st.Messages,
-				Unseen:                  st.Unseen,
-			})
-			result.Failures = append(result.Failures, mail.SyncCheckFailure{
-				Account: email,
-				Mailbox: serverName,
-				Code:    syncCheckMissingLocalMailboxCode,
-				Message: fmt.Sprintf("server mailbox %q has no matching local mailbox", serverName),
-			})
+			appendServerOnlySyncStatusResult(ctx, &result, acct.Ref, email, job, statusResults[index])
 		}
 	}
 	sortSyncCheckMailboxes(result.Mailboxes)
