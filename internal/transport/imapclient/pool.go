@@ -128,6 +128,13 @@ func (c *Client) connectionLimit() int {
 	return c.maxConnectionsPerAccount
 }
 
+// MaxConnectionsPerAccount reports the immutable pool capacity used for one
+// server/account identity. It lets higher-level independent read planners
+// match their worker count to the transport gate.
+func (c *Client) MaxConnectionsPerAccount() int {
+	return c.connectionLimit()
+}
+
 // PoolStats returns a credential-free resource snapshot across all identities.
 func (c *Client) PoolStats() PoolStats {
 	c.mu.Lock()

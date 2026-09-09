@@ -152,6 +152,15 @@ type ImapOperator interface {
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }
 
+// ImapConcurrencyProvider optionally reports the configured per-account pool
+// capacity so callers can bound independent STATUS work without creating an
+// unbounded number of goroutines. Implementations must return a positive limit
+// when they provide the interface; callers use a conservative fallback when
+// it is absent or invalid.
+type ImapConcurrencyProvider interface {
+	MaxConnectionsPerAccount() int
+}
+
 // MessageIdentityHint contains local metadata used for bounded server-side
 // identity discovery when a store-bound reference has no Message-ID or UID.
 type MessageIdentityHint struct {
