@@ -43,6 +43,8 @@ type responseData struct {
 	MessageState             *mail.MessageSummary    `json:"message_state,omitempty"`
 	RawSource                *string                 `json:"raw_source,omitempty"`
 	Attachments              *[]mail.Attachment      `json:"attachments,omitempty"`
+	Projection               *projectionInfo         `json:"projection,omitempty"`
+	ContentExport            *mail.ContentExport     `json:"content_export,omitempty"`
 	ContentSource            string                  `json:"content_source,omitempty"`
 	ContentComplete          *bool                   `json:"content_complete,omitempty"`
 	MissingParts             *[]string               `json:"missing_parts,omitempty"`
@@ -60,6 +62,7 @@ type responseData struct {
 	SyncResult               *mail.SyncResult        `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult   `json:"sync_check,omitempty"`
 	UpdateResult             *updateResult           `json:"update_result,omitempty"`
+	serialization            *serializedProjection   `json:"-"`
 }
 
 type responsePage struct {
@@ -553,6 +556,7 @@ func isHelpArgument(argument string) bool {
 	return argument == "help" || argument == "--help" || argument == "-h"
 }
 
+//go:noinline
 func helpOnly(args []string) bool {
 	found := false
 	for _, argument := range args {

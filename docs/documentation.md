@@ -67,6 +67,7 @@ The CLI is optimized for both humans and agents:
 
 - Stable nouns and verbs; no interactive menu.
 - JSON is available on every data-bearing command through `--json` and uses `schema_version=1`.
+- Message, draft, attachment, and raw detail responses support validated `--view`, `--fields`, and `--max-bytes` projections. Named views and field schemas, defaults, and limits are published under `data.capabilities.limits.output_projection`.
 - Standard input accepts structured payloads for long bodies and recipient lists, avoiding shell quoting problems.
 - Human output is concise; message bodies and raw MIME are written only when explicitly requested.
 - Focused help accepts `help`, `-h`, and `--help`; options use aligned long names, semantic value placeholders, and readable defaults.
@@ -77,6 +78,12 @@ The CLI is optimized for both humans and agents:
 - Destructive operations require an explicit command and confirmation flag. `drafts send` requires `--confirm` and delivers over SMTP/IMAP without Mail.app.
 - `mailcli capabilities --json` is the authoritative discovery contract. It reports schema and release identity, every command ID, read/write class, confirmation requirement, Mail-store and Mail.app dependencies, result states, and hard limits without opening the Mail store or contacting Mail.app.
 - Capability discovery, local draft create/list/inspect/preview/edit/update/discard/prune, sending, credential setup, the unsupported native save preflight, and missing or unknown command/subcommand routes bypass Mail-store configuration, SQLite, `plutil`, and Mail.app initialization. Reply and forward creation read the source message's header block from the Mail store (they require it, like reads) but write only local draft files. Visible handoff reads only the local draft and invokes AppKit. `drafts reconcile` and `drafts open` still need the Mail store.
+
+### Output projections
+
+Detail JSON responses are bounded at the CLI serialization boundary. `messages get` and `drafts inspect` default to the `metadata` view, which retains identity, completeness, and operation-state evidence while omitting headers and body variants. `drafts create`, `drafts update`, `drafts edit`, `messages reply`, and `messages forward` default to the canonical plain draft body; `--view plain` omits draft source and HTML variants, and `--view full` includes every stored representation. `attachments list` defaults to attachment metadata, while `messages raw` exposes only its `full` view. A caller may select exact JSON field names with `--fields`; combining it with `--view`, selecting an unknown field, or selecting a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
+
+`--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON. MailCLI measures the complete encoded envelope before writing it; an oversized response returns exit code `1` with `error.code:"output_too_large"` and never truncates content. `messages get`, `messages raw`, and `drafts inspect` additionally accept `--export /absolute/new/path`. The exporter creates a mode-0600 file with exclusive creation, writes complete normalized body or raw RFC 5322 bytes, then verifies path identity, size, and SHA-256. JSON reports only `data.content_export` metadata for an export, an invalid destination fails before retrieval, and incomplete normalized content fails without creating an export. Failed message hydration keeps the safe `data.message.hydration` evidence and retains recovered content only when it was not redirected to an export file.
 
 Command surface:
 
@@ -92,8 +99,8 @@ Command surface:
 | `mailcli messages list` | Implemented | Page through a mailbox without loading full bodies |
 | `mailcli messages filter` | Implemented | Apply typed filters through the local store and authoritative message sources |
 | `mailcli messages search` | Implemented | Run metadata search or bounded on-demand body search across selected scope |
-| `mailcli messages get` | Implemented | Read normalized metadata, recipients, body, and attachment metadata |
-| `mailcli messages raw` | Implemented | Return the exact raw RFC 5322 source stored locally by Mail.app |
+| `mailcli messages get` | Implemented | Read projected normalized metadata, recipients, body, and attachment metadata; export complete body bytes with verified proof |
+| `mailcli messages raw` | Implemented | Return or exclusively export the exact raw RFC 5322 source stored locally by Mail.app |
 | `mailcli attachments list/save` | Implemented | Inspect or save a received attachment to an explicit non-existing destination |
 | `mailcli drafts create/list/inspect/preview/edit/update/handoff/open/send/reconcile/discard/prune` | Implemented | Manage plain/Markdown/safe-HTML drafts, visibly hand new drafts to Mail.app, inspect persisted drafts, send over SMTP, reconcile claims, discard, and prune stale drafts |
 | `mailcli drafts save` | New native save blocked; legacy claim reconciliation only | Reject new native save before Mail contact; reconcile a retained historical claim with the exact recovery command in the capability policy |

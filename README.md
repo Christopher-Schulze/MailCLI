@@ -31,6 +31,8 @@ Reads and mutations add zero work to the Mail.app process. Sending, marking, mov
 
 Run `mailcli capabilities --json` before automation. Its versioned response is the authoritative command contract for agents: command IDs, read/write class, confirmation, Mail-store and Mail.app dependencies, result states, and hard limits. Help text is for humans and must not be parsed as capability data.
 
+Detail JSON responses support bounded projections. Use `--view metadata|plain|full` for named views or `--fields field1,field2` for an explicit selection; the supported fields, defaults, and byte limits are published under `data.capabilities.limits.output_projection`. `messages get` and `drafts inspect` default to metadata, while draft creation and update responses default to the canonical plain body. `--max-bytes` defaults to 1 MiB and rejects oversized JSON with `output_too_large` instead of truncating it. `messages get`, `messages raw`, and `drafts inspect` accept `--export /absolute/new/path`; the complete body or raw source is written to a mode-0600 exclusive file and JSON returns verified `data.content_export` size and SHA-256 metadata without embedding the exported bytes.
+
 | Area | Commands | Behavior |
 |---|---|---|
 | Accounts | `accounts list` | Lists configured accounts and bounded sender identities with explicit coverage evidence |
@@ -192,7 +194,10 @@ List, filter, and search commands accept page sizes from 1 through 25. Continue 
 
 ```bash
 mailcli messages get --ref MESSAGE_REF --json
+mailcli messages get --ref MESSAGE_REF --view plain --json
+mailcli messages get --ref MESSAGE_REF --view full --export /absolute/new/path/message.txt --json
 mailcli messages raw --ref MESSAGE_REF
+mailcli messages raw --ref MESSAGE_REF --export /absolute/new/path/message.eml --json
 mailcli attachments list --message MESSAGE_REF --json
 mailcli attachments save \
   --message MESSAGE_REF \
@@ -201,7 +206,7 @@ mailcli attachments save \
   --json
 ```
 
-`messages get` returns normalized content and completion metadata. A fallback result is complete only after MailCLI parses a full raw RFC 5322 source; failed Mail scripting properties remain explicitly incomplete. In human mode, `messages raw` streams a complete local `.emlx` source directly to stdout instead of allocating a second 64 MiB string; JSON and targeted Mail.app fallback remain bounded. Attachment IDs are deterministic MIME-part paths, including during targeted fallback, while exported attachment files contain the decoded MIME-part bytes and report their media type, byte count, and SHA-256. Attachment export requires an absolute path and refuses to overwrite an existing file.
+`messages get` defaults to metadata, including identity and content-completeness evidence but no headers or body. Request `--view plain` for normalized body text without headers or `--view full` for headers plus body. `--fields` accepts only the field names published in capability JSON and cannot be combined with `--view`; invalid selections fail before message retrieval. A fallback result is complete only after MailCLI parses a full raw RFC 5322 source; failed Mail scripting properties remain explicitly incomplete and failed JSON retains the safe hydration diagnostic. In human mode, `messages raw` streams a complete local `.emlx` source directly to stdout instead of allocating a second 64 MiB string; JSON and targeted Mail.app fallback remain bounded. `--export` writes complete normalized body or raw RFC 5322 bytes to a new mode-0600 file, verifies the final path identity, byte count, and SHA-256, and omits the exported content from JSON. Export requires complete normalized content and refuses relative, existing, symlinked, or non-directory destinations. Attachment IDs are deterministic MIME-part paths, including during targeted fallback, while exported attachment files contain the decoded MIME-part bytes and report their media type, byte count, and SHA-256. Attachment export requires an absolute path and refuses to overwrite an existing file.
 
 ### Create and review a message
 
@@ -219,6 +224,7 @@ printf '%s' '{
 }' | mailcli drafts create --input - --json
 
 mailcli drafts inspect --ref DRAFT_REF --json
+mailcli drafts inspect --ref DRAFT_REF --view plain --json
 mailcli drafts preview --ref DRAFT_REF --format plain
 ```
 

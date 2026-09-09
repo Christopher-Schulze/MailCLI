@@ -218,19 +218,25 @@ func runDraftEdit(
 	var editorArgs repeatableStringFlag
 	flags.Var(&editorArgs, "editor-arg", "editor argument; repeat for multiple arguments")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	draft, err := service.GetDraft(*ref)
+	output, err := outputFlags.options(projectionTargetDraft)
 	if err != nil {
 		return failCommand("drafts.edit", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
+	draft, err := service.GetDraft(*ref)
+	if err != nil {
+		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
 	input := draftInputFromStored(draft)
 	updated, err := editDraftInput(ctx, service, draft.Ref, input, *editor, editorArgs)
 	if err != nil {
-		return failCommand("drafts.edit", *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "drafts.edit", updated, *jsonOutput)
+	return writeDraftResponse(stdout, "drafts.edit", updated, *jsonOutput, output)
 }
 
 func editDraftInput(

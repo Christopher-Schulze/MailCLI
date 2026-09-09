@@ -130,17 +130,23 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	flags := newFlagSet("drafts open", stderr)
 	messageRef := flags.String("message", "", "Mail.app draft message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetMessage, defaultMessageOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	output, err := outputFlags.options(projectionTargetMessage)
+	if err != nil {
+		return failCommand("drafts.open", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	message, err := service.OpenDraft(operationCtx, *messageRef)
 	if err != nil {
-		return failMessageRead("drafts.open", *jsonOutput, message, err, stdout, stderr)
+		return failMessageRead("drafts.open", *jsonOutput, message, err, stdout, stderr, output)
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.open", responseData{Message: &message})
+		return writeProjectedSuccess(stdout, "drafts.open", responseData{Message: &message}, output)
 	}
 	if err := writeMessage(stdout, message); err != nil {
 		return 1
@@ -156,18 +162,24 @@ func runDraftCreateContext(ctx context.Context, service *mail.Service, args []st
 	flags := newFlagSet("drafts create", stderr)
 	inputFlags := registerDraftInputFlags(flags)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	input, err := inputFlags.read()
+	output, err := outputFlags.options(projectionTargetDraft)
 	if err != nil {
 		return failCommand("drafts.create", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
+	input, err := inputFlags.read()
+	if err != nil {
+		return failProjectedEmpty("drafts.create", *jsonOutput, output, err, stdout, stderr)
 	}
 	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{Kind: mail.DraftKindNew, Input: input})
 	if err != nil {
-		return failCommand("drafts.create", *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("drafts.create", *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "drafts.create", draft, *jsonOutput)
+	return writeDraftResponse(stdout, "drafts.create", draft, *jsonOutput, output)
 }
 
 type draftListEntry struct {
@@ -292,11 +304,18 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 	flags := newFlagSet("drafts inspect", stderr)
 	ref := flags.String("ref", "", "draft ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, outputViewMetadata, true)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	output, err := outputFlags.options(projectionTargetDraft)
+	if err != nil {
+		return failCommand("drafts.inspect", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
 	if *ref == "" {
-		return failCommand("drafts.inspect", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+		return failProjectedEmpty("drafts.inspect", *jsonOutput, output,
+			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 	draft, err := service.GetDraft(*ref)
 	if err != nil {
@@ -304,16 +323,24 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 		if errors.As(err, &operation) && operation.ErrorCode() == "not_found" {
 			receipt, receiptErr := service.GetSendReceipt(*ref)
 			if receiptErr == nil {
-				return writeSendReceiptResponse(stdout, "drafts.inspect", receipt, *jsonOutput)
+				if output.exportPath != "" {
+					return failProjectedEmpty("drafts.inspect", *jsonOutput, output,
+						&commandError{code: "content_unavailable", message: "consumed send receipt has no draft body to export"}, stdout, stderr)
+				}
+				if *jsonOutput {
+					data := responseData{SendReceipt: &receipt, Projection: &projectionInfo{View: output.view, Fields: []string{}}}
+					return writeProjectedSuccess(stdout, "drafts.inspect", data, output)
+				}
+				return writeSendReceiptResponse(stdout, "drafts.inspect", receipt, false)
 			}
 			var receiptOperation interface{ ErrorCode() string }
 			if !errors.As(receiptErr, &receiptOperation) || receiptOperation.ErrorCode() != "not_found" {
-				return failCommand("drafts.inspect", *jsonOutput, receiptErr, stdout, stderr)
+				return failProjectedEmpty("drafts.inspect", *jsonOutput, output, receiptErr, stdout, stderr)
 			}
 		}
-		return failCommand("drafts.inspect", *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("drafts.inspect", *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "drafts.inspect", draft, *jsonOutput)
+	return writeDraftResponse(stdout, "drafts.inspect", draft, *jsonOutput, output)
 }
 
 func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.SendReceipt, jsonOutput bool) int {
@@ -344,23 +371,30 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 	ref := flags.String("ref", "", "draft ref")
 	inputFlags := registerDraftInputFlags(flags)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	output, err := outputFlags.options(projectionTargetDraft)
+	if err != nil {
+		return failCommand("drafts.update", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
 	if *ref == "" {
-		return failCommand("drafts.update", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+		return failProjectedEmpty("drafts.update", *jsonOutput, output,
+			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 	input, err := inputFlags.read()
 	if err != nil {
-		return failCommand("drafts.update", *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
 	defer cancel()
 	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, Input: input})
 	if err != nil {
-		return failCommand("drafts.update", *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "drafts.update", draft, *jsonOutput)
+	return writeDraftResponse(stdout, "drafts.update", draft, *jsonOutput, output)
 }
 
 func runDraftSend(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -440,34 +474,66 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 		flags.BoolVar(&replyAll, "all", false, "reply to all recipients")
 	}
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	input, err := inputFlags.read()
+	output, err := outputFlags.options(projectionTargetDraft)
 	if err != nil {
 		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
+	input, err := inputFlags.read()
+	if err != nil {
+		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	source, err := service.ThreadSource(ctx, *messageRef)
 	if err != nil {
-		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	derived, sourceMessageID, references, err := mail.DeriveReplyInput(source, kind, replyAll, input)
 	if err != nil {
-		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{
 		Kind: kind, SourceRef: *messageRef, ReplyAll: replyAll, Input: derived,
 		SourceMessageID: sourceMessageID, SourceReferences: references,
 	})
 	if err != nil {
-		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
+		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "messages."+string(kind), draft, *jsonOutput)
+	return writeDraftResponse(stdout, "messages."+string(kind), draft, *jsonOutput, output)
 }
 
-func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, jsonOutput bool) int {
+func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, jsonOutput bool, options ...outputOptions) int {
+	output := outputOptions{target: projectionTargetDraft, view: defaultDraftOutputView, maxBytes: defaultJSONOutputBytes}
+	if len(options) > 0 {
+		output = options[0]
+	}
+	if output.stderr == nil {
+		output.stderr = io.Discard
+	}
+	var exported *mail.ContentExport
+	if output.exportPath != "" {
+		if int64(len(draft.Body)) > maximumContentExportBytes {
+			return failProjectedDraft(command, jsonOutput, draft, output,
+				&commandError{code: "content_export_too_large", message: "draft body exceeds the 64 MiB export limit"}, stdout, output.stderr)
+		}
+		value, err := mail.WriteExclusiveContent(output.exportPath, func(writer io.Writer) error {
+			_, writeErr := io.WriteString(writer, draft.Body)
+			return writeErr
+		})
+		if err != nil {
+			return failProjectedDraft(command, jsonOutput, draft, output, err, stdout, output.stderr)
+		}
+		exported = &value
+	}
 	if jsonOutput {
-		return writeSuccess(stdout, command, responseData{Draft: &draft})
+		return writeProjectedSuccess(stdout, command, responseData{Draft: &draft, ContentExport: exported}, output)
+	}
+	if output.exportPath != "" {
+		writeFormat(stdout, "%s\t%d\t%s\n", exported.Path, exported.Size, exported.SHA256)
+		return 0
 	}
 	writeFormat(stdout, "%s\t%s\t%s\n", draft.Ref, draft.Kind, oneLine(draft.Subject))
 	return 0
