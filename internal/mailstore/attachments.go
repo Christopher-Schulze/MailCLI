@@ -118,7 +118,7 @@ func (s *Store) saveAttachmentToWithEvidence(
 			return s.copyExternalAttachmentWithEvidence(external, outputPath)
 		}
 	}
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false, false)
+	document, err := parseMIMEDocumentWithContext(ctx, source.Reader(), source.partial, false, false)
 	if err != nil {
 		return mail.AttachmentEvidence{}, err
 	}

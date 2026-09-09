@@ -181,7 +181,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 	if c.send.ImapClient() != nil {
 		rawBytes, summary, rawErr := c.hydrateMessage(ctx, ref, false)
 		if rawErr == nil && len(rawBytes) > 0 {
-			return messageFromRawFallback(local, summary, string(rawBytes))
+			return messageFromRawFallback(ctx, local, summary, string(rawBytes))
 		}
 		// IMAP fallback failed. Preserve both local and remote causes so the
 		// caller sees the full picture.
@@ -204,8 +204,8 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 	return mail.Message{}, c.readUnavailableError()
 }
 
-func messageFromRawFallback(base mail.Message, summary mail.MessageSummary, raw string) (mail.Message, error) {
-	document, err := parseMIMEDocument(strings.NewReader(raw), false, false, false)
+func messageFromRawFallback(ctx context.Context, base mail.Message, summary mail.MessageSummary, raw string) (mail.Message, error) {
+	document, err := parseMIMEDocumentWithContext(ctx, strings.NewReader(raw), false, false, false)
 	if err != nil {
 		return mail.Message{}, err
 	}
@@ -546,9 +546,14 @@ func (c *Client) sourceAttachmentFingerprints(
 			"forward_source_incomplete", "forward source is partial; original attachments cannot be proven",
 		)
 	}
-	document, err := parseMIMEDocument(source.Reader(), false, true, false)
+	document, err := parseMIMEDocumentWithContext(ctx, source.Reader(), false, true, false)
 	if err != nil {
 		return nil, err
+	}
+	if document.budget != nil && document.budget.error() != nil {
+		return nil, operationError(
+			"forward_source_incomplete", "forward source MIME budget prevented complete attachment coverage",
+		)
 	}
 	identifiers := make([]string, 0, len(document.Parts))
 	for identifier := range document.Parts {
