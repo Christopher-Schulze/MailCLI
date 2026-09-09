@@ -865,7 +865,7 @@ func scanCandidate(
 		if match {
 			// Build original-case text only for the snippet to preserve
 			// readable case in search results.
-			snippet = snippetForSearchText(representations, firstTerm)
+			snippet = snippetForSearchText(&representations, firstTerm)
 		}
 	}
 	return candidateScan{
@@ -931,8 +931,9 @@ func normalizedSearchTerms(value string) []string {
 
 // foldSearchText defines the local search policy: canonical NFC normalization
 // followed by Unicode simple lowercasing. Simple lowercasing keeps one rune
-// per input rune, which preserves snippet rune offsets; full case-fold
-// expansions such as ß -> ss require a separate offset map.
+// per normalized input rune, so a boundary map is needed only when NFC changes
+// the number of runes; full case-fold expansions such as ß -> ss would require
+// a separate offset map.
 func foldSearchText(value string) string {
 	value = norm.NFC.String(value)
 	var folded strings.Builder
@@ -944,8 +945,10 @@ func foldSearchText(value string) string {
 }
 
 type searchTextRepresentations struct {
-	original             string
-	folded               string
+	original string
+	folded   string
+	// A nil map means folded and original text share rune boundaries. The map
+	// is populated lazily when normalization changes those boundaries.
 	foldedRuneBoundaries []int
 }
 
@@ -957,39 +960,40 @@ func buildSearchTextRepresentations(item messageRecord, document mimeDocument) s
 func newSearchTextRepresentations(original string) searchTextRepresentations {
 	folded := foldSearchText(original)
 	return searchTextRepresentations{
-		original:             original,
-		folded:               folded,
-		foldedRuneBoundaries: foldedRuneBoundaries(original, folded),
+		original: original,
+		folded:   folded,
 	}
 }
 
 func foldedRuneBoundaries(original, folded string) []int {
+	if original == folded {
+		return nil
+	}
 	originalRunes := utf8.RuneCountInString(original)
 	foldedRunes := utf8.RuneCountInString(folded)
-	// NFC-normalized search text and simple lowercasing keep rune counts equal;
-	// build that common mapping without per-rune transformed strings.
+	// Simple lowercasing preserves one rune per normalized input rune. A
+	// different byte representation with equal rune counts therefore still has
+	// an implicit identity mapping.
 	if originalRunes == foldedRunes {
-		boundaries := make([]int, foldedRunes+1)
-		for index := range boundaries {
-			boundaries[index] = index
-		}
-		return boundaries
+		return nil
 	}
-	boundaries := []int{0}
+	boundaries := make([]int, 1, foldedRunes+1)
+	boundaries[0] = 0
+	var iterator norm.Iter
+	iterator.InitString(norm.NFC, original)
 	originalRune := 0
-	for offset := 0; offset < len(original); {
-		size := norm.NFC.NextBoundaryInString(original[offset:], true)
-		if size <= 0 || size > len(original)-offset {
-			size = len(original) - offset
+	for !iterator.Done() {
+		start := iterator.Pos()
+		segment := iterator.Next()
+		if len(segment) == 0 {
+			break
 		}
-		segment := original[offset : offset+size]
-		originalRune += utf8.RuneCountInString(segment)
-		for range utf8.RuneCountInString(foldSearchText(segment)) {
+		originalRune += utf8.RuneCountInString(original[start:iterator.Pos()])
+		for range utf8.RuneCount(segment) {
 			boundaries = append(boundaries, originalRune)
 		}
-		offset += size
 	}
-	if len(boundaries) != utf8.RuneCountInString(folded)+1 {
+	if len(boundaries) != foldedRunes+1 {
 		boundaries = make([]int, foldedRunes+1)
 		for index := range boundaries {
 			boundaries[index] = min(index, originalRunes)
@@ -1013,10 +1017,11 @@ func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) 
 
 func snippetFor(value string, term string) string {
 	value = collapseSearchText(value)
-	return snippetForSearchText(newSearchTextRepresentations(value), term)
+	representations := newSearchTextRepresentations(value)
+	return snippetForSearchText(&representations, term)
 }
 
-func snippetForSearchText(representations searchTextRepresentations, term string) string {
+func snippetForSearchText(representations *searchTextRepresentations, term string) string {
 	value := representations.original
 	if value == "" {
 		return ""
@@ -1036,8 +1041,13 @@ func snippetForSearchText(representations searchTextRepresentations, term string
 	end := min(start+maximumSnippetRunes, foldedRuneCount)
 	prefix := ""
 	suffix := ""
-	originalStart := originalRuneBoundary(representations.foldedRuneBoundaries, start)
-	originalEnd := originalRuneBoundary(representations.foldedRuneBoundaries, end)
+	boundaries := representations.foldedRuneBoundaries
+	if boundaries == nil {
+		boundaries = foldedRuneBoundaries(representations.original, representations.folded)
+		representations.foldedRuneBoundaries = boundaries
+	}
+	originalStart := originalRuneBoundary(boundaries, start)
+	originalEnd := originalRuneBoundary(boundaries, end)
 	if originalStart > 0 {
 		prefix = "…"
 	}
@@ -1051,6 +1061,9 @@ func snippetForSearchText(representations searchTextRepresentations, term string
 func originalRuneBoundary(boundaries []int, foldedBoundary int) int {
 	if foldedBoundary < 0 {
 		return 0
+	}
+	if len(boundaries) == 0 {
+		return foldedBoundary
 	}
 	if foldedBoundary >= len(boundaries) {
 		return boundaries[len(boundaries)-1]
