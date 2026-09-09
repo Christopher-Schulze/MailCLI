@@ -57,6 +57,8 @@ The embedded bridge creates one request-local resolution context. Enabled accoun
 
 Attachment saving propagates verified size, SHA-256, and bound regular-file identity evidence from the authoritative attachment writer together with its output path. Publication rechecks temporary and published inode identities, size, mode, and final ownership, then reuses that evidence instead of rereading an unchanged file solely to reconstruct metadata.
 
+MIME parsing uses one aggregate budget per message: 32 MiB of decoded text, 4,096 visited entities, 64 nesting levels, 8 MiB of retained part and header metadata, and 128 MiB of source bytes. The budget is shared by recursive multipart traversal, text decoding, attachment drains, and raw reads; overflow-safe checks stop before another allocation or recursive descent. A budget stop keeps validated content and parts, sets `content_complete:false`, and records one `mime:budget:<resource>` identifier in `missing_parts`, where `<resource>` is `text_bytes`, `parts`, `depth`, `metadata_bytes`, or `raw_bytes`. Context cancellation checks every read and traversal step, closes a cancelable source, returns the already validated document with `mime:canceled`, and preserves the cancellation error for the caller.
+
 ## CLI contract
 
 The CLI is optimized for both humans and agents:

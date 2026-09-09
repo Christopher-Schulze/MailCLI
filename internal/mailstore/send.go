@@ -475,8 +475,14 @@ func (s *Store) recordContentMatchesDraft(
 	if err != nil || !stable {
 		return false, err
 	}
-	document, err := parseMIMEDocument(source.Reader(), false, true, false)
-	if err != nil || !document.Complete || !bodyMatchesDraft(document.Content, draft) {
+	document, err := parseMIMEDocumentWithContext(ctx, source.Reader(), false, true, false)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		return false, candidateSourcePending(err)
+	}
+	if !document.Complete || !bodyMatchesDraft(document.Content, draft) {
 		return false, candidateSourcePending(err)
 	}
 	return s.recordAttachmentsMatchDraft(

@@ -20,7 +20,7 @@ func (s *Store) GetMessage(ctx context.Context, ref string) (result mail.Message
 	if err != nil {
 		return mail.Message{}, err
 	}
-	document, err := parseMIMEDocument(source.Reader(), source.partial, false, false)
+	document, err := parseMIMEDocumentWithContext(ctx, source.Reader(), source.partial, false, false)
 	if err != nil {
 		return mail.Message{}, err
 	}
