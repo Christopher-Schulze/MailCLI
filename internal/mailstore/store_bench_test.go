@@ -345,6 +345,7 @@ func BenchmarkSearchFixture603(b *testing.B) {
 		query mail.Query
 	}{
 		{name: "metadata_subject", query: mail.Query{Subject: "Status", Limit: 25}},
+		{name: "metadata_subject_exact_count", query: mail.Query{Subject: "Status", Limit: 25, MaxMessages: 1000, ExactCount: true}},
 		{name: "body_default", query: mail.Query{Text: "needle", Limit: 25, MaxMessages: 1000}},
 		{name: "body_exact_count", query: mail.Query{Text: "needle", Limit: 25, MaxMessages: 1000, ExactCount: true}},
 	}

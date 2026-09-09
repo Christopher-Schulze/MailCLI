@@ -94,6 +94,132 @@ func TestStoreListAndSearchUsesLabelsAndStatelessEMLX(t *testing.T) {
 	}
 }
 
+func TestMetadataSearchUsesBoundedPageAndOptionalCount(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	prepared, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Subject: "Status", Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), prepared)
+	if err != nil {
+		t.Fatalf("SearchMessages() error = %v", err)
+	}
+	if len(page.Messages) != 1 || page.NextCursor == "" {
+		t.Fatalf("metadata page = %#v, want one result and a cursor", page)
+	}
+	if page.Coverage.CandidateMessages != 2 || page.Coverage.CandidateMessagesExact || !page.Coverage.Complete {
+		t.Fatalf("metadata coverage = %#v, want a two-row lower bound", page.Coverage)
+	}
+	if got := store.searchMetadataRowsLoaded.Load(); got != 2 {
+		t.Fatalf("metadata rows loaded = %d, want page plus one continuation row", got)
+	}
+	if got := store.searchCandidateCountQueries.Load(); got != 0 {
+		t.Fatalf("candidate count queries = %d, want no default count query", got)
+	}
+}
+
+func TestMetadataSearchExactCountHonorsCursorScope(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	first, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Subject: "Status", Limit: 1, MaxMessages: 1000,
+		ExactCount: true,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	firstPage, err := store.SearchMessages(context.Background(), first)
+	if err != nil || firstPage.NextCursor == "" {
+		t.Fatalf("SearchMessages(first) = %#v, error = %v", firstPage, err)
+	}
+	next, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Subject: "Status", Limit: 25, MaxMessages: 1000,
+		ExactCount: true, Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery(next) error = %v", err)
+	}
+	nextPage, err := store.SearchMessages(context.Background(), next)
+	if err != nil {
+		t.Fatalf("SearchMessages(next) error = %v", err)
+	}
+	plan, empty, err := store.prepareSearchPlan(context.Background(), next)
+	if err != nil || empty {
+		t.Fatalf("prepareSearchPlan(reference) = empty %t, error = %v", empty, err)
+	}
+	var referenceTotal int
+	referenceQuery := plan.prefixSQL + "SELECT count(*) " + plan.fromWhereSQL
+	if err := store.database.QueryRowContext(context.Background(), referenceQuery, plan.arguments...).Scan(&referenceTotal); err != nil {
+		t.Fatalf("reference candidate count: %v", err)
+	}
+	if len(nextPage.Messages) != 25 || nextPage.NextCursor == "" {
+		t.Fatalf("metadata exact page = %#v, want 25 results and a cursor", nextPage)
+	}
+	if nextPage.Coverage.CandidateMessages != referenceTotal || referenceTotal != 600 ||
+		!nextPage.Coverage.CandidateMessagesExact || !nextPage.Coverage.Complete {
+		t.Fatalf("metadata exact coverage = %#v, want reference total %d (600) after cursor", nextPage.Coverage, referenceTotal)
+	}
+	if got := store.searchCandidateCountQueries.Load(); got != 2 {
+		t.Fatalf("candidate count queries = %d, want one explicit count per page", got)
+	}
+}
+
+func TestMetadataSearchExactCountRejectsBoundExceeded(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	prepared, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Subject: "Status", Limit: 1, MaxMessages: 100,
+		ExactCount: true,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	if _, err := store.SearchMessages(context.Background(), prepared); errorCodeForTest(err) != "search_count_limit_exceeded" {
+		t.Fatalf("SearchMessages() error = %v, want search_count_limit_exceeded", err)
+	}
+	if got := store.searchCandidateCountQueries.Load(); got != 1 {
+		t.Fatalf("candidate count queries = %d, want one explicit count", got)
+	}
+}
+
+func TestMetadataSearchPaginationPreservesEqualAndNullDates(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 4)
+	closeTestResource(t, store, "test store")
+	updateFixtureMessage(t, store, `UPDATE messages SET date_received = 900 WHERE ROWID IN (104, 105)`)
+	updateFixtureMessage(t, store, `UPDATE messages SET date_received = NULL WHERE ROWID IN (106, 107)`)
+
+	var rowIDs []string
+	cursor := ""
+	for pageNumber, limit := range []int{2, 1, 4} {
+		prepared, err := mail.PrepareQuery(mail.Query{
+			MailboxRef: inboxRef, Subject: "Status", Limit: limit, Cursor: cursor,
+		})
+		if err != nil {
+			t.Fatalf("PrepareQuery(page %d) error = %v", pageNumber, err)
+		}
+		page, err := store.SearchMessages(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("SearchMessages(page %d) error = %v", pageNumber, err)
+		}
+		for _, message := range page.Messages {
+			ref, err := mailref.DecodeMessage(message.Summary.Ref)
+			if err != nil {
+				t.Fatalf("DecodeMessage(page %d) error = %v", pageNumber, err)
+			}
+			rowIDs = append(rowIDs, ref.LibraryID)
+		}
+		cursor = page.NextCursor
+	}
+	assertSearchRowIDs(t, rowIDs, []string{"105", "104", "102", "107", "106"})
+}
+
 func TestOpenSearchCandidateRejectsStaleStoreIdentity(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -674,7 +800,11 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 		return mail.SearchPage{}, err
 	}
 	maximum := prepared.Query.MaxMessages
-	items, total, err := store.querySearchRecords(ctx, plan, maximum+1)
+	items, err := store.querySearchRecords(ctx, plan, maximum+1)
+	if err != nil {
+		return mail.SearchPage{}, err
+	}
+	total, err := store.countSearchCandidates(ctx, plan, maximum)
 	if err != nil {
 		return mail.SearchPage{}, err
 	}
