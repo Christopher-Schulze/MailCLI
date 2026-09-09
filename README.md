@@ -49,8 +49,9 @@ Run `mailcli help` for the compact command overview. Focused command help accept
 `help`, `-h`, or `--help` and renders aligned long options with semantic value
 names and readable defaults. The global `--json` flag may appear before, between, or after the command path; a value position such as `--query --json` remains a value.
 
-Capability discovery, local draft management, sending, credential setup, and the unsupported native save preflight bypass the Mail store and
-Mail.app entirely. Reply and forward creation read the source message's header block from the Mail store and write only local draft files.
+Capability discovery, local draft management, sending, credential setup, the unsupported native save preflight, and direct reconciliation of
+transport claims bypass the Mail store and Mail.app entirely. Reply and forward creation read the source message's header block from the Mail
+store and write only local draft files. Legacy baseline reconciliation remains store-backed.
 Missing or unknown command/subcommand routes do the same.
 They therefore avoid SQLite, `plutil`, and Apple Events startup work.
 
@@ -145,8 +146,8 @@ MailCLI uses the permissions of the process that launches it. Grant permissions 
 | Permission | Required for |
 |---|---|
 | Full Disk Access | Accounts, mailboxes, messages, searches, raw source, and downloaded attachments |
-| Automation access to Mail | Live diagnostics, `drafts open`, `sync` without `--check`, and fallback listing when the store open fails |
-| None | Sending (`send setup`, `drafts send`), message mutations (`mark`, `move`, `copy`, `delete`), and `sync --check`; they use IMAP/SMTP with Keychain credentials and need no Automation permission, though the first keychain read may show one consent prompt |
+| Automation access to Mail | Live diagnostics, `sync` without `--check`, and fallback listing when the store open fails |
+| None | Sending (`send setup`, `drafts send`), direct transport-claim reconciliation, message mutations (`mark`, `move`, `copy`, `delete`), and `sync --check`; they use IMAP/SMTP with Keychain credentials and need no Automation permission, though the first keychain read may show one consent prompt |
 
 Accessibility and Screen Recording are not required.
 
@@ -341,7 +342,7 @@ MailCLI stores only local review drafts, historical send/save claims, and access
 - Mail 16 scripted save remains disabled. Direct SMTP/IMAP sending supports only Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`); other domains fail with `transport_unsupported_provider` before credentials are stored or network connections begin. Visible handoff supports new drafts only and requires Mail.app as the default email application.
 - Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts capture intent but cannot guarantee Mail-native threading, quoted content, or original forwarded attachments until completed in Mail's UI.
-- `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it.
+- `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it. The read path uses the local store or targeted IMAP hydration and does not require Mail Automation.
 - Messages that are not fully downloaded may need one targeted IMAP FETCH. The result reports remaining missing parts instead of claiming completeness.
 - Body search is bounded work over current `.emlx` sources, not an instant persistent index. Narrow account, mailbox, sender, date, or subject scope for large stores.
 

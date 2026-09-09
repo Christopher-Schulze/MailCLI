@@ -1,6 +1,27 @@
 package cli
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"mailcli/internal/mail"
+	"mailcli/internal/transport"
+)
+
+type unknownSubmitter struct{}
+
+func (unknownSubmitter) Submit(
+	context.Context,
+	transport.SubmitConfig,
+	string,
+	[]string,
+	[]byte,
+) (transport.SubmitEvidence, error) {
+	return transport.SubmitEvidence{}, &transport.SubmissionError{Stage: "final_reply"}
+}
 
 func TestRequiresMailService(t *testing.T) {
 	tests := []struct {
@@ -14,6 +35,8 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "update", args: []string{"update", "--json"}},
 		{name: "capabilities", args: []string{"capabilities", "--json"}},
 		{name: "global JSON version", args: []string{"--json", "version"}},
+		{name: "batch without input", args: []string{"batch"}},
+		{name: "batch execution", args: []string{"batch", "--input", "-"}, want: true},
 		{name: "unknown command", args: []string{"unknown"}},
 		{name: "command help", args: []string{"messages", "--help"}},
 		{name: "command help with JSON", args: []string{"drafts", "help", "--json"}},
@@ -39,6 +62,7 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "doctor", args: []string{"doctor"}, want: true},
 		{name: "list accounts", args: []string{"accounts", "list"}, want: true},
 		{name: "read message", args: []string{"--json", "messages", "get", "--ref", "ref"}, want: true},
+		{name: "open Mail draft", args: []string{"drafts", "open", "--message", "ref"}, want: true},
 		{name: "reconcile draft", args: []string{"drafts", "reconcile", "--ref", "draft"}, want: true},
 	}
 
@@ -59,6 +83,8 @@ func TestRequiresSignalContext(t *testing.T) {
 		{args: []string{"version"}},
 		{args: []string{"help"}},
 		{args: []string{"capabilities", "--json"}},
+		{args: []string{"batch"}},
+		{args: []string{"batch", "--input", "-"}, want: true},
 		{args: []string{"drafts", "list"}},
 		{args: []string{"drafts", "create", "--to", "recipient@example.com", "--body", "body"}, want: true},
 		{args: []string{"drafts", "edit", "--ref", "draft"}, want: true},
@@ -68,6 +94,7 @@ func TestRequiresSignalContext(t *testing.T) {
 		{args: []string{"drafts", "handoff", "--ref", "draft"}, want: true},
 		{args: []string{"drafts", "save", "--ref", "draft"}, want: true},
 		{args: []string{"drafts", "send", "--ref", "draft", "--confirm"}, want: true},
+		{args: []string{"drafts", "reconcile", "--ref", "draft"}, want: true},
 		{args: []string{"update"}, want: true},
 		{args: []string{"--json", "update"}, want: true},
 		{args: []string{"messages", "search", "--query", "text"}, want: true},
@@ -92,5 +119,42 @@ func TestRequiresMainThread(t *testing.T) {
 		if got := RequiresMainThread(test.args); got != test.want {
 			t.Fatalf("RequiresMainThread(%q) = %t, want %t", test.args, got, test.want)
 		}
+	}
+}
+
+func TestRequiresMailServiceSkipsDirectReconcile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error = %v", err)
+	}
+	root := filepath.Join(configRoot, "MailCLI", "drafts")
+	service := mail.NewServiceWithTransport(nil, root, mail.SendTransport{
+		Submitter:   unknownSubmitter{},
+		Mirror:      &cliMirror{},
+		Credentials: cliCredentials{},
+	})
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Direct recovery", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil {
+		t.Fatal("SendDraft() error = nil, want unknown submission")
+	} else {
+		var submissionErr *transport.SubmissionError
+		if !errors.As(err, &submissionErr) {
+			t.Fatalf("SendDraft() error = %v, want %s", err, transport.CodeSMTPSubmissionUnknown)
+		}
+	}
+	args := []string{"drafts", "reconcile", "--ref", draft.Ref}
+	if RequiresMailService(args) {
+		t.Fatalf("RequiresMailService(%q) = true for a direct unknown claim", args)
+	}
+	if !RequiresSignalContext(args) {
+		t.Fatalf("RequiresSignalContext(%q) = false for direct IMAP recovery", args)
 	}
 }

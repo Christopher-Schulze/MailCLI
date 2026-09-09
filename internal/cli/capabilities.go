@@ -126,59 +126,11 @@ func imapOperationsWithConcurrency(
 
 func capabilities() capabilityManifest {
 	imapContract := imapclient.OperationContracts()
-	read := func(id, store, mailApp string, states ...string) commandCapability {
-		return commandCapability{
-			ID: id, EffectClass: "read", Confirmation: "none",
-			StoreDependency: store, MailAppDependency: mailApp, ResultStates: states,
-		}
-	}
-	write := func(id, class, confirmation, store, mailApp string, states ...string) commandCapability {
-		return commandCapability{
-			ID: id, EffectClass: class, Confirmation: confirmation,
-			StoreDependency: store, MailAppDependency: mailApp, ResultStates: states,
-		}
-	}
 	return capabilityManifest{
 		SchemaVersion: capabilitySchemaVersion,
 		Name:          name,
 		Version:       version,
-		Commands: []commandCapability{
-			read("capabilities", "none", "none", "available"),
-			read("version", "none", "none", "available"),
-			write("update", "local-write", "none", "none", "none", "updated", "up_to_date"),
-			read("doctor", "mail-store", "optional-automation", "healthy", "unhealthy"),
-			read("accounts.list", "mail-store", "fallback-automation", "complete", "partial", "bounded_identity_coverage"),
-			read("mailboxes.list", "mail-store", "none", "complete"),
-			read("mailboxes.resolve", "mail-store", "none", "resolved"),
-			read("messages.list", "mail-store", "fallback-automation", "complete"),
-			read("messages.filter", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"),
-			read("messages.search", "mail-store", "none", "complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"),
-			read("messages.get", "mail-store", "none", "complete", "partial"),
-			read("messages.raw", "mail-store", "none", "complete"),
-			read("attachments.list", "mail-store", "none", "complete", "partial"),
-			write("attachments.save", "filesystem-write", "none", "mail-store", "none", "saved"),
-			write("drafts.create", "local-write", "none", "draft-store", "none", "created"),
-			read("drafts.list", "draft-store", "none", "complete"),
-			read("drafts.inspect", "draft-store", "none", "complete"),
-			read("drafts.preview", "draft-store", "none", "complete"),
-			write("drafts.edit", "local-write", "none", "draft-store", "none", "updated"),
-			write("drafts.handoff", "visible-compose", "none", "draft-store", "system-compose-service", "opened"),
-			write("drafts.update", "local-write", "none", "draft-store", "none", "updated"),
-			write("drafts.save", "unsupported", "none", "draft-store", "none", "compose_automation_unsupported"),
-			read("drafts.open", "mail-store", "fallback-automation", "complete"),
-			write("drafts.send", "smtp-send", "required-flag", "draft-store", "none", "sent", "sent_mirror_pending"),
-			write("send.setup", "keychain-write", "none", "none", "none", "stored", "removed"),
-			read("drafts.reconcile", "mail-and-draft-store", "none", "sent_store_observed", "accepted_by_mail", "outcome_unknown"),
-			write("drafts.discard", "local-write", "required-flag", "draft-store", "none", "discarded"),
-			write("drafts.prune", "local-write", "required-flag", "draft-store", "none", "listed", "pruned"),
-			write("messages.reply", "local-write", "none", "mail-store", "none", "created"),
-			write("messages.forward", "local-write", "none", "mail-store", "none", "created"),
-			write("messages.mark", "imap-write", "draft-flag", "mail-store", "none", "updated"),
-			write("messages.move", "imap-write", "draft-flag", "mail-store", "none", "moved"),
-			write("messages.copy", "imap-write", "none", "mail-store", "none", "copied"),
-			write("messages.delete", "imap-write", "required-and-draft-flags", "mail-store", "none", "deleted"),
-			write("sync", "mail-write", "none", "mail-store", "optional", "triggered", "checked_complete", "checked_incomplete"),
-		},
+		Commands:      capabilityCommands(),
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
 			OwnsMailIndex: false, BackgroundProcess: false,

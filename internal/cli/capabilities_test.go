@@ -162,6 +162,19 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	if !slices.Equal(syncCommand.ResultStates, []string{"triggered", "checked_complete", "checked_incomplete"}) {
 		t.Fatalf("sync result states = %+v", syncCommand.ResultStates)
 	}
+	open := manifest.Commands[slices.Index(got, "drafts.open")]
+	if open.EffectClass != "read" || open.StoreDependency != "mail-store" || open.MailAppDependency != "none" ||
+		!slices.Equal(open.ResultStates, []string{"complete", "partial"}) {
+		t.Fatalf("drafts.open capability = %+v", open)
+	}
+	reconcile := manifest.Commands[slices.Index(got, "drafts.reconcile")]
+	if reconcile.EffectClass != "local-write+imap-write" ||
+		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" || reconcile.MailAppDependency != "none" ||
+		!slices.Equal(reconcile.ResultStates, []string{
+			"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown",
+		}) {
+		t.Fatalf("drafts.reconcile capability = %+v", reconcile)
+	}
 }
 
 // TestCapabilityMailAppDependencies pins every declared Mail.app dependency to an
@@ -191,7 +204,7 @@ func TestCapabilityMailAppDependencies(t *testing.T) {
 		"drafts.handoff":    "system-compose-service",
 		"drafts.update":     "none",
 		"drafts.save":       "none",
-		"drafts.open":       "fallback-automation",
+		"drafts.open":       "none",
 		"drafts.send":       "none",
 		"send.setup":        "none",
 		"drafts.reconcile":  "none",
@@ -220,6 +233,44 @@ func TestCapabilityMailAppDependencies(t *testing.T) {
 	for id := range want {
 		if _, declared := seen[id]; !declared {
 			t.Fatalf("audited command %q is missing from the manifest", id)
+		}
+	}
+}
+
+func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
+	manifest := capabilities()
+	published := 0
+	for _, contract := range commandContracts {
+		if commandIsPublished(contract) {
+			published++
+		}
+	}
+	if len(manifest.Commands) != published {
+		t.Fatalf("manifest command count = %d, published contract count = %d", len(manifest.Commands), published)
+	}
+	index := 0
+	for _, contract := range commandContracts {
+		if !commandIsPublished(contract) {
+			continue
+		}
+		if got := manifest.Commands[index]; !reflect.DeepEqual(got, commandCapabilityFor(contract)) {
+			t.Fatalf("manifest command %d = %+v, contract = %+v", index, got, commandCapabilityFor(contract))
+		}
+		index++
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"drafts", "open", "--message", "ref"}, want: "read"},
+		{args: []string{"drafts", "reconcile", "--ref", "draft"}, want: "local-write+imap-write"},
+	} {
+		contract, _ := commandContractForArgs(test.args)
+		if contract == nil {
+			t.Fatalf("commandContractForArgs(%q) = nil", test.args)
+		}
+		if contractTextString(contract.metadata[metadataEffectClass]) != test.want {
+			t.Fatalf("%s effect_class = %q, want %q", contract.ID, contractTextString(contract.metadata[metadataEffectClass]), test.want)
 		}
 	}
 }
