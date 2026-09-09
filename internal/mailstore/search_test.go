@@ -1360,8 +1360,52 @@ func TestSearchTextRepresentationsShareAttachmentOrderAndOffsets(t *testing.T) {
 	if !matched || term != "zeta" {
 		t.Fatalf("containsAllFoldedSearchTerms() = %v, %q; want true, zeta", matched, term)
 	}
-	if got := snippetForSearchText(representations, term); got != representations.original {
+	if got := snippetForSearchText(&representations, term); got != representations.original {
 		t.Fatalf("attachment snippet = %q, want %q", got, representations.original)
+	}
+}
+
+func TestSearchTextRepresentationsUseImplicitIdentityOffsets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		original string
+		folded   string
+	}{
+		{name: "unchanged ascii", original: "alpha target omega", folded: "alpha target omega"},
+		{name: "simple lowercase", original: "ÄBC target", folded: "äbc target"},
+		{name: "sharp s", original: "Straße target", folded: "straße target"},
+		{name: "non-BMP", original: "😀 TARGET", folded: "😀 target"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			representations := newSearchTextRepresentations(test.original)
+			if representations.folded != test.folded {
+				t.Fatalf("folded text = %q, want %q", representations.folded, test.folded)
+			}
+			if representations.foldedRuneBoundaries != nil {
+				t.Fatalf("identity boundary map = %#v, want nil", representations.foldedRuneBoundaries)
+			}
+			for _, boundary := range []int{0, 1, utf8.RuneCountInString(test.folded)} {
+				if got := originalRuneBoundary(representations.foldedRuneBoundaries, boundary); got != boundary {
+					t.Fatalf("originalRuneBoundary(%d) = %d, want identity", boundary, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchTextRepresentationsRetainChangedOffsets(t *testing.T) {
+	t.Parallel()
+	representations := newSearchTextRepresentations("prefix Cafe\u0301 target suffix")
+	if representations.foldedRuneBoundaries != nil {
+		t.Fatal("changed normalization eagerly built a boundary map")
+	}
+	if got := snippetForSearchText(&representations, "TARGET"); !strings.Contains(got, "Cafe\u0301 target") && !strings.Contains(got, "Café target") {
+		t.Fatalf("snippetForSearchText() = %q, want target context", got)
+	}
+	if representations.foldedRuneBoundaries == nil {
+		t.Fatal("changed normalization did not build a boundary map for the snippet")
 	}
 }
 

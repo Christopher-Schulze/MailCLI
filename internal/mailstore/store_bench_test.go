@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/mattn/go-sqlite3"
@@ -369,6 +370,41 @@ func BenchmarkSearchFixture603(b *testing.B) {
 				}
 				if len(page.Messages) != 25 {
 					b.Fatalf("search fixture returned %d messages, want 25", len(page.Messages))
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkSearchTextRepresentations measures search-text preparation and
+// snippet offset handling without SQLite or MIME parsing noise.
+func BenchmarkSearchTextRepresentations(b *testing.B) {
+	normalizationHeavy := strings.Repeat("Cafe\u0301 ", 1<<17)
+	benchmarks := []struct {
+		name      string
+		value     string
+		term      string
+		wantMatch bool
+	}{
+		{name: "ascii_nonmatch_1MiB", value: strings.Repeat("a", 1<<20), term: "needle"},
+		{name: "ascii_early_match_1MiB", value: "needle " + strings.Repeat("a", 1<<20), term: "needle", wantMatch: true},
+		{name: "ascii_late_match_1MiB", value: strings.Repeat("a", 1<<20) + " needle", term: "needle", wantMatch: true},
+		{name: "normalization_heavy_nonmatch", value: normalizationHeavy, term: "needle"},
+		{name: "normalization_heavy_match", value: normalizationHeavy, term: "café", wantMatch: true},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			terms := normalizedSearchTerms(benchmark.term)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				representations := newSearchTextRepresentations(benchmark.value)
+				matched, firstTerm := containsAllFoldedSearchTerms(representations.folded, terms)
+				if matched != benchmark.wantMatch {
+					b.Fatalf("search match = %t, want %t", matched, benchmark.wantMatch)
+				}
+				if matched && snippetForSearchText(&representations, firstTerm) == "" {
+					b.Fatal("matched search text produced an empty snippet")
 				}
 			}
 		})
