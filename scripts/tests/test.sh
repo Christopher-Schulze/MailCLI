@@ -78,6 +78,7 @@ if ! SKILL_DRIFT="$(diff -qr "${REPO_SKILL}" "${INSTALLED_SKILL}")"; then
 fi
 
 "${MAILCLI_ROOT}/scripts/tests/test-preflight-cache.sh"
+"${MAILCLI_ROOT}/scripts/tests/test-install-local.sh"
 
 while IFS= read -r -d '' SCRIPT_PATH; do
   if [[ ! -x "${SCRIPT_PATH}" ]]; then
