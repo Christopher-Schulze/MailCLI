@@ -185,6 +185,25 @@ func TestSyncCheckParallelStatusRetainsFailureEvidence(t *testing.T) {
 	}
 }
 
+func TestSyncCheckParallelStatusPreservesSerialFailureOrder(t *testing.T) {
+	t.Parallel()
+	client, op := newDelayedSyncCheckClient(t, 3, 5*time.Millisecond, 2, nil, "INBOX")
+	op.boxes = []transport.MailboxInfo{
+		{Name: "INBOX"},
+		{Name: "All"},
+		{Name: "Remote-00"},
+		{Name: "Remote-01"},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if len(result.Failures) < 2 || result.Failures[0].Mailbox != "INBOX" ||
+		result.Failures[0].Code != transport.CodeIMAPTimeout || result.Failures[1].Mailbox != "Sent" {
+		t.Fatalf("Failures = %+v, want serial local order INBOX then Sent", result.Failures)
+	}
+}
+
 func TestSyncCheckCancellationJoinsStatusWorkers(t *testing.T) {
 	t.Parallel()
 	const limit = 3
