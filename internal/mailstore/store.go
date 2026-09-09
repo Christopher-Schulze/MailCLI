@@ -40,6 +40,10 @@ type Store struct {
 	// candidate records returned by body-search stream queries, including
 	// bounded lookahead rows.
 	searchCandidateRowsLoaded atomic.Int64
+	// searchMetadataRowsLoaded is per-store test instrumentation. It counts
+	// candidate records returned by metadata page queries, including the
+	// bounded continuation row.
+	searchMetadataRowsLoaded atomic.Int64
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {

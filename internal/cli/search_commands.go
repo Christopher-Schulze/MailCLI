@@ -73,7 +73,7 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.StringVar(&query.MailboxRef, "mailbox", "", "mailbox ref")
 	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size")
 	flags.StringVar(&query.Cursor, "cursor", "", "pagination cursor")
-	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total for source scans")
+	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total")
 	if allowText {
 		flags.IntVar(&query.MaxMessages, "max-messages", mail.DefaultSearchMaxMessages, "maximum messages for body search")
 		flags.Int64Var(&query.MaxBytes, "max-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body search")

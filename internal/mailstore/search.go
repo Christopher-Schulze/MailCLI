@@ -280,11 +280,21 @@ func (s *Store) searchMetadata(
 	prepared mail.PreparedQuery,
 	plan searchPlan,
 ) (mail.SearchPage, error) {
-	items, total, err := s.querySearchRecords(ctx, plan, prepared.Query.Limit+1)
+	items, err := s.querySearchRecords(ctx, plan, prepared.Query.Limit+1)
 	if err != nil {
 		return mail.SearchPage{}, err
 	}
+	s.searchMetadataRowsLoaded.Add(int64(len(items)))
 	hasMore := len(items) > prepared.Query.Limit
+	candidateMessages := len(items)
+	candidateMessagesExact := !hasMore
+	if prepared.Query.ExactCount {
+		candidateMessages, err = s.countSearchCandidates(ctx, plan, prepared.Query.MaxMessages)
+		if err != nil {
+			return mail.SearchPage{}, err
+		}
+		candidateMessagesExact = true
+	}
 	if hasMore {
 		items = items[:prepared.Query.Limit]
 	}
@@ -293,7 +303,8 @@ func (s *Store) searchMetadata(
 		return mail.SearchPage{}, err
 	}
 	page.Coverage = mail.SearchCoverage{
-		Backend: "envelope_sql", CandidateMessages: total, CandidateMessagesExact: true, Complete: true,
+		Backend: "envelope_sql", CandidateMessages: candidateMessages,
+		CandidateMessagesExact: candidateMessagesExact, Complete: true,
 	}
 	if hasMore && len(items) > 0 {
 		page.NextCursor, err = searchCursorFor(
@@ -589,7 +600,7 @@ func (s *Store) querySearchRecords(
 	ctx context.Context,
 	plan searchPlan,
 	limit int,
-) (result []messageRecord, total int, resultErr error) {
+) (result []messageRecord, resultErr error) {
 	query := `SELECT
 		m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
 		COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
@@ -598,14 +609,13 @@ func (s *Store) querySearchRecords(
 		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
 		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
-		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
-		count(*) OVER ()
+		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
 	` + plan.fromWhereSQL + " ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?"
 	query = plan.prefixSQL + query
 	arguments := append(append([]any(nil), plan.arguments...), limit)
 	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("query Envelope Index search candidates: %w", err)
+		return nil, fmt.Errorf("query Envelope Index search candidates: %w", err)
 	}
 	defer joinCloseError(&resultErr, rows, "search candidate rows")
 	var items []messageRecord
@@ -618,20 +628,17 @@ func (s *Store) querySearchRecords(
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
-			&item.Junk, &item.Size, &item.AttachmentCount, &total,
+			&item.Junk, &item.Size, &item.AttachmentCount,
 		); err != nil {
-			return nil, 0, fmt.Errorf("scan Envelope Index search candidate: %w", err)
+			return nil, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
 		item.DateReceivedNull = dateNull
-		if items == nil {
-			items = make([]messageRecord, 0, min(limit, total))
-		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate Envelope Index search candidates: %w", err)
+		return nil, fmt.Errorf("iterate Envelope Index search candidates: %w", err)
 	}
-	return items, total, nil
+	return items, nil
 }
 
 func (s *Store) mapSearchRecords(
