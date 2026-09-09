@@ -21,6 +21,8 @@ Apple Events are used only by `doctor --live`, `drafts open`, `sync` without `--
 
 For direct IMAP work, treat `mailcli capabilities --json` field `limits.imap_operation_contract` as authoritative. Shared-account LIST, STATUS, SEARCH, and FETCH may overlap only within the advertised bounded pool; APPEND and mutations are exclusive per account, and CLOSE drains the client. Separate library Client values do not coordinate cross-client mutations.
 
+Each CLI invocation creates one direct transport graph and closes its IMAP pool after command execution; store-backed invocations close transport before the local store. Cleanup failures are reported on stderr and turn a successful command into exit `1` while preserving an existing nonzero command result.
+
 ## Read
 
 IMAP FETCH hydration is bounded and parser-based: consume each complete logical response across literal boundaries, accept UID and BODY attributes in either order, ignore unrelated flag-only updates, and fail closed on duplicate or contradictory BODY values. Message-ID resolution treats UID SEARCH as candidate discovery, verifies every candidate with a bounded `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` fetch, and accepts only exact normalized single-header matches; substring, missing, duplicate, or malformed headers never become hydration or mutation targets.
