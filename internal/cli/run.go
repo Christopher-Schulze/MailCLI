@@ -38,7 +38,7 @@ type responseData struct {
 	IdentityCoverageComplete *bool                   `json:"identity_coverage_complete,omitempty"`
 	Mailboxes                *[]mail.Mailbox         `json:"mailboxes,omitempty"`
 	Mailbox                  *mail.Mailbox           `json:"mailbox,omitempty"`
-	Page                     *responsePage           `json:"page,omitempty"`
+	Page                     *json.RawMessage        `json:"page,omitempty"`
 	Message                  *mail.Message           `json:"message,omitempty"`
 	MessageState             *mail.MessageSummary    `json:"message_state,omitempty"`
 	RawSource                *string                 `json:"raw_source,omitempty"`
@@ -62,36 +62,41 @@ type responseData struct {
 	SyncResult               *mail.SyncResult        `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult   `json:"sync_check,omitempty"`
 	BatchResult              *mail.BatchResult       `json:"batch_result,omitempty"`
+	Finalization             *finalizationData       `json:"finalization,omitempty"`
 	UpdateResult             *updateResult           `json:"update_result,omitempty"`
 	serialization            *serializedProjection   `json:"-"`
 }
 
-type responsePage struct {
-	message *mail.MessagePage
-	search  *mail.SearchPage
-}
-
-func (p responsePage) MarshalJSON() ([]byte, error) {
-	if p.message != nil && p.search == nil {
-		return json.Marshal(p.message)
+func rawResponsePage(value any) *json.RawMessage {
+	payload, err := json.Marshal(value)
+	if err == nil {
+		return (*json.RawMessage)(&payload)
 	}
-	if p.search != nil && p.message == nil {
-		return json.Marshal(p.search)
-	}
-	return nil, fmt.Errorf("response page must contain exactly one page type")
+	return nil
 }
 
-func messageResponsePage(page *mail.MessagePage) *responsePage {
-	return &responsePage{message: page}
+func messageResponsePage(page *mail.MessagePage) *json.RawMessage {
+	return rawResponsePage(page)
 }
 
-func searchResponsePage(page *mail.SearchPage) *responsePage {
-	return &responsePage{search: page}
+func searchResponsePage(page *mail.SearchPage) *json.RawMessage {
+	return rawResponsePage(page)
 }
 
 type errorData struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+const (
+	initializationFailureCode = "initialization_failed"
+	finalizationFailureCode   = "finalization_failed"
+	serializationFailureCode  = "serialization_failed"
+)
+
+type finalizationData struct {
+	State string     `json:"state"`
+	Error *errorData `json:"error"`
 }
 
 func Run(
@@ -100,36 +105,93 @@ func Run(
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
-) (code int) {
+) int {
+	args, jsonOutput := NormalizeGlobalJSON(args)
 	trackedStdout := &errorTrackingWriter{writer: stdout}
 	trackedStderr := &errorTrackingWriter{writer: stderr}
 	stdout = trackedStdout
 	stderr = trackedStderr
-	defer func() {
-		if trackedStdout.err != nil || trackedStderr.err != nil {
-			code = 1
-		}
-	}()
 
-	args, jsonOutput := normalizeGlobalJSON(args)
+	code := 0
 	if len(args) == 0 {
 		if jsonOutput {
-			if writeFailureEnvelope(stdout, "", "invalid_argument", "command is required") != 0 {
+			if WriteFailureEnvelope(stdout, "", "invalid_argument", "command is required") != 0 {
 				return 1
 			}
-			return 2
+			code = 2
+		} else {
+			writeHelp(stdout)
 		}
-		writeHelp(stdout)
-		return 0
+	} else if !jsonOutput {
+		code = runCommand(ctx, mailService, args, stdout, stderr)
+	} else {
+		code = runJSONCommand(ctx, mailService, args, stdout, stderr)
 	}
-	if !jsonOutput {
-		return runCommand(ctx, mailService, args, stdout, stderr)
+	if trackedStdout.err != nil || trackedStderr.err != nil {
+		return 1
 	}
-	return runJSONCommand(ctx, mailService, args, stdout, stderr)
+	return code
+}
+
+// JSONOutputRequested reports whether args request the global JSON output mode.
+func JSONOutputRequested(args []string) bool {
+	_, requested := NormalizeGlobalJSON(args)
+	return requested
+}
+
+// InitializationErrorCode returns a typed startup code or the startup fallback.
+func InitializationErrorCode(err error) string {
+	code := errorCode(err)
+	if code == "operation_failed" {
+		return initializationFailureCode
+	}
+	return code
+}
+
+// FinalizeJSON writes one command envelope after merging any resource teardown failure.
+func FinalizeJSON(writer io.Writer, args []string, payload []byte, code int, cleanupErr error) int {
+	normalized, _ := NormalizeGlobalJSON(args)
+	command := AttemptedCommand(normalized)
+	if helpOnly(normalized) || (len(normalized) > 1 && helpOnly(normalized[1:])) {
+		if writeEnvelopeBytes(writer, payload) != 0 {
+			return 1
+		}
+		return code
+	}
+	var value envelope
+	if err := json.Unmarshal(payload, &value); err != nil || value.SchemaVersion <= 0 {
+		failureCode := serializationFailureCode
+		message := "invalid JSON"
+		if cleanupErr != nil {
+			failureCode = finalizationFailureCode
+			message = "JSON cleanup: " + cleanupErr.Error()
+		}
+		WriteFailureEnvelope(writer, command, failureCode, message)
+		return 1
+	}
+	if cleanupErr != nil {
+		failure := &errorData{Code: finalizationFailureCode, Message: "close Mail: " + cleanupErr.Error()}
+		value.Data.Finalization = &finalizationData{State: "failed", Error: failure}
+		if value.OK || value.Error == nil {
+			value.OK = false
+			value.Error = failure
+		}
+		if writeJSON(writer, value) != 0 {
+			return 1
+		}
+		if code == 0 || code == 3 {
+			return 1
+		}
+		return code
+	}
+	if writeEnvelopeBytes(writer, payload) != 0 {
+		return 1
+	}
+	return code
 }
 
 func RequiresMailService(args []string) bool {
-	args, _ = normalizeGlobalJSON(args)
+	args, _ = NormalizeGlobalJSON(args)
 	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
@@ -138,7 +200,7 @@ func RequiresMailService(args []string) bool {
 }
 
 func RequiresSignalContext(args []string) bool {
-	args, _ = normalizeGlobalJSON(args)
+	args, _ = NormalizeGlobalJSON(args)
 	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
@@ -150,7 +212,7 @@ func RequiresSignalContext(args []string) bool {
 }
 
 func RequiresMainThread(args []string) bool {
-	args, _ = normalizeGlobalJSON(args)
+	args, _ = NormalizeGlobalJSON(args)
 	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
@@ -213,7 +275,7 @@ func runJSONCommand(
 		(strings.HasPrefix(message, "unknown ") && strings.Contains(message, " command ")) {
 		errorCode = "unknown_command"
 	}
-	if writeFailureEnvelope(stdout, attemptedCommand(args), errorCode, message) != 0 {
+	if WriteFailureEnvelope(stdout, AttemptedCommand(args), errorCode, message) != 0 {
 		return 1
 	}
 	return code
@@ -354,30 +416,28 @@ func runCommand(
 	return spec.run(ctx, mailService, args[1:], stdout, stderr)
 }
 
-func normalizeGlobalJSON(args []string) ([]string, bool) {
+// NormalizeGlobalJSON moves a global --json flag to the command tail.
+func NormalizeGlobalJSON(args []string) ([]string, bool) {
 	requested := false
-	moved := false
 	normalized := make([]string, 0, len(args)+1)
 	for index, argument := range args {
-		if argument != "--json" {
-			normalized = append(normalized, argument)
-			continue
+		switch argument {
+		case "--json":
+			requested = true
+			if index == 0 || !strings.HasPrefix(args[index-1], "-") {
+				continue
+			}
 		}
-		requested = true
-		if index > 0 && strings.HasPrefix(args[index-1], "-") {
-			normalized = append(normalized, argument)
-			continue
-		}
-		moved = true
+		normalized = append(normalized, argument)
 	}
 	if !requested {
 		return args, false
 	}
-	if moved || len(normalized) == 0 || normalized[len(normalized)-1] != "--json" {
-		normalized = append(normalized, "--json")
-	}
-	if len(normalized) == 1 && normalized[0] == "--json" {
+	if len(normalized) == 0 {
 		return nil, true
+	}
+	if len(normalized) < len(args) || normalized[len(normalized)-1] != "--json" {
+		normalized = append(normalized, "--json")
 	}
 	return normalized, true
 }
@@ -418,7 +478,6 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
 	var report mail.DiagnosticReport
 	var timings []mail.DiagnosticTiming
 	if flags["--diagnostics"] {
@@ -427,6 +486,7 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 		report = service.Probe(operationCtx, flags["--live"])
 	}
 	healthy := mail.IsHealthy(report)
+	cancel()
 	if flags["--json"] {
 		response := envelope{
 			SchemaVersion: schemaVersion,
@@ -485,22 +545,15 @@ func parseBooleanFlags(args []string, allowed ...string) (map[string]bool, error
 }
 
 func writeJSON(writer io.Writer, value envelope) int {
-	// Marshal to a buffer first so a partial JSON envelope is never written
-	// to the output. If marshalling fails, the caller can still emit a
-	// fallback error envelope.
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
+	payload, err := marshalEnvelope(value)
+	if err != nil {
 		return 1
 	}
-	if _, err := writer.Write(buf.Bytes()); err != nil {
-		return 1
-	}
-	return 0
+	return writeEnvelopeBytes(writer, payload)
 }
 
-func writeFailureEnvelope(writer io.Writer, command string, code string, message string) int {
+//go:noinline
+func WriteFailureEnvelope(writer io.Writer, command string, code string, message string) int {
 	return writeJSON(writer, envelope{
 		SchemaVersion: schemaVersion,
 		OK:            false,
@@ -510,7 +563,8 @@ func writeFailureEnvelope(writer io.Writer, command string, code string, message
 	})
 }
 
-func attemptedCommand(args []string) string {
+// AttemptedCommand returns the command identifier represented by normalized args.
+func AttemptedCommand(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}

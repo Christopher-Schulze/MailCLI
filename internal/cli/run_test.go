@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -274,6 +275,94 @@ func TestRunFailsWhenCommandOutputCannotBeWritten(t *testing.T) {
 	}
 }
 
+func TestFinalizeJSONRetainsOperationEvidenceOnCleanupFailure(t *testing.T) {
+	payload := []byte(`{"schema_version":1,"ok":true,"command":"drafts.send","data":{"send_result":{"submission_accepted":true,"sent_copy_observed":false}},"error":null}
+`)
+	var stdout bytes.Buffer
+	cleanupErr := errors.New("transport close failed")
+	code := FinalizeJSON(&stdout, []string{"drafts", "send", "--json"}, payload, 0, cleanupErr)
+	if code != 1 {
+		t.Fatalf("FinalizeJSON() code = %d, want 1", code)
+	}
+	var response struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			SendResult struct {
+				SubmissionAccepted bool `json:"submission_accepted"`
+			} `json:"send_result"`
+			Finalization struct {
+				State string `json:"state"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			} `json:"finalization"`
+		} `json:"data"`
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode finalized response: %v; stdout = %q", err, stdout.String())
+	}
+	if response.OK || !response.Data.SendResult.SubmissionAccepted ||
+		response.Data.Finalization.State != "failed" ||
+		response.Data.Finalization.Error.Code != finalizationFailureCode ||
+		response.Error == nil || response.Error.Code != finalizationFailureCode {
+		t.Fatalf("finalized response = %+v; stdout = %q", response, stdout.String())
+	}
+}
+
+func TestFinalizeJSONPreservesStructuredPageData(t *testing.T) {
+	var execution bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run(context.Background(), newTestService(), []string{"messages", "list", "--mailbox", "mbx_ref", "--json"}, &execution, &stderr); code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var stdout bytes.Buffer
+	if code := FinalizeJSON(&stdout, []string{"messages", "list", "--mailbox", "mbx_ref", "--json"}, execution.Bytes(), 0, errors.New("close failed")); code != 1 {
+		t.Fatalf("FinalizeJSON() code = %d, want 1", code)
+	}
+	var response struct {
+		Data struct {
+			Page         json.RawMessage `json:"page"`
+			Finalization json.RawMessage `json:"finalization"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode finalized page response: %v; stdout = %q", err, stdout.String())
+	}
+	if len(response.Data.Page) == 0 || string(response.Data.Page) == "null" ||
+		len(response.Data.Finalization) == 0 || string(response.Data.Finalization) == "null" {
+		t.Fatalf("finalized data lost page or finalization: %+v", response.Data)
+	}
+}
+
+func TestFinalizeJSONReturnsOutputWriterFailure(t *testing.T) {
+	payload := []byte(`{"schema_version":1,"ok":true,"command":"version","data":{},"error":null}
+`)
+	if code := FinalizeJSON(failingWriter{}, []string{"version", "--json"}, payload, 0, nil); code != 1 {
+		t.Fatalf("FinalizeJSON() code = %d, want 1", code)
+	}
+	if code := FinalizeJSON(shortWriter{}, []string{"version", "--json"}, payload, 0, nil); code != 1 {
+		t.Fatalf("FinalizeJSON() with short writer code = %d, want 1", code)
+	}
+}
+
+func TestFinalizeJSONRejectsMalformedExecutionOutput(t *testing.T) {
+	var stdout bytes.Buffer
+	code := FinalizeJSON(&stdout, []string{"version", "--json"}, []byte("partial"), 0, nil)
+	if code != 1 {
+		t.Fatalf("FinalizeJSON() code = %d, want 1", code)
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode serialization failure: %v; stdout = %q", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != serializationFailureCode {
+		t.Fatalf("serialization response = %+v", response)
+	}
+}
+
 func TestWriteMessageFailsOnWriteError(t *testing.T) {
 	// writeMessage must return an error when stdout fails, causing exit 1.
 	// Use messages get which calls writeMessage in human mode.
@@ -323,9 +412,9 @@ func TestNormalizeGlobalJSONSupportsAnyPositionWithoutStealingValues(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, requested := normalizeGlobalJSON(test.args)
+			got, requested := NormalizeGlobalJSON(test.args)
 			if !requested || !slices.Equal(got, test.want) {
-				t.Fatalf("normalizeGlobalJSON(%q) = %q, %t, want %q, true", test.args, got, requested, test.want)
+				t.Fatalf("NormalizeGlobalJSON(%q) = %q, %t, want %q, true", test.args, got, requested, test.want)
 			}
 		})
 	}
