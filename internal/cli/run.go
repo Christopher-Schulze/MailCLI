@@ -130,14 +130,11 @@ func Run(
 
 func RequiresMailService(args []string) bool {
 	args, _ = normalizeGlobalJSON(args)
-	if len(args) == 0 {
+	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
-	if helpOnly(args[1:]) {
-		return false
-	}
-	spec, ok := commandRegistry[args[0]]
-	return ok && spec.requiresMailService != nil && spec.requiresMailService(args[1:])
+	contract, commandArgs := commandContractForArgs(args)
+	return contract != nil && !helpOnly(commandArgs) && commandRequiresMailService(*contract, commandArgs)
 }
 
 func RequiresSignalContext(args []string) bool {
@@ -145,12 +142,11 @@ func RequiresSignalContext(args []string) bool {
 	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
-	spec, ok := commandRegistry[args[0]]
-	if !ok {
+	contract, commandArgs := commandContractForArgs(args)
+	if contract == nil || helpOnly(commandArgs) {
 		return false
 	}
-	return (spec.requiresSignal != nil && spec.requiresSignal(args[1:])) ||
-		(spec.requiresMailService != nil && spec.requiresMailService(args[1:]))
+	return commandNeedsSignalFor(*contract) || commandRequiresMailService(*contract, commandArgs)
 }
 
 func RequiresMainThread(args []string) bool {
@@ -158,50 +154,34 @@ func RequiresMainThread(args []string) bool {
 	if len(args) == 0 || helpOnly(args[1:]) {
 		return false
 	}
-	spec, ok := commandRegistry[args[0]]
-	return ok && spec.requiresMainThread != nil && spec.requiresMainThread(args[1:])
+	contract, commandArgs := commandContractForArgs(args)
+	return contract != nil && !helpOnly(commandArgs) && commandNeedsMainThreadFor(*contract)
 }
 
-func serviceCommandRequired(args []string) bool {
-	return !helpOnly(args)
-}
-
-func accountCommandRequired(args []string) bool {
-	return len(args) > 0 && args[0] == "list" && !helpOnly(args[1:])
-}
-
-func mailboxCommandRequired(args []string) bool {
-	return len(args) > 0 && (args[0] == "list" || args[0] == "resolve") && !helpOnly(args[1:])
-}
-
-func messageCommandRequired(args []string) bool {
-	if len(args) == 0 || helpOnly(args[1:]) {
+func draftReconcileCommandRequired(args []string) bool {
+	if len(args) == 0 || helpOnly(args) {
 		return false
 	}
-	switch args[0] {
-	case "reply", "forward", "list", "filter", "search", "get", "raw", "mark", "move", "copy", "delete":
+	ref, found := draftRefArgument(args)
+	if !found || ref == "" {
 		return true
-	default:
-		return false
 	}
+	return mail.DraftReconcileRequiresMailStore(ref)
 }
 
-func attachmentCommandRequired(args []string) bool {
-	return len(args) > 0 && (args[0] == "list" || args[0] == "save") && !helpOnly(args[1:])
-}
-
-func draftCommandRequired(args []string) bool {
-	return len(args) > 0 && (args[0] == "open" || args[0] == "reconcile") && !helpOnly(args[1:])
-}
-
-func draftSignalRequired(args []string) bool {
-	return len(args) > 0 &&
-		(args[0] == "create" || args[0] == "edit" || args[0] == "handoff" || args[0] == "update" || args[0] == "save" || args[0] == "send") &&
-		!helpOnly(args[1:])
-}
-
-func draftHandoffRequired(args []string) bool {
-	return len(args) > 0 && args[0] == "handoff" && !helpOnly(args[1:])
+func draftRefArgument(args []string) (string, bool) {
+	for index, argument := range args {
+		if argument == "--ref" {
+			if index+1 >= len(args) {
+				return "", true
+			}
+			return args[index+1], true
+		}
+		if strings.HasPrefix(argument, "--ref=") {
+			return strings.TrimPrefix(argument, "--ref="), true
+		}
+	}
+	return "", false
 }
 
 func runJSONCommand(
@@ -299,10 +279,7 @@ func (w *countingWriter) Write(payload []byte) (int, error) {
 type commandRunner func(context.Context, *mail.Service, []string, io.Writer, io.Writer) int
 
 type commandSpec struct {
-	run                 commandRunner
-	requiresMailService func([]string) bool
-	requiresSignal      func([]string) bool
-	requiresMainThread  func([]string) bool
+	run commandRunner
 }
 
 var commandRegistry = map[string]commandSpec{
@@ -326,31 +303,31 @@ var commandRegistry = map[string]commandSpec{
 	}},
 	"update": {run: func(ctx context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runUpdate(ctx, args, stdout, stderr)
-	}, requiresSignal: func([]string) bool { return true }},
+	}},
 	"capabilities": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runCapabilities(args, stdout, stderr)
 	}},
 	"doctor": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runDoctor(ctx, service, args, stdout, stderr)
-	}, requiresMailService: serviceCommandRequired},
+	}},
 	"batch": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runBatch(ctx, service, args, stdout, stderr)
-	}, requiresMailService: serviceCommandRequired},
+	}},
 	"accounts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runAccounts(ctx, service, args, stdout, stderr)
-	}, requiresMailService: accountCommandRequired},
+	}},
 	"mailboxes": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runMailboxes(ctx, service, args, stdout, stderr)
-	}, requiresMailService: mailboxCommandRequired},
+	}},
 	"messages": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runMessages(ctx, service, args, stdout, stderr)
-	}, requiresMailService: messageCommandRequired},
+	}},
 	"attachments": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runAttachments(ctx, service, args, stdout, stderr)
-	}, requiresMailService: attachmentCommandRequired},
+	}},
 	"drafts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runDrafts(ctx, service, args, stdout, stderr)
-	}, requiresMailService: draftCommandRequired, requiresSignal: draftSignalRequired, requiresMainThread: draftHandoffRequired},
+	}},
 	"send": {run: func(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		if service == nil {
 			return runSend(args, stdout, stderr)
@@ -359,7 +336,7 @@ var commandRegistry = map[string]commandSpec{
 	}},
 	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runSync(ctx, service, args, stdout, stderr)
-	}, requiresMailService: func([]string) bool { return true }, requiresSignal: func([]string) bool { return true }},
+	}},
 }
 
 func runCommand(

@@ -16,11 +16,11 @@ import (
 func (s *Service) resolveDraftRoot() (string, error) {
 	root := s.draftRoot
 	if root == "" {
-		configRoot, err := os.UserConfigDir()
+		var err error
+		root, err = defaultDraftRoot()
 		if err != nil {
-			return "", fmt.Errorf("resolve Application Support directory: %w", err)
+			return "", err
 		}
-		root = filepath.Join(configRoot, "MailCLI", "drafts")
 	}
 	if !filepath.IsAbs(root) {
 		return "", validationError("draft root must be absolute")
@@ -32,6 +32,14 @@ func (s *Service) resolveDraftRoot() (string, error) {
 		return "", fmt.Errorf("restrict draft directory: %w", err)
 	}
 	return root, nil
+}
+
+func defaultDraftRoot() (string, error) {
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Application Support directory: %w", err)
+	}
+	return filepath.Join(configRoot, "MailCLI", "drafts"), nil
 }
 
 func newDraftReference() (string, error) {
