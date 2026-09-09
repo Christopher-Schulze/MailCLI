@@ -1,8 +1,8 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	stdmail "net/mail"
@@ -14,7 +14,14 @@ import (
 	"mailcli/internal/mailref"
 )
 
-const listCursorVersion = 2
+const (
+	legacyListCursorVersion = 2
+	listCursorVersion       = 3
+)
+
+const (
+	listCursorDateNull = 1 << iota
+)
 
 type messageRecord struct {
 	RowID            int64
@@ -61,6 +68,10 @@ func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesReque
 	if !s.activeAccountID(mailbox.AccountID) {
 		return mail.MessagePage{}, operationError("stale_reference", "mailbox account is not active")
 	}
+	cursor, err := decodeListCursor(request.Cursor, request.MailboxRef, s.storeUUID)
+	if err != nil {
+		return mail.MessagePage{}, err
+	}
 	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return mail.MessagePage{}, err
@@ -68,10 +79,6 @@ func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesReque
 	mailboxRecord, found := findMailboxRecord(records, mailbox.AccountID, mailbox.Path)
 	if !found {
 		return s.emptyOrMissingMailbox(ctx, request.MailboxRef, mailbox.AccountID, mailbox.Path)
-	}
-	cursor, err := decodeListCursor(request.Cursor, request.MailboxRef, s.storeUUID)
-	if err != nil {
-		return mail.MessagePage{}, err
 	}
 	items, err := s.queryMailboxMessages(ctx, mailboxRecord.RowID, cursor, request.Limit+1)
 	if err != nil {
@@ -304,31 +311,65 @@ func formatUnixTime(value int64) string {
 
 func encodeListCursor(cursor listCursor) (string, error) {
 	cursor.Version = listCursorVersion
-	payload, err := json.Marshal(cursor)
+	var flags uint8
+	if cursor.DateReceivedNull {
+		flags = listCursorDateNull
+	}
+	token, err := mailref.EncodeCompactTokenPayload("lcur_", &mailref.CompactPayload{
+		StoreUUID: cursor.StoreUUID, MailboxRef: cursor.MailboxRef,
+		DateReceived: cursor.DateReceived, Flags: flags, RowID: cursor.RowID,
+	}, listCursorVersion)
 	if err != nil {
 		return "", fmt.Errorf("encode list cursor: %w", err)
 	}
-	return "lcur_" + base64.RawURLEncoding.EncodeToString(payload), nil
+	return token, nil
 }
 
 func decodeListCursor(value string, mailboxRef string, storeUUID string) (*listCursor, error) {
 	if value == "" {
 		return nil, nil
 	}
-	if !strings.HasPrefix(value, "lcur_") {
-		return nil, operationError("invalid_cursor", "invalid list cursor prefix")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "lcur_"))
+	payload, err := mailref.DecodeTokenPayload("lcur_", value)
 	if err != nil {
-		return nil, operationError("invalid_cursor", fmt.Sprintf("decode list cursor: %v", err))
+		return nil, operationError("invalid_cursor", err.Error())
 	}
-	var cursor listCursor
-	if err := json.Unmarshal(payload, &cursor); err != nil {
-		return nil, operationError("invalid_cursor", fmt.Sprintf("parse list cursor: %v", err))
+	cursor, err := decodeListCursorPayload(payload)
+	if err != nil {
+		return nil, operationError("invalid_cursor", err.Error())
 	}
-	if cursor.Version != listCursorVersion || cursor.StoreUUID != storeUUID ||
+	if (cursor.Version != listCursorVersion && cursor.Version != legacyListCursorVersion) || cursor.StoreUUID != storeUUID ||
 		cursor.MailboxRef != mailboxRef || cursor.RowID < 1 {
 		return nil, operationError("invalid_cursor", "list cursor does not match this mailbox")
 	}
-	return &cursor, nil
+	return cursor, nil
+}
+
+func decodeListCursorPayload(payload []byte) (*listCursor, error) {
+	if isLegacyCursorJSON(payload) {
+		var cursor listCursor
+		if err := json.Unmarshal(payload, &cursor); err != nil {
+			return nil, fmt.Errorf("parse list cursor: %w", err)
+		}
+		if cursor.Version != legacyListCursorVersion {
+			return nil, fmt.Errorf("unsupported list cursor version %d (expected %d)", cursor.Version, listCursorVersion)
+		}
+		return &cursor, nil
+	}
+	compact, err := mailref.DecodeCompactPayload(payload, listCursorVersion)
+	if err != nil {
+		return nil, err
+	}
+	if compact.Flags > listCursorDateNull {
+		return nil, fmt.Errorf("unknown list cursor flags 0x%x", compact.Flags)
+	}
+	return &listCursor{
+		Version: listCursorVersion, StoreUUID: compact.StoreUUID, MailboxRef: compact.MailboxRef,
+		DateReceived: compact.DateReceived, DateReceivedNull: compact.Flags&listCursorDateNull != 0,
+		RowID: compact.RowID,
+	}, nil
+}
+
+func isLegacyCursorJSON(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }

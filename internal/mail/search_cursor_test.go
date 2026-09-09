@@ -1,7 +1,11 @@
 package mail
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"testing"
+
+	"mailcli/internal/mailref"
 )
 
 func TestEncodeSearchCursorRoundtrip(t *testing.T) {
@@ -107,6 +111,136 @@ func TestDecodeSearchCursorRejectsEmptyStoreUUID(t *testing.T) {
 	if err == nil {
 		t.Fatal("DecodeSearchCursor error = nil, want empty store UUID rejection")
 	}
+}
+
+func TestDecodeSearchCursorAcceptsLegacyJSONFixture(t *testing.T) {
+	t.Parallel()
+	want := SearchCursor{
+		Version: legacySearchCursorVersion, Fingerprint: "fp", StoreUUID: "store",
+		IndexRevision: "revision", ReceivedAt: 1700000000, RowID: 42, Inclusive: true,
+	}
+	payload, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	token := "scur_" + base64.RawURLEncoding.EncodeToString(payload)
+	got, err := DecodeSearchCursor(token, "fp")
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	if *got != want {
+		t.Fatalf("legacy cursor = %+v, want %+v", *got, want)
+	}
+}
+
+func TestCompactSearchCursorPreservesFlagsAndReducesSize(t *testing.T) {
+	t.Parallel()
+	input := SearchCursor{
+		Version: searchCursorVersion, Fingerprint: "query-fingerprint-with-unicode-ä✅",
+		StoreUUID: "store-uuid", IndexRevision: "revision-2026-09-09", ReceivedAt: -1700000000,
+		ReceivedAtNull: true, RowID: 424242, Inclusive: true,
+	}
+	compact, err := EncodeSearchCursorInclusiveWithRevision(
+		input.Fingerprint, input.StoreUUID, input.IndexRevision,
+		input.ReceivedAt, input.ReceivedAtNull, input.RowID,
+	)
+	if err != nil {
+		t.Fatalf("EncodeSearchCursor() error = %v", err)
+	}
+	got, err := DecodeSearchCursor(compact, input.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	if got.Version != searchCursorVersion || got.StoreUUID != input.StoreUUID || got.IndexRevision != input.IndexRevision || got.ReceivedAt != input.ReceivedAt || !got.ReceivedAtNull || !got.Inclusive || got.RowID != input.RowID {
+		t.Fatalf("compact cursor = %+v, want fields from %+v", *got, input)
+	}
+	legacyPayload, err := json.Marshal(SearchCursor{
+		Version: legacySearchCursorVersion, Fingerprint: input.Fingerprint, StoreUUID: input.StoreUUID,
+		IndexRevision: input.IndexRevision, ReceivedAt: input.ReceivedAt,
+		ReceivedAtNull: input.ReceivedAtNull, RowID: input.RowID, Inclusive: input.Inclusive,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	compactPayload, err := mailref.DecodeTokenPayload("scur_", compact)
+	if err != nil {
+		t.Fatalf("DecodeTokenPayload() error = %v", err)
+	}
+	if len(compactPayload) >= len(legacyPayload) {
+		t.Fatalf("compact payload size = %d, legacy JSON size = %d; want reduction", len(compactPayload), len(legacyPayload))
+	}
+	if (len(compactPayload)+3)/4 >= (len(legacyPayload)+3)/4 {
+		t.Fatalf("compact token estimate = %d, legacy token estimate = %d; want reduction", (len(compactPayload)+3)/4, (len(legacyPayload)+3)/4)
+	}
+}
+
+func TestDecodeSearchCursorRejectsUnknownFlagsAndTrailingBytes(t *testing.T) {
+	t.Parallel()
+	payload, err := mailref.EncodeCompactPayload(mailref.CompactPayload{
+		Fingerprint: "fp", StoreUUID: "store", IndexRevision: "revision", ReceivedAt: 1, Flags: 4, RowID: 1,
+	}, searchCursorVersion)
+	if err != nil {
+		t.Fatalf("EncodeCompactPayload() error = %v", err)
+	}
+	token, err := mailref.EncodeToken("scur_", payload)
+	if err != nil {
+		t.Fatalf("EncodeToken() error = %v", err)
+	}
+	if _, err := DecodeSearchCursor(token, "fp"); err == nil {
+		t.Fatal("DecodeSearchCursor(unknown flags) error = nil")
+	}
+	payload, err = mailref.EncodeCompactPayload(mailref.CompactPayload{
+		Fingerprint: "fp", StoreUUID: "store", IndexRevision: "revision", ReceivedAt: 1, RowID: 1,
+	}, searchCursorVersion)
+	if err != nil {
+		t.Fatalf("EncodeCompactPayload() error = %v", err)
+	}
+	token, err = mailref.EncodeToken("scur_", append(payload, 0))
+	if err != nil {
+		t.Fatalf("EncodeToken() error = %v", err)
+	}
+	if _, err := DecodeSearchCursor(token, "fp"); err == nil {
+		t.Fatal("DecodeSearchCursor(trailing) error = nil")
+	}
+}
+
+func FuzzDecodeSearchCursor(f *testing.F) {
+	valid, _ := EncodeSearchCursorWithRevision("fp", "store", "revision", 1, false, 1)
+	for _, seed := range []string{valid, "", "scur_!!!", "scur_eyJ2ZXJzaW9uIjozfQ"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, token string) {
+		_, _ = DecodeSearchCursor(token, "fp")
+	})
+}
+
+func BenchmarkSearchCursorEncoding(b *testing.B) {
+	fingerprint, storeUUID, revision := "query-fingerprint", "store-uuid", "revision-42"
+	b.Run("compact", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			token, err := EncodeSearchCursorWithRevision(fingerprint, storeUUID, revision, 1700000000, false, 42)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if i == 0 {
+				b.ReportMetric(float64(len(token)), "bytes/token")
+			}
+		}
+	})
+	b.Run("legacy-json", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			payload, err := json.Marshal(SearchCursor{Version: legacySearchCursorVersion, Fingerprint: fingerprint, StoreUUID: storeUUID, IndexRevision: revision, ReceivedAt: 1700000000, RowID: 42})
+			if err != nil {
+				b.Fatal(err)
+			}
+			token := "scur_" + base64.RawURLEncoding.EncodeToString(payload)
+			if i == 0 {
+				b.ReportMetric(float64(len(token)), "bytes/token")
+			}
+		}
+	})
 }
 
 func TestQueryFingerprintStable(t *testing.T) {

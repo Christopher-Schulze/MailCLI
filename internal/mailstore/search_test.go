@@ -2,11 +2,14 @@ package mailstore
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -218,6 +221,56 @@ func TestMetadataSearchPaginationPreservesEqualAndNullDates(t *testing.T) {
 		cursor = page.NextCursor
 	}
 	assertSearchRowIDs(t, rowIDs, []string{"105", "104", "102", "107", "106"})
+}
+
+func TestSearchCursorLegacyAndCompactContinueIdentically(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 4)
+	closeTestResource(t, store, "test store")
+	first, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Subject: "Status", Limit: 1})
+	if err != nil {
+		t.Fatalf("PrepareQuery(first) error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), first)
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("SearchMessages(first) = %#v, error = %v", page, err)
+	}
+	decoded, err := mail.DecodeSearchCursor(page.NextCursor, first.Fingerprint)
+	if err != nil {
+		t.Fatalf("DecodeSearchCursor() error = %v", err)
+	}
+	legacyPayload, err := json.Marshal(mail.SearchCursor{
+		Version: 3, Fingerprint: decoded.Fingerprint, StoreUUID: decoded.StoreUUID,
+		IndexRevision: decoded.IndexRevision, ReceivedAt: decoded.ReceivedAt,
+		ReceivedAtNull: decoded.ReceivedAtNull, RowID: decoded.RowID, Inclusive: decoded.Inclusive,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(legacy cursor) error = %v", err)
+	}
+	legacyCursor := "scur_" + base64.RawURLEncoding.EncodeToString(legacyPayload)
+	var continuations [][]string
+	for _, cursor := range []string{page.NextCursor, legacyCursor} {
+		next, err := mail.PrepareQuery(mail.Query{MailboxRef: inboxRef, Subject: "Status", Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("PrepareQuery(next) error = %v", err)
+		}
+		nextPage, err := store.SearchMessages(context.Background(), next)
+		if err != nil {
+			t.Fatalf("SearchMessages(next) error = %v", err)
+		}
+		ids := make([]string, 0, len(nextPage.Messages))
+		for _, item := range nextPage.Messages {
+			ref, err := mailref.DecodeMessage(item.Summary.Ref)
+			if err != nil {
+				t.Fatalf("DecodeMessage() error = %v", err)
+			}
+			ids = append(ids, ref.LibraryID)
+		}
+		continuations = append(continuations, ids)
+	}
+	if !reflect.DeepEqual(continuations[0], continuations[1]) {
+		t.Fatalf("compact continuation = %v, legacy continuation = %v", continuations[0], continuations[1])
+	}
 }
 
 func TestOpenSearchCandidateRejectsStaleStoreIdentity(t *testing.T) {

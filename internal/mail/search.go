@@ -1,13 +1,15 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
+
+	"mailcli/internal/mailref"
 )
 
 const (
@@ -16,7 +18,13 @@ const (
 	MaximumSearchMaxMessages    = 100_000
 	MaximumSearchMaxBytes       = int64(8 * 1024 * 1024 * 1024)
 	SearchConsistencyBestEffort = "best_effort"
-	searchCursorVersion         = 3
+	legacySearchCursorVersion   = 3
+	searchCursorVersion         = 4
+)
+
+const (
+	searchCursorReceivedAtNull = 1 << iota
+	searchCursorInclusive
 )
 
 type Query struct {
@@ -198,35 +206,60 @@ func encodeSearchCursor(
 	rowID int64,
 	inclusive bool,
 ) (string, error) {
-	payload, err := json.Marshal(SearchCursor{
-		Version: searchCursorVersion, Fingerprint: fingerprint, StoreUUID: storeUUID,
-		IndexRevision: indexRevision,
-		ReceivedAt:    receivedAt, ReceivedAtNull: receivedAtNull, RowID: rowID,
-		Inclusive: inclusive,
-	})
+	var flags uint8
+	if receivedAtNull {
+		flags |= searchCursorReceivedAtNull
+	}
+	if inclusive {
+		flags |= searchCursorInclusive
+	}
+	token, err := mailref.EncodeCompactTokenPayload("scur_", &mailref.CompactPayload{
+		Fingerprint: fingerprint, StoreUUID: storeUUID, IndexRevision: indexRevision,
+		ReceivedAt: receivedAt, Flags: flags, RowID: rowID,
+	}, searchCursorVersion)
 	if err != nil {
 		return "", fmt.Errorf("encode search cursor: %w", err)
 	}
-	return "scur_" + base64.RawURLEncoding.EncodeToString(payload), nil
+	return token, nil
 }
 
 func DecodeSearchCursor(value string, fingerprint string) (*SearchCursor, error) {
-	if !strings.HasPrefix(value, "scur_") {
-		return nil, fmt.Errorf("invalid search cursor prefix")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "scur_"))
+	payload, err := mailref.DecodeTokenPayload("scur_", value)
 	if err != nil {
-		return nil, fmt.Errorf("decode search cursor: %w", err)
+		return nil, err
 	}
 	var cursor SearchCursor
-	if err := json.Unmarshal(payload, &cursor); err != nil {
-		return nil, fmt.Errorf("parse search cursor: %w", err)
+	if isLegacyJSONPayload(payload) {
+		if err := json.Unmarshal(payload, &cursor); err != nil {
+			return nil, fmt.Errorf("parse search cursor: %w", err)
+		}
+		if cursor.Version != legacySearchCursorVersion {
+			return nil, fmt.Errorf("unsupported search cursor version %d (expected %d)", cursor.Version, searchCursorVersion)
+		}
+	} else {
+		compact, err := mailref.DecodeCompactPayload(payload, searchCursorVersion)
+		if err != nil {
+			return nil, err
+		}
+		if compact.Flags > searchCursorReceivedAtNull|searchCursorInclusive {
+			return nil, fmt.Errorf("unknown search cursor flags 0x%x", compact.Flags)
+		}
+		cursor = SearchCursor{
+			Version: searchCursorVersion, Fingerprint: compact.Fingerprint, StoreUUID: compact.StoreUUID,
+			IndexRevision: compact.IndexRevision, ReceivedAt: compact.ReceivedAt,
+			ReceivedAtNull: compact.Flags&searchCursorReceivedAtNull != 0, RowID: compact.RowID,
+			Inclusive: compact.Flags&searchCursorInclusive != 0,
+		}
 	}
-	if cursor.Version != searchCursorVersion || cursor.StoreUUID == "" || cursor.IndexRevision == "" ||
-		cursor.RowID < 1 || cursor.Fingerprint != fingerprint {
+	if cursor.StoreUUID == "" || cursor.IndexRevision == "" || cursor.RowID < 1 || cursor.Fingerprint != fingerprint {
 		return nil, fmt.Errorf("search cursor does not match this query")
 	}
 	return &cursor, nil
+}
+
+func isLegacyJSONPayload(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 func parseQueryTime(value string) (int64, error) {
