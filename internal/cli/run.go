@@ -61,6 +61,7 @@ type responseData struct {
 	DeleteResult             *mail.DeleteResult      `json:"delete_result,omitempty"`
 	SyncResult               *mail.SyncResult        `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult   `json:"sync_check,omitempty"`
+	BatchResult              *mail.BatchResult       `json:"batch_result,omitempty"`
 	UpdateResult             *updateResult           `json:"update_result,omitempty"`
 	serialization            *serializedProjection   `json:"-"`
 }
@@ -332,6 +333,9 @@ var commandRegistry = map[string]commandSpec{
 	"doctor": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runDoctor(ctx, service, args, stdout, stderr)
 	}, requiresMailService: serviceCommandRequired},
+	"batch": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+		return runBatch(ctx, service, args, stdout, stderr)
+	}, requiresMailService: serviceCommandRequired},
 	"accounts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runAccounts(ctx, service, args, stdout, stderr)
 	}, requiresMailService: accountCommandRequired},
@@ -536,7 +540,7 @@ func attemptedCommand(args []string) string {
 	command := strings.TrimLeft(args[0], "-")
 	if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
 		switch command {
-		case "accounts", "attachments", "drafts", "mailboxes", "messages", "send":
+		case "accounts", "attachments", "batch", "drafts", "mailboxes", "messages", "send":
 			return command + "." + args[1]
 		}
 	}
@@ -577,12 +581,12 @@ Local Apple Mail access for the shell and coding agents.
 
 Usage:
   mailcli <command> [flags]
-
 Commands:
   accounts      List configured accounts and sender identities
   mailboxes     List and resolve exact mailbox paths
   messages      List, search, read, reply, forward, and organize messages
   attachments   List and save received attachments
+  batch         Execute bounded explicit reads, attachment saves, and marks
   drafts        Create, preview, edit, hand off, and prune drafts
   send          Store or remove app-specific SMTP send credentials
   sync          Synchronize with Mail.app or check server status over IMAP (--check)
