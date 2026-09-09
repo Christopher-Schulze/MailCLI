@@ -84,8 +84,55 @@ func searchResponsePage(page *mail.SearchPage) *json.RawMessage {
 }
 
 type errorData struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code     string                  `json:"code"`
+	Message  string                  `json:"message"`
+	Guidance *mail.OperationGuidance `json:"guidance"`
+}
+
+func newErrorData(command string, data responseData, err error) *errorData {
+	guidance := guidanceForResponse(command, data, err)
+	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance}
+}
+
+func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
+	guidance := mail.GuidanceForError(command, err)
+	if result := data.SendResult; result != nil && result.AttemptID != "" {
+		guidance.Recovery.Action, guidance.Recovery.OperationID = mail.RecoveryReconcile, result.AttemptID
+		if result.DraftRef != "" {
+			guidance.Recovery.Command = "drafts.reconcile"
+			guidance.Recovery.Args = []string{"--ref", result.DraftRef, "--json"}
+		}
+		guidance.ReplayAllowed, guidance.Retryability = false, mail.RetryObserveRequired
+		switch result.Outcome {
+		case mail.SendOutcomeMirrorPending:
+			guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseMirror, mail.EffectPartial
+		case mail.SendOutcomeSent, mail.SendOutcomeObserved:
+			guidance.Phase, guidance.EffectCertainty, guidance.Recovery.Action = mail.OperationPhaseCleanup, mail.EffectComplete, mail.RecoveryInspect
+			if result.DraftRef != "" {
+				guidance.Recovery.Command = "drafts.inspect"
+			}
+		default:
+			guidance.Phase = mail.OperationPhaseSubmission
+			if result.SubmissionAccepted || result.AcceptedByMail {
+				guidance.EffectCertainty = mail.EffectPartial
+			} else {
+				guidance.EffectCertainty = mail.EffectUnknown
+			}
+		}
+	}
+	if message := data.Message; message != nil && message.Hydration != nil {
+		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseHydration, mail.EffectNone
+		if message.Summary.Ref != "" && (guidance.Recovery.Action == mail.RecoveryRetry || guidance.Recovery.Action == mail.RecoveryCorrect) &&
+			(command == "messages.get" || command == "drafts.open") {
+			guidance.Recovery.Command = command
+			argument := "--ref"
+			if command == "drafts.open" {
+				argument = "--message"
+			}
+			guidance.Recovery.Args = []string{argument, message.Summary.Ref, "--json"}
+		}
+	}
+	return guidance
 }
 
 const (
@@ -170,7 +217,8 @@ func FinalizeJSON(writer io.Writer, args []string, payload []byte, code int, cle
 		return 1
 	}
 	if cleanupErr != nil {
-		failure := &errorData{Code: finalizationFailureCode, Message: "close Mail: " + cleanupErr.Error()}
+		failureErr := &commandError{code: finalizationFailureCode, message: "close Mail: " + cleanupErr.Error()}
+		failure := newErrorData(command, value.Data, failureErr)
 		value.Data.Finalization = &finalizationData{State: "failed", Error: failure}
 		if value.OK || value.Error == nil {
 			value.OK = false
@@ -502,10 +550,9 @@ func runDoctor(ctx context.Context, service *mail.Service, args []string, stdout
 					break
 				}
 			}
-			response.Error = &errorData{
-				Code:    code,
-				Message: "one or more required MailCLI checks failed",
-			}
+			response.Error = newErrorData("doctor", response.Data, &commandError{
+				code: code, message: "one or more required MailCLI checks failed",
+			})
 		}
 		if code := writeJSON(stdout, response); code != 0 {
 			return code
@@ -559,7 +606,7 @@ func WriteFailureEnvelope(writer io.Writer, command string, code string, message
 		OK:            false,
 		Command:       command,
 		Data:          responseData{},
-		Error:         &errorData{Code: code, Message: message},
+		Error:         newErrorData(command, responseData{}, &commandError{code: code, message: message}),
 	})
 }
 

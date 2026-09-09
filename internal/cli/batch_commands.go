@@ -54,7 +54,9 @@ func runBatch(
 			Data:          responseData{BatchResult: &result},
 		}
 		if !result.Complete() {
-			response.Error = &errorData{Code: "batch_partial", Message: "one or more batch items did not complete"}
+			response.Error = newErrorData("batch", response.Data, &commandError{
+				code: "batch_partial", message: "one or more batch items did not complete",
+			})
 		}
 		return writeJSON(stdout, response)
 	}
