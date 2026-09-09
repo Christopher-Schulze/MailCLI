@@ -400,6 +400,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 		st.done = true
 		return nil, nil
 	}
+	st.store.searchCandidateRowsLoaded.Add(int64(len(items)))
 	st.last = items[len(items)-1]
 	st.lastNull = lastDateNull
 	st.haveLast = true
@@ -487,7 +488,9 @@ func (s *Store) scanSearchRecordsChunked(
 	var lastScanned *messageRecord
 	var budgetCandidate *messageRecord
 chunkLoop:
-	for loaded < maximum && len(results) <= prepared.Query.Limit {
+	// A loaded chunk can contain an unscanned tail after the page fills. Keep
+	// that tail out of later queries: lastScanned remains the resumable cursor.
+	for loaded < maximum && len(results) < prepared.Query.Limit {
 		chunkWant := min(candidateChunkSize, maximum-loaded)
 		items, err := stream.next(chunkWant)
 		if err != nil {

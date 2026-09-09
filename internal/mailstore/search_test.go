@@ -1331,6 +1331,110 @@ func TestBodySearchDoesNotOpenCandidatesBeyondSmallResultWindow(t *testing.T) {
 	}
 }
 
+func TestBodySearchStopsLoadingAfterFullPage(t *testing.T) {
+	t.Parallel()
+	// The newest candidate matches, while the fixture contains 603 rows. A
+	// full-page outer-loop regression would load the trailing 91-row chunk.
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	prepared, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("PrepareQuery() error = %v", err)
+	}
+	page, err := store.SearchMessages(context.Background(), prepared)
+	if err != nil || len(page.Messages) != 1 || page.NextCursor == "" {
+		t.Fatalf("SearchMessages() = %#v, error = %v", page, err)
+	}
+	if got := store.searchCandidateRowsLoaded.Load(); got != int64(candidateChunkSize) {
+		t.Fatalf("candidate rows loaded = %d, want first chunk size %d", got, candidateChunkSize)
+	}
+	if page.Coverage.CandidateMessages != candidateChunkSize || page.Coverage.CandidateMessagesExact || page.Coverage.Complete {
+		t.Fatalf("coverage = %#v, want the loaded lower-bound prefix", page.Coverage)
+	}
+}
+
+func TestBodySearchPaginationPreservesSparseChunkBoundaryMatches(t *testing.T) {
+	t.Parallel()
+	// Matches at the last row of chunk one and the first row of chunk two
+	// exercise the one-row lookahead and the strict cursor anchor together.
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	for _, rowID := range []int64{615, 616, 703} {
+		writeFixtureEMLX(t, store, rowID, "imap://"+testAccountID+"/INBOX", sentFixtureSource(rowID, sentMessageFixture{
+			Body: "needle sparse",
+		}))
+	}
+	paginated := collectBodySearchRowIDs(t, store, inboxRef, "needle sparse", 1)
+	complete := collectBodySearchRowIDs(t, store, inboxRef, "needle sparse", 25)
+	want := []string{"615", "616", "703"}
+	assertSearchRowIDs(t, paginated, want)
+	assertSearchRowIDs(t, complete, want)
+}
+
+func TestBodySearchDensePaginationPreservesOrder(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	got := collectBodySearchRowIDs(t, store, inboxRef, "needle", 25)
+	want := make([]string, 0, 602)
+	for rowID := int64(104); rowID <= 703; rowID++ {
+		want = append(want, fmt.Sprintf("%d", rowID))
+	}
+	want = append(want, "101", "102")
+	assertSearchRowIDs(t, got, want)
+}
+
+func collectBodySearchRowIDs(t testing.TB, store *Store, mailboxRef, text string, limit int) []string {
+	t.Helper()
+	var rowIDs []string
+	cursor := ""
+	for pageNumber := 0; pageNumber < 1000; pageNumber++ {
+		prepared, err := mail.PrepareQuery(mail.Query{
+			MailboxRef: mailboxRef, Text: text, Limit: limit, Cursor: cursor,
+		})
+		if err != nil {
+			t.Fatalf("PrepareQuery(page %d) error = %v", pageNumber, err)
+		}
+		page, err := store.SearchMessages(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("SearchMessages(page %d) error = %v", pageNumber, err)
+		}
+		for _, message := range page.Messages {
+			ref, err := mailref.DecodeMessage(message.Summary.Ref)
+			if err != nil {
+				t.Fatalf("DecodeMessage(page %d) error = %v", pageNumber, err)
+			}
+			rowIDs = append(rowIDs, ref.LibraryID)
+		}
+		if page.NextCursor == "" {
+			if !page.Coverage.Complete {
+				t.Fatalf("final page %d coverage = %#v, want complete", pageNumber, page.Coverage)
+			}
+			return rowIDs
+		}
+		if page.NextCursor == cursor {
+			t.Fatalf("page %d repeated cursor %q", pageNumber, cursor)
+		}
+		cursor = page.NextCursor
+	}
+	t.Fatal("body search pagination did not terminate")
+	return nil
+}
+
+func assertSearchRowIDs(t testing.TB, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("search rows = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("search row %d = %q, want %q (all rows: %v)", index, got[index], want[index], got)
+		}
+	}
+}
+
 func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 	t.Helper()
 	extraCount := 0
