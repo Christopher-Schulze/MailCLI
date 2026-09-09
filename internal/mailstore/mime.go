@@ -30,6 +30,8 @@ const (
 	maximumMIMEMetadata      = int64(8 * 1024 * 1024)
 	maximumMIMERawBytes      = maximumRFCSourceBytes
 	maximumInt64             = int64(1<<63 - 1)
+	mimeHeaderReaderBuffer   = 8 * 1024
+	mimeHeaderInitialBytes   = 4 * 1024
 	mimePartMetadataOverhead = int64(96)
 )
 
@@ -752,12 +754,15 @@ func consumeMIMEAttachmentContext(ctx context.Context, reader io.Reader, withHas
 }
 
 func readRawHeaders(reader io.Reader) (string, error) {
-	buffered := bufio.NewReaderSize(io.LimitReader(reader, int64(maximumHeaderBytes)+1), 64*1024)
+	buffered := bufio.NewReaderSize(io.LimitReader(reader, int64(maximumHeaderBytes)+1), mimeHeaderReaderBuffer)
 	var output strings.Builder
-	output.Grow(maximumHeaderBytes)
+	output.Grow(mimeHeaderInitialBytes)
 	for output.Len() <= maximumHeaderBytes {
 		line, err := buffered.ReadBytes('\n')
 		output.Write(line)
+		if output.Len() > maximumHeaderBytes {
+			return "", operationError("invalid_message_source", "RFC message headers exceed the safety limit")
+		}
 		if len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
 			return output.String(), nil
 		}
