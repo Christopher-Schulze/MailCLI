@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PACKAGE_ROOT="${MAILCLI_INSTALL_PACKAGE_ROOT:-${DEFAULT_PACKAGE_ROOT}}"
+if [[ "${PACKAGE_ROOT}" != /* || "${PACKAGE_ROOT}" == "/" ||
+  "${PACKAGE_ROOT}" == *$'\t'* || "${PACKAGE_ROOT}" == *$'\n'* || "${PACKAGE_ROOT}" == *$'\r'* ||
+  ! -d "${PACKAGE_ROOT}" || -L "${PACKAGE_ROOT}" ]]; then
+  printf 'Install package root must be a safe absolute directory: %s\n' "${PACKAGE_ROOT}" >&2
+  exit 1
+fi
+PACKAGE_ROOT="$(cd "${PACKAGE_ROOT}" && pwd -P)"
 SOURCE_BINARY="${PACKAGE_ROOT}/bin/mailcli"
 SOURCE_SKILL="${PACKAGE_ROOT}/skills/mailcli"
 BINARY_DESTINATION="${MAILCLI_BINARY_DESTINATION:-${HOME}/.local/bin/mailcli}"

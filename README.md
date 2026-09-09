@@ -135,7 +135,7 @@ cd MailCLI
 ./scripts/build/install-local.sh
 ```
 
-The source installer builds a native `darwin/arm64` executable and copies only the binary to `~/.local/bin/mailcli` by default. Pass an explicit destination as the first argument to install elsewhere, then install or link [`skills/mailcli`](skills/mailcli) separately when agent support is needed.
+The source installer builds a native `darwin/arm64` executable and uses the same rollback-safe transaction as the release installer to install the matching binary and companion skill together. It writes the binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli` by default. Pass an explicit binary destination as the first argument to install elsewhere; set `MAILCLI_SKILL_DESTINATION` to choose the skill destination.
 
 For repeated agent commands in a source checkout, `scripts/utils/mailcli-preflight.sh capabilities` caches the validated capabilities envelope by the executable's SHA-256 and schema version. `scripts/utils/mailcli-preflight.sh doctor` caches a healthy local-store check for five minutes under the same identity; use `--refresh` or `invalidate` after installation, a binary/schema change, or any relevant failure. Live `doctor --live` checks are never cached.
 
