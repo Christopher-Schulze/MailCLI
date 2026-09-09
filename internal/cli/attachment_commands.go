@@ -45,22 +45,30 @@ func runAttachmentsList(
 	flags := newFlagSet("attachments list", stderr)
 	messageRef := flags.String("message", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetAttachment, outputViewMetadata, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	output, err := outputFlags.options(projectionTargetAttachment)
+	if err != nil {
+		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	message, err := service.GetMessage(operationCtx, *messageRef)
 	if err != nil {
+		if *jsonOutput {
+			return failProjectedEmpty("attachments.list", true, output, err, stdout, stderr)
+		}
 		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		complete := message.ContentComplete
 		missing := message.MissingParts
-		return writeSuccess(stdout, "attachments.list", responseData{
+		return writeProjectedSuccess(stdout, "attachments.list", responseData{
 			Attachments: &message.Attachments, ContentSource: message.ContentSource,
 			ContentComplete: &complete, MissingParts: &missing,
-		})
+		}, output)
 	}
 	rows := make([][]string, 0, len(message.Attachments))
 	for _, attachment := range message.Attachments {

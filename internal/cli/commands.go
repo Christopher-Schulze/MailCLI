@@ -305,21 +305,40 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	flags := newFlagSet("messages get", stderr)
 	ref := flags.String("ref", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetMessage, defaultMessageOutputView, true)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	output, err := outputFlags.options(projectionTargetMessage)
+	if err != nil {
+		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
+	}
 	if *ref == "" {
-		return failCommand("messages.get", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+		return failProjectedEmpty("messages.get", *jsonOutput, output,
+			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	message, err := service.GetMessage(operationCtx, *ref)
 	if err != nil {
-		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr)
+		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr, output)
+	}
+	var exported *mail.ContentExport
+	if output.exportPath != "" {
+		value, exportErr := exportMessageBody(message, output.exportPath)
+		if exportErr != nil {
+			return failProjectedMessage("messages.get", *jsonOutput, message, output, exportErr, stdout, stderr)
+		}
+		exported = &value
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "messages.get", responseData{Message: &message})
+		data := responseData{Message: &message, ContentExport: exported}
+		return writeProjectedSuccess(stdout, "messages.get", data, output)
+	}
+	if output.exportPath != "" {
+		writeFormat(stdout, "%s\t%d\t%s\n", exported.Path, exported.Size, exported.SHA256)
+		return 0
 	}
 	if err := writeMessage(stdout, message); err != nil {
 		return 1
@@ -334,12 +353,26 @@ func failMessageRead(
 	err error,
 	stdout io.Writer,
 	stderr io.Writer,
+	options ...outputOptions,
 ) int {
+	var output outputOptions
+	if len(options) > 0 {
+		output = options[0]
+	}
 	if message.Hydration == nil {
+		if jsonOutput && output.target == projectionTargetMessage {
+			if messageHasRecoveryData(message) {
+				return writeProjectedFailure(stdout, command, responseData{Message: &message}, output, err, false)
+			}
+			return failProjectedEmpty(command, true, output, err, stdout, stderr)
+		}
 		return failCommand(command, jsonOutput, err, stdout, stderr)
 	}
 	safeErr := hydrationCommandError(message.Hydration, err)
 	if jsonOutput {
+		if output.target == projectionTargetMessage {
+			return failProjectedMessage(command, true, message, output, safeErr, stdout, stderr)
+		}
 		return failCommandWithData(command, true, responseData{Message: &message}, safeErr, stdout, stderr)
 	}
 	if writeErr := writeMessage(stdout, message); writeErr != nil {
@@ -347,6 +380,12 @@ func failMessageRead(
 	}
 	writeLine(stderr, safeErr)
 	return commandExitCode(safeErr)
+}
+
+func messageHasRecoveryData(message mail.Message) bool {
+	return message.Summary.Ref != "" || message.Summary.MessageID != "" || message.Content != "" ||
+		message.Headers != "" || message.ContentSource != "" || message.Hydration != nil ||
+		len(message.To) > 0 || len(message.CC) > 0 || len(message.BCC) > 0 || len(message.Attachments) > 0
 }
 
 func hydrationCommandError(diagnostic *mail.HydrationDiagnostic, fallback error) error {
@@ -376,21 +415,44 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 	flags := newFlagSet("messages raw", stderr)
 	ref := flags.String("ref", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetRaw, defaultRawOutputView, true)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	output, err := outputFlags.options(projectionTargetRaw)
+	if err != nil {
+		return failCommand("messages.raw", *jsonOutput, err, stdout, stderr)
+	}
 	if *ref == "" {
-		return failCommand("messages.raw", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+		return failProjectedEmpty("messages.raw", *jsonOutput, output,
+			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
+	if output.exportPath != "" {
+		exported, exportErr := mail.WriteExclusiveContent(output.exportPath, func(writer io.Writer) error {
+			return service.WriteRawSource(operationCtx, *ref, writer)
+		})
+		if exportErr != nil {
+			if *jsonOutput {
+				return failProjectedEmpty("messages.raw", true, output, exportErr, stdout, stderr)
+			}
+			return failCommand("messages.raw", false, exportErr, stdout, stderr)
+		}
+		if *jsonOutput {
+			data := responseData{ContentExport: &exported}
+			return writeProjectedSuccess(stdout, "messages.raw", data, output)
+		}
+		writeFormat(stdout, "%s\t%d\t%s\n", exported.Path, exported.Size, exported.SHA256)
+		return 0
+	}
 	if *jsonOutput {
 		raw, err := service.GetRawSource(operationCtx, *ref)
 		if err != nil {
-			return failCommand("messages.raw", true, err, stdout, stderr)
+			return failProjectedEmpty("messages.raw", true, output, err, stdout, stderr)
 		}
-		return writeSuccess(stdout, "messages.raw", responseData{RawSource: &raw})
+		return writeProjectedSuccess(stdout, "messages.raw", responseData{RawSource: &raw}, output)
 	}
 	if err := service.WriteRawSource(operationCtx, *ref, stdout); err != nil {
 		return failCommand("messages.raw", false, err, stdout, stderr)
@@ -398,6 +460,7 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 	return 0
 }
 
+//go:noinline
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -499,6 +562,9 @@ func visibleFlagDefault(option *flag.Flag) string {
 	if option.Name == "max-bytes" && option.DefValue == "4294967296" {
 		return "4 GiB"
 	}
+	if option.Name == "max-bytes" && option.DefValue == "1048576" {
+		return "1 MiB"
+	}
 	return option.DefValue
 }
 
@@ -509,6 +575,7 @@ func capitalizeHelp(value string) string {
 	return strings.ToUpper(value[:1]) + value[1:]
 }
 
+//go:noinline
 func failCommand(command string, jsonOutput bool, err error, stdout io.Writer, stderr io.Writer) int {
 	return failCommandWithData(command, jsonOutput, responseData{}, err, stdout, stderr)
 }
@@ -555,6 +622,7 @@ func commandExitCode(err error) int {
 	return 1
 }
 
+//go:noinline
 func writeSuccess(stdout io.Writer, command string, data responseData) int {
 	return writeJSON(stdout, envelope{
 		SchemaVersion: schemaVersion,
