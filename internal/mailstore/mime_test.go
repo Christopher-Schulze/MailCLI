@@ -377,6 +377,70 @@ func TestReadRawHeadersEnforcesBoundBeforeUnterminatedLine(t *testing.T) {
 	}
 }
 
+func TestReadRawHeadersAcceptsExactMaximum(t *testing.T) {
+	t.Parallel()
+	source := strings.Repeat("X", maximumHeaderBytes-4) + "\r\n\r\n"
+	parsed, err := readRawHeaders(strings.NewReader(source))
+	if err != nil || len(parsed) != maximumHeaderBytes {
+		t.Fatalf("readRawHeaders() length = %d, error = %v; want exact maximum %d", len(parsed), err, maximumHeaderBytes)
+	}
+}
+
+func TestReadRawHeadersRejectsOneByteBeyondMaximumWithBoundary(t *testing.T) {
+	t.Parallel()
+	source := strings.Repeat("X", maximumHeaderBytes-3) + "\r\n\r\n"
+	if _, err := readRawHeaders(strings.NewReader(source)); errorCodeForTest(err) != "invalid_message_source" {
+		t.Fatalf("readRawHeaders() error = %v, want invalid_message_source", err)
+	}
+}
+
+func TestReadRawHeadersStopsAtHeaderBoundary(t *testing.T) {
+	t.Parallel()
+	header := "Subject: hello\r\n\r\n"
+	reader := &rawHeaderCountingReader{reader: strings.NewReader(header + strings.Repeat("attachment", 1024*1024))}
+	parsed, err := readRawHeaders(reader)
+	if err != nil || parsed != header {
+		t.Fatalf("readRawHeaders() = %q, error = %v; want header only", parsed, err)
+	}
+	if reader.bytesRead > int64(len(header)+mimeHeaderReaderBuffer) {
+		t.Fatalf("readRawHeaders() consumed %d bytes, want at most one bounded buffer past the header", reader.bytesRead)
+	}
+}
+
+func BenchmarkReadRawHeaders(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		source string
+	}{
+		{name: "small", source: "Subject: hello\r\n\r\n"},
+		{name: "medium", source: strings.Repeat("X-Trace: value\r\n", 256) + "\r\n"},
+		{name: "maximum", source: strings.Repeat("X", maximumHeaderBytes-4) + "\r\n\r\n"},
+	}
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(benchmark.source)))
+			for b.Loop() {
+				parsed, err := readRawHeaders(strings.NewReader(benchmark.source))
+				if err != nil || len(parsed) != len(benchmark.source) {
+					b.Fatalf("readRawHeaders() length = %d, error = %v", len(parsed), err)
+				}
+			}
+		})
+	}
+}
+
+type rawHeaderCountingReader struct {
+	reader    io.Reader
+	bytesRead int64
+}
+
+func (r *rawHeaderCountingReader) Read(buffer []byte) (int, error) {
+	read, err := r.reader.Read(buffer)
+	r.bytesRead += int64(read)
+	return read, err
+}
+
 func TestValidAttachmentID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
