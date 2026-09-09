@@ -36,6 +36,9 @@ REQUIRED_SKILL_STRINGS=(
   'mailcli send setup'
   'compose_automation_unsupported'
   'data.page.coverage.complete'
+  'scripts/utils/mailcli-preflight.sh capabilities'
+  'binary SHA-256'
+  'Never cache `doctor --live`'
 )
 for REQUIRED_STRING in "${REQUIRED_SKILL_STRINGS[@]}"; do
   if ! grep -Fq "${REQUIRED_STRING}" "${MAILCLI_ROOT}/skills/mailcli/SKILL.md"; then
@@ -43,6 +46,12 @@ for REQUIRED_STRING in "${REQUIRED_SKILL_STRINGS[@]}"; do
     exit 1
   fi
 done
+SKILL_BYTES="$(wc -c <"${MAILCLI_ROOT}/skills/mailcli/SKILL.md")"
+SKILL_BYTES="${SKILL_BYTES//[[:space:]]/}"
+if ((SKILL_BYTES >= 21925)); then
+  printf 'Agent skill exceeds the TASK 222 size threshold: %s bytes\n' "${SKILL_BYTES}" >&2
+  exit 1
+fi
 
 REPO_SKILL="${MAILCLI_ROOT}/skills/mailcli"
 INSTALLED_SKILL="${MAILCLI_SKILL_DESTINATION:-${HOME}/.agents/skills/mailcli}"
@@ -67,6 +76,8 @@ if ! SKILL_DRIFT="$(diff -qr "${REPO_SKILL}" "${INSTALLED_SKILL}")"; then
   printf 'Installed skill drifted from the repository copy:\n%s\n' "${SKILL_DRIFT}" >&2
   exit 1
 fi
+
+"${MAILCLI_ROOT}/scripts/tests/test-preflight-cache.sh"
 
 while IFS= read -r -d '' SCRIPT_PATH; do
   if [[ ! -x "${SCRIPT_PATH}" ]]; then
