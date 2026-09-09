@@ -80,7 +80,7 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 
 func TestCapabilityCommandInventory(t *testing.T) {
 	want := []string{
-		"capabilities", "version", "update", "doctor", "accounts.list", "mailboxes.list", "mailboxes.resolve",
+		"capabilities", "version", "update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve",
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
@@ -186,6 +186,7 @@ func TestCapabilityMailAppDependencies(t *testing.T) {
 		"version":           "none",
 		"update":            "none",
 		"doctor":            "optional-automation",
+		"batch":             "none",
 		"accounts.list":     "fallback-automation",
 		"mailboxes.list":    "none",
 		"mailboxes.resolve": "none",

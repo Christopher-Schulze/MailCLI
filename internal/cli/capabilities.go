@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -16,6 +17,7 @@ type capabilityManifest struct {
 	Name            string              `json:"name"`
 	Version         string              `json:"version"`
 	Commands        []commandCapability `json:"commands"`
+	Scope           string              `json:"scope,omitempty"`
 	Limits          capabilityLimits    `json:"limits"`
 	SyncCheckPolicy syncCheckPolicy     `json:"sync_check_policy"`
 	DraftSavePolicy draftSavePolicy     `json:"draft_save_policy"`
@@ -35,12 +37,13 @@ type draftSavePolicy struct {
 }
 
 type commandCapability struct {
-	ID                string   `json:"id"`
-	EffectClass       string   `json:"effect_class"`
-	Confirmation      string   `json:"confirmation"`
-	StoreDependency   string   `json:"store_dependency"`
-	MailAppDependency string   `json:"mail_app_dependency"`
-	ResultStates      []string `json:"result_states"`
+	ID                string          `json:"id"`
+	Schema            json.RawMessage `json:"schema"`
+	EffectClass       string          `json:"effect_class"`
+	Confirmation      string          `json:"confirmation"`
+	StoreDependency   string          `json:"store_dependency"`
+	MailAppDependency string          `json:"mail_app_dependency"`
+	ResultStates      []string        `json:"result_states"`
 }
 
 type capabilityLimits struct {
@@ -125,12 +128,16 @@ func imapOperationsWithConcurrency(
 }
 
 func capabilities() capabilityManifest {
+	return capabilitiesForScope("", "")
+}
+
+func capabilitiesForScope(command, family string) capabilityManifest {
 	imapContract := imapclient.OperationContracts()
-	return capabilityManifest{
+	manifest := capabilityManifest{
 		SchemaVersion: capabilitySchemaVersion,
 		Name:          name,
 		Version:       version,
-		Commands:      capabilityCommands(),
+		Commands:      capabilityCommandsForScope(command, family),
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
 			OwnsMailIndex: false, BackgroundProcess: false,
@@ -217,20 +224,29 @@ func capabilities() capabilityManifest {
 			SafeRecoveryCommand: "mailcli drafts save --ref <DRAFT_REF> --json",
 		},
 	}
+	if command != "" {
+		manifest.Scope = command
+	} else if family != "" {
+		manifest.Scope = family
+	}
+	return manifest
 }
 
 func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
-	if helpOnly(args) {
-		writeLine(stdout, "Usage:\n  mailcli capabilities [--json]")
-		return 0
+	flags := newFlagSet("capabilities", stderr)
+	command := flags.String("command", "", "exact command ID to describe")
+	family := flags.String("family", "", "command family to describe")
+	scope := flags.String("scope", "", "exact command ID or command family to describe")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
 	}
-	flags, err := parseBooleanFlags(args, "--json")
+	selectionCommand, selectionFamily, err := resolveCapabilityScope(*command, *family, *scope)
 	if err != nil {
-		writeLine(stderr, err)
-		return 2
+		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 	}
-	manifest := capabilities()
-	if flags["--json"] {
+	manifest := capabilitiesForScope(selectionCommand, selectionFamily)
+	if *jsonOutput {
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,
 			OK:            true,
