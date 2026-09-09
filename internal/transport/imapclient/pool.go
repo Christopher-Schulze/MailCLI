@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -47,9 +48,10 @@ type PoolStats struct {
 type Client struct {
 	TLSConfig *tls.Config
 
-	lifecycle sync.RWMutex
-	mu        sync.Mutex
-	pools     map[sessionIdentity]*accountSessionPool
+	lifecycle           sync.RWMutex
+	lifecycleGeneration uint64
+	mu                  sync.Mutex
+	pools               map[sessionIdentity]*accountSessionPool
 
 	credentialGenerations    map[sessionIdentity]uint64
 	maxConnectionsPerAccount int
@@ -71,14 +73,16 @@ type accountSessionPool struct {
 }
 
 // pooledSession wraps one authenticated connection with its selected mailbox
-// state, so follow-up commands on the same mailbox can skip SELECT.
+// state, so follow-up commands on the same mailbox can skip SELECT. A session
+// is reusable only after the cancellation watcher for its current borrower
+// has exited; the watcher itself is borrow-scoped and captures this session's
+// connection for that generation.
 type pooledSession struct {
 	sess                 *session
 	key                  sessionIdentity
 	credentialGeneration uint64
 	selected             string
 	uidvalidity          uint32
-	cancelWatch          context.CancelFunc
 	inUse                bool
 	invalidated          bool
 }
@@ -196,6 +200,20 @@ func (c *Client) removeEmptyPoolLocked(key sessionIdentity, pool *accountSession
 	}
 }
 
+func (c *Client) releaseOperationState(
+	key sessionIdentity,
+	pool *accountSessionPool,
+	weight int64,
+) {
+	if weight > 0 {
+		pool.stateGate.Release(weight)
+	}
+	c.mu.Lock()
+	pool.operations--
+	c.removeEmptyPoolLocked(key, pool)
+	c.mu.Unlock()
+}
+
 func (c *Client) acquireOperation(
 	ctx context.Context,
 	cfg transport.ImapConfig,
@@ -205,10 +223,8 @@ func (c *Client) acquireOperation(
 		return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP operation acquisition")
 	}
 	c.lifecycle.RLock()
-	if err := ctx.Err(); err != nil {
-		c.lifecycle.RUnlock()
-		return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP operation acquisition")
-	}
+	lifecycleGeneration := c.lifecycleGeneration
+	c.lifecycle.RUnlock()
 	key := sessionKey(cfg)
 	c.mu.Lock()
 	pool := c.poolLocked(key)
@@ -224,24 +240,28 @@ func (c *Client) acquireOperation(
 	}
 	if weight > 0 {
 		if err := pool.stateGate.Acquire(ctx, weight); err != nil {
-			c.mu.Lock()
-			pool.operations--
-			c.removeEmptyPoolLocked(key, pool)
-			c.mu.Unlock()
-			c.lifecycle.RUnlock()
+			c.releaseOperationState(key, pool, 0)
 			return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP selected-state acquisition")
+		}
+	}
+	c.lifecycle.RLock()
+	if err := ctx.Err(); err != nil {
+		c.lifecycle.RUnlock()
+		c.releaseOperationState(key, pool, weight)
+		return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP operation acquisition")
+	}
+	if lifecycleGeneration != c.lifecycleGeneration {
+		c.lifecycle.RUnlock()
+		c.releaseOperationState(key, pool, weight)
+		return nil, nil, &transport.TransportError{
+			Code:    transport.CodeIMAPTimeout,
+			Message: "IMAP operation acquisition interrupted by client Close",
 		}
 	}
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			if weight > 0 {
-				pool.stateGate.Release(weight)
-			}
-			c.mu.Lock()
-			pool.operations--
-			c.removeEmptyPoolLocked(key, pool)
-			c.mu.Unlock()
+			c.releaseOperationState(key, pool, weight)
 			c.lifecycle.RUnlock()
 		})
 	}
@@ -276,24 +296,37 @@ func (c *Client) acquirePooled(
 		return nil, nil, err
 	}
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
-	pooled.cancelWatch = cancelWatch
-	connection := pooled.sess.conn
+	watchDone := startCancellationWatcher(ctx, watchCtx, pooled.sess.conn)
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			cancelWatch()
+			<-watchDone
+			c.releaseSession(ctx, pool, pooled)
+			releaseOperation()
+		})
+	}
+	return pooled, release, nil
+}
+
+// startCancellationWatcher closes only the connection captured for one
+// borrower when that borrow's context is canceled. The returned completion
+// channel must be joined before the session can become reusable.
+func startCancellationWatcher(
+	ctx context.Context,
+	watchCtx context.Context,
+	connection net.Conn,
+) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		select {
 		case <-ctx.Done():
 			_ = connection.Close()
 		case <-watchCtx.Done():
 		}
 	}()
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			cancelWatch()
-			c.releaseSession(ctx, pool, pooled)
-			releaseOperation()
-		})
-	}
-	return pooled, release, nil
+	return done
 }
 
 func (c *Client) borrowSession(
@@ -470,11 +503,13 @@ func (c *Client) InvalidateCredentials(cfg transport.ImapConfig) {
 	closePooledConnections(stale)
 }
 
-// Close waits for acquired operations, then logs out of and closes every
-// pooled session. It is safe to call repeatedly; later operations reconnect.
+// Close stops the current acquisition generation, waits for operations that
+// already own a session, then logs out of and closes every pooled session. It
+// is safe to call repeatedly; later operations start a new generation and
+// reconnect.
 func (c *Client) Close() error {
 	c.lifecycle.Lock()
-	defer c.lifecycle.Unlock()
+	c.lifecycleGeneration = nextCredentialGeneration(c.lifecycleGeneration)
 
 	c.mu.Lock()
 	var pooled []*pooledSession
@@ -483,6 +518,7 @@ func (c *Client) Close() error {
 	}
 	c.pools = nil
 	c.mu.Unlock()
+	c.lifecycle.Unlock()
 	var joined []error
 	for _, session := range pooled {
 		logoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

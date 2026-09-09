@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,6 +337,240 @@ func TestAcquireCancellationAfterAcquisitionReleasesSession(t *testing.T) {
 	if got := srv.ConnectionCount(); got != 2 {
 		t.Fatalf("connection count after canceled session = %d, want 2", got)
 	}
+}
+
+func TestCancellationWatcherMustBeJoinedBeforeReuse(t *testing.T) {
+	clientConn, peerConn := net.Pipe()
+	t.Cleanup(func() { _ = peerConn.Close() })
+	started := make(chan struct{})
+	allowClose := make(chan struct{})
+	connection := &blockingCloseConn{
+		Conn:    clientConn,
+		started: started,
+		allow:   allowClose,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	done := startCancellationWatcher(ctx, watchCtx, connection)
+	cancel()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation watcher did not begin closing the borrowed connection")
+	}
+
+	releaseDone := make(chan struct{})
+	go func() {
+		stopWatch()
+		<-done
+		close(releaseDone)
+	}()
+	select {
+	case <-releaseDone:
+		t.Fatal("borrow release completed before the cancellation watcher exited")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(allowClose)
+	select {
+	case <-releaseDone:
+	case <-time.After(time.Second):
+		t.Fatal("borrow release did not join the cancellation watcher")
+	}
+}
+
+func TestCanceledBorrowCannotCloseNextBorrower(t *testing.T) {
+	clientConn, peerConn := net.Pipe()
+	allowClose := make(chan struct{})
+	var allowCloseOnce sync.Once
+	closeConnection := func() { allowCloseOnce.Do(func() { close(allowClose) }) }
+	t.Cleanup(func() {
+		closeConnection()
+		_ = peerConn.Close()
+	})
+	connection := &blockingCloseConn{
+		Conn:    clientConn,
+		started: make(chan struct{}),
+		allow:   allowClose,
+	}
+	client := New()
+	client.maxConnectionsPerAccount = 1
+	cfg := transport.ImapConfig{}
+	key := sessionKey(cfg)
+	client.mu.Lock()
+	pool := client.poolLocked(key)
+	pooled := &pooledSession{sess: &session{conn: connection}, key: key}
+	pool.sessions = append(pool.sessions, pooled)
+	client.mu.Unlock()
+
+	ctx := newStagedContext()
+	_, release, err := client.acquire(ctx, cfg)
+	if err != nil {
+		t.Fatalf("initial acquire: %v", err)
+	}
+	ctx.cancelDone()
+	select {
+	case <-connection.started:
+	case <-time.After(time.Second):
+		t.Fatal("canceled borrow did not start closing its captured connection")
+	}
+	client.mu.Lock()
+	releaseDone := make(chan struct{})
+	go func() {
+		release()
+		close(releaseDone)
+	}()
+	client.mu.Unlock()
+
+	nextResult := make(chan struct {
+		pooled  *pooledSession
+		release func()
+		err     error
+	}, 1)
+	go func() {
+		next, nextRelease, nextErr := client.acquire(context.Background(), cfg)
+		nextResult <- struct {
+			pooled  *pooledSession
+			release func()
+			err     error
+		}{pooled: next, release: nextRelease, err: nextErr}
+	}()
+	select {
+	case result := <-nextResult:
+		closeConnection()
+		if result.release != nil {
+			result.release()
+		}
+		t.Fatalf("next borrower acquired before prior cancellation watcher exited: pooled=%p err=%v", result.pooled, result.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	ctx.setErr(context.Canceled)
+	closeConnection()
+	select {
+	case <-releaseDone:
+	case <-time.After(time.Second):
+		t.Fatal("borrow release did not complete after the watcher was allowed to exit")
+	}
+	select {
+	case result := <-nextResult:
+		if result.release != nil {
+			result.release()
+		}
+		if result.err == nil {
+			t.Fatal("next borrower reused a session after canceled generation was discarded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("next borrower did not receive a bounded result")
+	}
+}
+
+func TestCloseCancelsPendingAcquisitionGeneration(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	client, cfg := newFakeClient(t, srv)
+	client.maxConnectionsPerAccount = 1
+	_, release, err := client.acquire(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("initial acquire: %v", err)
+	}
+	pendingResult := make(chan error, 1)
+	go func() {
+		_, _, err := client.acquire(context.Background(), cfg)
+		pendingResult <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		client.mu.Lock()
+		pool := client.pools[sessionKey(cfg)]
+		operations := 0
+		if pool != nil {
+			operations = pool.operations
+		}
+		client.mu.Unlock()
+		if operations >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			release()
+			t.Fatal("pending acquisition did not register")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- client.Close() }()
+	select {
+	case err := <-closeResult:
+		release()
+		t.Fatalf("Close returned while an acquired operation was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not complete after the active operation released")
+	}
+	select {
+	case err := <-pendingResult:
+		if transport.ErrorCode(err) != transport.CodeIMAPTimeout {
+			t.Fatalf("pending acquire error = %v, want %s", err, transport.CodeIMAPTimeout)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending acquisition did not finish after Close")
+	}
+
+	_, nextRelease, err := client.acquire(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("acquire after Close: %v", err)
+	}
+	nextRelease()
+}
+
+type blockingCloseConn struct {
+	net.Conn
+	started chan struct{}
+	allow   <-chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingCloseConn) Close() error {
+	c.once.Do(func() { close(c.started) })
+	<-c.allow
+	return c.Conn.Close()
+}
+
+type stagedContext struct {
+	mu   sync.Mutex
+	done chan struct{}
+	err  error
+}
+
+func newStagedContext() *stagedContext {
+	return &stagedContext{done: make(chan struct{})}
+}
+
+func (c *stagedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c *stagedContext) Done() <-chan struct{} { return c.done }
+
+func (c *stagedContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *stagedContext) Value(key any) any { return nil }
+
+func (c *stagedContext) cancelDone() { close(c.done) }
+
+func (c *stagedContext) setErr(err error) {
+	c.mu.Lock()
+	c.err = err
+	c.mu.Unlock()
 }
 
 func TestCredentialInvalidationBeforeAcquireUsesNewGeneration(t *testing.T) {
