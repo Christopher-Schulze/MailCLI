@@ -603,7 +603,7 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 	data = dataForProjection(data, options, failed)
 	payload, marshalErr := marshalEnvelope(envelope{
 		SchemaVersion: schemaVersion, OK: false, Command: command, Data: data,
-		Error: &errorData{Code: errorCode(err), Message: err.Error()},
+		Error: newErrorData(command, data, err),
 	})
 	if marshalErr != nil || int64(len(payload)) > options.maxBytes {
 		// An error envelope must remain parseable even when the requested view is
@@ -616,7 +616,7 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 		fallback.Projection = &projectionInfo{View: options.view, Fields: fallback.Projection.Fields}
 		payload, marshalErr = marshalEnvelope(envelope{
 			SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
-			Error: &errorData{Code: errorCode(err), Message: err.Error()},
+			Error: newErrorData(command, fallback, err),
 		})
 	}
 	if marshalErr != nil {

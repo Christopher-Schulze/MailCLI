@@ -592,17 +592,12 @@ func failCommandWithData(
 		writeLine(stderr, err)
 		return commandExitCode(err)
 	}
-	code := "operation_failed"
-	var typed codedError
-	if errors.As(err, &typed) {
-		code = typed.ErrorCode()
-	}
 	writeJSON(stdout, envelope{
 		SchemaVersion: schemaVersion,
 		OK:            false,
 		Command:       command,
 		Data:          data,
-		Error:         &errorData{Code: code, Message: err.Error()},
+		Error:         newErrorData(command, data, err),
 	})
 	return commandExitCode(err)
 }
@@ -622,7 +617,6 @@ func commandExitCode(err error) int {
 	return 1
 }
 
-//go:noinline
 func writeSuccess(stdout io.Writer, command string, data responseData) int {
 	return writeJSON(stdout, envelope{
 		SchemaVersion: schemaVersion,

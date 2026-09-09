@@ -58,9 +58,10 @@ type BatchItem struct {
 }
 
 type BatchItemError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Code      string             `json:"code"`
+	Message   string             `json:"message"`
+	Retryable bool               `json:"retryable,omitempty"`
+	Guidance  *OperationGuidance `json:"guidance,omitempty"`
 }
 
 type BatchItemResult struct {
@@ -110,10 +111,14 @@ func (s *Service) ExecuteBatch(ctx context.Context, request BatchRequest) (Batch
 		Operation: request.Operation, Concurrency: concurrency, Total: len(request.Items),
 		Items: make([]BatchItemResult, len(request.Items)),
 	}
+	canceledError := &OperationError{Code: "batch_canceled", Message: "batch was canceled before item started"}
+	canceledGuidance := GuidanceForError(string(request.Operation), canceledError)
 	for index, item := range request.Items {
 		result.Items[index] = BatchItemResult{
 			ID: item.ID, State: BatchItemSkipped,
-			Error: &BatchItemError{Code: "batch_canceled", Message: "batch was canceled before item started"},
+			Error: &BatchItemError{
+				Code: canceledError.Code, Message: canceledError.Message, Guidance: &canceledGuidance,
+			},
 		}
 	}
 	execution := batchExecution{ctx: ctx, service: s, request: request, result: &result}
@@ -303,7 +308,8 @@ func (run *batchExecution) itemError(err error) *BatchItemError {
 			retryable = false
 		}
 	}
-	return &BatchItemError{Code: code, Message: err.Error(), Retryable: retryable}
+	guidance := GuidanceForError(string(run.request.Operation), err)
+	return &BatchItemError{Code: code, Message: err.Error(), Retryable: retryable, Guidance: &guidance}
 }
 
 func hasBatchMessageEvidence(message Message) bool {
