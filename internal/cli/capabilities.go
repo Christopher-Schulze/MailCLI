@@ -68,6 +68,11 @@ type capabilityLimits struct {
 	MaximumDraftAttachmentBytes      int64                          `json:"maximum_draft_attachment_bytes"`
 	MaximumComposeBodyBytes          int                            `json:"maximum_compose_body_bytes"`
 	MaximumRawSourceBytes            int64                          `json:"maximum_raw_source_bytes"`
+	BatchOperations                  []string                       `json:"batch_operations"`
+	DefaultBatchConcurrency          int                            `json:"default_batch_concurrency"`
+	MaximumBatchConcurrency          int                            `json:"maximum_batch_concurrency"`
+	MaximumBatchItems                int                            `json:"maximum_batch_items"`
+	MaximumBatchInputBytes           int                            `json:"maximum_batch_input_bytes"`
 	OutputProjection                 outputProjectionCapability     `json:"output_projection"`
 	SenderIdentityScanLimit          int                            `json:"sender_identity_scan_limit"`
 	MaximumSenderIdentityScanLimit   int                            `json:"maximum_sender_identity_scan_limit"`
@@ -195,6 +200,11 @@ func capabilities() capabilityManifest {
 			MaximumDraftAttachmentBytes: mail.MaximumDraftAttachmentBytes,
 			MaximumComposeBodyBytes:     mail.MaximumComposeBodyBytes,
 			MaximumRawSourceBytes:       mail.MaximumRawSourceBytes,
+			BatchOperations:             []string{string(mail.BatchOperationRead), string(mail.BatchOperationAttachmentSave), string(mail.BatchOperationMark)},
+			DefaultBatchConcurrency:     mail.DefaultBatchConcurrency,
+			MaximumBatchConcurrency:     mail.MaximumBatchConcurrency,
+			MaximumBatchItems:           mail.MaximumBatchItems,
+			MaximumBatchInputBytes:      mail.MaximumBatchInputBytes,
 			OutputProjection: outputProjectionCapability{
 				ViewFlag:                  "--view",
 				FieldsFlag:                "--fields",
