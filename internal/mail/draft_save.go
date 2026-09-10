@@ -144,7 +144,7 @@ func reconcileNativeDraftSave(
 		attempt.Materialized = cloneSendMaterialization(evidence.Materialized)
 	}
 	attempt.UpdatedAt = time.Now().UTC()
-	if err := replaceDraftSaveAttempt(root, ref, attempt); err != nil {
+	if err := replaceDraftSaveAttempt(root, ref, attempt, lease.storage); err != nil {
 		return SavedDraft{}, &OperationError{
 			Code:    "draft_save_reconcile_state_failed",
 			Message: fmt.Sprintf("native draft was observed, but its reconciled state could not be recorded: %v", err),

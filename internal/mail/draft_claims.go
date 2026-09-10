@@ -46,8 +46,8 @@ func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservati
 	return &clone
 }
 
-func beginSendAttempt(root string, ref string, messageID, envelopeFingerprint string) (SendAttempt, error) {
-	return beginSendAttemptWithMIMEFingerprint(root, ref, nil, messageID, envelopeFingerprint, "")
+func beginSendAttempt(root string, ref string, messageID, envelopeFingerprint string, storage ...*draftStorage) (SendAttempt, error) {
+	return beginSendAttemptWithMIMEFingerprint(root, ref, nil, messageID, envelopeFingerprint, "", storage...)
 }
 
 func beginSendAttemptWithBaseline(
@@ -56,8 +56,9 @@ func beginSendAttemptWithBaseline(
 	baseline *SendObservationBaseline,
 	messageID string,
 	envelopeFingerprint string,
+	storage ...*draftStorage,
 ) (SendAttempt, error) {
-	return beginSendAttemptWithMIMEFingerprint(root, ref, baseline, messageID, envelopeFingerprint, "")
+	return beginSendAttemptWithMIMEFingerprint(root, ref, baseline, messageID, envelopeFingerprint, "", storage...)
 }
 
 func beginSendAttemptWithMIMEFingerprint(
@@ -67,9 +68,10 @@ func beginSendAttemptWithMIMEFingerprint(
 	messageID string,
 	envelopeFingerprint string,
 	mimeFingerprint string,
+	storage ...*draftStorage,
 ) (SendAttempt, error) {
 	return beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
-		root, ref, baseline, messageID, envelopeFingerprint, mimeFingerprint, nil,
+		root, ref, baseline, messageID, envelopeFingerprint, mimeFingerprint, nil, storage...,
 	)
 }
 
@@ -81,6 +83,7 @@ func beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
 	envelopeFingerprint string,
 	mimeFingerprint string,
 	recoverySpool *AcceptedMessageSpool,
+	storage ...*draftStorage,
 ) (SendAttempt, error) {
 	id, err := newSendAttemptID()
 	if err != nil {
@@ -94,15 +97,13 @@ func beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
 		RecoverySpool:       cloneAcceptedMessageSpool(recoverySpool),
 		ObservationBaseline: cloneSendObservationBaseline(baseline),
 	}
-	path, err := sendClaimPath(root, ref)
-	if err != nil {
-		return SendAttempt{}, err
-	}
+	state := draftStorageFor(root, storage...)
+	name := ref + ".send-claim"
 	payload, err := encodeSendAttempt(ref, attempt)
 	if err != nil {
 		return SendAttempt{}, err
 	}
-	if err := writePrivateFile(path, payload); err != nil {
+	if _, err := writePrivateDraftFile(state, name, payload); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return SendAttempt{}, &OperationError{
 				Code:    "send_retry_blocked",
@@ -154,12 +155,10 @@ func encodeSendAttempt(ref string, attempt SendAttempt) ([]byte, error) {
 	return append(payload, '\n'), nil
 }
 
-func readSendAttempt(root string, ref string) (*SendAttempt, error) {
-	path, err := sendClaimPath(root, ref)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(path)
+func readSendAttempt(root string, ref string, storage ...*draftStorage) (*SendAttempt, error) {
+	state := draftStorageFor(root, storage...)
+	name := ref + ".send-claim"
+	info, err := state.lstat(name)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -167,9 +166,9 @@ func readSendAttempt(root string, ref string) (*SendAttempt, error) {
 		return nil, fmt.Errorf("inspect send claim: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > maximumDraftStateBytes {
-		return nil, fmt.Errorf("send claim is not a bounded regular file")
+		return nil, errors.New("send claim is not a bounded regular file")
 	}
-	payload, err := readBoundedRegularFile(path, info, maximumDraftStateBytes)
+	payload, err := readBoundedRegularFile(name, info, maximumDraftStateBytes, state)
 	if err != nil {
 		return nil, fmt.Errorf("read send claim: %w", err)
 	}
@@ -181,10 +180,10 @@ func readSendAttempt(root string, ref string) (*SendAttempt, error) {
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("send claim must contain exactly one JSON object")
+		return nil, errors.New("send claim must contain exactly one JSON object")
 	}
 	if !validSendAttempt(stored, ref) {
-		return nil, fmt.Errorf("send claim is invalid")
+		return nil, errors.New("send claim is invalid")
 	}
 	return &stored.Attempt, nil
 }
@@ -262,49 +261,28 @@ func validObservationBaseline(value *SendObservationBaseline) bool {
 	return true
 }
 
-func replaceSendAttempt(root string, ref string, attempt SendAttempt) (resultErr error) {
-	path, err := sendClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
+func replaceSendAttempt(root string, ref string, attempt SendAttempt, storage ...*draftStorage) error {
+	state := draftStorageFor(root, storage...)
+	name := ref + ".send-claim"
 	payload, err := encodeSendAttempt(ref, attempt)
 	if err != nil {
 		return err
 	}
-	temporary, err := attachmentTemporaryPath(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, removeIfPresent(temporary))
-	}()
-	if err := writePrivateFile(temporary, payload); err != nil {
-		return fmt.Errorf("write send claim update: %w", err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("publish send claim update: %w", err)
-	}
-	return syncDirectory(root)
+	return replacePrivateDraftFile(state, name, payload, "write send claim update", "publish send claim update")
 }
 
-func removeSendAttempt(root string, ref string) error {
-	attempt, err := readSendAttempt(root, ref)
+func removeSendAttempt(root string, ref string, state *draftStorage) error {
+	attempt, err := readSendAttempt(root, ref, state)
 	if err != nil {
 		return err
 	}
 	if attempt != nil {
-		if err := removeAcceptedMessageSpool(root, ref, attempt); err != nil {
+		if err := removeAcceptedMessageSpool(ref, attempt, state); err != nil {
 			return err
 		}
 	}
-	path, err := sendClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove send claim: %w", err)
-	}
-	return syncDirectory(root)
+	name := ref + ".send-claim"
+	return removeDraftStorageFile(state, name, nil, "send claim")
 }
 
 const maximumSendReceiptBytes = 64 * 1024
@@ -378,12 +356,13 @@ func encodeSendReceipt(receipt SendReceipt) ([]byte, error) {
 	return payload, nil
 }
 
-func readSendReceipt(root string, ref string) (*SendReceipt, error) {
-	path, err := sendReceiptPath(root, ref)
-	if err != nil {
+func readSendReceipt(root string, ref string, storage ...*draftStorage) (*SendReceipt, error) {
+	if _, err := draftPath(root, ref); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	state := draftStorageFor(root, storage...)
+	name := ref + ".send-receipt"
+	info, err := state.lstat(name)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -393,7 +372,7 @@ func readSendReceipt(root string, ref string) (*SendReceipt, error) {
 	if !info.Mode().IsRegular() || info.Size() > maximumSendReceiptBytes {
 		return nil, &OperationError{Code: "send_receipt_invalid", Message: "send receipt is not a bounded regular file"}
 	}
-	payload, err := readBoundedRegularFile(path, info, maximumSendReceiptBytes)
+	payload, err := readBoundedRegularFile(name, info, maximumSendReceiptBytes, state)
 	if err != nil {
 		return nil, fmt.Errorf("read send receipt: %w", err)
 	}
@@ -415,8 +394,8 @@ func readSendReceipt(root string, ref string) (*SendReceipt, error) {
 	return &receipt, nil
 }
 
-func readActiveSendReceipt(root string, ref string) (*SendReceipt, error) {
-	receipt, err := readSendReceipt(root, ref)
+func readActiveSendReceipt(root string, ref string, storage ...*draftStorage) (*SendReceipt, error) {
+	receipt, err := readSendReceipt(root, ref, storage...)
 	if err != nil || receipt == nil {
 		return receipt, err
 	}
@@ -457,12 +436,13 @@ func sendReceiptsEqual(left SendReceipt, right SendReceipt) bool {
 		left.SentAppended == right.SentAppended
 }
 
-func persistSendReceipt(root string, ref string, receipt SendReceipt) error {
+func persistSendReceipt(root string, ref string, receipt SendReceipt, storage ...*draftStorage) error {
+	state := draftStorageFor(root, storage...)
 	receipt = normalizeSendReceipt(receipt)
 	if !validSendReceipt(storedSendReceipt{Version: 1, DraftRef: ref, Receipt: receipt}, ref) {
 		return &OperationError{Code: "send_receipt_invalid", Message: "terminal send receipt is invalid"}
 	}
-	existing, err := readSendReceipt(root, ref)
+	existing, err := readSendReceipt(root, ref, state)
 	if err != nil {
 		return err
 	}
@@ -476,15 +456,12 @@ func persistSendReceipt(root string, ref string, receipt SendReceipt) error {
 	if err != nil {
 		return err
 	}
-	path, err := sendReceiptPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := writePrivateFile(path, payload); err != nil {
+	name := ref + ".send-receipt"
+	if _, err := writePrivateDraftFile(state, name, payload); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("persist send receipt: %w", err)
 		}
-		existing, readErr := readSendReceipt(root, ref)
+		existing, readErr := readSendReceipt(root, ref, state)
 		if readErr != nil {
 			return readErr
 		}
@@ -495,12 +472,13 @@ func persistSendReceipt(root string, ref string, receipt SendReceipt) error {
 	return nil
 }
 
-func ensureSendReceipt(root string, ref string, attempt SendAttempt) (*SendReceipt, error) {
+func ensureSendReceipt(root string, ref string, attempt SendAttempt, storage ...*draftStorage) (*SendReceipt, error) {
+	state := draftStorageFor(root, storage...)
 	derived := receiptFromAttempt(ref, attempt)
 	if !time.Now().UTC().Before(derived.ExpiresAt) {
 		return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send evidence is older than the receipt retention window"}
 	}
-	receipt, err := readSendReceipt(root, ref)
+	receipt, err := readSendReceipt(root, ref, state)
 	if err != nil {
 		return nil, err
 	}
@@ -516,21 +494,10 @@ func ensureSendReceipt(root string, ref string, attempt SendAttempt) (*SendRecei
 		}
 		return receipt, nil
 	}
-	if err := persistSendReceipt(root, ref, derived); err != nil {
+	if err := persistSendReceipt(root, ref, derived, state); err != nil {
 		return nil, err
 	}
 	return &derived, nil
-}
-
-func removeSendReceipt(root string, ref string) error {
-	path, err := sendReceiptPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove send receipt: %w", err)
-	}
-	return syncDirectory(root)
 }
 
 type storedDraftSaveAttempt struct {
@@ -553,12 +520,10 @@ func encodeDraftSaveAttempt(ref string, attempt DraftSaveAttempt) ([]byte, error
 	return payload, nil
 }
 
-func readDraftSaveAttempt(root string, ref string) (*DraftSaveAttempt, error) {
-	path, err := saveClaimPath(root, ref)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(path)
+func readDraftSaveAttempt(root string, ref string, storage ...*draftStorage) (*DraftSaveAttempt, error) {
+	state := draftStorageFor(root, storage...)
+	name := ref + ".save-claim"
+	info, err := state.lstat(name)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -566,9 +531,9 @@ func readDraftSaveAttempt(root string, ref string) (*DraftSaveAttempt, error) {
 		return nil, fmt.Errorf("inspect draft-save claim: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > maximumDraftStateBytes {
-		return nil, fmt.Errorf("draft-save claim is not a bounded regular file")
+		return nil, errors.New("draft-save claim is not a bounded regular file")
 	}
-	payload, err := readBoundedRegularFile(path, info, maximumDraftStateBytes)
+	payload, err := readBoundedRegularFile(name, info, maximumDraftStateBytes, state)
 	if err != nil {
 		return nil, fmt.Errorf("read draft-save claim: %w", err)
 	}
@@ -580,10 +545,10 @@ func readDraftSaveAttempt(root string, ref string) (*DraftSaveAttempt, error) {
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("draft-save claim must contain exactly one JSON object")
+		return nil, errors.New("draft-save claim must contain exactly one JSON object")
 	}
 	if !validDraftSaveAttempt(stored, ref) {
-		return nil, fmt.Errorf("draft-save claim is invalid")
+		return nil, errors.New("draft-save claim is invalid")
 	}
 	return &stored.Attempt, nil
 }
@@ -614,11 +579,9 @@ func validateDraftSaveAttempt(ref string, attempt DraftSaveAttempt) error {
 	return nil
 }
 
-func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt) (resultErr error) {
-	path, err := saveClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
+func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt, storage ...*draftStorage) error {
+	state := draftStorageFor(root, storage...)
+	name := ref + ".save-claim"
 	if err := validateDraftSaveAttempt(ref, attempt); err != nil {
 		return err
 	}
@@ -626,27 +589,5 @@ func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt) 
 	if err != nil {
 		return err
 	}
-	temporary, err := attachmentTemporaryPath(path)
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, removeIfPresent(temporary)) }()
-	if err := writePrivateFile(temporary, payload); err != nil {
-		return fmt.Errorf("write draft-save claim update: %w", err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("publish draft-save claim update: %w", err)
-	}
-	return syncDirectory(root)
-}
-
-func removeDraftSaveAttempt(root string, ref string) error {
-	path, err := saveClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove draft-save claim: %w", err)
-	}
-	return syncDirectory(root)
+	return replacePrivateDraftFile(state, name, payload, "write draft-save claim update", "publish draft-save claim update")
 }

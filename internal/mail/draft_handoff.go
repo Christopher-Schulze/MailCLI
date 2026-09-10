@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,38 +39,12 @@ type DraftHandoffPreparation struct {
 // transition. Its methods are intentionally serial: exactly one owner may
 // mark dispatch, retain uncertainty, or release the claim.
 type DraftHandoffSession struct {
-	root            string
 	ref             string
 	lease           *draftLease
 	draft           Draft
 	attempt         HandoffAttempt
 	attachmentPaths []string
 	closed          bool
-}
-
-func handoffClaimPath(root string, ref string) (string, error) {
-	if _, err := draftPath(root, ref); err != nil {
-		return "", err
-	}
-	return filepath.Join(root, ref+handoffClaimSuffix), nil
-}
-
-func handoffSnapshotParent(root string, ref string) (string, error) {
-	if _, err := draftPath(root, ref); err != nil {
-		return "", err
-	}
-	return filepath.Join(root, ref+handoffSnapshotSuffix), nil
-}
-
-func handoffSnapshotRoot(root string, ref string, attemptID string) (string, error) {
-	if !validHandoffAttemptID(attemptID) {
-		return "", validationError("invalid handoff attempt id")
-	}
-	parent, err := handoffSnapshotParent(root, ref)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(parent, attemptID), nil
 }
 
 func newHandoffAttemptID() (string, error) {
@@ -102,12 +78,9 @@ func encodeHandoffAttempt(ref string, attempt HandoffAttempt) ([]byte, error) {
 	return append(payload, '\n'), nil
 }
 
-func readHandoffAttempt(root string, ref string) (*HandoffAttempt, error) {
-	path, err := handoffClaimPath(root, ref)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(path)
+func readHandoffAttempt(ref string, state *draftStorage) (*HandoffAttempt, error) {
+	name := ref + handoffClaimSuffix
+	info, err := state.lstat(name)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -115,9 +88,9 @@ func readHandoffAttempt(root string, ref string) (*HandoffAttempt, error) {
 		return nil, fmt.Errorf("inspect handoff claim: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Size() > maximumDraftStateBytes {
-		return nil, fmt.Errorf("handoff claim is not a bounded regular file")
+		return nil, errors.New("handoff claim is not a bounded regular file")
 	}
-	payload, err := readBoundedRegularFile(path, info, maximumDraftStateBytes)
+	payload, err := readBoundedRegularFile(name, info, maximumDraftStateBytes, state)
 	if err != nil {
 		return nil, fmt.Errorf("read handoff claim: %w", err)
 	}
@@ -129,10 +102,10 @@ func readHandoffAttempt(root string, ref string) (*HandoffAttempt, error) {
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, fmt.Errorf("handoff claim must contain exactly one JSON object")
+		return nil, errors.New("handoff claim must contain exactly one JSON object")
 	}
 	if !validHandoffAttempt(stored, ref) {
-		return nil, fmt.Errorf("handoff claim is invalid")
+		return nil, errors.New("handoff claim is invalid")
 	}
 	return &stored.Attempt, nil
 }
@@ -175,131 +148,135 @@ func validHandoffAttempt(stored storedHandoffAttempt, ref string) bool {
 	return true
 }
 
-func writeHandoffAttempt(root string, ref string, attempt HandoffAttempt) error {
-	path, err := handoffClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
-	payload, err := encodeHandoffAttempt(ref, attempt)
-	if err != nil {
-		return err
-	}
-	if err := writePrivateFile(path, payload); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return handoffRetryBlockedError(attempt.ID)
-		}
-		return fmt.Errorf("create handoff claim: %w", err)
-	}
-	return nil
-}
-
-func replaceHandoffAttempt(root string, ref string, attempt HandoffAttempt) error {
+func replaceHandoffAttempt(ref string, attempt HandoffAttempt, state *draftStorage) error {
 	if !validHandoffAttempt(storedHandoffAttempt{Version: 1, DraftRef: ref, Attempt: attempt}, ref) {
-		return fmt.Errorf("handoff claim is invalid")
+		return errors.New("handoff claim is invalid")
 	}
-	path, err := handoffClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
+	name := ref + handoffClaimSuffix
 	payload, err := encodeHandoffAttempt(ref, attempt)
 	if err != nil {
 		return err
 	}
-	temporary, err := attachmentTemporaryPath(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = removeIfPresent(temporary) }()
-	if err := writePrivateFile(temporary, payload); err != nil {
-		return fmt.Errorf("write handoff claim update: %w", err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("publish handoff claim update: %w", err)
-	}
-	return syncDirectory(root)
+	return replacePrivateDraftFile(state, name, payload, "write handoff claim update", "publish handoff claim update")
 }
 
-func removeHandoffAttempt(root string, ref string) error {
-	path, err := handoffClaimPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove handoff claim: %w", err)
-	}
-	return syncDirectory(root)
+func removeHandoffAttempt(ref string, state *draftStorage) error {
+	name := ref + handoffClaimSuffix
+	return removeDraftStorageFile(state, name, nil, "handoff claim")
 }
 
-func ensurePrivateDirectory(path string) error {
-	info, err := os.Lstat(path)
+func ensurePrivateDirectoryAt(storage *draftStorage, name string) error {
+	info, err := storage.lstat(name)
 	if os.IsNotExist(err) {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			return err
-		}
-		return nil
+		return storage.apply(draftStorageMkdir, name, "", 0o700)
 	}
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("path is not a private directory")
+	if !info.IsDir() {
+		return errors.New("path is not a private directory")
 	}
-	return os.Chmod(path, 0o700)
-}
-
-func createHandoffSnapshotRoot(root string, ref string, attemptID string) (string, error) {
-	parent, err := handoffSnapshotParent(root, ref)
-	if err != nil {
-		return "", err
-	}
-	if err := ensurePrivateDirectory(parent); err != nil {
-		return "", fmt.Errorf("create private handoff snapshot parent: %w", err)
-	}
-	snapshotRoot, err := handoffSnapshotRoot(root, ref, attemptID)
-	if err != nil {
-		return "", err
-	}
-	if err := ensurePrivateDirectory(snapshotRoot); err != nil {
-		return "", fmt.Errorf("create private handoff snapshot root: %w", err)
-	}
-	return snapshotRoot, nil
-}
-
-func removePersistentHandoffSnapshotRoot(root string, ref string, attemptID string) error {
-	snapshotRoot, err := handoffSnapshotRoot(root, ref, attemptID)
+	file, _, err := storage.openFile(name, info, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
-	if err := removeHandoffSnapshotRoot(snapshotRoot); err != nil {
-		return fmt.Errorf("remove handoff snapshots: %w", err)
+	if err := file.Chmod(0o700); err != nil {
+		return errors.Join(err, file.Close())
 	}
-	return syncDirectory(root)
+	return file.Close()
 }
 
-func stageDraftAttachmentsForAttempt(
-	ctx context.Context,
-	root string,
+func removePersistentHandoffSnapshotRoot(
 	ref string,
 	attemptID string,
-	attachments []DraftAttachment,
-) ([]string, []HandoffSnapshot, error) {
-	snapshotRoot, err := createHandoffSnapshotRoot(root, ref, attemptID)
-	if err != nil {
-		return nil, nil, err
+	snapshots []HandoffSnapshot,
+	state *draftStorage,
+) error {
+	if !validHandoffAttemptID(attemptID) {
+		return validationError("invalid handoff attempt id")
 	}
-	paths := make([]string, 0, len(attachments))
-	snapshots := make([]HandoffSnapshot, 0, len(attachments))
-	for index, attachment := range attachments {
-		path, err := stageDraftAttachment(ctx, snapshotRoot, index, attachment)
-		if err != nil {
-			return paths, snapshots, err
+	snapshotName := filepath.Join(ref+handoffSnapshotSuffix, attemptID)
+	for index, snapshot := range snapshots {
+		directoryName := filepath.Join(snapshotName, strconv.Itoa(index))
+		stagedName := filepath.Join(directoryName, snapshot.Name)
+		if err := removeDraftStorageFile(state, stagedName, nil, ""); err != nil {
+			return err
 		}
-		paths = append(paths, path)
-		snapshots = append(snapshots, HandoffSnapshot{
-			Name: filepath.Base(attachment.Path), Size: attachment.Size, SHA256: attachment.SHA256,
-		})
+		if err := removeDraftStorageFile(state, directoryName, nil, ""); err != nil {
+			return err
+		}
 	}
-	return paths, snapshots, nil
+	if err := removeDraftStorageFile(state, snapshotName, nil, ""); err != nil {
+		return err
+	}
+	return state.apply(draftStorageSync, "", "", 0)
+}
+
+func closeHandoffFile(file *os.File, resultErr *error) {
+	*resultErr = errors.Join(*resultErr, file.Close())
+}
+
+func stageDraftAttachmentAt(
+	ctx context.Context,
+	storage *draftStorage,
+	snapshotName string,
+	index int,
+	expected DraftAttachment,
+) (stagedPath string, resultErr error) {
+	source, sourceInfo, err := openHandoffAttachment(expected.Path)
+	if err != nil {
+		return "", err
+	}
+	defer closeHandoffFile(source, &resultErr)
+	directoryName := filepath.Join(snapshotName, strconv.Itoa(index))
+	stagedName := filepath.Join(directoryName, filepath.Base(expected.Path))
+
+	if err := storage.apply(draftStorageMkdir, directoryName, "", 0o700); err != nil {
+		return "", fmt.Errorf("create private handoff attachment directory: %w", err)
+	}
+	destination, destinationIdentity, err := storage.openFile(stagedName, nil, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create private handoff attachment snapshot: %w", err)
+	}
+	defer closeHandoffFile(destination, &resultErr)
+	hash := sha256.New()
+	limited := io.LimitReader(source, expected.Size+1)
+	copyReader := attachmentFingerprintReader{
+		ctx: ctx, reader: limited, afterRead: handoffAttachmentReadHook,
+	}
+	written, copyErr := io.Copy(destination, io.TeeReader(copyReader, hash))
+	if copyErr != nil {
+		if errors.Is(copyErr, context.Canceled) || errors.Is(copyErr, context.DeadlineExceeded) {
+			return "", copyErr
+		}
+		return "", handoffAttachmentChanged(expected.Path, fmt.Errorf("copy attachment: %w", copyErr))
+	}
+	if err := destination.Sync(); err != nil {
+		return "", fmt.Errorf("sync private handoff attachment snapshot: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	currentInfo, err := os.Lstat(expected.Path)
+	if err != nil {
+		return "", handoffAttachmentChanged(expected.Path, fmt.Errorf("recheck attachment: %w", err))
+	}
+	if !currentInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, currentInfo) {
+		return "", handoffAttachmentChanged(expected.Path, errors.New("attachment path changed while it was staged"))
+	}
+	actualHash := hex.EncodeToString(hash.Sum(nil))
+	if written != expected.Size || !strings.EqualFold(actualHash, expected.SHA256) {
+		return "", handoffAttachmentChanged(expected.Path, errors.New("attachment size or SHA-256 fingerprint changed"))
+	}
+	if err := destination.Chmod(0o400); err != nil {
+		return "", fmt.Errorf("make private handoff attachment snapshot read-only: %w", err)
+	}
+	current, err := storage.lstat(stagedName)
+	if err != nil || !current.Mode().IsRegular() ||
+		current.Mode().Perm() != 0o400 || !os.SameFile(destinationIdentity, current) {
+		return "", errors.New("private handoff attachment snapshot changed while it was staged")
+	}
+	return storage.absolute(stagedName), nil
 }
 
 func handoffRetryBlockedError(attemptID string) error {
@@ -330,6 +307,7 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 	if err != nil {
 		return nil, classifyDraftContextError(ctx, err, "handoff")
 	}
+	storage := lease.storage
 	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
 		_ = lease.release()
@@ -337,8 +315,8 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 	}
 	if draft.HandoffAttempt != nil && !draft.HandoffAttempt.DispatchStarted && draft.HandoffAttempt.Outcome == HandoffOutcomePrepared {
 		cleanupErr := errors.Join(
-			removePersistentHandoffSnapshotRoot(root, ref, draft.HandoffAttempt.ID),
-			removeHandoffAttempt(root, ref),
+			removePersistentHandoffSnapshotRoot(ref, draft.HandoffAttempt.ID, draft.HandoffAttempt.Snapshots, storage),
+			removeHandoffAttempt(ref, storage),
 		)
 		if cleanupErr != nil {
 			_ = lease.release()
@@ -364,25 +342,62 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 		ID: attemptID, DraftRef: ref, StartedAt: now, UpdatedAt: now,
 		Outcome: HandoffOutcomePrepared, Snapshots: []HandoffSnapshot{},
 	}
-	if err := writeHandoffAttempt(root, ref, attempt); err != nil {
+	name := ref + handoffClaimSuffix
+	payload, err := encodeHandoffAttempt(ref, attempt)
+	if err != nil {
 		_ = lease.release()
 		return nil, err
 	}
-	paths, snapshots, err := stageDraftAttachmentsForAttempt(ctx, root, ref, attemptID, draft.Attachments)
+	if _, err := writePrivateDraftFile(storage, name, payload); err != nil {
+		_ = lease.release()
+		if errors.Is(err, os.ErrExist) {
+			return nil, handoffRetryBlockedError(attempt.ID)
+		}
+		return nil, fmt.Errorf("create handoff claim: %w", err)
+	}
+	snapshotName := filepath.Join(ref+handoffSnapshotSuffix, attemptID)
+	parentName := filepath.Dir(snapshotName)
+	var paths []string
+	var snapshots []HandoffSnapshot
+	if err = ensurePrivateDirectoryAt(storage, parentName); err != nil {
+		err = fmt.Errorf("create private handoff snapshot parent: %w", err)
+	} else if err = ensurePrivateDirectoryAt(storage, snapshotName); err != nil {
+		err = fmt.Errorf("create private handoff snapshot root: %w", err)
+	} else {
+		paths = make([]string, 0, len(draft.Attachments))
+		snapshots = make([]HandoffSnapshot, 0, len(draft.Attachments))
+		for index, attachment := range draft.Attachments {
+			snapshots = append(snapshots, HandoffSnapshot{
+				Name: filepath.Base(attachment.Path), Size: attachment.Size, SHA256: attachment.SHA256,
+			})
+			path, stageErr := stageDraftAttachmentAt(ctx, storage, snapshotName, index, attachment)
+			if stageErr != nil {
+				err = stageErr
+				break
+			}
+			paths = append(paths, path)
+		}
+	}
 	if err != nil {
-		cleanupErr := errors.Join(removePersistentHandoffSnapshotRoot(root, ref, attemptID), removeHandoffAttempt(root, ref))
+		cleanupErr := errors.Join(
+			removePersistentHandoffSnapshotRoot(ref, attemptID, snapshots, storage),
+			removeHandoffAttempt(ref, storage),
+		)
 		return nil, errors.Join(classifyDraftContextError(ctx, err, "handoff"), cleanupErr, lease.release())
 	}
 	attempt.Snapshots = snapshots
 	attempt.SnapshotsRetained = len(snapshots) > 0
 	attempt.UpdatedAt = time.Now().UTC()
-	if err := replaceHandoffAttempt(root, ref, attempt); err != nil {
-		cleanupErr := errors.Join(removePersistentHandoffSnapshotRoot(root, ref, attemptID), removeHandoffAttempt(root, ref))
+	if err := replaceHandoffAttempt(ref, attempt, storage); err != nil {
+		cleanupErr := errors.Join(
+			removePersistentHandoffSnapshotRoot(ref, attemptID, snapshots, storage),
+			removeHandoffAttempt(ref, storage),
+		)
 		return nil, errors.Join(err, cleanupErr, lease.release())
 	}
 	draft.HandoffAttempt = &attempt
 	return &DraftHandoffSession{
-		root: root, ref: ref, lease: lease, draft: draft, attempt: attempt, attachmentPaths: paths,
+		ref: ref, lease: lease, draft: draft, attempt: attempt, attachmentPaths: paths,
 	}, nil
 }
 
@@ -429,13 +444,13 @@ func (s *DraftHandoffSession) MarkDispatched(ctx context.Context) error {
 		return err
 	}
 	if s.attempt.Outcome != HandoffOutcomePrepared || s.attempt.DispatchStarted {
-		return fmt.Errorf("handoff dispatch state is invalid")
+		return errors.New("handoff dispatch state is invalid")
 	}
 	next := s.attempt
 	next.DispatchStarted = true
 	next.Outcome = HandoffOutcomeDispatched
 	next.UpdatedAt = time.Now().UTC()
-	if err := replaceHandoffAttempt(s.root, s.ref, next); err != nil {
+	if err := replaceHandoffAttempt(s.ref, next, s.lease.storage); err != nil {
 		return err
 	}
 	s.attempt = next
@@ -457,13 +472,13 @@ func (s *DraftHandoffSession) Finish(outcome HandoffOutcome) (resultErr error) {
 		s.attempt.DispatchStarted = true
 		s.attempt.SnapshotsRetained = len(s.attempt.Snapshots) > 0
 		s.attempt.UpdatedAt = time.Now().UTC()
-		resultErr = replaceHandoffAttempt(s.root, s.ref, s.attempt)
+		resultErr = replaceHandoffAttempt(s.ref, s.attempt, s.lease.storage)
 		s.closed = true
 		return errors.Join(resultErr, s.lease.release())
 	}
-	cleanupErr := removePersistentHandoffSnapshotRoot(s.root, s.ref, s.attempt.ID)
+	cleanupErr := removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage)
 	if cleanupErr == nil {
-		cleanupErr = removeHandoffAttempt(s.root, s.ref)
+		cleanupErr = removeHandoffAttempt(s.ref, s.lease.storage)
 	}
 	if cleanupErr != nil {
 		resultErr = errors.Join(
@@ -485,8 +500,8 @@ func (s *DraftHandoffSession) CancelBeforeDispatch() error {
 		return s.Finish(HandoffOutcomeUnknown)
 	}
 	cleanupErr := errors.Join(
-		removePersistentHandoffSnapshotRoot(s.root, s.ref, s.attempt.ID),
-		removeHandoffAttempt(s.root, s.ref),
+		removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage),
+		removeHandoffAttempt(s.ref, s.lease.storage),
 	)
 	s.closed = true
 	return errors.Join(cleanupErr, s.lease.release())
@@ -532,33 +547,32 @@ func (s *Service) ReconcileDraftHandoffContext(
 	if err != nil {
 		return result, classifyDraftContextError(ctx, err, "handoff reconcile")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	attempt, err := readHandoffAttempt(root, ref)
-	if err != nil {
-		return result, err
+	storage := lease.storage
+	attempt, err := readHandoffAttempt(ref, storage)
+	switch {
+	case err != nil:
+		resultErr = err
+	case attempt == nil:
+		resultErr = &OperationError{Code: "handoff_not_found", Message: "no retained visible compose handoff exists for this draft"}
+	case attempt.ID != attemptID:
+		resultErr = &OperationError{Code: "handoff_attempt_mismatch", Message: "handoff attempt does not match the retained draft state"}
+	case !attempt.DispatchStarted || (attempt.Outcome != HandoffOutcomeDispatched && attempt.Outcome != HandoffOutcomeUnknown):
+		resultErr = &OperationError{Code: "handoff_not_dispatched", Message: "the retained handoff has no unresolved native dispatch to reconcile"}
+	default:
+		result = HandoffReconcileResult{
+			DraftRef: ref, AttemptID: attempt.ID,
+			Outcome: mapHandoffResolution(resolution), SnapshotsRetained: attempt.SnapshotsRetained,
+		}
+		if cleanupErr := removePersistentHandoffSnapshotRoot(ref, attempt.ID, attempt.Snapshots, storage); cleanupErr != nil {
+			resultErr = &OperationError{Code: "handoff_attachment_cleanup_failed", Message: fmt.Sprintf("handoff outcome recorded as %s, but snapshots remain: %v", result.Outcome, cleanupErr)}
+		} else if cleanupErr := removeHandoffAttempt(ref, storage); cleanupErr != nil {
+			result.SnapshotsRetained = false
+			resultErr = &OperationError{Code: "handoff_claim_cleanup_failed", Message: fmt.Sprintf("handoff snapshots were removed, but the retained claim remains: %v", cleanupErr)}
+		} else {
+			result.SnapshotsRetained = false
+		}
 	}
-	if attempt == nil {
-		return result, &OperationError{Code: "handoff_not_found", Message: "no retained visible compose handoff exists for this draft"}
-	}
-	if attempt.ID != attemptID {
-		return result, &OperationError{Code: "handoff_attempt_mismatch", Message: "handoff attempt does not match the retained draft state"}
-	}
-	if !attempt.DispatchStarted || (attempt.Outcome != HandoffOutcomeDispatched && attempt.Outcome != HandoffOutcomeUnknown) {
-		return result, &OperationError{Code: "handoff_not_dispatched", Message: "the retained handoff has no unresolved native dispatch to reconcile"}
-	}
-	result = HandoffReconcileResult{
-		DraftRef: ref, AttemptID: attempt.ID,
-		Outcome: mapHandoffResolution(resolution), SnapshotsRetained: attempt.SnapshotsRetained,
-	}
-	if err := removePersistentHandoffSnapshotRoot(root, ref, attempt.ID); err != nil {
-		return result, &OperationError{Code: "handoff_attachment_cleanup_failed", Message: fmt.Sprintf("handoff outcome recorded as %s, but snapshots remain: %v", result.Outcome, err)}
-	}
-	if err := removeHandoffAttempt(root, ref); err != nil {
-		result.SnapshotsRetained = false
-		return result, &OperationError{Code: "handoff_claim_cleanup_failed", Message: fmt.Sprintf("handoff snapshots were removed, but the retained claim remains: %v", err)}
-	}
-	result.SnapshotsRetained = false
-	return result, nil
+	return result, errors.Join(resultErr, lease.release())
 }
 
 func mapHandoffResolution(resolution HandoffResolution) HandoffOutcome {

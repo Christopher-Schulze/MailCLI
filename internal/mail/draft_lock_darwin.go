@@ -7,9 +7,49 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func openPinnedDraftStorage(root string, lock *draftLockResource, ref string) (*draftStorage, error) {
+	if lock == nil || lock.directory == nil {
+		return nil, draftLockUnsafeError("draft lock parent descriptor is unavailable")
+	}
+	pinnedRoot, err := os.OpenRoot(fmt.Sprintf("/dev/fd/%d", lock.directory.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("open pinned draft directory: %w", err)
+	}
+	storage := &draftStorage{root: pinnedRoot, rootName: root, directory: lock.directory}
+	name := ref + ".lock"
+	current, err := storage.lstat(name)
+	if err != nil {
+		return nil, errors.Join(draftLockChangedError("draft lock disappeared while pinning operation storage"), pinnedRoot.Close())
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(lock.identity, current) {
+		return nil, errors.Join(draftLockChangedError("draft lock does not belong to the leased directory"), pinnedRoot.Close())
+	}
+	return storage, nil
+}
+
+func (s *draftStorage) apply(action uint8, name string, other string, perm uint32) error {
+	fd := int(s.directory.Fd())
+	switch action {
+	case draftStorageRename:
+		return unix.Renameat(fd, name, fd, other)
+	case draftStorageMkdir:
+		return unix.Mkdirat(fd, name, perm)
+	case draftStorageRemove:
+		return s.root.Remove(name)
+	case draftStorageLink:
+		return s.root.Link(name, other)
+	case draftStorageSync:
+		if err := s.directory.Sync(); err != nil {
+			return fmt.Errorf("sync pinned state directory: %w", err)
+		}
+	}
+	return nil
+}
 
 func openDraftLockResource(root string, ref string) (*draftLockResource, error) {
 	return openDraftLockResourceDarwin(root, ref, true)
@@ -129,4 +169,22 @@ func (r *draftLockResource) remove() error {
 		return fmt.Errorf("remove draft lock: %w", err)
 	}
 	return nil
+}
+
+func sweepOrphanDraftLock(_ string, _ string, lock *draftLockResource) (bool, error) {
+	if err := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = lock.close()
+			return false, nil
+		}
+		return false, errors.Join(err, lock.close())
+	}
+	removeErr := lock.remove()
+	unlockErr := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN)
+	closeErr := lock.close()
+	return removeErr == nil && unlockErr == nil && closeErr == nil, errors.Join(removeErr, unlockErr, closeErr)
+}
+
+func removeDraftStorageLock(storage *draftStorage, name string, expected os.FileInfo) error {
+	return removeDraftStorageFile(storage, name, expected, "")
 }

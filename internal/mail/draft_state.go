@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -86,10 +88,19 @@ func saveClaimPath(root string, ref string) (string, error) {
 }
 
 type draftLease struct {
-	lock *draftLockResource
+	lock        *draftLockResource
+	storage     *draftStorage
+	releaseOnce sync.Once
+	releaseErr  error
 }
 
 func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLease, error) {
+	if runtime.GOOS == "plan9" || (runtime.GOOS == "js" && runtime.GOARCH == "wasm") {
+		return nil, &OperationError{
+			Code:    "unsupported_platform",
+			Message: "descriptor-backed draft storage is unavailable on this platform",
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -106,33 +117,52 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 				closeErr := errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
 				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, closeErr)
 			}
-			return &draftLease{lock: lock}, nil
+			var storage *draftStorage
+			if runtime.GOOS == "darwin" {
+				pinnedRoot, storageErr := os.OpenRoot(fmt.Sprintf("/dev/fd/%d", lock.directory.Fd()))
+				if storageErr != nil {
+					return nil, errors.Join(fmt.Errorf("open pinned draft directory: %w", storageErr), syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
+				}
+				storage = &draftStorage{root: pinnedRoot, rootName: root, directory: lock.directory}
+			} else {
+				var storageErr error
+				storage, storageErr = openPinnedDraftStorage(root, lock, ref)
+				if storageErr != nil {
+					return nil, errors.Join(storageErr, syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
+				}
+			}
+			return &draftLease{lock: lock, storage: storage}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			closeErr := lock.close()
-			return nil, errors.Join(fmt.Errorf("lock draft: %w", err), closeErr)
+			return nil, errors.Join(fmt.Errorf("lock draft: %w", err), lock.close())
 		}
 		select {
 		case <-ctx.Done():
-			closeErr := lock.close()
-			return nil, errors.Join(
-				&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"},
-				closeErr,
-			)
+			return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, lock.close())
 		case <-ticker.C:
 		}
 	}
 }
 
 func (l *draftLease) release() error {
-	return errors.Join(
-		syscall.Flock(int(l.lock.file.Fd()), syscall.LOCK_UN),
-		l.lock.close(),
-	)
+	if l == nil {
+		return nil
+	}
+	l.releaseOnce.Do(func() {
+		l.releaseErr = errors.Join(
+			syscall.Flock(int(l.lock.file.Fd()), syscall.LOCK_UN),
+			l.lock.close(),
+			l.storage.root.Close(),
+		)
+	})
+	return l.releaseErr
 }
 
 func (l *draftLease) removeLock() error {
-	return l.lock.remove()
+	if runtime.GOOS == "darwin" {
+		return l.lock.remove()
+	}
+	return removeDraftStorageLock(l.storage, l.lock.name, l.lock.identity)
 }
 
 // readDraftForMutation reads a draft while the caller holds its exclusive lease.
@@ -140,7 +170,7 @@ func (l *draftLease) removeLock() error {
 // that lease's pinned parent and file identity, so a failed mutation leaves no
 // orphan lock and cannot clean an attacker-replaced path.
 func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, error) {
-	draft, err := readDraftFile(root, ref)
+	draft, err := readDraftFileWithObserver(root, ref, nil, lease.storage)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
@@ -178,7 +208,7 @@ func finishObservedSend(
 ) (SendResult, error) {
 	result := resultForAttempt(ref, attempt, true)
 	result.Reconciled = reconciled
-	receipt, err := ensureSendReceipt(root, ref, attempt)
+	receipt, err := ensureSendReceipt(root, ref, attempt, lease.storage)
 	if err != nil {
 		return result, &OperationError{
 			Code:    "send_receipt_persist_failed",
@@ -196,8 +226,12 @@ func finishObservedSend(
 	return result, nil
 }
 
-func removeDraftClaims(root string, ref string) error {
-	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), removeHandoffAttempt(root, ref))
+func removeDraftClaims(root string, ref string, storage *draftStorage) error {
+	return errors.Join(
+		removeSendAttempt(root, ref, storage),
+		removeDraftStorageFile(storage, ref+".save-claim", nil, "draft-save claim"),
+		removeHandoffAttempt(ref, storage),
+	)
 }
 
 func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendAttempt) (SendResult, error) {
@@ -205,7 +239,7 @@ func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendA
 	result.Replayed = true
 	switch attempt.Outcome {
 	case SendOutcomeObserved, SendOutcomeSent:
-		receipt, err := ensureSendReceipt(root, ref, attempt)
+		receipt, err := ensureSendReceipt(root, ref, attempt, lease.storage)
 		if err != nil {
 			return result, &OperationError{
 				Code:    "send_receipt_unavailable",
@@ -243,16 +277,14 @@ func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendA
 }
 
 func discardDraftFiles(lease *draftLease, root string, ref string) error {
-	if attempt, err := readHandoffAttempt(root, ref); err != nil {
+	state := lease.storage
+	if attempt, err := readHandoffAttempt(ref, state); err != nil {
 		return err
 	} else if attempt != nil {
 		return handoffRetryBlockedError(attempt.ID)
 	}
-	path, err := draftPath(root, ref)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil {
+	name := ref + ".json"
+	if err := state.apply(draftStorageRemove, name, "", 0); err != nil {
 		if os.IsNotExist(err) {
 			return errors.Join(
 				&OperationError{Code: "not_found", Message: "draft not found"},
@@ -261,10 +293,10 @@ func discardDraftFiles(lease *draftLease, root string, ref string) error {
 		}
 		return fmt.Errorf("discard draft: %w", err)
 	}
-	if err := syncDirectory(root); err != nil {
+	if err := state.apply(draftStorageSync, "", "", 0); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return errors.Join(removeDraftClaims(root, ref), lease.removeLock())
+	return errors.Join(removeDraftClaims(root, ref, state), lease.removeLock())
 }
 
 func nonNilRecipients(recipients []Recipient) []Recipient {

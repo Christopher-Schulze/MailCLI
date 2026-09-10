@@ -28,26 +28,25 @@ func validAcceptedMessageSpool(spool *AcceptedMessageSpool) bool {
 	return err == nil && len(digest) == sha256.Size
 }
 
-func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessage) (*AcceptedMessageSpool, error) {
+func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessage, state *draftStorage) (*AcceptedMessageSpool, error) {
 	if message == nil || message.Size() <= 0 || message.Size() > maximumAcceptedMessageSpoolBytes {
-		return nil, fmt.Errorf("accepted message spool exceeds its byte limit")
+		return nil, errors.New("accepted message spool exceeds its byte limit")
 	}
-	path, err := acceptedMessageSpoolPath(root, ref)
+	name := ref + ".send-spool"
+	temporaryPath, err := attachmentTemporaryPath(state.absolute(name))
 	if err != nil {
 		return nil, err
 	}
-	temporary, err := attachmentTemporaryPath(path)
-	if err != nil {
-		return nil, err
-	}
+	temporary := filepath.Base(temporaryPath)
 	source, _, err := openRegularAttachment(message.path)
 	if err != nil {
 		return nil, fmt.Errorf("open composed message for recovery: %w", err)
 	}
-	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, temporaryIdentity, err := state.openFile(temporary, nil, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("create recovery spool: %w", err), source.Close())
 	}
+	cleanupTemporary := func() error { return removeDraftStorageFile(state, temporary, temporaryIdentity, "") }
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(source, message.Size()+1))
 	sourceCloseErr := source.Close()
@@ -56,28 +55,33 @@ func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessa
 	if copyErr != nil || sourceCloseErr != nil || syncErr != nil || closeErr != nil {
 		return nil, errors.Join(
 			fmt.Errorf("write recovery spool: %w", errors.Join(copyErr, sourceCloseErr, syncErr, closeErr)),
-			removeIfPresent(temporary),
+			cleanupTemporary(),
 		)
 	}
 	if written != message.Size() {
 		return nil, errors.Join(
-			fmt.Errorf("recovery spool size changed while copying"),
-			removeIfPresent(temporary),
+			errors.New("recovery spool size changed while copying"),
+			cleanupTemporary(),
 		)
 	}
-	if err := os.Link(temporary, path); err != nil {
-		return nil, errors.Join(fmt.Errorf("publish recovery spool: %w", err), removeIfPresent(temporary))
+	current, err := state.lstat(temporary)
+	if err != nil || !current.Mode().IsRegular() ||
+		!os.SameFile(temporaryIdentity, current) || current.Size() != written {
+		return nil, errors.Join(errors.New("recovery spool changed before publication"), cleanupTemporary())
 	}
-	if err := os.Remove(temporary); err != nil {
-		return nil, errors.Join(fmt.Errorf("remove recovery spool temporary file: %w", err), removeIfPresent(temporary))
+	if err := state.apply(draftStorageLink, temporary, name, 0); err != nil {
+		return nil, errors.Join(fmt.Errorf("publish recovery spool: %w", err), cleanupTemporary())
 	}
-	if err := syncDirectory(root); err != nil {
+	if err := state.apply(draftStorageRemove, temporary, "", 0); err != nil {
+		return nil, errors.Join(fmt.Errorf("remove recovery spool temporary file: %w", err), cleanupTemporary())
+	}
+	if err := state.apply(draftStorageSync, "", "", 0); err != nil {
 		return nil, fmt.Errorf("persist recovery spool directory: %w", err)
 	}
 	return &AcceptedMessageSpool{Size: written, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
 }
 
-func openAcceptedMessageSpool(root string, ref string, attempt SendAttempt) (*ComposedMessage, error) {
+func openAcceptedMessageSpool(ref string, attempt SendAttempt, state *draftStorage) (*ComposedMessage, error) {
 	spool := attempt.RecoverySpool
 	if !validAcceptedMessageSpool(spool) {
 		return nil, &OperationError{Code: "send_recovery_spool_invalid", Message: "recovery spool metadata is invalid"}
@@ -85,11 +89,16 @@ func openAcceptedMessageSpool(root string, ref string, attempt SendAttempt) (*Co
 	if spool == nil {
 		return nil, &OperationError{Code: "send_recovery_spool_unavailable", Message: "no recovery spool is retained; automatic mirror retry is unavailable"}
 	}
-	path, err := acceptedMessageSpoolPath(root, ref)
-	if err != nil {
-		return nil, err
+	name := ref + ".send-spool"
+	var err error
+	pathInfo, err := state.root.Lstat(name)
+	if os.IsNotExist(err) {
+		return nil, &OperationError{Code: "send_recovery_spool_missing", Message: "the accepted-message recovery spool is missing; the draft is retained for explicit resolution"}
 	}
-	file, info, err := openRegularAttachment(path)
+	if err != nil || !pathInfo.Mode().IsRegular() {
+		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the retained recovery spool is not a regular file"}
+	}
+	file, info, err := state.openFile(name, pathInfo, os.O_RDONLY, 0)
 	if os.IsNotExist(err) {
 		return nil, &OperationError{Code: "send_recovery_spool_missing", Message: "the accepted-message recovery spool is missing; the draft is retained for explicit resolution"}
 	}
@@ -111,14 +120,17 @@ func openAcceptedMessageSpool(root string, ref string, attempt SendAttempt) (*Co
 	if written != spool.Size || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), spool.SHA256) {
 		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the retained recovery spool bytes no longer match"}
 	}
-	return &ComposedMessage{path: path, size: spool.Size, messageID: attempt.MessageID}, nil
+	return &ComposedMessage{
+		size: spool.Size, messageID: attempt.MessageID,
+		storage: state, storageName: name, storageIdentity: info,
+	}, nil
 }
 
-func removeAcceptedMessageSpool(root string, ref string, attempt *SendAttempt) error {
+func removeAcceptedMessageSpool(ref string, attempt *SendAttempt, state *draftStorage) error {
 	if attempt == nil || attempt.RecoverySpool == nil {
 		return nil
 	}
-	message, err := openAcceptedMessageSpool(root, ref, *attempt)
+	message, err := openAcceptedMessageSpool(ref, *attempt, state)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "send_recovery_spool_missing" {
@@ -129,5 +141,5 @@ func removeAcceptedMessageSpool(root string, ref string, attempt *SendAttempt) e
 	if err := message.Remove(); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove recovery spool: %w", err)
 	}
-	return syncDirectory(root)
+	return state.apply(draftStorageSync, "", "", 0)
 }
