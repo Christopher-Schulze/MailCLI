@@ -68,6 +68,20 @@ func beginSendAttemptWithMIMEFingerprint(
 	envelopeFingerprint string,
 	mimeFingerprint string,
 ) (SendAttempt, error) {
+	return beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
+		root, ref, baseline, messageID, envelopeFingerprint, mimeFingerprint, nil,
+	)
+}
+
+func beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
+	root string,
+	ref string,
+	baseline *SendObservationBaseline,
+	messageID string,
+	envelopeFingerprint string,
+	mimeFingerprint string,
+	recoverySpool *AcceptedMessageSpool,
+) (SendAttempt, error) {
 	id, err := newSendAttemptID()
 	if err != nil {
 		return SendAttempt{}, err
@@ -77,6 +91,7 @@ func beginSendAttemptWithMIMEFingerprint(
 		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
 		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint,
 		MIMEFingerprint:     mimeFingerprint,
+		RecoverySpool:       cloneAcceptedMessageSpool(recoverySpool),
 		ObservationBaseline: cloneSendObservationBaseline(baseline),
 	}
 	path, err := sendClaimPath(root, ref)
@@ -105,6 +120,14 @@ func newSendAttemptID() (string, error) {
 		return "", fmt.Errorf("generate send attempt id: %w", err)
 	}
 	return "send_" + base64.RawURLEncoding.EncodeToString(value[:]), nil
+}
+
+func cloneAcceptedMessageSpool(value *AcceptedMessageSpool) *AcceptedMessageSpool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func newMirrorAttemptID() (string, error) {
@@ -173,6 +196,9 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 		return false
 	}
 	if !validObservationBaseline(attempt.ObservationBaseline) {
+		return false
+	}
+	if !validAcceptedMessageSpool(attempt.RecoverySpool) {
 		return false
 	}
 	if !validSendMaterialization(attempt.Materialized) {
@@ -262,6 +288,15 @@ func replaceSendAttempt(root string, ref string, attempt SendAttempt) (resultErr
 }
 
 func removeSendAttempt(root string, ref string) error {
+	attempt, err := readSendAttempt(root, ref)
+	if err != nil {
+		return err
+	}
+	if attempt != nil {
+		if err := removeAcceptedMessageSpool(root, ref, attempt); err != nil {
+			return err
+		}
+	}
 	path, err := sendClaimPath(root, ref)
 	if err != nil {
 		return err

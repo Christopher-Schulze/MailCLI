@@ -76,21 +76,23 @@ func (s *streamingSubmitter) SubmitReader(
 }
 
 type stubMirror struct {
-	calls      int
-	lastID     string
-	evidence   transport.AppendEvidence
-	err        error
-	appendHook func(context.Context)
+	calls       int
+	lastID      string
+	lastMessage []byte
+	evidence    transport.AppendEvidence
+	err         error
+	appendHook  func(context.Context)
 }
 
 func (s *stubMirror) AppendToSent(
 	ctx context.Context,
 	_ transport.ImapConfig,
-	_ []byte,
+	message []byte,
 	messageID string,
 ) (transport.AppendEvidence, error) {
 	s.calls++
 	s.lastID = messageID
+	s.lastMessage = append(s.lastMessage[:0], message...)
 	if s.appendHook != nil {
 		s.appendHook(ctx)
 	}
@@ -115,6 +117,7 @@ func (s *streamingMirror) AppendToSentReader(
 	if int64(len(payload)) != size {
 		return transport.AppendEvidence{}, errors.New("stream size mismatch")
 	}
+	s.lastMessage = append(s.lastMessage[:0], payload...)
 	s.lastID = messageID
 	return s.evidence, s.err
 }
@@ -808,6 +811,174 @@ func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 	assertNoSendClaim(t, root, draft.Ref)
 }
 
+func TestReconcileMirrorPendingAdoptsSentAfterAttachmentRemoval(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	attachment := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(attachment, []byte("accepted attachment"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+	imap := &reconcileImapStub{
+		mailboxes: []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+		uid:       42,
+	}
+	service := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"}, Imap: imap,
+	})
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Attachment recovery", Body: "Body", Attachments: []string{attachment},
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil {
+		t.Fatalf("GetDraft() = %+v, error = %v", retained, err)
+	}
+	raw, err := BuildMessage(draft, retained.SendAttempt.MessageID)
+	if err != nil {
+		t.Fatalf("BuildMessage() error = %v", err)
+	}
+	imap.fetchRaw = raw
+	if err := os.Remove(attachment); err != nil {
+		t.Fatalf("Remove(attachment) error = %v", err)
+	}
+	mirrorCalls := mirror.calls
+
+	result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || result.DraftRetained || mirror.calls != mirrorCalls {
+		t.Fatalf("ReconcileDraft() = %+v, error = %v, mirror calls = %d want %d", result, err, mirror.calls, mirrorCalls)
+	}
+	if submitter.calls != 1 || imap.searchCalls != 1 || imap.fetchCalls != 1 {
+		t.Fatalf("reconciliation calls = submitter:%d search:%d fetch:%d", submitter.calls, imap.searchCalls, imap.fetchCalls)
+	}
+	spoolPath, err := acceptedMessageSpoolPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("acceptedMessageSpoolPath() error = %v", err)
+	}
+	if _, err := os.Lstat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("accepted message spool stat error = %v, want removed spool", err)
+	}
+}
+
+func TestReconcileMirrorPendingReplaysDurableSpoolAfterRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	attachment := filepath.Join(t.TempDir(), "report.txt")
+	if err := os.WriteFile(attachment, []byte("original attachment"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Restart recovery", Body: "Body", Attachments: []string{attachment},
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
+	}
+	acceptedBytes := append([]byte(nil), submitter.lastMessage...)
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.RecoverySpool == nil {
+		t.Fatalf("retained attempt = %+v, error = %v, want recovery spool", retained.SendAttempt, err)
+	}
+	digest := sha256.Sum256(acceptedBytes)
+	if retained.SendAttempt.RecoverySpool.Size != int64(len(acceptedBytes)) ||
+		!strings.EqualFold(retained.SendAttempt.RecoverySpool.SHA256, hex.EncodeToString(digest[:])) {
+		t.Fatalf("recovery spool metadata = %+v, want accepted bytes size/hash", retained.SendAttempt.RecoverySpool)
+	}
+	if err := os.WriteFile(attachment, []byte("changed attachment"), 0o600); err != nil {
+		t.Fatalf("WriteFile(changed) error = %v", err)
+	}
+
+	restartSubmitter, restartMirror := sendTransportStubs()
+	restarted := newTransportService(root, restartSubmitter, restartMirror, &stubCredentials{password: "secret"})
+	result, err := restarted.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || result.DraftRetained {
+		t.Fatalf("ReconcileDraft() after restart = %+v, error = %v", result, err)
+	}
+	if restartSubmitter.calls != 0 || restartMirror.calls != 1 || !bytes.Equal(acceptedBytes, restartMirror.lastMessage) {
+		t.Fatalf("restart transport = submitter:%d mirror:%d bytes_equal:%t", restartSubmitter.calls, restartMirror.calls, bytes.Equal(acceptedBytes, restartMirror.lastMessage))
+	}
+}
+
+func TestReconcileMirrorPendingBlocksMissingOrCorruptSpool(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*testing.T, string)
+		wantCode string
+	}{
+		{
+			name: "missing",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove(spool) error = %v", err)
+				}
+			},
+			wantCode: "send_recovery_spool_missing",
+		},
+		{
+			name: "corrupt",
+			mutate: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("corrupt spool"), 0o600); err != nil {
+					t.Fatalf("WriteFile(spool) error = %v", err)
+				}
+			},
+			wantCode: "send_recovery_spool_changed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			attachment := filepath.Join(t.TempDir(), "report.txt")
+			if err := os.WriteFile(attachment, []byte("spool evidence"), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			submitter, mirror := sendTransportStubs()
+			mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "NO mailbox"}
+			service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+			draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+				From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+				Subject: "Spool evidence", Body: "Body", Attachments: []string{attachment},
+			}})
+			if err != nil {
+				t.Fatalf("CreateDraft() error = %v", err)
+			}
+			if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+				t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
+			}
+			spoolPath, err := acceptedMessageSpoolPath(root, draft.Ref)
+			if err != nil {
+				t.Fatalf("acceptedMessageSpoolPath() error = %v", err)
+			}
+			test.mutate(t, spoolPath)
+			mirrorCalls := mirror.calls
+
+			result, err := service.ReconcileDraft(context.Background(), draft.Ref)
+			if errorCode(err) != test.wantCode || result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained {
+				t.Fatalf("ReconcileDraft() = %+v, error = %v, want %s", result, err, test.wantCode)
+			}
+			if mirror.calls != mirrorCalls {
+				t.Fatalf("mirror calls = %d, want %d after blocked recovery", mirror.calls, mirrorCalls)
+			}
+			retained, getErr := service.GetDraft(draft.Ref)
+			if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Outcome != SendOutcomeMirrorPending {
+				t.Fatalf("retained draft = %+v, error = %v", retained, getErr)
+			}
+		})
+	}
+}
+
 func TestReconcileMirrorRetryArmsUnknownOutcomeBeforeAppend(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()
@@ -1233,10 +1404,11 @@ func TestReconcileLegacyUnknownClaimStaysBlocked(t *testing.T) {
 }
 
 type submitClaimSpec struct {
-	ref         string
-	messageID   string
-	fingerprint string
-	outcome     SendOutcome
+	ref           string
+	messageID     string
+	fingerprint   string
+	outcome       SendOutcome
+	recoverySpool *AcceptedMessageSpool
 }
 
 // claimReadingSubmitter wraps a successful submission and records the send
@@ -1258,6 +1430,7 @@ func (s *claimReadingSubmitter) Submit(
 	}
 	s.spec.messageID, s.spec.fingerprint, s.spec.outcome =
 		claim.MessageID, claim.EnvelopeFingerprint, claim.Outcome
+	s.spec.recoverySpool = cloneAcceptedMessageSpool(claim.RecoverySpool)
 	return s.result, nil
 }
 
@@ -1278,7 +1451,7 @@ func TestSendDraftClaimCarriesMessageIDBeforeSubmit(t *testing.T) {
 	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
-	if spec.messageID == "" || spec.fingerprint == "" || spec.outcome != SendOutcomeUnknown {
+	if spec.messageID == "" || spec.fingerprint == "" || spec.outcome != SendOutcomeUnknown || spec.recoverySpool == nil {
 		t.Fatalf("claim at submit time = %+v", spec)
 	}
 	if spec.fingerprint != envelopeFingerprint(draft, spec.messageID) {
