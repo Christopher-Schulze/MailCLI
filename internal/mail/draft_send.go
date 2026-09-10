@@ -134,16 +134,25 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	attempt, err := beginSendAttemptWithMIMEFingerprint(
+	recoverySpool, err := persistAcceptedMessageSpool(root, ref, message)
+	if err != nil {
+		return SendResult{}, &OperationError{
+			Code:    "send_recovery_spool_persist_failed",
+			Message: fmt.Sprintf("the composed message could not be retained before SMTP submission; SMTP was not contacted: %v", err),
+		}
+	}
+	attempt, err := beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
 		root,
 		ref,
 		nil,
 		messageID,
 		envelopeFingerprint(draft, messageID),
 		mimeFingerprint,
+		recoverySpool,
 	)
 	if err != nil {
-		return SendResult{}, err
+		cleanupErr := removeAcceptedMessageSpool(root, ref, &SendAttempt{RecoverySpool: recoverySpool})
+		return SendResult{}, errors.Join(err, cleanupErr)
 	}
 	submitEvidence, err := submitComposedMessage(
 		ctx,
@@ -588,9 +597,6 @@ func (s *Service) reconcileMirrorPending(
 			Message: "direct SMTP send is unavailable because no send transport is configured",
 		}
 	}
-	if err := verifyDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
-		return result, err
-	}
 	identity, err := s.resolveSendIdentity(ctx, draft)
 	if err != nil {
 		return result, err
@@ -656,15 +662,10 @@ func (s *Service) reconcileMirrorPending(
 	if outcomeUnknown {
 		return result, mirrorOutcomeUnknownError(attempt)
 	}
-	message, err := composeDraftSpool(ctx, draft, attempt.MessageID)
+	message, err := openAcceptedMessageSpool(root, ref, attempt)
 	if err != nil {
 		return result, err
 	}
-	defer func() {
-		if err := message.Remove(); err != nil {
-			resultErr = errors.Join(resultErr, err)
-		}
-	}()
 	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
 		return resultForReconcile(ref, attempt), &OperationError{
 			Code:    "send_reconcile_state_failed",

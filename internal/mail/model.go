@@ -392,6 +392,14 @@ type SendObservationBaseline struct {
 	SentMailboxIDs []int64 `json:"sent_mailbox_ids"`
 }
 
+// AcceptedMessageSpool identifies the immutable MIME bytes retained across the
+// SMTP submission boundary while Sent mirroring remains unresolved. The spool
+// path is derived from the draft reference and is never serialized.
+type AcceptedMessageSpool struct {
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
 type SendAttempt struct {
 	ID                  string                   `json:"id"`
 	StartedAt           time.Time                `json:"started_at"`
@@ -399,6 +407,7 @@ type SendAttempt struct {
 	MessageID           string                   `json:"message_id,omitempty"`
 	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
 	MIMEFingerprint     string                   `json:"mime_fingerprint,omitempty"`
+	RecoverySpool       *AcceptedMessageSpool    `json:"recovery_spool,omitempty"`
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`
