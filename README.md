@@ -319,6 +319,7 @@ Draft-save state matrix: a new local draft without a historical `save_attempt` i
 ### Send a reviewed draft
 
 Sending bypasses Mail.app entirely: MailCLI resolves the SMTP and IMAP endpoints from the draft's From address, loads the app-specific password from the macOS Keychain, submits the composed RFC 5322 message over SMTP with STARTTLS, and appends it to the account's Sent mailbox over IMAP. Short protocol phases use 30 seconds; encoded DATA and APPEND transfers use a size-aware budget at a 1 MiB/s floor, capped at 15 minutes, and the caller context takes precedence.
+If SMTP accepts the message but local finalization of the composed reader returns a close error, MailCLI retains the acceptance evidence and cleanup diagnostic, keeps the send claim non-replayable, and never submits the message again.
 
 Before that transport lifecycle starts, `drafts send` rejects any historical `save_attempt` with `draft_save_retry_blocked`. It performs no provider or credential lookup, composition, send-claim creation, SMTP submission, or Sent APPEND, and keeps the original draft and save claim byte-identical for `drafts save` reconciliation or explicit discard.
 

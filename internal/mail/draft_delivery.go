@@ -164,35 +164,35 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	submitEvidence, err := submitComposedMessage(
+	submitEvidence, submissionAccepted, submissionErr := submitComposedMessage(
 		ctx,
 		send.Submitter,
 		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: identity.Credential, Password: password},
 		sender, envelopeRecipients, message,
 	)
-	if err != nil {
-		return TransportEvidence{}, err
+	if submissionErr != nil && !submissionAccepted {
+		return TransportEvidence{}, submissionErr
 	}
 	evidence = TransportEvidence{
 		ServerResponse:     submitEvidence.ServerResponse,
 		MessageID:          submitEvidence.MessageID,
 		SubmissionAccepted: true,
 	}
-	appendEvidence, err := mirrorComposedMessage(
+	appendEvidence, mirrorErr := mirrorComposedMessage(
 		ctx,
 		send.Mirror,
 		transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password},
 		message,
 		submitEvidence.MessageID,
 	)
-	if err != nil {
-		return evidence, err
+	if mirrorErr != nil {
+		return evidence, joinSubmissionError(submissionErr, mirrorErr)
 	}
 	evidence.MirrorMailbox = appendEvidence.Mailbox
 	evidence.MirrorUIDValidity = appendEvidence.UIDValidity
 	evidence.MirrorUID = appendEvidence.UID
 	evidence.MirrorAppended = appendEvidence.Appended
-	return evidence, nil
+	return evidence, submissionErr
 }
 
 // available rejects sends when the Service was created without a full

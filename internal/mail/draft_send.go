@@ -154,19 +154,19 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		cleanupErr := removeAcceptedMessageSpool(root, ref, &SendAttempt{RecoverySpool: recoverySpool})
 		return SendResult{}, errors.Join(err, cleanupErr)
 	}
-	submitEvidence, err := submitComposedMessage(
+	submitEvidence, submissionAccepted, submissionErr := submitComposedMessage(
 		ctx,
 		s.send.Submitter,
 		transport.SubmitConfig{Host: smtpHost, Port: smtpPort, Username: identity.Credential, Password: password},
 		sender, envelopeRecipients, message,
 	)
-	if err != nil {
-		var submissionErr *transport.SubmissionError
-		if errors.As(err, &submissionErr) {
+	if submissionErr != nil && !submissionAccepted {
+		var submissionCause *transport.SubmissionError
+		if errors.As(submissionErr, &submissionCause) {
 			attempt.InvocationStarted = true
 			attempt.Transport = &TransportEvidence{
 				MessageID:       attempt.MessageID,
-				SubmissionStage: submissionErr.Stage,
+				SubmissionStage: submissionCause.Stage,
 			}
 			attempt.Outcome = SendOutcomeUnknown
 			attempt.UpdatedAt = time.Now().UTC()
@@ -177,7 +177,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 					Message: fmt.Sprintf("SMTP submission outcome is unknown and its local state could not be retained safely: %v", stateErr),
 				}
 			}
-			return result, err
+			return result, submissionErr
 		}
 		// The server never accepted the message, so the claim can be
 		// released and a later send may retry the submission.
@@ -188,7 +188,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 				Message: fmt.Sprintf("send was rejected, but its local claim could not be cleared: %v", cleanupErr),
 			}
 		}
-		return SendResult{}, err
+		return SendResult{}, submissionErr
 	}
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
@@ -199,10 +199,10 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
 	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
-		return resultForAttempt(ref, attempt, true), &OperationError{
+		return resultForAttempt(ref, attempt, true), joinSubmissionError(submissionErr, &OperationError{
 			Code:    "send_state_unknown",
 			Message: fmt.Sprintf("SMTP submission was accepted, but the Sent-copy state could not be armed safely: %v", err),
-		}
+		})
 	}
 	result = resultForAttempt(ref, attempt, true)
 	appendEvidence, err := mirrorComposedMessage(
@@ -217,15 +217,15 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		attempt.UpdatedAt = time.Now().UTC()
 		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
 			result = resultForAttempt(ref, attempt, true)
-			return result, &OperationError{
+			return result, joinSubmissionError(submissionErr, &OperationError{
 				Code:    "send_state_unknown",
 				Message: fmt.Sprintf("Sent mirroring failed, but its local outcome could not be recorded safely: %v", stateErr),
-			}
+			})
 		}
 		result = resultForAttempt(ref, attempt, true)
 		// The submission was accepted, so the send itself is never retried;
 		// the claim stays reconcilable and only the mirror may be retried.
-		return result, mirrorPendingError(err)
+		return result, joinSubmissionError(submissionErr, mirrorPendingError(err))
 	}
 	attempt.SentStoreObserved = true
 	attempt.Transport.MirrorMailbox = appendEvidence.Mailbox
@@ -237,12 +237,13 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForAttempt(ref, attempt, true)
 	if err := replaceSendAttempt(root, ref, attempt); err != nil {
-		return result, &OperationError{
+		return result, joinSubmissionError(submissionErr, &OperationError{
 			Code:    "send_outcome_unknown",
 			Message: fmt.Sprintf("the message was sent and mirrored, but its local send state could not be recorded safely: %v", err),
-		}
+		})
 	}
-	return finishObservedSend(lease, root, ref, attempt, false)
+	result, finishErr := finishObservedSend(lease, root, ref, attempt, false)
+	return result, joinSubmissionError(submissionErr, finishErr)
 }
 
 func (s *Service) adoptObservedSentMessage(

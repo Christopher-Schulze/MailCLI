@@ -56,8 +56,9 @@ func (s *stubSubmitter) Submit(
 
 type streamingSubmitter struct {
 	stubSubmitter
-	readerCalls int
-	readerSize  int64
+	readerCalls          int
+	readerSize           int64
+	closeReaderAfterSend bool
 }
 
 func (s *streamingSubmitter) SubmitReader(
@@ -73,6 +74,15 @@ func (s *streamingSubmitter) SubmitReader(
 		return transport.SubmitEvidence{}, errors.New("stream size mismatch")
 	}
 	s.evidence.MessageID = messageID
+	if s.closeReaderAfterSend {
+		closer, ok := reader.(io.Closer)
+		if !ok {
+			return transport.SubmitEvidence{}, errors.New("stream reader is not closable")
+		}
+		if err := closer.Close(); err != nil {
+			return transport.SubmitEvidence{}, err
+		}
+	}
 	return s.evidence, s.err
 }
 
@@ -284,6 +294,141 @@ func assertNoSendClaim(t *testing.T, root string, ref string) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("send claim still exists: %v", err)
+	}
+}
+
+func TestDeliverViaTransportRetainsAcceptanceAfterSubmissionReaderCloseFailure(t *testing.T) {
+	submitter := &streamingSubmitter{
+		stubSubmitter: stubSubmitter{
+			evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK"},
+		},
+		closeReaderAfterSend: true,
+	}
+	mirror := &stubMirror{
+		err: &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "Sent unavailable"},
+	}
+	evidence, err := DeliverViaTransport(context.Background(), SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"},
+	}, Draft{
+		From: "sender@icloud.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Close failure", Body: "Body",
+	})
+	if err == nil || !strings.Contains(err.Error(), "file already closed") ||
+		!strings.Contains(err.Error(), "Sent unavailable") {
+		t.Fatalf("DeliverViaTransport() error = %v, want submission close and mirror diagnostics", err)
+	}
+	if !evidence.SubmissionAccepted || evidence.MessageID == "" || submitter.readerCalls != 1 || mirror.calls != 1 {
+		t.Fatalf("DeliverViaTransport() evidence = %+v, submitter = %+v, mirror calls = %d", evidence, submitter, mirror.calls)
+	}
+}
+
+func TestSendDraftRetainsAcceptanceAfterSubmissionReaderCloseFailure(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter := &streamingSubmitter{
+		stubSubmitter: stubSubmitter{
+			evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK"},
+		},
+		closeReaderAfterSend: true,
+	}
+	mirror := &stubMirror{
+		err: &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "Sent unavailable"},
+	}
+	service := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"},
+	})
+	draft := createTransportDraft(t, service)
+
+	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	if errorCode(sendErr) != transport.CodeIMAPAppendFailed || result.Outcome != SendOutcomeMirrorPending ||
+		!result.Accepted || !result.SubmissionAccepted || !result.DraftRetained || submitter.readerCalls != 1 || mirror.calls != 1 {
+		t.Fatalf("SendDraft() = %+v, error = %v, submitter = %+v, mirror calls = %d", result, sendErr, submitter, mirror.calls)
+	}
+	if sendErr == nil || !strings.Contains(sendErr.Error(), "file already closed") {
+		t.Fatalf("SendDraft() error = %v, want submission reader close diagnostic", sendErr)
+	}
+	retained, getErr := service.GetDraft(draft.Ref)
+	if getErr != nil || retained.SendAttempt == nil || !retained.SendAttempt.AcceptedByMail ||
+		retained.SendAttempt.Transport == nil || !retained.SendAttempt.Transport.SubmissionAccepted ||
+		retained.SendAttempt.Transport.ServerResponse != "250 2.0.0 OK" {
+		t.Fatalf("retained send attempt = %+v, error = %v, want accepted evidence", retained.SendAttempt, getErr)
+	}
+
+	restartSubmitter := &streamingSubmitter{stubSubmitter: stubSubmitter{
+		evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK"},
+	}}
+	restartMirror := &stubMirror{}
+	restarted := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: restartSubmitter, Mirror: restartMirror, Credentials: &stubCredentials{password: "secret"},
+	})
+	retry, retryErr := restarted.SendDraft(context.Background(), draft.Ref)
+	if errorCode(retryErr) != "send_mirror_pending" || !retry.Replayed || !retry.Accepted ||
+		!retry.SubmissionAccepted || !retry.DraftRetained || restartSubmitter.readerCalls != 0 ||
+		restartSubmitter.calls != 0 || restartMirror.calls != 0 || submitter.readerCalls != 1 || mirror.calls != 1 {
+		t.Fatalf("replayed SendDraft() after restart = %+v, error = %v, submitter = %+v, mirror = %+v", retry, retryErr, restartSubmitter, restartMirror)
+	}
+}
+
+func TestSendDraftPreservesRejectedAndUnknownSubmissionWithReaderCloseFailure(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		submitErr     error
+		wantCode      string
+		wantOutcome   SendOutcome
+		wantRetained  bool
+		wantRetryCall bool
+	}{
+		{
+			name:          "definitive rejection",
+			submitErr:     &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "550 rejected"},
+			wantCode:      transport.CodeSMTPRejected,
+			wantRetryCall: true,
+		},
+		{
+			name: "unknown final reply",
+			submitErr: &transport.SubmissionError{
+				Stage: "final_reply", Err: &transport.TransportError{Code: transport.CodeSMTPTimeout, Message: "final reply timed out"},
+			},
+			wantCode:     transport.CodeSMTPSubmissionUnknown,
+			wantOutcome:  SendOutcomeUnknown,
+			wantRetained: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			submitter := &streamingSubmitter{
+				stubSubmitter: stubSubmitter{
+					evidence: transport.SubmitEvidence{ServerResponse: "250 2.0.0 OK"},
+				},
+				closeReaderAfterSend: true,
+			}
+			submitter.err = test.submitErr
+			service := NewServiceWithTransport(nil, root, SendTransport{
+				Submitter: submitter, Mirror: &stubMirror{}, Credentials: &stubCredentials{password: "secret"},
+			})
+			draft := createTransportDraft(t, service)
+
+			result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+			if errorCode(sendErr) != test.wantCode || result.Outcome != test.wantOutcome ||
+				result.DraftRetained != test.wantRetained || submitter.readerCalls != 1 {
+				t.Fatalf("SendDraft() = %+v, error = %v, reader calls = %d", result, sendErr, submitter.readerCalls)
+			}
+			if sendErr == nil || !strings.Contains(sendErr.Error(), "file already closed") {
+				t.Fatalf("SendDraft() error = %v, want reader close diagnostic", sendErr)
+			}
+			if test.wantRetained {
+				retained, getErr := service.GetDraft(draft.Ref)
+				if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Outcome != SendOutcomeUnknown {
+					t.Fatalf("retained send attempt = %+v, error = %v, want unknown outcome", retained.SendAttempt, getErr)
+				}
+				return
+			}
+			assertNoSendClaim(t, root, draft.Ref)
+			if test.wantRetryCall {
+				if _, retryErr := service.SendDraft(context.Background(), draft.Ref); errorCode(retryErr) != test.wantCode || submitter.readerCalls != 2 {
+					t.Fatalf("retry SendDraft() error = %v, reader calls = %d, want definitive retry", retryErr, submitter.readerCalls)
+				}
+			}
+		})
 	}
 }
 
