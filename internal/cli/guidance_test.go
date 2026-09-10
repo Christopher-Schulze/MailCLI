@@ -52,6 +52,29 @@ func TestSendFailureGuidanceRequiresReconciliation(t *testing.T) {
 	}
 }
 
+func TestHandoffUnknownGuidanceKeepsRecoveryWithoutAttachments(t *testing.T) {
+	result := draftHandoffResult{
+		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeUnknown,
+		DispatchStarted: true, DraftRetained: true,
+	}
+	guidance := guidanceForResponse("drafts.handoff", responseData{DraftHandoff: &result}, &testCodedError{code: "handoff_outcome_unknown", message: "unknown"})
+	if guidance.Recovery.Action != mail.RecoveryReconcile || guidance.Recovery.Command != "drafts.handoff-reconcile" ||
+		guidance.Recovery.OperationID != result.AttemptID || !equalStrings(guidance.Recovery.Args, []string{"--ref", result.DraftRef, "--attempt", result.AttemptID, "--confirm", "--json"}) {
+		t.Fatalf("handoff recovery = %+v", guidance.Recovery)
+	}
+}
+
+func TestHandoffConfirmedFailureDoesNotInventReconciliation(t *testing.T) {
+	result := draftHandoffResult{
+		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeConfirmedFailed,
+		DispatchStarted: true, DraftRetained: true,
+	}
+	guidance := guidanceForResponse("drafts.handoff", responseData{DraftHandoff: &result}, &testCodedError{code: "handoff_failed", message: "native failure"})
+	if guidance.Recovery.Action == mail.RecoveryReconcile || guidance.Recovery.Command != "" || guidance.Recovery.OperationID != "" {
+		t.Fatalf("confirmed handoff failure guidance = %+v, must not require reconciliation without retained evidence", guidance)
+	}
+}
+
 func TestMirrorPendingGuidanceRequiresReconciliation(t *testing.T) {
 	result := mail.SendResult{
 		DraftRef: "draft_ref", AttemptID: "send_attempt", Outcome: mail.SendOutcomeMirrorPending,

@@ -5,21 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"mailcli/internal/mail"
 )
 
 const (
-	maximumDraftInputBytes = 16 * 1024 * 1024
-	draftUpdateTimeout     = 15 * time.Second
-	draftDiscardTimeout    = 15 * time.Second
-	draftPruneTimeout      = 2 * time.Minute
-	draftReconcileTimeout  = draftSendTimeout
-	draftSaveTimeout       = 2 * time.Minute
-	draftSendTimeout       = 15 * time.Minute
-	pruneDayDuration       = 24 * time.Hour
-	maxPruneAgeDays        = int64((1<<63 - 1) / int64(pruneDayDuration))
+	maximumDraftInputBytes       = 16 * 1024 * 1024
+	draftUpdateTimeout           = 15 * time.Second
+	draftDiscardTimeout          = 15 * time.Second
+	draftPruneTimeout            = 2 * time.Minute
+	draftReconcileTimeout        = draftSendTimeout
+	draftHandoffReconcileTimeout = 15 * time.Second
+	draftSaveTimeout             = 2 * time.Minute
+	draftSendTimeout             = 15 * time.Minute
+	pruneDayDuration             = 24 * time.Hour
+	maxPruneAgeDays              = int64((1<<63 - 1) / int64(pruneDayDuration))
 )
 
 type commandError struct {
@@ -37,12 +39,12 @@ func (e *commandError) ErrorCode() string {
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard|prune> [options]")
+		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|send|reconcile|discard|prune> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|update|save|open|send|reconcile|discard|prune> [options]")
+		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|send|reconcile|discard|prune> [options]")
 		return 0
 	case "create":
 		return runDraftCreateContext(ctx, service, args[1:], stdout, stderr)
@@ -56,6 +58,8 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 		return runDraftEdit(ctx, service, args[1:], stdout, stderr)
 	case "handoff":
 		return runDraftHandoff(ctx, service, args[1:], stdout, stderr)
+	case "handoff-reconcile":
+		return runDraftHandoffReconcile(ctx, service, args[1:], stdout, stderr)
 	case "update":
 		return runDraftUpdate(ctx, service, args[1:], stdout, stderr)
 	case "save":
@@ -74,6 +78,42 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 		writeFormat(stderr, "unknown drafts command %q\n", args[0])
 		return 2
 	}
+}
+
+func runDraftHandoffReconcile(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := newFlagSet("drafts handoff-reconcile", stderr)
+	ref := flags.String("ref", "", "draft ref with an unresolved handoff")
+	attempt := flags.String("attempt", "", "retained handoff attempt ID")
+	outcome := flags.String("outcome", "", "observed outcome: opened or failed")
+	confirm := flags.Bool("confirm", false, "confirm cleanup of the retained handoff evidence")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
+	}
+	if strings.TrimSpace(*ref) == "" {
+		return failCommand("drafts.handoff-reconcile", *jsonOutput, invalidDraftInput("missing required --ref"), stdout, stderr)
+	}
+	if strings.TrimSpace(*attempt) == "" {
+		return failCommand("drafts.handoff-reconcile", *jsonOutput, invalidDraftInput("missing required --attempt"), stdout, stderr)
+	}
+	if !*confirm {
+		return failCommand("drafts.handoff-reconcile", *jsonOutput, confirmationRequired("handoff reconciliation"), stdout, stderr)
+	}
+	resolution := mail.HandoffResolution(strings.TrimSpace(*outcome))
+	if resolution != mail.HandoffResolutionOpened && resolution != mail.HandoffResolutionFailed {
+		return failCommand("drafts.handoff-reconcile", *jsonOutput, invalidDraftInput("--outcome must be opened or failed"), stdout, stderr)
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, draftHandoffReconcileTimeout)
+	defer cancel()
+	result, err := service.ReconcileDraftHandoffContext(operationCtx, *ref, *attempt, resolution)
+	if err != nil {
+		return failCommandWithData("drafts.handoff-reconcile", *jsonOutput, responseData{HandoffReconcile: &result}, err, stdout, stderr)
+	}
+	if *jsonOutput {
+		return writeSuccess(stdout, "drafts.handoff-reconcile", responseData{HandoffReconcile: &result})
+	}
+	writeFormat(stdout, "handoff reconciled\t%s\t%s\n", result.DraftRef, result.Outcome)
+	return 0
 }
 
 func runDraftReconcile(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

@@ -86,7 +86,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
 		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
-		"messages.delete", "sync",
+		"messages.delete", "sync", "drafts.handoff-reconcile",
 	}
 	manifest := capabilities()
 	got := make([]string, 0, len(manifest.Commands))
@@ -175,6 +175,16 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		}) {
 		t.Fatalf("drafts.reconcile capability = %+v", reconcile)
 	}
+	handoff := manifest.Commands[slices.Index(got, "drafts.handoff")]
+	if !slices.Equal(handoff.ResultStates, []string{"confirmed_opened", "confirmed_failed", "outcome_unknown", "canceled_before_dispatch"}) {
+		t.Fatalf("drafts.handoff result states = %+v", handoff.ResultStates)
+	}
+	handoffReconcile := manifest.Commands[slices.Index(got, "drafts.handoff-reconcile")]
+	if handoffReconcile.EffectClass != "local-write" || handoffReconcile.Confirmation != "required-flag" ||
+		handoffReconcile.StoreDependency != "draft-store" || handoffReconcile.MailAppDependency != "none" ||
+		!slices.Equal(handoffReconcile.ResultStates, []string{"confirmed_opened", "confirmed_failed"}) {
+		t.Fatalf("drafts.handoff-reconcile capability = %+v", handoffReconcile)
+	}
 }
 
 // TestCapabilityMailAppDependencies pins every declared Mail.app dependency to an
@@ -182,42 +192,43 @@ func TestCapabilityCommandInventory(t *testing.T) {
 // Evidence for each value lives in docs/tasks/done/027-correct-stale-mail-app-capability-labels.md.
 func TestCapabilityMailAppDependencies(t *testing.T) {
 	want := map[string]string{
-		"capabilities":      "none",
-		"version":           "none",
-		"update":            "none",
-		"doctor":            "optional-automation",
-		"batch":             "none",
-		"accounts.list":     "fallback-automation",
-		"mailboxes.list":    "none",
-		"mailboxes.resolve": "none",
-		"messages.list":     "fallback-automation",
-		"messages.filter":   "none",
-		"messages.search":   "none",
-		"messages.get":      "none",
-		"messages.raw":      "none",
-		"attachments.list":  "none",
-		"attachments.save":  "none",
-		"drafts.create":     "none",
-		"drafts.list":       "none",
-		"drafts.inspect":    "none",
-		"drafts.preview":    "none",
-		"drafts.edit":       "none",
-		"drafts.handoff":    "system-compose-service",
-		"drafts.update":     "none",
-		"drafts.save":       "none",
-		"drafts.open":       "none",
-		"drafts.send":       "none",
-		"send.setup":        "none",
-		"drafts.reconcile":  "none",
-		"drafts.discard":    "none",
-		"drafts.prune":      "none",
-		"messages.reply":    "none",
-		"messages.forward":  "none",
-		"messages.mark":     "none",
-		"messages.move":     "none",
-		"messages.copy":     "none",
-		"messages.delete":   "none",
-		"sync":              "optional",
+		"capabilities":             "none",
+		"version":                  "none",
+		"update":                   "none",
+		"doctor":                   "optional-automation",
+		"batch":                    "none",
+		"accounts.list":            "fallback-automation",
+		"mailboxes.list":           "none",
+		"mailboxes.resolve":        "none",
+		"messages.list":            "fallback-automation",
+		"messages.filter":          "none",
+		"messages.search":          "none",
+		"messages.get":             "none",
+		"messages.raw":             "none",
+		"attachments.list":         "none",
+		"attachments.save":         "none",
+		"drafts.create":            "none",
+		"drafts.list":              "none",
+		"drafts.inspect":           "none",
+		"drafts.preview":           "none",
+		"drafts.edit":              "none",
+		"drafts.handoff":           "system-compose-service",
+		"drafts.update":            "none",
+		"drafts.save":              "none",
+		"drafts.open":              "none",
+		"drafts.send":              "none",
+		"send.setup":               "none",
+		"drafts.reconcile":         "none",
+		"drafts.discard":           "none",
+		"drafts.prune":             "none",
+		"messages.reply":           "none",
+		"messages.forward":         "none",
+		"messages.mark":            "none",
+		"messages.move":            "none",
+		"messages.copy":            "none",
+		"messages.delete":          "none",
+		"sync":                     "optional",
+		"drafts.handoff-reconcile": "none",
 	}
 	manifest := capabilities()
 	seen := make(map[string]struct{}, len(manifest.Commands))

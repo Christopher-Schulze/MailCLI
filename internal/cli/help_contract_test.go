@@ -52,6 +52,7 @@ func TestHelpContractTable(t *testing.T) {
 		{name: "drafts preview", args: []string{"drafts", "preview", "--help"}, want: "mailcli drafts preview [options]"},
 		{name: "drafts edit", args: []string{"drafts", "edit", "--help"}, want: "mailcli drafts edit [options]"},
 		{name: "drafts handoff", args: []string{"drafts", "handoff", "--help"}, want: "mailcli drafts handoff [options]"},
+		{name: "drafts handoff reconcile", args: []string{"drafts", "handoff-reconcile", "--help"}, want: "mailcli drafts handoff-reconcile [options]"},
 		{name: "drafts update", args: []string{"drafts", "update", "--help"}, want: "mailcli drafts update [options]"},
 		{name: "drafts save", args: []string{"drafts", "save", "--help"}, want: "mailcli drafts save [options]"},
 		{name: "drafts open", args: []string{"drafts", "open", "--help"}, want: "mailcli drafts open [options]"},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,7 +174,7 @@ func TestDraftHandoffUsesValidatedVisibleComposeRequest(t *testing.T) {
 	}
 }
 
-func TestDraftHandoffUnknownOutcomeCleansSnapshotAndRetainsDraft(t *testing.T) {
+func TestDraftHandoffUnknownOutcomeRetainsSnapshotUntilReconciliation(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
 	attachmentPath := filepath.Join(t.TempDir(), "report.pdf")
 	if err := os.WriteFile(attachmentPath, []byte("unknown outcome bytes"), 0o600); err != nil {
@@ -211,11 +212,109 @@ func TestDraftHandoffUnknownOutcomeCleansSnapshotAndRetainsDraft(t *testing.T) {
 		!strings.Contains(stdout.String(), `"code":"handoff_outcome_unknown"`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
+	if _, err := os.Stat(stagedPath); err != nil {
+		t.Fatalf("staged attachment was not retained after unknown outcome: %v", err)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil {
+		t.Fatalf("local draft was not retained: %v", err)
+	}
+	if retained.HandoffAttempt == nil || retained.HandoffAttempt.ID == "" || !retained.HandoffAttempt.SnapshotsRetained {
+		t.Fatalf("retained handoff attempt = %+v", retained.HandoffAttempt)
+	}
+	if _, err := service.ReconcileDraftHandoff(draft.Ref, retained.HandoffAttempt.ID, mail.HandoffResolutionOpened); err != nil {
+		t.Fatalf("ReconcileDraftHandoff() error = %v", err)
+	}
 	if _, err := os.Stat(stagedPath); !os.IsNotExist(err) {
-		t.Fatalf("staged attachment still exists after unknown outcome: %v", err)
+		t.Fatalf("staged attachment still exists after reconciliation: %v", err)
+	}
+	reconciled, err := service.GetDraft(draft.Ref)
+	if err != nil {
+		t.Fatalf("GetDraft() after reconciliation error = %v", err)
+	}
+	if reconciled.HandoffAttempt != nil {
+		t.Fatalf("handoff attempt remains after reconciliation: %+v", reconciled.HandoffAttempt)
+	}
+}
+
+func TestDraftHandoffPreDispatchFailureCleansAttempt(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "ada@example.com"}}, Subject: "Failure", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff := func(_ context.Context, _ compose.Request) (compose.Result, error) {
+		return compose.Result{}, &compose.Error{
+			Code: "compose_service_unavailable", Message: "service unavailable", State: compose.StateConfirmedFailure,
+		}
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftHandoffWith(context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"confirmed_failed"`) ||
+		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if _, err := service.GetDraft(draft.Ref); err != nil {
-		t.Fatalf("local draft was not retained: %v", err)
+		t.Fatalf("draft after pre-dispatch failure = %v", err)
+	}
+	next, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatalf("BeginDraftHandoff() after pre-dispatch failure = %v", err)
+	}
+	if err := next.CancelBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDraftHandoffCancellationBeforeDispatchReportsCanceledState(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "ada@example.com"}}, Subject: "Canceled", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handoff := func(_ context.Context, _ compose.Request) (compose.Result, error) {
+		cancel()
+		return compose.Result{}, errors.Join(context.Canceled, &compose.Error{
+			Code: "handoff_canceled_before_dispatch", Message: "not dispatched",
+			State: compose.StateCanceledBeforeDispatch,
+		})
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftHandoffWith(ctx, service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"canceled_before_dispatch"`) ||
+		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestDraftHandoffDispatchMarkerCancellationReportsCanceledState(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "ada@example.com"}}, Subject: "Canceled marker", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handoff := func(_ context.Context, _ compose.Request, observer compose.DispatchObserver) (compose.Result, error) {
+		cancel()
+		return compose.Result{}, observer()
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDraftHandoffWithDispatch(ctx, service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"canceled_before_dispatch"`) ||
+		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
 

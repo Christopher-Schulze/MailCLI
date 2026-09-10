@@ -57,6 +57,9 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := validateStoredDraftLimits(draft); err != nil {
 		return SendResult{}, err
 	}
+	if draft.HandoffAttempt != nil {
+		return SendResult{}, rejectClaimedDraft(draft)
+	}
 	if err := validateThreadSource(draft.SourceMessageID, draft.SourceReferences); err != nil {
 		return SendResult{}, err
 	}

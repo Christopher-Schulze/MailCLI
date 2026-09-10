@@ -58,6 +58,9 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 	if err := validateStoredDraftLimits(draft); err != nil {
 		return SavedDraft{}, err
 	}
+	if draft.HandoffAttempt != nil {
+		return SavedDraft{}, rejectClaimedDraft(draft)
+	}
 	if draft.SendAttempt != nil {
 		return SavedDraft{}, rejectClaimedDraft(draft)
 	}

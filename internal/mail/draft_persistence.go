@@ -19,6 +19,7 @@ func writeDraftFile(root string, draft Draft) (resultErr error) {
 	}
 	draft.SendAttempt = nil
 	draft.SaveAttempt = nil
+	draft.HandoffAttempt = nil
 	payload, err := json.MarshalIndent(draft, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode draft: %w", err)
@@ -167,8 +168,17 @@ func attachDraftAttempts(root string, ref string, draft *Draft) error {
 		return err
 	}
 	draft.SaveAttempt = saveAttempt
+	draft.HandoffAttempt = nil
+	handoffAttempt, err := readHandoffAttempt(root, ref)
+	if err != nil {
+		return err
+	}
+	draft.HandoffAttempt = handoffAttempt
 	if draft.SendAttempt != nil && draft.SaveAttempt != nil {
 		return fmt.Errorf("draft has conflicting send and save claims")
+	}
+	if draft.HandoffAttempt != nil && (draft.SendAttempt != nil || draft.SaveAttempt != nil) {
+		return fmt.Errorf("draft has conflicting handoff and send/save claims")
 	}
 	return nil
 }

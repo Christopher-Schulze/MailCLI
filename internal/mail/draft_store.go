@@ -79,22 +79,7 @@ func (s *Service) PrepareDraftHandoffContext(ctx context.Context, ref string) (D
 	if err := draftContextError(ctx, "handoff"); err != nil {
 		return Draft{}, err
 	}
-	if err := rejectClaimedDraft(draft); err != nil {
-		return Draft{}, err
-	}
-	if draft.Kind != DraftKindNew {
-		return Draft{}, validationError("visible compose handoff supports new drafts only; reply and forward threading cannot be preserved")
-	}
-	if draft.From != "" {
-		return Draft{}, validationError("visible compose handoff cannot guarantee an explicit from identity; remove from and select it in Mail.app")
-	}
-	if len(draft.CC) > 0 || len(draft.BCC) > 0 {
-		return Draft{}, validationError("visible compose handoff cannot preserve CC or BCC roles; add them in Mail.app")
-	}
-	if len(draft.To) == 0 {
-		return Draft{}, validationError("visible compose handoff requires at least one recipient")
-	}
-	if err := preflightDraftAttachmentsContext(ctx, draft.Attachments); err != nil {
+	if err := validateDraftHandoffContext(ctx, draft); err != nil {
 		return Draft{}, classifyDraftContextError(ctx, err, "handoff")
 	}
 	return draft, nil
@@ -153,6 +138,7 @@ func draftSummaryFrom(draft Draft) DraftSummary {
 		EverSent:        draft.SendAttempt != nil,
 		SendAttempt:     draftSendAttemptSummaryFrom(draft.SendAttempt),
 		SaveAttempt:     draftSaveAttemptSummaryFrom(draft.SaveAttempt),
+		HandoffAttempt:  draftHandoffAttemptSummaryFrom(draft.HandoffAttempt),
 	}
 }
 
@@ -195,6 +181,22 @@ func draftSaveAttemptSummaryFrom(attempt *DraftSaveAttempt) *DraftSaveAttemptSum
 		AcceptedByMail:      attempt.AcceptedByMail,
 		ObservedMessageRef:  attempt.ObservedMessageRef,
 		ObservationBaseline: cloneSendObservationBaseline(attempt.ObservationBaseline),
+	}
+}
+
+func draftHandoffAttemptSummaryFrom(attempt *HandoffAttempt) *DraftHandoffAttemptSummary {
+	if attempt == nil {
+		return nil
+	}
+	var snapshotBytes int64
+	for _, snapshot := range attempt.Snapshots {
+		snapshotBytes += snapshot.Size
+	}
+	return &DraftHandoffAttemptSummary{
+		ID: attempt.ID, StartedAt: attempt.StartedAt, UpdatedAt: attempt.UpdatedAt,
+		Outcome: attempt.Outcome, DispatchStarted: attempt.DispatchStarted,
+		SnapshotsRetained: attempt.SnapshotsRetained, SnapshotCount: len(attempt.Snapshots),
+		SnapshotBytes: snapshotBytes,
 	}
 }
 
