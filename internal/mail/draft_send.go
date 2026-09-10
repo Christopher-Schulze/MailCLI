@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, classifyDraftContextError(ctx, err, "send")
 	}
+	storage := lease.storage
 	defer func() {
 		resultErr = errors.Join(classifyDraftContextError(ctx, resultErr, "send"), lease.release())
 	}()
@@ -34,10 +36,10 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
-			receipt, receiptErr := readActiveSendReceipt(root, ref)
+			receipt, receiptErr := readActiveSendReceipt(root, ref, storage)
 			if receiptErr == nil && receipt != nil {
 				result := resultForReceipt(*receipt)
-				if cleanupErr := errors.Join(removeDraftClaims(root, ref), lease.removeLock()); cleanupErr != nil {
+				if cleanupErr := errors.Join(removeDraftClaims(root, ref, storage), lease.removeLock()); cleanupErr != nil {
 					return result, &OperationError{
 						Code:    "send_cleanup_failed",
 						Message: fmt.Sprintf("terminal send evidence was found, but stale local claims could not be removed: %v", cleanupErr),
@@ -75,7 +77,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if draft.SendAttempt != nil {
 		return replaySendAttempt(lease, root, ref, *draft.SendAttempt)
 	}
-	if receipt, receiptErr := readActiveSendReceipt(root, ref); receiptErr != nil {
+	if receipt, receiptErr := readActiveSendReceipt(root, ref, storage); receiptErr != nil {
 		var operation *OperationError
 		if !errors.As(receiptErr, &operation) || operation.Code != "not_found" {
 			return SendResult{}, receiptErr
@@ -134,24 +136,38 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		return SendResult{}, err
 	}
-	recoverySpool, err := persistAcceptedMessageSpool(root, ref, message)
+	recoverySpool, err := persistAcceptedMessageSpool(root, ref, message, storage)
 	if err != nil {
 		return SendResult{}, &OperationError{
 			Code:    "send_recovery_spool_persist_failed",
 			Message: fmt.Sprintf("the composed message could not be retained before SMTP submission; SMTP was not contacted: %v", err),
 		}
 	}
-	attempt, err := beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
-		root,
-		ref,
-		nil,
-		messageID,
-		envelopeFingerprint(draft, messageID),
-		mimeFingerprint,
-		recoverySpool,
-	)
+	id, err := newSendAttemptID()
 	if err != nil {
-		cleanupErr := removeAcceptedMessageSpool(root, ref, &SendAttempt{RecoverySpool: recoverySpool})
+		cleanupErr := removeAcceptedMessageSpool(ref, &SendAttempt{RecoverySpool: recoverySpool}, storage)
+		return SendResult{}, errors.Join(err, cleanupErr)
+	}
+	now := time.Now().UTC()
+	attempt := SendAttempt{
+		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
+		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
+		MIMEFingerprint: mimeFingerprint, RecoverySpool: cloneAcceptedMessageSpool(recoverySpool),
+	}
+	payload, err := encodeSendAttempt(ref, attempt)
+	if err == nil {
+		_, err = writePrivateDraftFile(storage, ref+".send-claim", payload)
+		if errors.Is(err, os.ErrExist) {
+			err = &OperationError{
+				Code:    "send_retry_blocked",
+				Message: "draft already has a send attempt; inspect it and discard explicitly instead of retrying",
+			}
+		} else if err != nil {
+			err = fmt.Errorf("create send claim: %w", err)
+		}
+	}
+	if err != nil {
+		cleanupErr := removeAcceptedMessageSpool(ref, &SendAttempt{RecoverySpool: recoverySpool}, storage)
 		return SendResult{}, errors.Join(err, cleanupErr)
 	}
 	submitEvidence, submissionAccepted, submissionErr := submitComposedMessage(
@@ -171,7 +187,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			attempt.Outcome = SendOutcomeUnknown
 			attempt.UpdatedAt = time.Now().UTC()
 			result = resultForAttempt(ref, attempt, true)
-			if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+			if stateErr := replaceSendAttempt(root, ref, attempt, storage); stateErr != nil {
 				return result, &OperationError{
 					Code:    "send_state_unknown",
 					Message: fmt.Sprintf("SMTP submission outcome is unknown and its local state could not be retained safely: %v", stateErr),
@@ -181,7 +197,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		}
 		// The server never accepted the message, so the claim can be
 		// released and a later send may retry the submission.
-		if cleanupErr := removeSendAttempt(root, ref); cleanupErr != nil {
+		if cleanupErr := removeSendAttempt(root, ref, storage); cleanupErr != nil {
 			result = resultForAttempt(ref, attempt, true)
 			return result, &OperationError{
 				Code:    "send_state_cleanup_failed",
@@ -198,7 +214,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		SubmissionAccepted: true,
 	}
 	attempt.Outcome = SendOutcomeMirrorPending
-	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
+	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt, storage); err != nil {
 		return resultForAttempt(ref, attempt, true), joinSubmissionError(submissionErr, &OperationError{
 			Code:    "send_state_unknown",
 			Message: fmt.Sprintf("SMTP submission was accepted, but the Sent-copy state could not be armed safely: %v", err),
@@ -215,7 +231,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err != nil {
 		attempt.Transport.MirrorOutcomeUnknown = mirrorOutcomeUnknown(err)
 		attempt.UpdatedAt = time.Now().UTC()
-		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+		if stateErr := replaceSendAttempt(root, ref, attempt, storage); stateErr != nil {
 			result = resultForAttempt(ref, attempt, true)
 			return result, joinSubmissionError(submissionErr, &OperationError{
 				Code:    "send_state_unknown",
@@ -236,7 +252,7 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	attempt.Outcome = SendOutcomeSent
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForAttempt(ref, attempt, true)
-	if err := replaceSendAttempt(root, ref, attempt); err != nil {
+	if err := replaceSendAttempt(root, ref, attempt, storage); err != nil {
 		return result, joinSubmissionError(submissionErr, &OperationError{
 			Code:    "send_outcome_unknown",
 			Message: fmt.Sprintf("the message was sent and mirrored, but its local send state could not be recorded safely: %v", err),
@@ -288,7 +304,7 @@ func (s *Service) adoptObservedSentMessage(
 	attempt.Outcome = SendOutcomeSent
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForReconcile(ref, attempt)
-	if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+	if stateErr := replaceSendAttempt(root, ref, attempt, lease.storage); stateErr != nil {
 		return result, &OperationError{
 			Code:    "send_reconcile_state_failed",
 			Message: fmt.Sprintf("the existing Sent message was verified, but the reconciled state could not be recorded: %v", stateErr),
@@ -325,6 +341,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	if err != nil {
 		return SendResult{}, classifyDraftContextError(ctx, err, "reconcile")
 	}
+	storage := lease.storage
 	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
 	if err := draftContextError(ctx, "reconcile"); err != nil {
 		return SendResult{}, err
@@ -333,11 +350,11 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
-			receipt, receiptErr := readActiveSendReceipt(root, ref)
+			receipt, receiptErr := readActiveSendReceipt(root, ref, storage)
 			if receiptErr == nil && receipt != nil {
 				result := resultForReceipt(*receipt)
 				result.Reconciled = true
-				if cleanupErr := errors.Join(removeDraftClaims(root, ref), lease.removeLock()); cleanupErr != nil {
+				if cleanupErr := errors.Join(removeDraftClaims(root, ref, storage), lease.removeLock()); cleanupErr != nil {
 					return result, &OperationError{
 						Code:    "send_cleanup_failed",
 						Message: fmt.Sprintf("terminal send evidence was found, but stale local claims could not be removed: %v", cleanupErr),
@@ -355,7 +372,7 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return SendResult{}, err
 	}
 	if draft.SendAttempt == nil {
-		if receipt, receiptErr := readActiveSendReceipt(root, ref); receiptErr != nil {
+		if receipt, receiptErr := readActiveSendReceipt(root, ref, storage); receiptErr != nil {
 			return SendResult{}, receiptErr
 		} else if receipt != nil {
 			result := resultForReceipt(*receipt)
@@ -403,7 +420,20 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		return resultForReconcile(ref, attempt), err
 	}
 	if evidence.SentStoreObserved && evidence.ObservedMessageRef != "" {
-		return persistReconciledSend(lease, root, ref, attempt, evidence)
+		attempt.InvocationStarted = true
+		attempt.AcceptedByMail = true
+		attempt.SentStoreObserved = true
+		attempt.ObservedMessageRef = evidence.ObservedMessageRef
+		attempt.Outcome = SendOutcomeObserved
+		attempt.UpdatedAt = time.Now().UTC()
+		result := resultForReconcile(ref, attempt)
+		if err := replaceSendAttempt(root, ref, attempt, lease.storage); err != nil {
+			return result, &OperationError{
+				Code:    "send_reconcile_state_failed",
+				Message: fmt.Sprintf("the Sent copy was observed, but the reconciled state could not be recorded: %v", err),
+			}
+		}
+		return finishObservedSend(lease, root, ref, attempt, true)
 	}
 	result = resultForReconcile(ref, attempt)
 	if attempt.Outcome == SendOutcomeAccepted {
@@ -416,29 +446,6 @@ func (s *Service) ReconcileDraft(ctx context.Context, ref string) (result SendRe
 		Code:    "send_outcome_unknown",
 		Message: "the sent store still does not prove this send; the draft is retained and retries remain blocked",
 	}
-}
-
-func persistReconciledSend(
-	lease *draftLease,
-	root string,
-	ref string,
-	attempt SendAttempt,
-	evidence SendEvidence,
-) (SendResult, error) {
-	attempt.InvocationStarted = true
-	attempt.AcceptedByMail = true
-	attempt.SentStoreObserved = true
-	attempt.ObservedMessageRef = evidence.ObservedMessageRef
-	attempt.Outcome = SendOutcomeObserved
-	attempt.UpdatedAt = time.Now().UTC()
-	result := resultForReconcile(ref, attempt)
-	if err := replaceSendAttempt(root, ref, attempt); err != nil {
-		return result, &OperationError{
-			Code:    "send_reconcile_state_failed",
-			Message: fmt.Sprintf("the Sent copy was observed, but the reconciled state could not be recorded: %v", err),
-		}
-	}
-	return finishObservedSend(lease, root, ref, attempt, true)
 }
 
 // reconcileUnknownViaImap resolves a crash-stranded unknown claim: the claim
@@ -531,7 +538,7 @@ func (s *Service) reconcileUnknownViaImap(
 		attempt.UpdatedAt = time.Now().UTC()
 		result := resultForReconcile(ref, attempt)
 		result.Reconciled = true
-		if err := replaceSendAttempt(root, ref, attempt); err != nil {
+		if err := replaceSendAttempt(root, ref, attempt, lease.storage); err != nil {
 			return result, &OperationError{
 				Code:    "send_reconcile_state_failed",
 				Message: fmt.Sprintf("the Sent copy was located over IMAP, but the reconciled state could not be recorded: %v", err),
@@ -663,11 +670,11 @@ func (s *Service) reconcileMirrorPending(
 	if outcomeUnknown {
 		return result, mirrorOutcomeUnknownError(attempt)
 	}
-	message, err := openAcceptedMessageSpool(root, ref, attempt)
+	message, err := openAcceptedMessageSpool(ref, attempt, lease.storage)
 	if err != nil {
 		return result, err
 	}
-	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt); err != nil {
+	if err := persistMirrorAttemptBeforeDispatch(root, ref, &attempt, lease.storage); err != nil {
 		return resultForReconcile(ref, attempt), &OperationError{
 			Code:    "send_reconcile_state_failed",
 			Message: fmt.Sprintf("the Sent mirror attempt could not be armed safely: %v", err),
@@ -684,7 +691,7 @@ func (s *Service) reconcileMirrorPending(
 		attempt.Transport.MirrorOutcomeUnknown = mirrorOutcomeUnknown(err)
 		attempt.UpdatedAt = time.Now().UTC()
 		result = resultForReconcile(ref, attempt)
-		if stateErr := replaceSendAttempt(root, ref, attempt); stateErr != nil {
+		if stateErr := replaceSendAttempt(root, ref, attempt, lease.storage); stateErr != nil {
 			return result, &OperationError{
 				Code:    "send_reconcile_state_failed",
 				Message: fmt.Sprintf("Sent mirroring failed, but its outcome could not be recorded safely: %v", stateErr),
@@ -732,7 +739,7 @@ func (s *Service) reconcileMirrorPending(
 	attempt.Outcome = SendOutcomeSent
 	attempt.UpdatedAt = time.Now().UTC()
 	result = resultForReconcile(ref, attempt)
-	if err := replaceSendAttempt(root, ref, attempt); err != nil {
+	if err := replaceSendAttempt(root, ref, attempt, lease.storage); err != nil {
 		return result, &OperationError{
 			Code:    "send_reconcile_state_failed",
 			Message: fmt.Sprintf("the Sent copy was mirrored, but the reconciled state could not be recorded: %v", err),
@@ -741,9 +748,9 @@ func (s *Service) reconcileMirrorPending(
 	return finishObservedSend(lease, root, ref, attempt, true)
 }
 
-func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAttempt) error {
+func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAttempt, storage *draftStorage) error {
 	if attempt == nil || attempt.Transport == nil {
-		return fmt.Errorf("send attempt has no transport evidence")
+		return errors.New("send attempt has no transport evidence")
 	}
 	mirrorAttemptID, err := newMirrorAttemptID()
 	if err != nil {
@@ -753,7 +760,7 @@ func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAt
 	attempt.Transport.MirrorAttempted = true
 	attempt.Transport.MirrorOutcomeUnknown = true
 	attempt.UpdatedAt = time.Now().UTC()
-	return replaceSendAttempt(root, ref, *attempt)
+	return replaceSendAttempt(root, ref, *attempt, storage)
 }
 
 func mirrorOutcomeUnknown(err error) bool {

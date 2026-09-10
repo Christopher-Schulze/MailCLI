@@ -100,7 +100,10 @@ func (s *Service) ListDrafts() ([]DraftSummary, error) {
 			continue
 		}
 		ref := strings.TrimSuffix(entry.Name(), ".json")
-		summary, err := readDraftSummary(root, ref, s.contentObserver)
+		draft, err := loadDraftDocument(root, ref)
+		if err == nil {
+			err = attachDraftAttempts(root, ref, &draft)
+		}
 		if err != nil {
 			var operation *OperationError
 			if errors.Is(err, os.ErrNotExist) || (errors.As(err, &operation) && operation.Code == "not_found") {
@@ -112,7 +115,7 @@ func (s *Service) ListDrafts() ([]DraftSummary, error) {
 			})
 			continue
 		}
-		drafts = append(drafts, summary)
+		drafts = append(drafts, draftSummaryFrom(draft))
 	}
 	sort.Slice(drafts, func(left int, right int) bool {
 		return drafts[left].UpdatedAt.After(drafts[right].UpdatedAt)
@@ -242,7 +245,7 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	}
 	replacement.Ref = current.Ref
 	replacement.CreatedAt = current.CreatedAt
-	if err := writeDraftFile(root, replacement); err != nil {
+	if err := writeDraftFile(root, replacement, lease.storage); err != nil {
 		return Draft{}, err
 	}
 	return replacement, nil
@@ -252,7 +255,7 @@ func (s *Service) DiscardDraft(ref string) (resultErr error) {
 	return s.DiscardDraftContext(context.Background(), ref)
 }
 
-func (s *Service) DiscardDraftContext(ctx context.Context, ref string) (resultErr error) {
+func (s *Service) DiscardDraftContext(ctx context.Context, ref string) error {
 	if err := draftContextError(ctx, "discard"); err != nil {
 		return err
 	}
@@ -266,9 +269,8 @@ func (s *Service) DiscardDraftContext(ctx context.Context, ref string) (resultEr
 	if err != nil {
 		return classifyDraftContextError(ctx, err, "discard")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
 	if err := draftContextError(ctx, "discard"); err != nil {
-		return err
+		return errors.Join(err, lease.release())
 	}
-	return discardDraftFiles(lease, root, ref)
+	return errors.Join(discardDraftFiles(lease, root, ref), lease.release())
 }

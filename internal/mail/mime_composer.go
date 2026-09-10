@@ -69,9 +69,12 @@ func BuildMessage(draft Draft, messageID string) (payload []byte, resultErr erro
 // message. The encoded attachment bytes stay on disk until all consumers have
 // replayed the source.
 type ComposedMessage struct {
-	path      string
-	size      int64
-	messageID string
+	path            string
+	size            int64
+	messageID       string
+	storage         *draftStorage
+	storageName     string
+	storageIdentity os.FileInfo
 }
 
 func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error) {
@@ -213,6 +216,10 @@ func composeMessageSpoolContext(
 }
 
 func (m *ComposedMessage) Open() (io.ReadCloser, error) {
+	if m.storage != nil {
+		file, _, err := m.storage.openFile(m.storageName, m.storageIdentity, os.O_RDONLY, 0)
+		return file, err
+	}
 	return os.Open(m.path)
 }
 
@@ -220,7 +227,12 @@ func (m *ComposedMessage) Size() int64 { return m.size }
 
 func (m *ComposedMessage) MessageID() string { return m.messageID }
 
-func (m *ComposedMessage) Remove() error { return os.Remove(m.path) }
+func (m *ComposedMessage) Remove() error {
+	if m.storage != nil {
+		return removeDraftStorageFile(m.storage, m.storageName, m.storageIdentity, "")
+	}
+	return os.Remove(m.path)
+}
 
 func composerAttachmentHeaders(path string) []string {
 	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))

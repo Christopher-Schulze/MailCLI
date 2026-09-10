@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -175,42 +174,50 @@ func terminalSendOutcome(outcome SendOutcome) bool {
 	return outcome == SendOutcomeObserved || outcome == SendOutcomeSent
 }
 
-func pruneExpiredSendReceiptOnce(ctx context.Context, root string, ref string, now time.Time) (resultErr error) {
+func pruneExpiredSendReceiptOnce(ctx context.Context, root string, ref string, now time.Time) error {
 	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
 		return classifyDraftContextError(ctx, err, "prune")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	if err := draftContextError(ctx, "prune"); err != nil {
-		return err
-	}
-	receipt, err := readSendReceipt(root, ref)
-	if err != nil || receipt == nil || now.Before(receipt.ExpiresAt) {
-		return err
-	}
-	attempt, err := readSendAttempt(root, ref)
+	var resultErr error
+	var receipt *SendReceipt
+	var attempt *SendAttempt
+	var draftName string
+	err = draftContextError(ctx, "prune")
 	if err != nil {
-		return err
+		resultErr = err
+		goto release
+	}
+	receipt, err = readSendReceipt(root, ref, lease.storage)
+	if err != nil || receipt == nil || now.Before(receipt.ExpiresAt) {
+		resultErr = err
+		goto release
+	}
+	attempt, err = readSendAttempt(root, ref, lease.storage)
+	if err != nil {
+		resultErr = err
+		goto release
 	}
 	if attempt != nil && !terminalSendOutcome(attempt.Outcome) {
-		return nil
+		goto release
 	}
-	draftFile, err := draftPath(root, ref)
-	if err != nil {
-		return err
+	draftName = ref + ".json"
+	if _, err = lease.storage.lstat(draftName); err == nil || !os.IsNotExist(err) {
+		goto release
 	}
-	if _, err := os.Lstat(draftFile); err == nil || !os.IsNotExist(err) {
-		return nil
+	if err = removeDraftClaims(root, ref, lease.storage); err != nil {
+		resultErr = err
+		goto release
 	}
-	if err := removeDraftClaims(root, ref); err != nil {
-		return err
+	if err = removeDraftStorageFile(lease.storage, ref+".send-receipt", nil, "send receipt"); err != nil {
+		resultErr = err
+		goto release
 	}
-	if err := removeSendReceipt(root, ref); err != nil {
-		return err
-	}
-	return lease.removeLock()
+	resultErr = lease.removeLock()
+release:
+	return errors.Join(resultErr, lease.release())
 }
 
 func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
@@ -244,57 +251,57 @@ func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
 			continue
 		}
-		if err := syscall.Flock(int(lockFile.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			_ = lockFile.close()
-			if errors.Is(err, syscall.EWOULDBLOCK) {
-				continue
-			}
+		sweptLock, err := sweepOrphanDraftLock(root, ref, lockFile)
+		if err != nil {
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
 			continue
 		}
-		removeErr := lockFile.remove()
-		unlockErr := syscall.Flock(int(lockFile.file.Fd()), syscall.LOCK_UN)
-		closeErr := lockFile.close()
-		if err := errors.Join(removeErr, unlockErr, closeErr); err != nil {
-			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
-			continue
+		if sweptLock {
+			swept = append(swept, ref)
 		}
-		swept = append(swept, ref)
 	}
 	return swept, failures, nil
 }
 
-func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Time) (resultErr error) {
+func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Time) error {
 	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, ref)
 	if err != nil {
 		return classifyDraftContextError(ctx, err, "prune")
 	}
-	defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
-	if err := draftContextError(ctx, "prune"); err != nil {
-		return err
-	}
-	draft, err := readDraftForMutation(lease, root, ref)
+	var resultErr error
+	var draft Draft
+	var operation *OperationError
+	err = draftContextError(ctx, "prune")
 	if err != nil {
-		var operation *OperationError
+		resultErr = err
+		goto release
+	}
+	draft, err = readDraftForMutation(lease, root, ref)
+	if err != nil {
 		if errors.As(err, &operation) && operation.Code == "not_found" {
-			return nil
+			goto release
 		}
-		return err
+		resultErr = err
+		goto release
 	}
 	if !pruneEligible(draftSummaryFrom(draft), cutoff) {
-		return &OperationError{Code: "prune_state_changed", Message: "draft changed since listing; skipped"}
+		resultErr = &OperationError{Code: "prune_state_changed", Message: "draft changed since listing; skipped"}
+		goto release
 	}
-	if err := draftContextError(ctx, "prune"); err != nil {
-		return err
+	err = draftContextError(ctx, "prune")
+	if err != nil {
+		resultErr = err
+		goto release
 	}
-	if err := discardDraftFiles(lease, root, ref); err != nil {
-		var operation *OperationError
+	err = discardDraftFiles(lease, root, ref)
+	if err != nil {
 		if errors.As(err, &operation) && operation.Code == "not_found" {
-			return nil
+			goto release
 		}
-		return err
+		resultErr = err
 	}
-	return nil
+release:
+	return errors.Join(resultErr, lease.release())
 }
