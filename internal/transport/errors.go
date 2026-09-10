@@ -1,6 +1,9 @@
 package transport
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // TransportError is the typed error for all send-transport failures.
 type TransportError struct {
@@ -38,6 +41,11 @@ func (e *MutationOutcomeError) Unwrap() error { return e.Err }
 
 func (e *MutationOutcomeError) ErrorCode() string { return e.Code }
 
+func (e *MutationOutcomeError) Is(target error) bool {
+	code, ok := target.(transportCode)
+	return ok && e.Code == string(code)
+}
+
 func (e *SubmissionError) Error() string {
 	if e.Err == nil {
 		return CodeSMTPSubmissionUnknown + ": SMTP submission outcome is unknown during " + e.Stage
@@ -48,6 +56,11 @@ func (e *SubmissionError) Error() string {
 func (e *SubmissionError) Unwrap() error { return e.Err }
 
 func (e *SubmissionError) ErrorCode() string { return CodeSMTPSubmissionUnknown }
+
+func (e *SubmissionError) Is(target error) bool {
+	code, ok := target.(transportCode)
+	return ok && code == transportCode(CodeSMTPSubmissionUnknown)
+}
 
 func (e *TransportError) Error() string {
 	if e.Err != nil {
@@ -60,14 +73,40 @@ func (e *TransportError) Unwrap() error { return e.Err }
 
 func (e *TransportError) ErrorCode() string { return e.Code }
 
-// ErrorCode returns the typed code of a transport error, or "" for other errors.
+func (e *TransportError) Is(target error) bool {
+	code, ok := target.(transportCode)
+	return ok && e.Code == string(code)
+}
+
+// ErrorCode resolves typed codes through the standard wrapped or joined error
+// tree. An outcome-uncertain transport code takes precedence over ordinary or
+// definitive failures so cleanup diagnostics cannot make an external write
+// appear safe to replay. When no uncertainty is present, the first code in
+// the standard error traversal is retained for compatibility.
 func ErrorCode(err error) string {
 	type coder interface{ ErrorCode() string }
-	if c, ok := err.(coder); ok {
-		return c.ErrorCode()
+	var coded coder
+	firstCode := ""
+	if errors.As(err, &coded) {
+		firstCode = coded.ErrorCode()
 	}
-	return ""
+	for _, code := range [...]string{
+		CodeSMTPSubmissionUnknown,
+		CodeIMAPAppendOutcomeUnknown,
+		CodeIMAPMoveOutcomeUnknown,
+		CodeIMAPAmbiguousMessageID,
+		CodeIMAPCopyOutcomeUnknown,
+	} {
+		if errors.Is(err, transportCode(code)) {
+			return code
+		}
+	}
+	return firstCode
 }
+
+type transportCode string
+
+func (transportCode) Error() string { return "" }
 
 // Typed error codes for the send transport.
 const (

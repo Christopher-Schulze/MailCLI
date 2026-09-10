@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -177,6 +178,101 @@ func TestErrorCodeFreeFunction(t *testing.T) {
 	}
 	if got := ErrorCode(fmt.Errorf("plain error")); got != "" {
 		t.Errorf("ErrorCode(plain) = %q, want empty", got)
+	}
+}
+
+func TestErrorCodeTraversesWrappedAndJoinedChains(t *testing.T) {
+	cleanup := errors.New("close accepted spool")
+	unknown := &TransportError{Code: CodeIMAPAppendOutcomeUnknown, Message: "final APPEND response lost"}
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "direct", err: unknown},
+		{name: "wrapped", err: fmt.Errorf("mirror failed: %w", unknown)},
+		{name: "nested", err: fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", unknown))},
+		{name: "joined unknown first", err: errors.Join(unknown, cleanup)},
+		{name: "joined cleanup first", err: errors.Join(cleanup, unknown)},
+		{name: "wrapped joined", err: fmt.Errorf("reconcile: %w", errors.Join(cleanup, unknown))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ErrorCode(test.err); got != CodeIMAPAppendOutcomeUnknown {
+				t.Fatalf("ErrorCode() = %q, want %q: %v", got, CodeIMAPAppendOutcomeUnknown, test.err)
+			}
+			if !errors.Is(test.err, cleanup) && strings.Contains(test.name, "joined") {
+				t.Fatalf("joined error lost cleanup cause: %v", test.err)
+			}
+			if !strings.Contains(test.err.Error(), "final APPEND response lost") {
+				t.Fatalf("error diagnostics lost transport cause: %v", test.err)
+			}
+		})
+	}
+}
+
+func TestErrorCodeUncertaintyWinsOverKnownTransportFailure(t *testing.T) {
+	unknown := &TransportError{Code: CodeIMAPAppendOutcomeUnknown, Message: "APPEND outcome unknown"}
+	rejected := &TransportError{Code: CodeSMTPRejected, Message: "SMTP rejected"}
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "unknown first", err: errors.Join(unknown, rejected)},
+		{name: "rejection first", err: errors.Join(rejected, unknown)},
+		{name: "known wrapper", err: &TransportError{Code: CodeIMAPAppendFailed, Message: "cleanup failed", Err: unknown}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ErrorCode(test.err); got != CodeIMAPAppendOutcomeUnknown {
+				t.Fatalf("ErrorCode() = %q, want %q: %v", got, CodeIMAPAppendOutcomeUnknown, test.err)
+			}
+			if !strings.Contains(test.err.Error(), "APPEND outcome unknown") {
+				t.Fatalf("error diagnostics lost a cause: %v", test.err)
+			}
+			if test.name != "known wrapper" && !strings.Contains(test.err.Error(), "SMTP rejected") {
+				t.Fatalf("error diagnostics lost rejection cause: %v", test.err)
+			}
+		})
+	}
+}
+
+func TestErrorCodeUsesStableUncertaintyPrecedence(t *testing.T) {
+	smtpUnknown := &SubmissionError{Stage: "final reply"}
+	appendUnknown := &TransportError{Code: CodeIMAPAppendOutcomeUnknown, Message: "APPEND outcome unknown"}
+	copyUnknown := &TransportError{Code: CodeIMAPCopyOutcomeUnknown, Message: "COPY outcome unknown"}
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "submission before append", err: errors.Join(smtpUnknown, appendUnknown), want: CodeSMTPSubmissionUnknown},
+		{name: "append before submission", err: errors.Join(appendUnknown, smtpUnknown), want: CodeSMTPSubmissionUnknown},
+		{name: "append before copy", err: errors.Join(appendUnknown, copyUnknown), want: CodeIMAPAppendOutcomeUnknown},
+		{name: "copy before append", err: errors.Join(copyUnknown, appendUnknown), want: CodeIMAPAppendOutcomeUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ErrorCode(test.err); got != test.want {
+				t.Fatalf("ErrorCode() = %q, want %q: %v", got, test.want, test.err)
+			}
+		})
+	}
+}
+
+func TestErrorCodePreservesKnownCodeWithoutUncertainty(t *testing.T) {
+	rejected := &TransportError{Code: CodeSMTPRejected, Message: "SMTP rejected"}
+	cleanup := errors.New("close accepted spool")
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "direct", err: rejected},
+		{name: "wrapped", err: fmt.Errorf("submission: %w", rejected)},
+		{name: "joined", err: errors.Join(cleanup, rejected)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ErrorCode(test.err); got != CodeSMTPRejected {
+				t.Fatalf("ErrorCode() = %q, want %q: %v", got, CodeSMTPRejected, test.err)
+			}
+		})
 	}
 }
 
