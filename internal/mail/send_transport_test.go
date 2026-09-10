@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -296,6 +297,66 @@ func TestSendDraftRejectsInvalidStoredRecipient(t *testing.T) {
 	}
 	if submitter.calls != 0 || mirror.calls != 0 {
 		t.Fatalf("submission calls = %d, mirror calls = %d", submitter.calls, mirror.calls)
+	}
+}
+
+func TestSendDraftRejectsHistoricalSaveClaimBeforeTransport(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	credentialLoads := 0
+	service := newTransportService(root, submitter, mirror, &stubCredentials{
+		password: "secret",
+		loadHook: func() { credentialLoads++ },
+	})
+	draft := createTransportDraft(t, service)
+	baseline := &SendObservationBaseline{
+		StoreUUID: "store", MaximumRowID: 1, CapturedUnix: 1, SentMailboxIDs: []int64{1},
+	}
+	attempt := writeLegacyDraftSaveAttempt(t, root, draft.Ref, baseline)
+
+	draftFile, err := draftPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("draftPath() error = %v", err)
+	}
+	draftBefore, err := os.ReadFile(draftFile)
+	if err != nil {
+		t.Fatalf("read draft before send error = %v", err)
+	}
+	saveClaimFile, err := saveClaimPath(root, draft.Ref)
+	if err != nil {
+		t.Fatalf("saveClaimPath() error = %v", err)
+	}
+	saveClaimBefore, err := os.ReadFile(saveClaimFile)
+	if err != nil {
+		t.Fatalf("read save claim before send error = %v", err)
+	}
+
+	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	if errorCode(sendErr) != "draft_save_retry_blocked" || result != (SendResult{}) {
+		t.Fatalf("SendDraft() = %+v, error = %v, want save-claim rejection", result, sendErr)
+	}
+	if submitter.calls != 0 || mirror.calls != 0 || credentialLoads != 0 {
+		t.Fatalf("transport calls submit=%d mirror=%d credential loads=%d", submitter.calls, mirror.calls, credentialLoads)
+	}
+	if !strings.Contains(sendErr.Error(), attempt.ID) || !strings.Contains(sendErr.Error(), "drafts save") {
+		t.Fatalf("SendDraft() error = %v, want claim identity and recovery command", sendErr)
+	}
+	assertNoSendClaim(t, root, draft.Ref)
+
+	draftAfter, err := os.ReadFile(draftFile)
+	if err != nil {
+		t.Fatalf("read draft after send error = %v", err)
+	}
+	saveClaimAfter, err := os.ReadFile(saveClaimFile)
+	if err != nil {
+		t.Fatalf("read save claim after send error = %v", err)
+	}
+	if !bytes.Equal(draftBefore, draftAfter) || !bytes.Equal(saveClaimBefore, saveClaimAfter) {
+		t.Fatal("historical draft or save claim changed after rejected send")
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SaveAttempt == nil || retained.SaveAttempt.ID != attempt.ID {
+		t.Fatalf("retained draft = %+v, error = %v, want original save claim", retained, err)
 	}
 }
 

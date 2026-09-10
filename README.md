@@ -22,7 +22,7 @@ Apple Mail's scripting interface can perform targeted mailbox mutations but perf
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. It decodes text parts and keeps attachment names searchable without decoding attachment payloads. MailCLI creates no second mail index.
 - Mark, move, copy, and delete execute directly over IMAP using provisioned account credentials without launching Mail.app. Every mutation returns typed server-truth evidence. COPY arms a stable operation identity before dispatch, preserves COPYUID and destination UID evidence when available, and fails closed with `imap_copy_outcome_unknown` after a lost response until an exact destination observation proves what happened; retries never blindly duplicate a copy. MOVE fallback evidence lists proven phases such as `copy`, `source_flag`, `uid_expunge`, or `cleanup_deferred`.
 - Local-store staleness is documented and honest: IMAP mutations apply immediately on the server; the local read store updates on Mail.app's next background sync. `mailcli sync --check` inspects server vs local message counts over IMAP without launching Mail.app.
-- Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
+- Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; it rejects a historical native save claim before provider or credential resolution, composition, SMTP, or Sent APPEND, preserving the claim for reconcile-only recovery. Unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
 
 Reads and mutations add zero work to the Mail.app process. Sending, marking, moving, copying, and deleting operate autonomously over standard SMTP and IMAP transports. Mail.app is retained solely as the local sync engine feeding the SQLite read store and for optional visible compose handoff.
@@ -319,6 +319,8 @@ Draft-save state matrix: a new local draft without a historical `save_attempt` i
 ### Send a reviewed draft
 
 Sending bypasses Mail.app entirely: MailCLI resolves the SMTP and IMAP endpoints from the draft's From address, loads the app-specific password from the macOS Keychain, submits the composed RFC 5322 message over SMTP with STARTTLS, and appends it to the account's Sent mailbox over IMAP. Short protocol phases use 30 seconds; encoded DATA and APPEND transfers use a size-aware budget at a 1 MiB/s floor, capped at 15 minutes, and the caller context takes precedence.
+
+Before that transport lifecycle starts, `drafts send` rejects any historical `save_attempt` with `draft_save_retry_blocked`. It performs no provider or credential lookup, composition, send-claim creation, SMTP submission, or Sent APPEND, and keeps the original draft and save claim byte-identical for `drafts save` reconciliation or explicit discard.
 
 ```bash
 mailcli send setup --from me@example.com
