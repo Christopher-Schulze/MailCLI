@@ -109,6 +109,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForMirrorUnknown()
 	case "send_outcome_unknown", "send_outcome_unverifiable", "send_state_unknown":
 		return guidanceForSendUnknown()
+	case "handoff_outcome_unknown", "handoff_retry_blocked", "handoff_attachment_cleanup_failed", "handoff_claim_cleanup_failed":
+		return guidanceForHandoffUnknown()
+	case "handoff_canceled_before_dispatch":
+		return OperationGuidance{
+			Phase: OperationPhaseExecution, EffectCertainty: EffectNone,
+			Retryability: RetrySafe, ReplayAllowed: true,
+			Recovery: RecoveryGuidance{Action: RecoveryRetry},
+		}
 	case transport.CodeIMAPAppendFailed:
 		if command == "drafts.send" || command == "drafts.reconcile" {
 			return guidanceForMirrorUnknown()
@@ -153,7 +161,7 @@ func effectfulCommand(command string) bool {
 	switch command {
 	case "batch", "update", "attachments.save", "send.setup", "sync",
 		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save",
-		"drafts.send", "drafts.reconcile", "drafts.discard", "drafts.prune",
+		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move",
 		"messages.copy", "messages.delete":
 		return true
@@ -168,6 +176,8 @@ func defaultPhase(command string) OperationPhase {
 		return OperationPhaseSubmission
 	case command == "drafts.reconcile":
 		return OperationPhaseMirror
+	case command == "drafts.handoff-reconcile":
+		return OperationPhaseCleanup
 	case strings.HasPrefix(command, "messages."):
 		return OperationPhaseMutation
 	default:
@@ -193,6 +203,14 @@ func guidanceForSendUnknown() OperationGuidance {
 
 func guidanceForMirrorUnknown() OperationGuidance {
 	return OperationGuidance{Phase: OperationPhaseMirror, EffectCertainty: EffectPartial, Retryability: RetryObserveRequired, Recovery: RecoveryGuidance{Action: RecoveryReconcile}}
+}
+
+func guidanceForHandoffUnknown() OperationGuidance {
+	return OperationGuidance{
+		Phase: OperationPhaseExecution, EffectCertainty: EffectUnknown,
+		Retryability: RetryObserveRequired, ReplayAllowed: false,
+		Recovery: RecoveryGuidance{Action: RecoveryReconcile},
+	}
 }
 
 func guidanceForMutationUnknown(err error) OperationGuidance {

@@ -10,11 +10,11 @@ import (
 func TestHandoffSuccessWithoutAppKit(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })
-	invokeNativeCompose = func(payload string) (string, error) {
+	invokeNativeCompose = func(payload string, _ <-chan struct{}) (string, error) {
 		if !strings.Contains(payload, "a@example.com") {
 			t.Fatalf("payload = %s, want recipient", payload)
 		}
-		return `{"ok":true,"opened":true,"mail_application":"com.apple.mail"}`, nil
+		return `{"ok":true,"opened":true,"mail_application":"com.apple.mail","dispatched":true}`, nil
 	}
 
 	result, err := Handoff(context.Background(), Request{Recipients: []string{"a@example.com"}})
@@ -29,7 +29,7 @@ func TestHandoffSuccessWithoutAppKit(t *testing.T) {
 func TestHandoffNormalizesEmptyCollectionsForNativeContract(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })
-	invokeNativeCompose = func(payload string) (string, error) {
+	invokeNativeCompose = func(payload string, _ <-chan struct{}) (string, error) {
 		var request Request
 		if err := json.Unmarshal([]byte(payload), &request); err != nil {
 			t.Fatalf("Unmarshal() error = %v", err)
@@ -37,7 +37,7 @@ func TestHandoffNormalizesEmptyCollectionsForNativeContract(t *testing.T) {
 		if request.Recipients == nil || request.Attachments == nil {
 			t.Fatalf("native collections = recipients %#v, attachments %#v; want arrays", request.Recipients, request.Attachments)
 		}
-		return `{"ok":true,"opened":true,"mail_application":"com.apple.mail"}`, nil
+		return `{"ok":true,"opened":true,"mail_application":"com.apple.mail","dispatched":true}`, nil
 	}
 
 	if _, err := Handoff(context.Background(), Request{}); err != nil {
@@ -48,14 +48,14 @@ func TestHandoffNormalizesEmptyCollectionsForNativeContract(t *testing.T) {
 func TestHandoffEscapesEmbeddedNULBeforeNativeCall(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })
-	invokeNativeCompose = func(payload string) (string, error) {
+	invokeNativeCompose = func(payload string, _ <-chan struct{}) (string, error) {
 		if strings.Contains(payload, "\x00") {
 			t.Fatal("native payload contains an embedded NUL")
 		}
 		if !strings.Contains(payload, `\u0000`) {
 			t.Fatalf("payload = %s, want JSON NUL escape", payload)
 		}
-		return `{"ok":true,"opened":true}`, nil
+		return `{"ok":true,"opened":true,"dispatched":true}`, nil
 	}
 
 	if _, err := Handoff(context.Background(), Request{Subject: "before\x00after"}); err != nil {
@@ -66,7 +66,7 @@ func TestHandoffEscapesEmbeddedNULBeforeNativeCall(t *testing.T) {
 func TestHandoffNativeErrorWithoutAppKit(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })
-	invokeNativeCompose = func(string) (string, error) {
+	invokeNativeCompose = func(string, <-chan struct{}) (string, error) {
 		return "", context.DeadlineExceeded
 	}
 
@@ -78,7 +78,7 @@ func TestHandoffNativeErrorWithoutAppKit(t *testing.T) {
 func TestHandoffNativeFailureJSONWithoutAppKit(t *testing.T) {
 	original := invokeNativeCompose
 	t.Cleanup(func() { invokeNativeCompose = original })
-	invokeNativeCompose = func(string) (string, error) {
+	invokeNativeCompose = func(string, <-chan struct{}) (string, error) {
 		return `{"ok":false,"code":"compose_failed","message":"native failed"}`, nil
 	}
 

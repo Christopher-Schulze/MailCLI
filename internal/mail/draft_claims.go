@@ -31,6 +31,9 @@ func rejectClaimedDraft(draft Draft) error {
 			),
 		}
 	}
+	if draft.HandoffAttempt != nil {
+		return handoffRetryBlockedError(draft.HandoffAttempt.ID)
+	}
 	return nil
 }
 

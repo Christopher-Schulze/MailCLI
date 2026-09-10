@@ -16,4 +16,5 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build \
   -o "${MAILCLI_OUTPUT}" \
   "${MAILCLI_ROOT}/cmd/mailcli"
 
+strip -no_uuid "${MAILCLI_OUTPUT}"
 file "${MAILCLI_OUTPUT}"

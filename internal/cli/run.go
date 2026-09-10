@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -28,43 +29,44 @@ type envelope struct {
 }
 
 type responseData struct {
-	Name                     string                  `json:"name,omitempty"`
-	Version                  string                  `json:"version,omitempty"`
-	Capabilities             *capabilityManifest     `json:"capabilities,omitempty"`
-	Checks                   []mail.Check            `json:"checks,omitempty"`
-	Timings                  []mail.DiagnosticTiming `json:"timings,omitempty"`
-	Accounts                 *[]mail.Account         `json:"accounts,omitempty"`
-	Complete                 *bool                   `json:"complete,omitempty"`
-	IdentityCoverageComplete *bool                   `json:"identity_coverage_complete,omitempty"`
-	Mailboxes                *[]mail.Mailbox         `json:"mailboxes,omitempty"`
-	Mailbox                  *mail.Mailbox           `json:"mailbox,omitempty"`
-	Page                     *json.RawMessage        `json:"page,omitempty"`
-	Message                  *mail.Message           `json:"message,omitempty"`
-	MessageState             *mail.MessageSummary    `json:"message_state,omitempty"`
-	RawSource                *string                 `json:"raw_source,omitempty"`
-	Attachments              *[]mail.Attachment      `json:"attachments,omitempty"`
-	Projection               *projectionInfo         `json:"projection,omitempty"`
-	ContentExport            *mail.ContentExport     `json:"content_export,omitempty"`
-	ContentSource            string                  `json:"content_source,omitempty"`
-	ContentComplete          *bool                   `json:"content_complete,omitempty"`
-	MissingParts             *[]string               `json:"missing_parts,omitempty"`
-	SavedAttachment          *mail.SavedAttachment   `json:"saved_attachment,omitempty"`
-	Draft                    *mail.Draft             `json:"draft,omitempty"`
-	DraftPreview             *draftPreview           `json:"draft_preview,omitempty"`
-	DraftHandoff             *draftHandoffResult     `json:"draft_handoff,omitempty"`
-	Drafts                   *[]draftListEntry       `json:"drafts,omitempty"`
-	PruneResult              *mail.PruneDraftsResult `json:"prune,omitempty"`
-	SavedDraft               *mail.SavedDraft        `json:"saved_draft,omitempty"`
-	SendResult               *mail.SendResult        `json:"send_result,omitempty"`
-	SendReceipt              *mail.SendReceipt       `json:"send_receipt,omitempty"`
-	SendSetup                *sendSetupResult        `json:"send_setup,omitempty"`
-	DeleteResult             *mail.DeleteResult      `json:"delete_result,omitempty"`
-	SyncResult               *mail.SyncResult        `json:"sync_result,omitempty"`
-	SyncCheck                *mail.SyncCheckResult   `json:"sync_check,omitempty"`
-	BatchResult              *mail.BatchResult       `json:"batch_result,omitempty"`
-	Finalization             *finalizationData       `json:"finalization,omitempty"`
-	UpdateResult             *updateResult           `json:"update_result,omitempty"`
-	serialization            *serializedProjection   `json:"-"`
+	Name                     string                       `json:"name,omitempty"`
+	Version                  string                       `json:"version,omitempty"`
+	Capabilities             *capabilityManifest          `json:"capabilities,omitempty"`
+	Checks                   []mail.Check                 `json:"checks,omitempty"`
+	Timings                  []mail.DiagnosticTiming      `json:"timings,omitempty"`
+	Accounts                 *[]mail.Account              `json:"accounts,omitempty"`
+	Complete                 *bool                        `json:"complete,omitempty"`
+	IdentityCoverageComplete *bool                        `json:"identity_coverage_complete,omitempty"`
+	Mailboxes                *[]mail.Mailbox              `json:"mailboxes,omitempty"`
+	Mailbox                  *mail.Mailbox                `json:"mailbox,omitempty"`
+	Page                     *json.RawMessage             `json:"page,omitempty"`
+	Message                  *mail.Message                `json:"message,omitempty"`
+	MessageState             *mail.MessageSummary         `json:"message_state,omitempty"`
+	RawSource                *string                      `json:"raw_source,omitempty"`
+	Attachments              *[]mail.Attachment           `json:"attachments,omitempty"`
+	Projection               *projectionInfo              `json:"projection,omitempty"`
+	ContentExport            *mail.ContentExport          `json:"content_export,omitempty"`
+	ContentSource            string                       `json:"content_source,omitempty"`
+	ContentComplete          *bool                        `json:"content_complete,omitempty"`
+	MissingParts             *[]string                    `json:"missing_parts,omitempty"`
+	SavedAttachment          *mail.SavedAttachment        `json:"saved_attachment,omitempty"`
+	Draft                    *mail.Draft                  `json:"draft,omitempty"`
+	DraftPreview             *draftPreview                `json:"draft_preview,omitempty"`
+	DraftHandoff             *draftHandoffResult          `json:"draft_handoff,omitempty"`
+	HandoffReconcile         *mail.HandoffReconcileResult `json:"handoff_reconcile,omitempty"`
+	Drafts                   *[]draftListEntry            `json:"drafts,omitempty"`
+	PruneResult              *mail.PruneDraftsResult      `json:"prune,omitempty"`
+	SavedDraft               *mail.SavedDraft             `json:"saved_draft,omitempty"`
+	SendResult               *mail.SendResult             `json:"send_result,omitempty"`
+	SendReceipt              *mail.SendReceipt            `json:"send_receipt,omitempty"`
+	SendSetup                *sendSetupResult             `json:"send_setup,omitempty"`
+	DeleteResult             *mail.DeleteResult           `json:"delete_result,omitempty"`
+	SyncResult               *mail.SyncResult             `json:"sync_result,omitempty"`
+	SyncCheck                *mail.SyncCheckResult        `json:"sync_check,omitempty"`
+	BatchResult              *mail.BatchResult            `json:"batch_result,omitempty"`
+	Finalization             *finalizationData            `json:"finalization,omitempty"`
+	UpdateResult             *updateResult                `json:"update_result,omitempty"`
+	serialization            *serializedProjection        `json:"-"`
 }
 
 func rawResponsePage(value any) *json.RawMessage {
@@ -96,6 +98,17 @@ func newErrorData(command string, data responseData, err error) *errorData {
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if result := data.DraftHandoff; handoffNeedsReconciliation(result, err) {
+		guidance.Phase = mail.OperationPhaseExecution
+		guidance.EffectCertainty = mail.EffectUnknown
+		guidance.Retryability = mail.RetryObserveRequired
+		guidance.ReplayAllowed = false
+		guidance.Recovery = mail.RecoveryGuidance{
+			Action: mail.RecoveryReconcile, Command: "drafts.handoff-reconcile",
+			Args:        []string{"--ref", result.DraftRef, "--attempt", result.AttemptID, "--confirm", "--json"},
+			OperationID: result.AttemptID,
+		}
+	}
 	if result := data.SendResult; result != nil && result.AttemptID != "" {
 		guidance.Recovery.Action, guidance.Recovery.OperationID = mail.RecoveryReconcile, result.AttemptID
 		if result.DraftRef != "" {
@@ -133,6 +146,20 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 		}
 	}
 	return guidance
+}
+
+func handoffNeedsReconciliation(result *draftHandoffResult, err error) bool {
+	if result == nil || result.AttemptID == "" || !result.DispatchStarted {
+		return false
+	}
+	if result.Outcome == mail.HandoffOutcomeUnknown || result.SnapshotsRetained {
+		return true
+	}
+	var cleanupErr *mail.OperationError
+	if errors.As(err, &cleanupErr) {
+		return cleanupErr.ErrorCode() == "handoff_attachment_cleanup_failed" || cleanupErr.ErrorCode() == "handoff_claim_cleanup_failed"
+	}
+	return false
 }
 
 const (

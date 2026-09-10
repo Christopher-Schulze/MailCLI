@@ -2,11 +2,12 @@ package compose
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
 func TestParseHandoffResponseSuccess(t *testing.T) {
-	raw := `{"ok":true,"opened":true,"mail_application":"com.apple.mail"}`
+	raw := `{"ok":true,"opened":true,"mail_application":"com.apple.mail","dispatched":true}`
 	result, err := parseHandoffResponse(raw)
 	if err != nil {
 		t.Fatalf("parseHandoffResponse error = %v", err)
@@ -20,13 +21,21 @@ func TestParseHandoffResponseSuccess(t *testing.T) {
 }
 
 func TestParseHandoffResponseSuccessNoOpen(t *testing.T) {
-	raw := `{"ok":true,"opened":false}`
+	raw := `{"ok":true,"opened":false,"dispatched":true}`
 	result, err := parseHandoffResponse(raw)
 	if err != nil {
 		t.Fatalf("parseHandoffResponse error = %v", err)
 	}
 	if result.Opened {
 		t.Error("Opened = true, want false")
+	}
+}
+
+func TestParseHandoffResponseRejectsUnmarkedSuccess(t *testing.T) {
+	_, err := parseHandoffResponse(`{"ok":true,"opened":true}`)
+	var composeErr *Error
+	if !errors.As(err, &composeErr) || composeErr.Code != "handoff_response_invalid" || composeErr.DispatchedToNative() {
+		t.Fatalf("parseHandoffResponse() = %v, compose error=%+v", err, composeErr)
 	}
 }
 
@@ -45,6 +54,15 @@ func TestParseHandoffResponseError(t *testing.T) {
 	}
 	if composeErr.Message != "Mail.app is not the default email application" {
 		t.Errorf("Message = %q, want default mailto message", composeErr.Message)
+	}
+}
+
+func TestParseHandoffResponseCanceledBeforeDispatch(t *testing.T) {
+	raw := `{"ok":false,"code":"handoff_canceled_before_dispatch","message":"not dispatched","dispatched":false}`
+	_, err := parseHandoffResponse(raw)
+	var composeErr *Error
+	if !errors.As(err, &composeErr) || composeErr.State != StateCanceledBeforeDispatch || composeErr.DispatchedToNative() {
+		t.Fatalf("parseHandoffResponse() = %v, compose error=%+v", err, composeErr)
 	}
 }
 

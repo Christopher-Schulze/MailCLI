@@ -119,6 +119,8 @@ const (
 	resultCopied
 	resultSync
 	resultDeleted
+	resultHandoff
+	resultHandoffReconcile
 )
 
 // NUL-delimited state sets avoid one slice header per command in the release
@@ -145,6 +147,8 @@ var resultStateTable = []string{
 	"copied",
 	"triggered\x00checked_complete\x00checked_incomplete",
 	"deleted",
+	"confirmed_opened\x00confirmed_failed\x00outcome_unknown\x00canceled_before_dispatch",
+	"confirmed_opened\x00confirmed_failed",
 }
 
 func resultStateValues(states uint8) []string {
@@ -256,7 +260,7 @@ var commandContracts = []commandContract{
 	newCommandContract("drafts.inspect", textRead, textNone, textDraftStore, textNone, mailServiceNotRequired, false, false, resultComplete),
 	newCommandContract("drafts.preview", textRead, textNone, textDraftStore, textNone, mailServiceNotRequired, false, false, resultComplete),
 	newCommandContract("drafts.edit", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultUpdated),
-	newCommandContract("drafts.handoff", textVisibleCompose, textNone, textDraftStore, textSystemComposeService, mailServiceNotRequired, true, true, resultOpened),
+	newCommandContract("drafts.handoff", textVisibleCompose, textNone, textDraftStore, textSystemComposeService, mailServiceNotRequired, true, true, resultHandoff),
 	newCommandContract("drafts.update", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultUpdated),
 	newCommandContract("drafts.save", textUnsupported, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultComposeUnsupported),
 	newCommandContract("drafts.open", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
@@ -272,6 +276,7 @@ var commandContracts = []commandContract{
 	newCommandContract("messages.copy", textIMAPWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCopied),
 	newCommandContract("messages.delete", textIMAPWrite, textRequiredAndDraftFlags, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultDeleted),
 	newCommandContract("sync", textMailWrite, textNone, textMailStore, textOptional, mailServiceAlwaysRequired, true, false, resultSync),
+	newCommandContract("drafts.handoff-reconcile", textLocalWrite, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, true, false, resultHandoffReconcile),
 }
 
 func commandContractForArgs(args []string) (*commandContract, []string) {

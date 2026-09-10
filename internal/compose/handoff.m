@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <stdlib.h>
 #import <string.h>
+#import <unistd.h>
 
 #import "handoff.h"
 
@@ -27,18 +28,22 @@
 
 @end
 
-static char *mailcli_response(BOOL ok, NSString *code, NSString *message, BOOL opened) {
+static char *mailcli_response(BOOL ok, NSString *code, NSString *message, BOOL opened, BOOL dispatched) {
     NSDictionary *response = @{
         @"ok": @(ok),
         @"code": code ?: @"",
         @"message": message ?: @"",
         @"opened": @(opened),
+        @"dispatched": @(dispatched),
         @"mail_application": ok ? @"com.apple.mail" : @""
     };
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:&error];
     if (data == nil) {
-        return strdup("{\"ok\":false,\"code\":\"handoff_failed\",\"message\":\"could not encode native handoff result\"}");
+        NSString *fallback = [NSString stringWithFormat:
+            @"{\"ok\":false,\"code\":\"handoff_failed\",\"message\":\"could not encode native handoff result\",\"dispatched\":%@}",
+            dispatched ? @"true" : @"false"];
+        return strdup(fallback.UTF8String);
     }
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return strdup(json.UTF8String);
@@ -54,19 +59,23 @@ static NSString *mailcli_default_email_bundle_identifier(void) {
     return bundle.bundleIdentifier;
 }
 
-char *mailcli_compose_email(const char *request_json) {
+static BOOL mailcli_cancellation_requested(const char *cancel_path) {
+    return cancel_path != NULL && access(cancel_path, F_OK) == 0;
+}
+
+char *mailcli_compose_email(const char *request_json, const char *cancel_path) {
     @autoreleasepool {
         if (![NSThread isMainThread]) {
-            return mailcli_response(NO, @"handoff_thread_invalid", @"visible compose must run on the macOS main thread", NO);
+            return mailcli_response(NO, @"handoff_thread_invalid", @"visible compose must run on the macOS main thread", NO, NO);
         }
         if (request_json == NULL) {
-            return mailcli_response(NO, @"invalid_argument", @"compose handoff request is missing", NO);
+            return mailcli_response(NO, @"invalid_argument", @"compose handoff request is missing", NO, NO);
         }
         NSData *payload = [NSData dataWithBytes:request_json length:strlen(request_json)];
         NSError *decodeError = nil;
         id decoded = [NSJSONSerialization JSONObjectWithData:payload options:0 error:&decodeError];
         if (![decoded isKindOfClass:[NSDictionary class]]) {
-            return mailcli_response(NO, @"invalid_argument", @"compose handoff request is invalid", NO);
+            return mailcli_response(NO, @"invalid_argument", @"compose handoff request is invalid", NO, NO);
         }
         NSDictionary *request = (NSDictionary *)decoded;
         NSString *defaultBundleIdentifier = mailcli_default_email_bundle_identifier();
@@ -75,7 +84,7 @@ char *mailcli_compose_email(const char *request_json) {
             NSString *message = [NSString stringWithFormat:
                 @"Mail.app is not the default email application (current handler: %@); select Mail in Mail > Settings > General > Default email reader",
                 actual];
-            return mailcli_response(NO, @"default_mail_app_required", message, NO);
+            return mailcli_response(NO, @"default_mail_app_required", message, NO, NO);
         }
 
         NSArray *recipientValues = request[@"recipients"];
@@ -85,7 +94,7 @@ char *mailcli_compose_email(const char *request_json) {
         NSArray *attachmentPaths = request[@"attachments"];
         if (![recipientValues isKindOfClass:[NSArray class]] || ![subject isKindOfClass:[NSString class]] ||
             ![plainBody isKindOfClass:[NSString class]] || ![attachmentPaths isKindOfClass:[NSArray class]]) {
-            return mailcli_response(NO, @"invalid_argument", @"compose handoff fields are invalid", NO);
+            return mailcli_response(NO, @"invalid_argument", @"compose handoff fields are invalid", NO, NO);
         }
 
         NSMutableArray *items = [NSMutableArray arrayWithCapacity:attachmentPaths.count + 1];
@@ -99,7 +108,7 @@ char *mailcli_compose_email(const char *request_json) {
             NSAttributedString *attributedBody = [[NSAttributedString alloc]
                 initWithData:htmlData options:options documentAttributes:nil error:&htmlError];
             if (attributedBody == nil) {
-                return mailcli_response(NO, @"invalid_body", @"could not materialize the validated HTML body", NO);
+                return mailcli_response(NO, @"invalid_body", @"could not materialize the validated HTML body", NO, NO);
             }
             [items addObject:attributedBody];
         } else {
@@ -107,7 +116,7 @@ char *mailcli_compose_email(const char *request_json) {
         }
         for (id value in attachmentPaths) {
             if (![value isKindOfClass:[NSString class]]) {
-                return mailcli_response(NO, @"invalid_attachment", @"attachment path is invalid", NO);
+                return mailcli_response(NO, @"invalid_attachment", @"attachment path is invalid", NO, NO);
             }
             NSURL *url = [NSURL fileURLWithPath:(NSString *)value isDirectory:NO];
             [items addObject:url];
@@ -115,26 +124,42 @@ char *mailcli_compose_email(const char *request_json) {
 
         NSSharingService *service = [NSSharingService sharingServiceNamed:NSSharingServiceNameComposeEmail];
         if (service == nil || ![service canPerformWithItems:items]) {
-            return mailcli_response(NO, @"compose_service_unavailable", @"macOS Compose Email sharing service is unavailable for this draft", NO);
+            return mailcli_response(NO, @"compose_service_unavailable", @"macOS Compose Email sharing service is unavailable for this draft", NO, NO);
         }
         [NSApplication sharedApplication];
         MailCLISharingDelegate *delegate = [[MailCLISharingDelegate alloc] init];
         service.delegate = delegate;
         service.recipients = recipientValues;
         service.subject = subject;
+
+        if (mailcli_cancellation_requested(cancel_path)) {
+            service.delegate = nil;
+            return mailcli_response(NO, @"handoff_canceled_before_dispatch", @"compose handoff was canceled before native dispatch; no external compose was initiated", NO, NO);
+        }
         [service performWithItems:items];
 
+        if (mailcli_cancellation_requested(cancel_path)) {
+            service.delegate = nil;
+            return mailcli_response(NO, @"handoff_outcome_unknown", @"compose handoff was dispatched, but cancellation interrupted the native wait; Mail.app may still have opened the compose", NO, YES);
+        }
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
         while (!delegate.completed && deadline.timeIntervalSinceNow > 0) {
+            if (mailcli_cancellation_requested(cancel_path)) {
+                service.delegate = nil;
+                return mailcli_response(NO, @"handoff_outcome_unknown", @"compose handoff was dispatched, but cancellation interrupted the native wait; Mail.app may still have opened the compose", NO, YES);
+            }
             NSDate *slice = [NSDate dateWithTimeIntervalSinceNow:0.05];
             [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:slice];
         }
         if (!delegate.completed) {
-            return mailcli_response(NO, @"handoff_outcome_unknown", @"macOS did not confirm that the compose window opened", NO);
+            service.delegate = nil;
+            return mailcli_response(NO, @"handoff_outcome_unknown", @"macOS did not confirm that the compose window opened", NO, YES);
         }
         if (!delegate.succeeded) {
-            return mailcli_response(NO, @"handoff_failed", delegate.failureMessage, NO);
+            service.delegate = nil;
+            return mailcli_response(NO, @"handoff_failed", delegate.failureMessage, NO, YES);
         }
-        return mailcli_response(YES, nil, nil, YES);
+        service.delegate = nil;
+        return mailcli_response(YES, nil, nil, YES, YES);
     }
 }

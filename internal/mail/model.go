@@ -232,6 +232,7 @@ type Draft struct {
 	UpdatedAt                     time.Time                `json:"updated_at"`
 	SendAttempt                   *SendAttempt             `json:"send_attempt,omitempty"`
 	SaveAttempt                   *DraftSaveAttempt        `json:"save_attempt,omitempty"`
+	HandoffAttempt                *HandoffAttempt          `json:"handoff_attempt,omitempty"`
 	PreparedSendBaseline          *SendObservationBaseline `json:"-"`
 	PreparedSaveBaseline          *SendObservationBaseline `json:"-"`
 	ExpectedNativeAttachmentCount int                      `json:"-"`
@@ -249,21 +250,22 @@ type SavedDraft struct {
 // attachment content. Lists must stay cheap: building a summary never
 // re-renders Markdown/HTML bodies.
 type DraftSummary struct {
-	Ref             string                   `json:"ref"`
-	Kind            DraftKind                `json:"kind"`
-	AccountRef      string                   `json:"account_ref,omitempty"`
-	Subject         string                   `json:"subject,omitempty"`
-	From            string                   `json:"from,omitempty"`
-	To              []Recipient              `json:"to"`
-	CC              []Recipient              `json:"cc"`
-	CreatedAt       time.Time                `json:"created_at"`
-	UpdatedAt       time.Time                `json:"updated_at"`
-	BodyFormat      DraftBodyFormat          `json:"body_format"`
-	AttachmentCount int                      `json:"attachment_count"`
-	EverSent        bool                     `json:"ever_sent"`
-	SendAttempt     *DraftSendAttemptSummary `json:"send_attempt,omitempty"`
-	SaveAttempt     *DraftSaveAttemptSummary `json:"save_attempt,omitempty"`
-	StateError      string                   `json:"state_error,omitempty"`
+	Ref             string                      `json:"ref"`
+	Kind            DraftKind                   `json:"kind"`
+	AccountRef      string                      `json:"account_ref,omitempty"`
+	Subject         string                      `json:"subject,omitempty"`
+	From            string                      `json:"from,omitempty"`
+	To              []Recipient                 `json:"to"`
+	CC              []Recipient                 `json:"cc"`
+	CreatedAt       time.Time                   `json:"created_at"`
+	UpdatedAt       time.Time                   `json:"updated_at"`
+	BodyFormat      DraftBodyFormat             `json:"body_format"`
+	AttachmentCount int                         `json:"attachment_count"`
+	EverSent        bool                        `json:"ever_sent"`
+	SendAttempt     *DraftSendAttemptSummary    `json:"send_attempt,omitempty"`
+	SaveAttempt     *DraftSaveAttemptSummary    `json:"save_attempt,omitempty"`
+	HandoffAttempt  *DraftHandoffAttemptSummary `json:"handoff_attempt,omitempty"`
+	StateError      string                      `json:"state_error,omitempty"`
 }
 
 // DraftSendAttemptSummary is the metadata-only list projection of SendAttempt.
@@ -298,6 +300,65 @@ type DraftSaveAttemptSummary struct {
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`
 	ObservedMessageRef  string                   `json:"observed_message_ref,omitempty"`
 	ObservationBaseline *SendObservationBaseline `json:"observation_baseline"`
+}
+
+// HandoffOutcome describes the durable lifecycle of a visible compose
+// request. A confirmed completion means only that NSSharingService reported
+// success; it never proves that Mail saved, sent, or closed a window.
+type HandoffOutcome string
+
+const (
+	HandoffOutcomePrepared        HandoffOutcome = "prepared"
+	HandoffOutcomeDispatched      HandoffOutcome = "dispatched"
+	HandoffOutcomeConfirmedOpened HandoffOutcome = "confirmed_opened"
+	HandoffOutcomeConfirmedFailed HandoffOutcome = "confirmed_failed"
+	HandoffOutcomeCanceled        HandoffOutcome = "canceled_before_dispatch"
+	HandoffOutcomeUnknown         HandoffOutcome = "outcome_unknown"
+)
+
+type HandoffResolution string
+
+const (
+	HandoffResolutionOpened HandoffResolution = "opened"
+	HandoffResolutionFailed HandoffResolution = "failed"
+)
+
+type HandoffSnapshot struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type HandoffAttempt struct {
+	ID                string            `json:"id"`
+	DraftRef          string            `json:"draft_ref"`
+	StartedAt         time.Time         `json:"started_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+	Outcome           HandoffOutcome    `json:"outcome"`
+	DispatchStarted   bool              `json:"dispatch_started"`
+	SnapshotsRetained bool              `json:"snapshots_retained"`
+	Snapshots         []HandoffSnapshot `json:"snapshots"`
+}
+
+// DraftHandoffAttemptSummary is the metadata-only list projection of a
+// retained visible-compose attempt. It contains no attachment paths or
+// content, only enough evidence to select the required reconciliation.
+type DraftHandoffAttemptSummary struct {
+	ID                string         `json:"id"`
+	StartedAt         time.Time      `json:"started_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	Outcome           HandoffOutcome `json:"outcome"`
+	DispatchStarted   bool           `json:"dispatch_started"`
+	SnapshotsRetained bool           `json:"snapshots_retained"`
+	SnapshotCount     int            `json:"snapshot_count"`
+	SnapshotBytes     int64          `json:"snapshot_bytes"`
+}
+
+type HandoffReconcileResult struct {
+	DraftRef          string         `json:"draft_ref"`
+	AttemptID         string         `json:"attempt_id"`
+	Outcome           HandoffOutcome `json:"outcome"`
+	SnapshotsRetained bool           `json:"snapshots_retained"`
 }
 
 type CreateDraftRequest struct {

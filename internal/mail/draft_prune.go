@@ -37,7 +37,7 @@ type PruneDraftsRequest struct {
 }
 
 func pruneEligible(draft DraftSummary, cutoff time.Time) bool {
-	return draft.UpdatedAt.Before(cutoff) && draft.SendAttempt == nil && draft.SaveAttempt == nil
+	return draft.UpdatedAt.Before(cutoff) && draft.SendAttempt == nil && draft.SaveAttempt == nil && draft.HandoffAttempt == nil
 }
 
 func pruneAgeDays(updatedAt time.Time) int {

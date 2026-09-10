@@ -33,13 +33,18 @@ type draftPreview struct {
 }
 
 type draftHandoffResult struct {
-	DraftRef        string `json:"draft_ref"`
-	Opened          bool   `json:"opened"`
-	MailApplication string `json:"mail_application"`
-	DraftRetained   bool   `json:"draft_retained"`
+	DraftRef          string              `json:"draft_ref"`
+	AttemptID         string              `json:"attempt_id"`
+	Opened            bool                `json:"opened"`
+	MailApplication   string              `json:"mail_application"`
+	Outcome           mail.HandoffOutcome `json:"outcome"`
+	DispatchStarted   bool                `json:"dispatch_started"`
+	SnapshotsRetained bool                `json:"snapshots_retained"`
+	DraftRetained     bool                `json:"draft_retained"`
 }
 
 type composeHandoffFunc func(context.Context, compose.Request) (compose.Result, error)
+type composeDispatchHandoffFunc func(context.Context, compose.Request, compose.DispatchObserver) (compose.Result, error)
 
 func runDraftHandoff(
 	ctx context.Context,
@@ -48,7 +53,7 @@ func runDraftHandoff(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	return runDraftHandoffWith(ctx, service, args, stdout, stderr, compose.Handoff)
+	return runDraftHandoffWithDispatch(ctx, service, args, stdout, stderr, compose.HandoffWithDispatch)
 }
 
 func runDraftHandoffWith(
@@ -59,6 +64,26 @@ func runDraftHandoffWith(
 	stderr io.Writer,
 	handoff composeHandoffFunc,
 ) int {
+	return runDraftHandoffWithDispatch(ctx, service, args, stdout, stderr,
+		func(ctx context.Context, request compose.Request, observer compose.DispatchObserver) (compose.Result, error) {
+			if observer != nil {
+				if err := observer(); err != nil {
+					return compose.Result{}, err
+				}
+			}
+			return handoff(ctx, request)
+		},
+	)
+}
+
+func runDraftHandoffWithDispatch(
+	ctx context.Context,
+	service *mail.Service,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	handoff composeDispatchHandoffFunc,
+) int {
 	flags := newFlagSet("drafts handoff", stderr)
 	ref := flags.String("ref", "", "local draft ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -67,50 +92,95 @@ func runDraftHandoffWith(
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	draft, err := service.PrepareDraftHandoffContext(operationCtx, *ref)
+	session, err := service.BeginDraftHandoffContext(operationCtx, *ref)
 	if err != nil {
 		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
 	}
+	defer func() { _ = session.Close() }()
+	preparation := session.Preparation()
+	draft := preparation.Draft
 	recipients := make([]string, 0, len(draft.To))
 	for _, recipient := range draft.To {
 		recipients = append(recipients, recipient.Address)
 	}
-	attachments, cleanup, err := mail.StageDraftAttachments(operationCtx, draft.Attachments)
-	if err != nil {
-		if cleanup != nil {
-			err = errors.Join(err, cleanup())
-		}
-		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
-	}
-	result, err := handoff(operationCtx, compose.Request{
+	var dispatchErr error
+	result, handoffErr := handoff(operationCtx, compose.Request{
 		Recipients: recipients, Subject: draft.Subject, PlainBody: draft.Body,
-		HTMLBody: draft.BodyHTML, Attachments: attachments,
+		HTMLBody: draft.BodyHTML, Attachments: preparation.AttachmentPaths,
+	}, func() error {
+		dispatchErr = session.MarkDispatched(operationCtx)
+		return dispatchErr
 	})
-	var cleanupErr error
-	if cleanup != nil {
-		cleanupErr = cleanup()
-	}
-	if err != nil {
-		if cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
+	if dispatchErr != nil {
+		cleanupErr := session.CancelBeforeDispatch()
+		outcome := mail.HandoffOutcomeConfirmedFailed
+		if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+			outcome = mail.HandoffOutcomeCanceled
 		}
-		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
+		response := draftHandoffResult{
+			DraftRef: draft.Ref, AttemptID: session.AttemptID(), Outcome: outcome,
+			DispatchStarted: false, SnapshotsRetained: cleanupErr != nil && preparation.Attempt.SnapshotsRetained,
+			DraftRetained: true,
+		}
+		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(dispatchErr, cleanupErr), stdout, stderr)
 	}
-	if cleanupErr != nil {
-		return failCommand(
-			"drafts.handoff",
-			*jsonOutput,
-			&commandError{
-				code:    "handoff_attachment_cleanup_failed",
-				message: fmt.Sprintf("visible compose opened, but private attachment cleanup failed: %v", cleanupErr),
-			},
-			stdout,
-			stderr,
-		)
+	if handoffErr != nil {
+		var composeErr *compose.Error
+		if result.State == compose.StateConfirmedCompletion {
+			finishErr := session.Finish(mail.HandoffOutcomeConfirmedOpened)
+			response := draftHandoffResult{
+				DraftRef: draft.Ref, AttemptID: session.AttemptID(), Opened: result.Opened,
+				MailApplication: result.MailApplication, Outcome: mail.HandoffOutcomeConfirmedOpened,
+				DispatchStarted: session.Dispatched(), SnapshotsRetained: finishErr != nil && preparation.Attempt.SnapshotsRetained,
+				DraftRetained: true,
+			}
+			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
+		}
+		if errors.As(handoffErr, &composeErr) && !composeErr.DispatchedToNative() && !composeErr.OutcomeUnknown() {
+			cleanupErr := session.CancelBeforeDispatch()
+			outcome := mail.HandoffOutcomeConfirmedFailed
+			if composeErr.State == compose.StateCanceledBeforeDispatch ||
+				errors.Is(handoffErr, context.Canceled) || errors.Is(handoffErr, context.DeadlineExceeded) {
+				outcome = mail.HandoffOutcomeCanceled
+			}
+			response := draftHandoffResult{
+				DraftRef: draft.Ref, AttemptID: session.AttemptID(), Outcome: outcome,
+				DispatchStarted: false, SnapshotsRetained: cleanupErr != nil && preparation.Attempt.SnapshotsRetained,
+				DraftRetained: true,
+			}
+			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, cleanupErr), stdout, stderr)
+		}
+		if !session.Dispatched() {
+			cleanupErr := session.CancelBeforeDispatch()
+			response := draftHandoffResult{
+				DraftRef: draft.Ref, AttemptID: session.AttemptID(), Outcome: mail.HandoffOutcomeCanceled,
+				DispatchStarted: false, SnapshotsRetained: false, DraftRetained: true,
+			}
+			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, cleanupErr), stdout, stderr)
+		}
+		if errors.As(handoffErr, &composeErr) && composeErr.OutcomeUnknown() {
+			finishErr := session.Finish(mail.HandoffOutcomeUnknown)
+			response := draftHandoffResult{
+				DraftRef: draft.Ref, AttemptID: session.AttemptID(), Outcome: mail.HandoffOutcomeUnknown,
+				DispatchStarted: true, SnapshotsRetained: preparation.Attempt.SnapshotsRetained, DraftRetained: true,
+			}
+			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
+		}
+		finishErr := session.Finish(mail.HandoffOutcomeConfirmedFailed)
+		response := draftHandoffResult{
+			DraftRef: draft.Ref, AttemptID: session.AttemptID(), Outcome: mail.HandoffOutcomeConfirmedFailed,
+			DispatchStarted: session.Dispatched(), SnapshotsRetained: finishErr != nil && preparation.Attempt.SnapshotsRetained, DraftRetained: true,
+		}
+		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
 	}
+	finishErr := session.Finish(mail.HandoffOutcomeConfirmedOpened)
 	response := draftHandoffResult{
-		DraftRef: draft.Ref, Opened: result.Opened, MailApplication: result.MailApplication,
-		DraftRetained: true,
+		DraftRef: draft.Ref, AttemptID: session.AttemptID(), Opened: result.Opened,
+		MailApplication: result.MailApplication, Outcome: mail.HandoffOutcomeConfirmedOpened,
+		DispatchStarted: session.Dispatched(), SnapshotsRetained: finishErr != nil, DraftRetained: true,
+	}
+	if finishErr != nil {
+		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, finishErr, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.handoff", responseData{DraftHandoff: &response})

@@ -197,7 +197,7 @@ func finishObservedSend(
 }
 
 func removeDraftClaims(root string, ref string) error {
-	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref))
+	return errors.Join(removeSendAttempt(root, ref), removeDraftSaveAttempt(root, ref), removeHandoffAttempt(root, ref))
 }
 
 func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendAttempt) (SendResult, error) {
@@ -243,6 +243,11 @@ func replaySendAttempt(lease *draftLease, root string, ref string, attempt SendA
 }
 
 func discardDraftFiles(lease *draftLease, root string, ref string) error {
+	if attempt, err := readHandoffAttempt(root, ref); err != nil {
+		return err
+	} else if attempt != nil {
+		return handoffRetryBlockedError(attempt.ID)
+	}
 	path, err := draftPath(root, ref)
 	if err != nil {
 		return err
