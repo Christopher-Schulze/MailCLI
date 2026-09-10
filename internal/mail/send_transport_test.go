@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -457,6 +458,53 @@ func TestReconcileDoesNotReplayUnknownSentAppend(t *testing.T) {
 	if errorCode(err) != "send_mirror_outcome_unknown" ||
 		reconciled.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
 		t.Fatalf("second ReconcileDraft() = %+v, error = %v, mirror calls = %d", reconciled, err, mirror.calls)
+	}
+}
+
+func TestReconcileDoesNotReplayJoinedUnknownSentAppend(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		joinErrors func(error, error) error
+	}{
+		{name: "unknown first", joinErrors: func(unknown, cleanup error) error {
+			return errors.Join(unknown, cleanup)
+		}},
+		{name: "cleanup first", joinErrors: func(unknown, cleanup error) error {
+			return errors.Join(cleanup, unknown)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			submitter, mirror := sendTransportStubs()
+			unknown := &transport.TransportError{
+				Code:    transport.CodeIMAPAppendOutcomeUnknown,
+				Message: "APPEND final response lost",
+			}
+			cleanup := errors.New("close mirror reader")
+			mirror.err = fmt.Errorf("mirror cleanup: %w", test.joinErrors(unknown, cleanup))
+			service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+			draft := createTransportDraft(t, service)
+
+			result, err := service.SendDraft(context.Background(), draft.Ref)
+			if errorCode(err) != transport.CodeIMAPAppendOutcomeUnknown ||
+				result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained || mirror.calls != 1 {
+				t.Fatalf("SendDraft() = %+v, error = %v, mirror calls = %d", result, err, mirror.calls)
+			}
+			if !strings.Contains(err.Error(), "APPEND final response lost") || !strings.Contains(err.Error(), "close mirror reader") {
+				t.Fatalf("joined mirror diagnostics = %v", err)
+			}
+			retained, getErr := service.GetDraft(draft.Ref)
+			if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil ||
+				!retained.SendAttempt.Transport.MirrorOutcomeUnknown {
+				t.Fatalf("retained attempt = %+v, error = %v, want unknown mirror outcome", retained.SendAttempt, getErr)
+			}
+
+			reconciled, reconcileErr := service.ReconcileDraft(context.Background(), draft.Ref)
+			if errorCode(reconcileErr) != "send_mirror_outcome_unknown" ||
+				reconciled.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
+				t.Fatalf("ReconcileDraft() = %+v, error = %v, mirror calls = %d, want replay block", reconciled, reconcileErr, mirror.calls)
+			}
+		})
 	}
 }
 
