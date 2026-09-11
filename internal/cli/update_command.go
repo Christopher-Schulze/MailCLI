@@ -805,7 +805,7 @@ func updateInstallerEnvironment(base []string, homeDirectory string, binaryPath 
 		name, _, _ := strings.Cut(value, "=")
 		switch name {
 		case "HOME", "PATH", "MAILCLI_BINARY_DESTINATION", "MAILCLI_SKILL_DESTINATION", "MAILCLI_INSTALL_LOCK_FD",
-			"BASH_ENV", "ENV", "CDPATH", "SHELLOPTS", "BASHOPTS", "GLOBIGNORE":
+			"MAILCLI_INSTALL_PACKAGE_ROOT", "BASH_ENV", "ENV", "CDPATH", "SHELLOPTS", "BASHOPTS", "GLOBIGNORE":
 			continue
 		}
 		if strings.HasPrefix(name, "BASH_FUNC_") || strings.HasPrefix(name, "DYLD_") ||
