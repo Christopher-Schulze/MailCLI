@@ -61,7 +61,7 @@ func validFlagAtom(flag string) bool {
 	return true
 }
 
-func parseFetchFlagsValue(value string) ([]string, error) {
+func parseFlagListValue(value string, allowWildcard bool) ([]string, error) {
 	value = strings.TrimSpace(value)
 	if len(value) < 2 || value[0] != '(' || value[len(value)-1] != ')' {
 		return nil, errors.New("FETCH FLAGS value is not a flag list")
@@ -71,7 +71,7 @@ func parseFetchFlagsValue(value string) ([]string, error) {
 		return nil, errors.New("FETCH FLAGS exceeds the flag count limit")
 	}
 	for _, flag := range flags {
-		if !validFlagAtom(flag) {
+		if !validFlagAtom(flag) && (!allowWildcard || flag != "\\*") {
 			return nil, errors.New("FETCH FLAGS contains an invalid flag atom")
 		}
 	}
@@ -101,73 +101,183 @@ func flagsMatchChanges(flags, addFlags, removeFlags []string) bool {
 	return true
 }
 
-func (c *Client) setFlagsAndVerify(ctx context.Context, sess *session, ev transport.MutationEvidence, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
-	var result flagCommandResult
-	for index, flags := range [][]string{addFlags, removeFlags} {
-		if len(flags) == 0 {
+func (c *Client) setFlagsAndVerify(ctx context.Context, sess *session, ev transport.MutationEvidence, addFlags, removeFlags []string, permissions flagPermissions) (transport.MutationEvidence, error) {
+	requested := flagChanges{add: addFlags, remove: removeFlags}
+	ev, needed, err := c.prepareFlagChanges(ctx, sess, ev, requested, &permissions)
+	if err != nil {
+		return ev, err
+	}
+	phases := [2]flagChanges{{add: needed.add}, {remove: needed.remove}}
+	if requested.touchesJunk() {
+		phases[0], phases[1] = phases[1], phases[0]
+	}
+	for _, phase := range phases {
+		if len(phase.add)+len(phase.remove) == 0 {
 			continue
 		}
-		if err := c.setDeadline(ctx, sess); err != nil {
-			if ev.Outcome == transport.MutationOutcomeNotStarted {
-				return ev, err
-			}
-			return unknownFlagResult(ev, err)
+		if unsupported := permissions.unsupported(phase); unsupported != "" {
+			return unsupportedFlagResult(ev, unsupported)
 		}
-		operation := "+FLAGS"
-		if index == 1 {
-			operation = "-FLAGS"
-		}
-		tag := sess.nextTag()
-		previouslyAttempted := ev.Outcome != transport.MutationOutcomeNotStarted
-		ev.Outcome = transport.MutationOutcomeAttempted
-		ev.FlagsSource = "STORE"
-		command := fmt.Sprintf("%s UID STORE %d %s (%s)", tag, ev.UID, operation, strings.Join(flags, " "))
-		if err := c.writeLine(sess, command); err != nil {
-			return unknownFlagResult(ev, err)
-		}
-		var err error
-		result, err = c.readFlagResult(ctx, sess, tag, ev.UID, ev.UIDValidity)
-		ev.ServerResponse = result.response
+		ev, err = c.performFlagChange(ctx, sess, ev, phase, &permissions)
 		if err != nil {
-			if !previouslyAttempted && (result.status == "NO" || result.status == "BAD") {
-				ev.Outcome = transport.MutationOutcomeRejected
-				return ev, err
-			}
-			return unknownFlagResult(ev, err)
-		}
-		if result.observation.missing {
-			ev.FlagsSource = "STORE"
-			return missingFlagResult(ev)
+			return ev, err
 		}
 	}
-	return c.verifyFlagResult(ctx, sess, ev, result.observation, addFlags, removeFlags)
+	return completeFlagResult(ev, addFlags, removeFlags)
 }
 
-func (c *Client) verifyFlagResult(ctx context.Context, sess *session, ev transport.MutationEvidence, observation flagObservation, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+func (c *Client) prepareFlagChanges(ctx context.Context, sess *session, ev transport.MutationEvidence, requested flagChanges, permissions *flagPermissions) (transport.MutationEvidence, flagChanges, error) {
+	needed := requested
+	if requested.touchesJunk() || permissions.unsupported(requested) != "" {
+		ev.FlagsSource = "FETCH"
+		result, err := c.fetchFlagResult(ctx, sess, ev.UID, ev.UIDValidity, permissions)
+		ev.ServerResponse = result.response
+		if err != nil {
+			ev, err = flagPreflightFailure(ev, err)
+			return ev, needed, err
+		}
+		ev = withFlagObservation(ev, result.observation)
+		if ev.FlagsState != transport.FlagObservationObserved {
+			code := transport.CodeIMAPResponseMalformed
+			if ev.FlagsState == transport.FlagObservationMissing {
+				code = transport.CodeIMAPMessageNotFound
+			}
+			ev, err = flagPreflightFailure(ev, &transport.TransportError{Code: code, Message: "target flags unavailable before STORE"})
+			return ev, needed, err
+		}
+		needed = requested.pending(ev.ActualFlags)
+	}
+	if unsupported := permissions.unsupported(needed); unsupported != "" {
+		updated, err := unsupportedFlagResult(ev, unsupported)
+		return updated, needed, err
+	}
+	return ev, needed, nil
+}
+
+func (c *Client) performFlagChange(ctx context.Context, sess *session, ev transport.MutationEvidence, phase flagChanges, permissions *flagPermissions) (transport.MutationEvidence, error) {
+	previouslyCompleted := ev.Outcome == transport.MutationOutcomePartial
+	result, err := c.storeFlagChange(ctx, sess, &ev, phase, permissions)
+	if err != nil {
+		if result.status == "NO" || result.status == "BAD" {
+			return c.rejectedFlagResult(ctx, sess, ev, previouslyCompleted, permissions, err)
+		}
+		if ev.Outcome == transport.MutationOutcomeNotStarted {
+			return flagPreflightFailure(ev, err)
+		}
+		if ev.Outcome == transport.MutationOutcomePartial {
+			return ev, &transport.MutationOutcomeError{Code: transport.CodeIMAPFlagsPartial, Evidence: ev, Err: err, Message: "a verified flag phase completed; the next phase was not dispatched"}
+		}
+		return unknownFlagResult(ev, err)
+	}
+	ev, err = c.verifyFlagResult(ctx, sess, ev, result.observation, phase.add, phase.remove, permissions)
+	if err != nil {
+		return ev, err
+	}
+	if unsupported := permissions.unsupported(phase); unsupported != "" {
+		ev.Outcome = transport.MutationOutcomeUnknown
+		return unsupportedFlagResult(ev, unsupported)
+	}
+	ev.Outcome = transport.MutationOutcomePartial
+	return ev, nil
+}
+
+func (c *Client) storeFlagChange(ctx context.Context, sess *session, ev *transport.MutationEvidence, phase flagChanges, permissions *flagPermissions) (flagCommandResult, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return flagCommandResult{}, err
+	}
+	operation, flags := "+FLAGS", phase.add
+	if len(phase.remove) > 0 {
+		operation, flags = "-FLAGS", phase.remove
+	}
+	tag := sess.nextTag()
+	ev.Outcome, ev.FlagsSource = transport.MutationOutcomeAttempted, "STORE"
+	ev.FlagsState, ev.ActualFlags = transport.FlagObservationUnverified, nil
+	command := fmt.Sprintf("%s UID STORE %d %s (%s)", tag, ev.UID, operation, strings.Join(flags, " "))
+	if err := c.writeLine(sess, command); err != nil {
+		return flagCommandResult{}, err
+	}
+	result, err := c.readFlagResult(ctx, sess, tag, ev.UID, ev.UIDValidity, permissions)
+	ev.ServerResponse = result.response
+	return result, err
+}
+
+func (c *Client) rejectedFlagResult(ctx context.Context, sess *session, ev transport.MutationEvidence, previouslyCompleted bool, permissions *flagPermissions, cause error) (transport.MutationEvidence, error) {
+	code := transport.CodeIMAPMutationFailed
+	ev.Outcome, ev.FlagsSource = transport.MutationOutcomeRejected, "FETCH"
+	if previouslyCompleted {
+		code, ev.Outcome = transport.CodeIMAPFlagsPartial, transport.MutationOutcomePartial
+	}
+	result, err := c.fetchFlagResult(ctx, sess, ev.UID, ev.UIDValidity, permissions)
+	if err == nil {
+		ev = withFlagObservation(ev, result.observation)
+	}
+	return ev, &transport.MutationOutcomeError{
+		Code: code, Evidence: ev, Err: errors.Join(cause, err),
+		Message: "IMAP STORE was rejected; inspect the retained flag state before another mutation",
+	}
+}
+
+func flagPreflightFailure(ev transport.MutationEvidence, cause error) (transport.MutationEvidence, error) {
+	code := transport.ErrorCode(cause)
+	if code == "" {
+		code = transport.CodeIMAPFetchFailed
+	}
+	return ev, &transport.MutationOutcomeError{Code: code, Evidence: ev, Err: cause, Message: "IMAP flag operation stopped before STORE"}
+}
+
+func unsupportedFlagResult(ev transport.MutationEvidence, flag string) (transport.MutationEvidence, error) {
+	return ev, &transport.MutationOutcomeError{
+		Code: transport.CodeIMAPFlagsUnsupported, Evidence: ev,
+		Message: fmt.Sprintf("IMAP flag %q cannot be changed permanently under the current PERMANENTFLAGS; inspect the retained state and mailbox permissions", flag),
+	}
+}
+
+func (c *Client) fetchFlagResult(ctx context.Context, sess *session, uid, uidvalidity uint32, permissions *flagPermissions) (flagCommandResult, error) {
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return flagCommandResult{}, err
+	}
+	tag := sess.nextTag()
+	if err := c.writeLine(sess, fmt.Sprintf("%s UID FETCH %d (UID FLAGS)", tag, uid)); err != nil {
+		return flagCommandResult{}, err
+	}
+	return c.readFlagResult(ctx, sess, tag, uid, uidvalidity, permissions)
+}
+
+func withFlagObservation(ev transport.MutationEvidence, observation flagObservation) transport.MutationEvidence {
+	ev.ActualFlags, ev.FlagsState = nil, transport.FlagObservationUnverified
+	if observation.missing || !observation.seenUID {
+		ev.FlagsState = transport.FlagObservationMissing
+	} else if observation.observed {
+		ev.ActualFlags = append([]string{}, observation.flags...)
+		ev.FlagsState = transport.FlagObservationObserved
+	}
+	return ev
+}
+
+func (c *Client) verifyFlagResult(ctx context.Context, sess *session, ev transport.MutationEvidence, observation flagObservation, addFlags, removeFlags []string, permissions *flagPermissions) (transport.MutationEvidence, error) {
 	ev.FlagsSource = "STORE"
+	if observation.missing {
+		return missingFlagResult(ev)
+	}
 	if !observation.observed {
 		ev.FlagsSource = "FETCH"
-		if err := c.setDeadline(ctx, sess); err != nil {
-			return unknownFlagResult(ev, err)
-		}
-		tag := sess.nextTag()
-		if err := c.writeLine(sess, fmt.Sprintf("%s UID FETCH %d (UID FLAGS)", tag, ev.UID)); err != nil {
-			return unknownFlagResult(ev, err)
-		}
-		result, err := c.readFlagResult(ctx, sess, tag, ev.UID, ev.UIDValidity)
+		result, err := c.fetchFlagResult(ctx, sess, ev.UID, ev.UIDValidity, permissions)
 		if err != nil {
 			return unknownFlagResult(ev, err)
 		}
 		observation = result.observation
-		if observation.missing || !observation.seenUID {
-			return missingFlagResult(ev)
-		}
 	}
-	if !observation.observed {
+	ev = withFlagObservation(ev, observation)
+	if ev.FlagsState == transport.FlagObservationMissing {
+		return missingFlagResult(ev)
+	}
+	if ev.FlagsState != transport.FlagObservationObserved {
 		return unknownFlagResult(ev, errors.New("target UID was returned without complete FLAGS proof"))
 	}
-	ev.ActualFlags = append([]string{}, observation.flags...)
-	ev.FlagsState = transport.FlagObservationObserved
+	return completeFlagResult(ev, addFlags, removeFlags)
+}
+
+func completeFlagResult(ev transport.MutationEvidence, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
 	if !flagsMatchChanges(ev.ActualFlags, addFlags, removeFlags) {
 		ev.Outcome = transport.MutationOutcomeObserved
 		return ev, &transport.MutationOutcomeError{
@@ -203,7 +313,7 @@ func missingFlagResult(ev transport.MutationEvidence) (transport.MutationEvidenc
 // Accept proof only after parsing the UID attribute, and consume subsequent
 // updates through tagged completion so an expunged or superseded observation
 // cannot be reported as current. Verification never sends another STORE.
-func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, uid, uidvalidity uint32) (flagCommandResult, error) {
+func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, uid, uidvalidity uint32, permissions *flagPermissions) (flagCommandResult, error) {
 	var result flagCommandResult
 	remaining := int64(maxFlagResponseBytes)
 	for range maxFlagResponseCount {
@@ -222,7 +332,7 @@ func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, 
 		if remaining < 0 {
 			break
 		}
-		if err := flagResponseValidity(line, tag, uidvalidity); err != nil {
+		if err := flagResponseValidity(line, tag, uidvalidity, permissions); err != nil {
 			sess.dirty = true
 			return result, err
 		}
@@ -246,21 +356,16 @@ func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, 
 	return result, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP flag verification exceeded its response budget"}
 }
 
-func flagResponseValidity(line, tag string, expected uint32) error {
-	fields := strings.Fields(line)
-	if len(fields) < 2 || (fields[0] != "*" && fields[0] != tag) {
-		return nil
+func flagResponseValidity(line, tag string, expected uint32, permissions *flagPermissions) error {
+	code, err := flagResponseCode(line, tag)
+	if err != nil {
+		return err
 	}
-	status := strings.ToUpper(fields[1])
-	if status == "BYE" {
-		return errors.New("IMAP server closed the selected mailbox session")
+	if err := permissions.observeCode(code); err != nil {
+		return err
 	}
-	if status != "OK" && status != "NO" && status != "BAD" {
-		return nil
-	}
-	code, present := bracketedResponseCode(line)
 	values := strings.Fields(code)
-	if !present || len(values) == 0 || !strings.EqualFold(values[0], "UIDVALIDITY") {
+	if len(values) == 0 || !strings.EqualFold(values[0], "UIDVALIDITY") {
 		return nil
 	}
 	if len(values) != 2 {

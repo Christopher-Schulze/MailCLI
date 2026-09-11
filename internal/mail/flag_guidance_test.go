@@ -27,3 +27,25 @@ func TestFlagUnknownCodeOutranksJoinedRejectionAndRollover(t *testing.T) {
 		})
 	}
 }
+
+func TestFlagFailuresRetainEffectCertaintyWithoutReplay(t *testing.T) {
+	for _, test := range []struct {
+		name, code, outcome string
+		effect              EffectCertainty
+	}{
+		{"unsupported before STORE", transport.CodeIMAPFlagsUnsupported, transport.MutationOutcomeNotStarted, EffectNone},
+		{"rejected first STORE", transport.CodeIMAPMutationFailed, transport.MutationOutcomeRejected, EffectNone},
+		{"missing before STORE", transport.CodeIMAPMessageNotFound, transport.MutationOutcomeNotStarted, EffectNone},
+		{"partial rejection", transport.CodeIMAPFlagsPartial, transport.MutationOutcomePartial, EffectPartial},
+		{"permissions revoked between phases", transport.CodeIMAPFlagsUnsupported, transport.MutationOutcomePartial, EffectPartial},
+		{"persistence unknown after STORE", transport.CodeIMAPFlagsUnsupported, transport.MutationOutcomeUnknown, EffectUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &transport.MutationOutcomeError{Code: test.code, Evidence: transport.MutationEvidence{Command: "STORE", Outcome: test.outcome, OperationID: "store_junk"}}
+			guidance := GuidanceForError("messages.mark", err)
+			if guidance.EffectCertainty != test.effect || guidance.ReplayAllowed || guidance.Retryability != RetryObserveRequired || guidance.Recovery.OperationID != "store_junk" {
+				t.Fatalf("guidance %+v; want effect %s without replay", guidance, test.effect)
+			}
+		})
+	}
+}
