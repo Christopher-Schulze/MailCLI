@@ -67,10 +67,19 @@ func TestRunReleaseInstallerCancellationRunsRollback(t *testing.T) {
 	t.Setenv("MAILCLI_TEST_ROLLBACK_FILE", rollbackPath)
 	t.Setenv("MAILCLI_TEST_PROCESS_FILE", processFile)
 
+	installationLock, err := acquireUpdateLock(context.Background(), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := installationLock.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- runReleaseInstaller(ctx, installerPath, filepath.Join(directory, "mailcli"), directory)
+		result <- runReleaseInstaller(ctx, installerPath, filepath.Join(directory, "mailcli"), directory, installationLock)
 	}()
 	waitForTestFile(t, readyPath)
 	processIDs := waitForTestProcessIDs(t, processFile, 1)

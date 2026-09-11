@@ -9,8 +9,13 @@ TEST_HOME="${TEST_ROOT}/home"
 BINARY_DESTINATION="${TEST_ROOT}/install/.local/bin/mailcli"
 SKILL_DESTINATION="${TEST_ROOT}/install/.agents/skills/mailcli"
 TRANSACTION_ROOT="${TEST_HOME}/Library/Application Support/MailCLI/install-transactions"
+LOCAL_INSTALL_PROCESS=""
 
 cleanup() {
+  if [[ -n "${LOCAL_INSTALL_PROCESS}" ]]; then
+    exec 9>&-
+    wait "${LOCAL_INSTALL_PROCESS}" || true
+  fi
   if [[ "${TEST_ROOT}" == *"/mailcli-local-install-test."* && -d "${TEST_ROOT}" ]]; then
     rm -rf "${TEST_ROOT}"
   fi
@@ -42,7 +47,38 @@ verify_install "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
 printf 'old binary\n' >"${BINARY_DESTINATION}"
 chmod 0755 "${BINARY_DESTINATION}"
 printf 'old skill\n' >"${SKILL_DESTINATION}/SKILL.md"
-install_local "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
+# Prove the real source wrapper reaches the shared installer and waits on the
+# updater's persistent lock before replacing either destination.
+WAIT_ENV="${TEST_ROOT}/record-installer-entry.sh"
+# shellcheck disable=SC2016
+printf '%s\n' \
+  'if [[ "$0" == */scripts/release/install.sh ]]; then' \
+  '  : > "$MAILCLI_TEST_INSTALLER_ENTERED"' \
+  'fi' >"${WAIT_ENV}"
+exec 9<>"${TEST_HOME}/Library/Application Support/MailCLI/update.lock"
+/usr/bin/lockf -s -t 0 9
+(
+  exec 9>&-
+  BASH_ENV="${WAIT_ENV}" MAILCLI_TEST_INSTALLER_ENTERED="${TEST_ROOT}/installer-entered" \
+    install_local "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
+) &
+LOCAL_INSTALL_PROCESS=$!
+WAIT_DEADLINE=$((SECONDS + 30))
+while [[ ! -f "${TEST_ROOT}/installer-entered" ]]; do
+  if ((SECONDS >= WAIT_DEADLINE)) || ! kill -0 "${LOCAL_INSTALL_PROCESS}" 2>/dev/null; then
+    printf 'Local installer did not reach the shared installation boundary\n' >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+sleep 0.2
+kill -0 "${LOCAL_INSTALL_PROCESS}"
+[[ "$(<"${BINARY_DESTINATION}")" == 'old binary' ]]
+[[ "$(<"${SKILL_DESTINATION}/SKILL.md")" == 'old skill' ]]
+[[ -z "$(find "${TRANSACTION_ROOT}" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+exec 9>&-
+wait "${LOCAL_INSTALL_PROCESS}"
+LOCAL_INSTALL_PROCESS=""
 verify_install "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
 
 cp "${BINARY_DESTINATION}" "${TEST_ROOT}/binary-before-backup-refusal"

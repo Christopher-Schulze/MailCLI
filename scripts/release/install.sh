@@ -16,7 +16,11 @@ BINARY_DESTINATION="${MAILCLI_BINARY_DESTINATION:-${HOME}/.local/bin/mailcli}"
 SKILL_DESTINATION="${MAILCLI_SKILL_DESTINATION:-${HOME}/.agents/skills/mailcli}"
 BINARY_BACKUP="${BINARY_DESTINATION}.mailcli-backup"
 SKILL_BACKUP="${SKILL_DESTINATION}.mailcli-backup"
-INSTALL_STATE_ROOT="${HOME}/Library/Application Support/MailCLI/install-transactions"
+INSTALL_LOCK_ROOT="${HOME}/Library/Application Support/MailCLI"
+INSTALL_LOCK_PATH="${INSTALL_LOCK_ROOT}/update.lock"
+INSTALL_STATE_ROOT="${INSTALL_LOCK_ROOT}/install-transactions"
+INSTALL_LOCK_ROOT_IDENTITY=""
+INSTALL_STATE_ROOT_IDENTITY=""
 
 TRANSACTION_DIRECTORY=""
 TRANSACTION_MANIFEST=""
@@ -28,6 +32,8 @@ BINARY_STAGE_IDENTITY=""
 SKILL_STAGE_IDENTITY=""
 BINARY_HAD_DESTINATION=0
 SKILL_HAD_DESTINATION=0
+BINARY_ORIGINAL_IDENTITY=""
+SKILL_ORIGINAL_IDENTITY=""
 TRANSACTION_STATE=""
 
 validate_destination() {
@@ -118,6 +124,57 @@ path_identity() {
   stat -f '%d:%i' "$1"
 }
 
+verify_install_lock() {
+  if ! validate_existing_directory_chain "${INSTALL_LOCK_ROOT}" ||
+    [[ "$(path_identity "${INSTALL_LOCK_ROOT}")" != "${INSTALL_LOCK_ROOT_IDENTITY}" ||
+      ! -f "${INSTALL_LOCK_PATH}" || -L "${INSTALL_LOCK_PATH}" ||
+      ! -O "${INSTALL_LOCK_PATH}" ||
+      "$(path_identity "${INSTALL_LOCK_PATH}")" != "$(stat -f '%d:%i' <&9)" ||
+      "$(stat -f '%l' <&9)" != 1 ]]; then
+    printf 'Installer lock identity changed; retaining transaction evidence\n' >&2
+    return 1
+  fi
+  if [[ -n "${INSTALL_STATE_ROOT_IDENTITY}" ]] &&
+    { ! directory_is_safe "${INSTALL_STATE_ROOT}" ||
+      [[ "$(path_identity "${INSTALL_STATE_ROOT}")" != "${INSTALL_STATE_ROOT_IDENTITY}" ]]; }; then
+    printf 'Installer transaction directory identity changed; retaining evidence\n' >&2
+    return 1
+  fi
+}
+
+acquire_install_lock() {
+  ensure_directory_chain "${INSTALL_LOCK_ROOT}" || return 1
+  [[ -O "${INSTALL_LOCK_ROOT}" ]] || return 1
+  chmod 0700 "${INSTALL_LOCK_ROOT}" || return 1
+  INSTALL_LOCK_ROOT_IDENTITY="$(path_identity "${INSTALL_LOCK_ROOT}")"
+  if [[ -n "${MAILCLI_INSTALL_LOCK_FD:-}" ]]; then
+    if [[ "${MAILCLI_INSTALL_LOCK_FD}" != 3 ]] || ! exec 9<&3; then
+      printf 'Installer inherited lock descriptor is invalid\n' >&2
+      return 1
+    fi
+  else
+    if ! path_present "${INSTALL_LOCK_PATH}"; then
+      (umask 077; set -C; : >"${INSTALL_LOCK_PATH}") 2>/dev/null ||
+        [[ -f "${INSTALL_LOCK_PATH}" ]] || return 1
+    fi
+    if [[ ! -f "${INSTALL_LOCK_PATH}" || -L "${INSTALL_LOCK_PATH}" ||
+      ! -O "${INSTALL_LOCK_PATH}" ]]; then
+      printf 'Installer lock must be an owned regular file\n' >&2
+      return 1
+    fi
+    exec 9<>"${INSTALL_LOCK_PATH}" || return 1
+  fi
+  verify_install_lock || return 1
+  chmod 0600 "${INSTALL_LOCK_PATH}" || return 1
+  # Descriptor mode retains the inode and lock until its last owner closes it.
+  # An inherited updater descriptor shares the existing flock, avoiding deadlock.
+  if ! /usr/bin/lockf -s -t 30 9; then
+    printf 'Another MailCLI installation holds the lock; wait exceeded 30 seconds\n' >&2
+    return 1
+  fi
+  verify_install_lock
+}
+
 manifest_path_is_safe() {
   local path="$1"
   [[ "${path}" == /* && "${path}" != "/" ]] || return 1
@@ -128,6 +185,7 @@ manifest_path_is_safe() {
 manifest_write() {
   local state="$1"
   local temporary="${TRANSACTION_DIRECTORY}/manifest.tmp"
+  verify_install_lock || return 1
   {
     printf 'mailcli-install-v1\n'
     printf 'state\t%s\n' "${state}"
@@ -139,6 +197,8 @@ manifest_write() {
     printf 'skill_stage_identity\t%s\n' "${SKILL_STAGE_IDENTITY}"
     printf 'binary_had_destination\t%s\n' "${BINARY_HAD_DESTINATION}"
     printf 'skill_had_destination\t%s\n' "${SKILL_HAD_DESTINATION}"
+    printf 'binary_original_identity\t%s\n' "${BINARY_ORIGINAL_IDENTITY}"
+    printf 'skill_original_identity\t%s\n' "${SKILL_ORIGINAL_IDENTITY}"
   } >"${temporary}" || return 1
   chmod 0600 "${temporary}" || return 1
   mv -f "${temporary}" "${TRANSACTION_MANIFEST}" || return 1
@@ -158,6 +218,8 @@ read_manifest() {
   local have_skill_stage_identity=0
   local have_binary_had=0
   local have_skill_had=0
+  local have_binary_original=0
+  local have_skill_original=0
   TRANSACTION_DIRECTORY="${transaction}"
   TRANSACTION_MANIFEST="${transaction}/manifest"
   BINARY_STAGE=""
@@ -166,6 +228,8 @@ read_manifest() {
   SKILL_STAGE_IDENTITY=""
   BINARY_HAD_DESTINATION=0
   SKILL_HAD_DESTINATION=0
+  BINARY_ORIGINAL_IDENTITY=""
+  SKILL_ORIGINAL_IDENTITY=""
   TRANSACTION_STATE=""
   [[ -f "${TRANSACTION_MANIFEST}" && ! -L "${TRANSACTION_MANIFEST}" ]] || return 1
   IFS= read -r header <"${TRANSACTION_MANIFEST}" || return 1
@@ -221,6 +285,16 @@ read_manifest() {
         SKILL_HAD_DESTINATION="${value}"
         have_skill_had=1
         ;;
+      binary_original_identity)
+        [[ "${have_binary_original}" -eq 0 ]] || return 1
+        BINARY_ORIGINAL_IDENTITY="${value}"
+        have_binary_original=1
+        ;;
+      skill_original_identity)
+        [[ "${have_skill_original}" -eq 0 ]] || return 1
+        SKILL_ORIGINAL_IDENTITY="${value}"
+        have_skill_original=1
+        ;;
       *)
         return 1
         ;;
@@ -257,6 +331,8 @@ validate_transaction() {
     "${TRANSACTION_STATE}" == "committed" ]] || return 1
   [[ "${BINARY_HAD_DESTINATION}" == 0 || "${BINARY_HAD_DESTINATION}" == 1 ]] || return 1
   [[ "${SKILL_HAD_DESTINATION}" == 0 || "${SKILL_HAD_DESTINATION}" == 1 ]] || return 1
+  [[ -z "${BINARY_ORIGINAL_IDENTITY}" || "${BINARY_ORIGINAL_IDENTITY}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  [[ -z "${SKILL_ORIGINAL_IDENTITY}" || "${SKILL_ORIGINAL_IDENTITY}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   manifest_path_is_safe "${BINARY_DESTINATION}" || return 1
   manifest_path_is_safe "${SKILL_DESTINATION}" || return 1
   manifest_path_is_safe "${BINARY_STAGE}" || return 1
@@ -269,6 +345,8 @@ validate_transaction() {
   paths_overlap "${BINARY_DESTINATION}" "${SKILL_DESTINATION}" && return 1
   paths_overlap "${BINARY_DESTINATION}" "${INSTALL_STATE_ROOT}" && return 1
   paths_overlap "${SKILL_DESTINATION}" "${INSTALL_STATE_ROOT}" && return 1
+  paths_overlap "${BINARY_DESTINATION}" "${INSTALL_LOCK_PATH}" && return 1
+  paths_overlap "${SKILL_DESTINATION}" "${INSTALL_LOCK_PATH}" && return 1
   [[ "${BINARY_STAGE}" == "${binary_parent}/.mailcli-binary-stage.${transaction_name}" ]] || return 1
   [[ "${SKILL_STAGE}" == "${skill_parent}/.mailcli-skill-stage.${transaction_name}" ]] || return 1
   if [[ -z "${BINARY_STAGE_IDENTITY}" ]]; then
@@ -289,12 +367,16 @@ component_matches_snapshot() {
   local component="$1"
   if [[ "${component}" == "binary" ]]; then
     [[ -f "${BINARY_DESTINATION}" && ! -L "${BINARY_DESTINATION}" &&
+      -n "${BINARY_STAGE_IDENTITY}" &&
+      "$(path_identity "${BINARY_DESTINATION}")" == "${BINARY_STAGE_IDENTITY}" &&
       -x "${BINARY_DESTINATION}" && -f "${BINARY_SNAPSHOT}" &&
       ! -L "${BINARY_SNAPSHOT}" ]] || return 1
     cmp -s "${BINARY_SNAPSHOT}" "${BINARY_DESTINATION}"
     return
   fi
   [[ -d "${SKILL_DESTINATION}" && ! -L "${SKILL_DESTINATION}" &&
+    -n "${SKILL_STAGE_IDENTITY}" &&
+    "$(path_identity "${SKILL_DESTINATION}")" == "${SKILL_STAGE_IDENTITY}" &&
     -d "${SKILL_SNAPSHOT}" && ! -L "${SKILL_SNAPSHOT}" ]] || return 1
   if find "${SKILL_DESTINATION}" -type l -print -quit | grep -q .; then
     return 1
@@ -324,6 +406,7 @@ component_stage_matches_snapshot() {
 
 remove_component_destination() {
   local component="$1"
+  verify_install_lock || return 1
   if [[ "${component}" == "binary" ]]; then
     rm -f "${BINARY_DESTINATION}"
   else
@@ -335,6 +418,7 @@ remove_component_destination() {
 remove_component_stage() {
   local component="$1"
   local stage
+  verify_install_lock || return 1
   if [[ "${component}" == "binary" ]]; then
     stage="${BINARY_STAGE}"
     if path_present "${stage}"; then
@@ -356,17 +440,31 @@ remove_component_stage() {
   sync_filesystem
 }
 
+component_original_matches() {
+  local component="$1"
+  local path="$2"
+  [[ ! -L "${path}" ]] || return 1
+  if [[ "${component}" == "binary" ]]; then
+    [[ -f "${path}" && -n "${BINARY_ORIGINAL_IDENTITY}" &&
+      "$(path_identity "${path}")" == "${BINARY_ORIGINAL_IDENTITY}" ]]
+  else
+    [[ -d "${path}" && -n "${SKILL_ORIGINAL_IDENTITY}" &&
+      "$(path_identity "${path}")" == "${SKILL_ORIGINAL_IDENTITY}" ]]
+  fi
+}
+
 restore_component_backup() {
   local component="$1"
   local backup
+  verify_install_lock || return 1
   if [[ "${component}" == "binary" ]]; then
     backup="${BINARY_BACKUP}"
-    [[ -f "${backup}" && ! -L "${backup}" ]] || return 1
+    component_original_matches binary "${backup}" || return 1
     mv "${backup}" "${BINARY_DESTINATION}"
     [[ -f "${BINARY_DESTINATION}" && ! -L "${BINARY_DESTINATION}" ]] || return 1
   else
     backup="${SKILL_BACKUP}"
-    [[ -d "${backup}" && ! -L "${backup}" ]] || return 1
+    component_original_matches skill "${backup}" || return 1
     if find "${backup}" -type l -print -quit | grep -q .; then
       return 1
     fi
@@ -380,21 +478,18 @@ rollback_component() {
   local component="$1"
   local destination
   local backup
-  local stage
   local had_destination
   if [[ "${component}" == "binary" ]]; then
     destination="${BINARY_DESTINATION}"
     backup="${BINARY_BACKUP}"
-    stage="${BINARY_STAGE}"
     had_destination="${BINARY_HAD_DESTINATION}"
   else
     destination="${SKILL_DESTINATION}"
     backup="${SKILL_BACKUP}"
-    stage="${SKILL_STAGE}"
     had_destination="${SKILL_HAD_DESTINATION}"
   fi
   if path_present "${backup}"; then
-    [[ ! -L "${backup}" ]] || return 1
+    component_original_matches "${component}" "${backup}" || return 1
     if path_present "${destination}"; then
       component_matches_snapshot "${component}" || return 1
       remove_component_destination "${component}" || return 1
@@ -402,13 +497,8 @@ rollback_component() {
     restore_component_backup "${component}" || return 1
   elif [[ "${had_destination}" -eq 1 ]]; then
     if path_present "${destination}"; then
-      [[ ! -L "${destination}" ]] || return 1
-      if path_present "${stage}"; then
-        :
-      else
-        return 1
-      fi
-    elif ! path_present "${stage}"; then
+      component_original_matches "${component}" "${destination}" || return 1
+    else
       return 1
     fi
   elif path_present "${destination}"; then
@@ -419,6 +509,7 @@ rollback_component() {
 }
 
 cleanup_transaction_directory() {
+  verify_install_lock || return 1
   rm -f "${TRANSACTION_DIRECTORY}/manifest" "${TRANSACTION_DIRECTORY}/manifest.tmp" \
     "${BINARY_SNAPSHOT}"
   if path_present "${SKILL_SNAPSHOT}"; then
@@ -447,8 +538,15 @@ rollback_transaction() {
 }
 
 finalize_committed_transaction() {
+  verify_install_lock || return 1
   component_matches_snapshot binary || return 1
   component_matches_snapshot skill || return 1
+  if path_present "${BINARY_BACKUP}"; then
+    component_original_matches binary "${BINARY_BACKUP}" || return 1
+  fi
+  if path_present "${SKILL_BACKUP}"; then
+    component_original_matches skill "${SKILL_BACKUP}" || return 1
+  fi
   if path_present "${BINARY_BACKUP}"; then
     [[ -f "${BINARY_BACKUP}" && ! -L "${BINARY_BACKUP}" ]] || return 1
     rm -f "${BINARY_BACKUP}"
@@ -468,6 +566,7 @@ finalize_committed_transaction() {
 
 recover_transaction() {
   local transaction="$1"
+  verify_install_lock || return 1
   if ! read_manifest "${transaction}" || ! validate_transaction; then
     printf 'Refusing unsafe or invalid installer transaction: %s\n' "${transaction}" >&2
     return 1
@@ -522,7 +621,7 @@ if [[ "${INSTALL_STATE_ROOT}" == */../* || "${INSTALL_STATE_ROOT}" == */.. ]]; t
   printf 'Installer state path must not contain parent traversal\n' >&2
   exit 1
 fi
-INSTALL_PATHS=("${BINARY_DESTINATION}" "${SKILL_DESTINATION}" "${BINARY_BACKUP}" "${SKILL_BACKUP}" "${INSTALL_STATE_ROOT}")
+INSTALL_PATHS=("${BINARY_DESTINATION}" "${SKILL_DESTINATION}" "${BINARY_BACKUP}" "${SKILL_BACKUP}" "${INSTALL_STATE_ROOT}" "${INSTALL_LOCK_PATH}")
 for ((LEFT_INDEX = 0; LEFT_INDEX < ${#INSTALL_PATHS[@]}; LEFT_INDEX++)); do
   for ((RIGHT_INDEX = LEFT_INDEX + 1; RIGHT_INDEX < ${#INSTALL_PATHS[@]}; RIGHT_INDEX++)); do
     if paths_overlap "${INSTALL_PATHS[LEFT_INDEX]}" "${INSTALL_PATHS[RIGHT_INDEX]}"; then
@@ -532,14 +631,19 @@ for ((LEFT_INDEX = 0; LEFT_INDEX < ${#INSTALL_PATHS[@]}; LEFT_INDEX++)); do
   done
 done
 
-if ! ensure_directory_chain "${INSTALL_STATE_ROOT}"; then
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! acquire_install_lock || ! ensure_directory_chain "${INSTALL_STATE_ROOT}"; then
   exit 1
 fi
+INSTALL_STATE_ROOT_IDENTITY="$(path_identity "${INSTALL_STATE_ROOT}")"
 if ! recover_transactions; then
   exit 1
 fi
 BINARY_HAD_DESTINATION=0
 SKILL_HAD_DESTINATION=0
+BINARY_ORIGINAL_IDENTITY=""
+SKILL_ORIGINAL_IDENTITY=""
 TRANSACTION_STATE=""
 
 if [[ ! -f "${SOURCE_BINARY}" || -L "${SOURCE_BINARY}" || ! -x "${SOURCE_BINARY}" ]]; then
@@ -579,6 +683,7 @@ if path_present "${BINARY_DESTINATION}"; then
     exit 1
   }
   BINARY_HAD_DESTINATION=1
+  BINARY_ORIGINAL_IDENTITY="$(path_identity "${BINARY_DESTINATION}")"
 fi
 if path_present "${SKILL_DESTINATION}"; then
   [[ -d "${SKILL_DESTINATION}" && ! -L "${SKILL_DESTINATION}" ]] || {
@@ -590,13 +695,16 @@ if path_present "${SKILL_DESTINATION}"; then
     exit 1
   fi
   SKILL_HAD_DESTINATION=1
+  SKILL_ORIGINAL_IDENTITY="$(path_identity "${SKILL_DESTINATION}")"
 fi
 
 verify_install_parents() {
+  verify_install_lock || return 1
   validate_existing_directory_chain "${BINARY_PARENT}" || return 1
   validate_existing_directory_chain "${SKILL_PARENT}" || return 1
 }
 
+verify_install_lock
 TRANSACTION_DIRECTORY="$(mktemp -d "${INSTALL_STATE_ROOT}/txn.XXXXXX")"
 chmod 0700 "${TRANSACTION_DIRECTORY}"
 TRANSACTION_MANIFEST="${TRANSACTION_DIRECTORY}/manifest"
@@ -610,6 +718,9 @@ INSTALL_COMPLETE=0
 rollback_install() {
   local status=$?
   set +e
+  if ! verify_install_lock; then
+    exit 1
+  fi
   if [[ "${INSTALL_COMPLETE}" -ne 1 && -n "${TRANSACTION_DIRECTORY}" &&
     -f "${TRANSACTION_MANIFEST}" ]]; then
     if [[ "${TRANSACTION_STATE}" == "committed" ]]; then
@@ -663,6 +774,7 @@ manifest_write prepared
 manifest_write binary_backup_pending
 verify_install_parents
 if [[ "${BINARY_HAD_DESTINATION}" -eq 1 ]]; then
+  component_original_matches binary "${BINARY_DESTINATION}"
   mv "${BINARY_DESTINATION}" "${BINARY_BACKUP}"
 fi
 sync_filesystem
@@ -671,6 +783,7 @@ manifest_write binary_backed_up
 manifest_write skill_backup_pending
 verify_install_parents
 if [[ "${SKILL_HAD_DESTINATION}" -eq 1 ]]; then
+  component_original_matches skill "${SKILL_DESTINATION}"
   mv "${SKILL_DESTINATION}" "${SKILL_BACKUP}"
 fi
 sync_filesystem

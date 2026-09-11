@@ -113,7 +113,7 @@ type updateEnvironment struct {
 	operatingSystem    string
 	architecture       string
 	verifyPackage      func(context.Context, string, string) error
-	installPackage     func(context.Context, string, string, string) error
+	installPackage     func(context.Context, string, string, string, *os.File) error
 	verifyInstallation func(context.Context, string, string) error
 	urlPolicy          updateURLPolicy
 	releasePublicKey   ed25519.PublicKey
@@ -219,11 +219,13 @@ func performUpdate(
 			"update_unsupported_platform", "self-update requires darwin/arm64",
 		)
 	}
-	releaseLock, err := acquireUpdateLock(ctx, environment.homeDirectory)
+	installationLock, err := acquireUpdateLock(ctx, environment.homeDirectory)
 	if err != nil {
 		return updateResult{}, err
 	}
-	defer func() { resultErr = errors.Join(resultErr, releaseLock()) }()
+	defer func() {
+		resultErr = errors.Join(resultErr, validateUpdateLock(installationLock), installationLock.Close())
+	}()
 	var release updateRelease
 	if err := reporter.step("Checking for updates", func() error {
 		var fetchErr error
@@ -243,7 +245,7 @@ func performUpdate(
 	if comparison >= 0 {
 		return result, nil
 	}
-	if err := downloadAndInstallUpdate(ctx, environment, reporter, release, latestVersion); err != nil {
+	if err := downloadAndInstallUpdate(ctx, environment, reporter, release, latestVersion, installationLock); err != nil {
 		return updateResult{}, err
 	}
 	result.Updated = true
@@ -319,6 +321,7 @@ func downloadAndInstallUpdate(
 	reporter *updateReporter,
 	release updateRelease,
 	latestVersion string,
+	installationLock *os.File,
 ) error {
 	archiveName := fmt.Sprintf("mailcli_%s_darwin_arm64.tar.gz", latestVersion)
 	archiveURL, checksumURL, signatureURL, err := releaseAssetURLs(release.Assets, archiveName)
@@ -362,7 +365,7 @@ func downloadAndInstallUpdate(
 	}); err != nil {
 		return err
 	}
-	return installVerifiedArchive(ctx, environment, reporter, archive, latestVersion)
+	return installVerifiedArchive(ctx, environment, reporter, archive, latestVersion, installationLock)
 }
 
 func validateUpdateURL(value string, allowInsecure bool) error {
@@ -393,7 +396,7 @@ func sanitizeUpdateRequestError(err error) error {
 	return errors.New("release request failed")
 }
 
-func acquireUpdateLock(ctx context.Context, homeDirectory string) (func() error, error) {
+func acquireUpdateLock(ctx context.Context, homeDirectory string) (*os.File, error) {
 	if !filepath.IsAbs(homeDirectory) {
 		return nil, updateFailure("update_lock_failed", "home directory must be absolute")
 	}
@@ -417,7 +420,7 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (func() error,
 		return nil, updateFailure("update_lock_failed", "secure update state directory: %v", err)
 	}
 	lockPath := filepath.Join(stateRoot, "update.lock")
-	fileDescriptor, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	fileDescriptor, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, updateFailure("update_lock_failed", "open update lock: %v", err)
 	}
@@ -426,27 +429,57 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (func() error,
 		_ = unix.Close(fileDescriptor)
 		return nil, updateFailure("update_lock_failed", "open update lock: invalid file descriptor")
 	}
+	if err := validateUpdateLock(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
 	if err := file.Chmod(0o600); err != nil {
 		return nil, errors.Join(updateFailure("update_lock_failed", "secure update lock: %v", err), file.Close())
 	}
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(updateFailure("update_busy", "another mailcli installation may be running"), err, file.Close())
+		}
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return func() error {
-				return errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close())
-			}, nil
+			currentRoot, rootErr := os.Lstat(stateRoot)
+			if rootErr != nil || !os.SameFile(stateInfo, currentRoot) {
+				return nil, errors.Join(updateFailure("update_lock_failed", "update state directory changed while waiting"), file.Close())
+			}
+			if err := validateUpdateLock(file); err != nil {
+				return nil, errors.Join(err, file.Close())
+			}
+			return file, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, errors.Join(updateFailure("update_lock_failed", "lock update state: %v", err), file.Close())
 		}
 		select {
 		case <-ctx.Done():
-			return nil, errors.Join(updateFailure("update_busy", "another mailcli update is already running"), file.Close())
+			return nil, errors.Join(updateFailure("update_busy", "another mailcli installation is already running"), ctx.Err(), file.Close())
 		case <-ticker.C:
 		}
 	}
+}
+
+func validateUpdateLock(file *os.File) error {
+	if file == nil {
+		return updateFailure("update_lock_failed", "installation lock is missing")
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return updateFailure("update_lock_failed", "installation lock is not a regular file")
+	}
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || metadata.Nlink != 1 || metadata.Uid != uint32(os.Geteuid()) {
+		return updateFailure("update_lock_failed", "installation lock has unsafe ownership or links")
+	}
+	current, err := os.Lstat(file.Name())
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+		return updateFailure("update_lock_failed", "installation lock path changed")
+	}
+	return nil
 }
 
 func releaseAssetURLs(assets []updateAsset, archiveName string) (string, string, string, error) {
@@ -577,6 +610,7 @@ func installVerifiedArchive(
 	reporter *updateReporter,
 	archive []byte,
 	latestVersion string,
+	installationLock *os.File,
 ) (resultErr error) {
 	temporaryRoot, err := os.MkdirTemp("", "mailcli-update-*")
 	if err != nil {
@@ -600,7 +634,7 @@ func installVerifiedArchive(
 	}
 	installerPath := filepath.Join(packageRoot, "install.sh")
 	if err := reporter.step("Installing mailcli "+latestVersion, func() error {
-		return environment.installPackage(ctx, installerPath, environment.executablePath, environment.homeDirectory)
+		return environment.installPackage(ctx, installerPath, environment.executablePath, environment.homeDirectory, installationLock)
 	}); err != nil {
 		return updateFailure("update_install_failed", "install release: %v", err)
 	}
@@ -744,13 +778,18 @@ func runReleaseInstaller(
 	installerPath string,
 	binaryPath string,
 	homeDirectory string,
+	installationLock *os.File,
 ) error {
+	if err := validateUpdateLock(installationLock); err != nil {
+		return err
+	}
 	info, err := os.Stat(installerPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("release installer is missing or invalid")
 	}
 	command := exec.CommandContext(ctx, "/bin/bash", installerPath)
 	command.Env = updateInstallerEnvironment(os.Environ(), homeDirectory, binaryPath)
+	command.ExtraFiles = []*os.File{installationLock}
 	var output boundedUpdateOutput
 	command.Stdout = &output
 	command.Stderr = &output
@@ -765,7 +804,7 @@ func updateInstallerEnvironment(base []string, homeDirectory string, binaryPath 
 	for _, value := range base {
 		name, _, _ := strings.Cut(value, "=")
 		switch name {
-		case "HOME", "PATH", "MAILCLI_BINARY_DESTINATION", "MAILCLI_SKILL_DESTINATION",
+		case "HOME", "PATH", "MAILCLI_BINARY_DESTINATION", "MAILCLI_SKILL_DESTINATION", "MAILCLI_INSTALL_LOCK_FD",
 			"BASH_ENV", "ENV", "CDPATH", "SHELLOPTS", "BASHOPTS", "GLOBIGNORE":
 			continue
 		}
@@ -780,6 +819,7 @@ func updateInstallerEnvironment(base []string, homeDirectory string, binaryPath 
 		"HOME="+homeDirectory,
 		"PATH=/usr/bin:/bin",
 		"MAILCLI_BINARY_DESTINATION="+binaryPath,
+		"MAILCLI_INSTALL_LOCK_FD=3",
 	)
 }
 
