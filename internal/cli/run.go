@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,6 +89,7 @@ type errorData struct {
 	Message               string                      `json:"message"`
 	Guidance              *mail.OperationGuidance     `json:"guidance"`
 	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
+	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
@@ -101,7 +101,18 @@ func newErrorData(command string, data responseData, err error) *errorData {
 			Args: []string{"--ref", conflict.Ref, "--view", "full", "--json"},
 		}
 	}
-	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance, DraftRevisionConflict: conflict}
+	var editor *draftEditorError
+	var editorEvidence *draftEditorEvidence
+	if errors.As(err, &editor) {
+		editorEvidence = &editor.evidence
+		guidance.ReplayAllowed, guidance.Retryability = false, mail.RetryObserveRequired
+		guidance.Recovery = mail.RecoveryGuidance{Action: mail.RecoveryInspect, Command: "drafts.inspect",
+			Args: []string{"--ref", editor.evidence.Ref, "--view", "full", "--json"}}
+		if !editor.updateAttempted {
+			guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectNone
+		}
+	}
+	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance, DraftRevisionConflict: conflict, DraftEditor: editorEvidence}
 }
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
@@ -337,7 +348,7 @@ func runJSONCommand(
 	stderr io.Writer,
 ) int {
 	commandOutput := countingWriter{writer: stdout}
-	var commandError bytes.Buffer
+	commandError := commandDiagnosticBuffer{processOutput: stderr}
 	code := runCommand(ctx, mailService, args, &commandOutput, &commandError)
 	if code == 0 || commandOutput.written > 0 {
 		if _, err := io.Copy(stderr, &commandError); err != nil {

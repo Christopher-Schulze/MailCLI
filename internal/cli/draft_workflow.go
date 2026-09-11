@@ -305,7 +305,8 @@ func runDraftEdit(
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
 	input := draftInputFromStored(draft)
-	updated, err := editDraftInput(ctx, service, draft.Ref, draft.Revision, input, *editor, editorArgs)
+	streams := draftEditorStreams{stdin: os.Stdin, stdout: stdout, stderr: stderr, jsonOutput: *jsonOutput}
+	updated, err := editDraftInput(ctx, service, draft.Ref, draft.Revision, input, *editor, editorArgs, streams)
 	if err != nil {
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -320,7 +321,8 @@ func editDraftInput(
 	input mail.DraftInput,
 	editor string,
 	editorArgs []string,
-) (mail.Draft, error) {
+	streams draftEditorStreams,
+) (updated mail.Draft, resultErr error) {
 	directory, err := os.MkdirTemp("", "mailcli-draft-edit-")
 	if err != nil {
 		return mail.Draft{}, fmt.Errorf("create secure draft editor directory: %w", err)
@@ -341,11 +343,21 @@ func editDraftInput(
 	}
 	arguments = append(arguments, path)
 	process := exec.CommandContext(ctx, command, arguments...)
-	process.Stdin = os.Stdin
-	process.Stdout = os.Stdout
-	process.Stderr = os.Stderr
-	if err := runOwnedProcess(process, 2*time.Second); err != nil {
-		return mail.Draft{}, &commandError{code: "editor_failed", message: "draft editor failed: " + err.Error()}
+	updateAttempted := false
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		retainCandidate = true
+		var conflict *mail.DraftRevisionConflict
+		if errors.As(resultErr, &conflict) {
+			conflict.CandidatePath = path
+			return
+		}
+		resultErr = newDraftEditorError(resultErr, ref, expectedRevision, path, process.ProcessState, updateAttempted)
+	}()
+	if err := runDraftEditor(ctx, process, streams); err != nil {
+		return mail.Draft{}, err
 	}
 	edited, err := readDraftInput(path)
 	if err != nil {
@@ -353,15 +365,10 @@ func editDraftInput(
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
 	defer cancel()
-	updated, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{
+	updateAttempted = true
+	return service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{
 		Ref: ref, ExpectedRevision: expectedRevision, Input: edited,
 	})
-	var conflict *mail.DraftRevisionConflict
-	if errors.As(err, &conflict) {
-		retainCandidate = true
-		conflict.CandidatePath = path
-	}
-	return updated, err
 }
 
 func writeDraftEditorFile(path string, input mail.DraftInput) error {
