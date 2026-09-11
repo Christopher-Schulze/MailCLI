@@ -687,11 +687,21 @@ func formatComposerAddress(recipient Recipient) (string, error) {
 	if err := validateComposerHeaderValue("recipient address", recipient.Address); err != nil {
 		return "", err
 	}
+	address, err := mail.ParseAddress(recipient.Address)
+	if err != nil {
+		return "", validationError("invalid recipient address")
+	}
+	if err := validateComposerHeaderValue("recipient address display name", address.Name); err != nil {
+		return "", err
+	}
+	if recipient.Name == "" {
+		recipient.Name = address.Name
+	}
 	encoded := encodeHeaderValue(recipient.Name)
 	if encoded != recipient.Name {
-		return encoded + " " + (&mail.Address{Address: recipient.Address}).String(), nil
+		return encoded + " " + (&mail.Address{Address: address.Address}).String(), nil
 	}
-	return (&mail.Address{Name: recipient.Name, Address: recipient.Address}).String(), nil
+	return (&mail.Address{Name: recipient.Name, Address: address.Address}).String(), nil
 }
 
 func formatComposerSender(value string) (string, error) {
@@ -711,7 +721,7 @@ func formatComposerSender(value string) (string, error) {
 	if encodeHeaderValue(address.Name) == address.Name {
 		return value, nil
 	}
-	return formatComposerAddress(Recipient{Name: address.Name, Address: address.Address})
+	return formatComposerAddress(Recipient{Name: address.Name, Address: MailboxAddrSpec(address.Address)})
 }
 
 // encodeHeaderValue requires validated UTF-8, including decoded sender names.

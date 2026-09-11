@@ -160,7 +160,7 @@ func normalizeBindingAddress(value string) (string, error) {
 	if strings.ContainsAny(parsed.Address, "\r\n\x00") {
 		return "", errors.New("address contains control characters")
 	}
-	return parsed.Address, nil
+	return MailboxAddrSpec(parsed.Address), nil
 }
 
 func providerBindingError(kind, address string, cause error) error {

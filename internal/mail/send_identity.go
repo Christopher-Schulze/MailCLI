@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"fmt"
+	stdmail "net/mail"
 	"strings"
 
 	"mailcli/internal/mailref"
@@ -123,11 +124,16 @@ func (s *Service) validateBindingCatalog(
 }
 
 func accountContainsAddress(account Account, address string) bool {
+	sender, err := stdmail.ParseAddress(address)
+	if err != nil {
+		return false
+	}
 	for _, group := range [][]string{
 		account.EmailAddresses, account.DiscoveredSenderIdentities, account.ConfiguredSenderAliases,
 	} {
 		for _, candidate := range group {
-			if strings.EqualFold(candidate, address) {
+			parsed, err := stdmail.ParseAddress(candidate)
+			if err == nil && strings.EqualFold(parsed.Address, sender.Address) {
 				return true
 			}
 		}

@@ -155,7 +155,7 @@ func parseRecipientFlags(values []string) ([]mailmodel.Recipient, error) {
 		if err != nil {
 			return nil, invalidDraftInput("invalid recipient address: " + value)
 		}
-		recipients = append(recipients, mailmodel.Recipient{Name: parsed.Name, Address: parsed.Address})
+		recipients = append(recipients, mailmodel.Recipient{Name: parsed.Name, Address: mailmodel.MailboxAddrSpec(parsed.Address)})
 	}
 	return recipients, nil
 }

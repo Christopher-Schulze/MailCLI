@@ -94,7 +94,7 @@ func runSendSetup(
 			stdout, stderr,
 		)
 	}
-	account := parsed.Address
+	account := mail.MailboxAddrSpec(parsed.Address)
 	if _, _, _, _, err := transport.ProviderHosts(account); err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}
@@ -121,7 +121,7 @@ func runSendSetup(
 		if err != nil || credentialParsed.Address == "" {
 			return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "send setup requires a valid --credential-account <email>"}, stdout, stderr)
 		}
-		credential = credentialParsed.Address
+		credential = mail.MailboxAddrSpec(credentialParsed.Address)
 		if _, _, _, _, err := transport.ProviderHosts(credential); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}

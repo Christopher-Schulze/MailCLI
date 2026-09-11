@@ -187,7 +187,8 @@ func (s *Service) validateDraftSender(ctx context.Context, sender string) error 
 	}
 	for _, account := range accounts {
 		for _, address := range account.EmailAddresses {
-			if strings.EqualFold(parsed.Address, address) {
+			configured, err := stdmail.ParseAddress(address)
+			if err == nil && strings.EqualFold(parsed.Address, configured.Address) {
 				return nil
 			}
 		}

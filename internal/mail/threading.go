@@ -186,11 +186,7 @@ func deduplicateRecipientsAgainst(recipients []Recipient, existing []Recipient) 
 }
 
 func recipientAddressKey(recipient Recipient) (string, error) {
-	address := recipient.Address
-	if recipient.Name != "" {
-		address = (&stdmail.Address{Name: recipient.Name, Address: recipient.Address}).String()
-	}
-	parsed, err := stdmail.ParseAddress(address)
+	parsed, err := stdmail.ParseAddress(recipient.Address)
 	if err != nil || parsed.Address == "" {
 		if err == nil {
 			err = fmt.Errorf("recipient address is empty")
@@ -275,5 +271,5 @@ func recipientFromFormatted(formatted string) (Recipient, error) {
 	if err != nil {
 		return Recipient{}, err
 	}
-	return Recipient{Name: parsed.Name, Address: parsed.Address}, nil
+	return Recipient{Name: parsed.Name, Address: MailboxAddrSpec(parsed.Address)}, nil
 }
