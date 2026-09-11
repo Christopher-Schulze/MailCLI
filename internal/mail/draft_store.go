@@ -3,10 +3,6 @@ package mail
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
-	"sort"
-	"strings"
 )
 
 func (s *Service) CreateDraft(request CreateDraftRequest) (Draft, error) {
@@ -86,44 +82,6 @@ func (s *Service) PrepareDraftHandoffContext(ctx context.Context, ref string) (D
 		return Draft{}, classifyDraftContextError(ctx, err, "handoff")
 	}
 	return draft, nil
-}
-
-func (s *Service) ListDrafts() ([]DraftSummary, error) {
-	root, err := s.resolveDraftRoot()
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, fmt.Errorf("list drafts: %w", err)
-	}
-	drafts := make([]DraftSummary, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "draft_") || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		ref := strings.TrimSuffix(entry.Name(), ".json")
-		draft, err := loadDraftDocument(root, ref)
-		if err == nil {
-			err = attachDraftAttempts(root, ref, &draft)
-		}
-		if err != nil {
-			var operation *OperationError
-			if errors.Is(err, os.ErrNotExist) || (errors.As(err, &operation) && operation.Code == "not_found") {
-				continue
-			}
-			drafts = append(drafts, DraftSummary{
-				Ref:        ref,
-				StateError: err.Error(),
-			})
-			continue
-		}
-		drafts = append(drafts, draftSummaryFrom(draft))
-	}
-	sort.Slice(drafts, func(left int, right int) bool {
-		return drafts[left].UpdatedAt.After(drafts[right].UpdatedAt)
-	})
-	return drafts, nil
 }
 
 // draftSummaryFrom maps a loaded draft to its list summary. Body content

@@ -132,6 +132,12 @@ run_group \
   '^BenchmarkAttachmentCatalogShortcut$' \
   1x
 run_group \
+  draft-list \
+  '1-byte and 1 MiB draft bodies; full-record baseline, streaming summary, and paginated service; 25-entry pages over 1 and 2049 records; file bytes and serialized output are separate metrics' \
+  ./internal/mail \
+  '^BenchmarkDraft(SummaryBodies|ListPage)$' \
+  5x
+run_group \
   imap-concurrency \
   'two concurrent STATUS or FETCH operations against a loopback fake server with 2 ms command delay and one or two sessions' \
   ./internal/transport/imapclient \

@@ -578,7 +578,7 @@ func TestDraftsListEmitsSummariesWithoutBodies(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runDraftList(service, []string{"--json"}, &stdout, &stderr)
+	code := runDraftList(context.Background(), service, []string{"--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("list code = %d, stderr = %s", code, stderr.String())
 	}
@@ -595,7 +595,7 @@ func TestDraftsListEmitsSummariesWithoutBodies(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	code = runDraftList(service, []string{}, &stdout, &stderr)
+	code = runDraftList(context.Background(), service, []string{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("list code = %d, stderr = %s", code, stderr.String())
 	}
@@ -696,7 +696,8 @@ func TestDraftSendMirrorPendingJSONPreservesOutcomeEvidence(t *testing.T) {
 		!strings.Contains(stdout.String(), `"attempt_id":"`) || strings.Contains(stdout.String(), "delivered") {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
-	summaries, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), mail.ListDraftsRequest{})
+	summaries := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}

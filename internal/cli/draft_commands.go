@@ -49,7 +49,7 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 	case "create":
 		return runDraftCreateContext(ctx, service, args[1:], stdout, stderr)
 	case "list":
-		return runDraftList(service, args[1:], stdout, stderr)
+		return runDraftList(ctx, service, args[1:], stdout, stderr)
 	case "inspect":
 		return runDraftInspect(service, args[1:], stdout, stderr)
 	case "preview":
@@ -227,25 +227,32 @@ type draftListEntry struct {
 	AgeDays int `json:"age_days"`
 }
 
-func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+func runDraftList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts list", stderr)
+	limit := flags.Int("limit", mail.DefaultDraftListLimit, "maximum drafts per page (1-200)")
+	cursor := flags.String("cursor", "", "continuation cursor from an unchanged draft directory")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	drafts, err := service.ListDrafts()
+	if *limit < 1 || *limit > mail.MaximumDraftListLimit {
+		return failCommand("drafts.list", *jsonOutput, &commandError{code: "invalid_argument", message: "--limit must be between 1 and 200"}, stdout, stderr)
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	page, err := service.ListDrafts(operationCtx, mail.ListDraftsRequest{Limit: *limit, Cursor: *cursor})
 	if err != nil {
 		return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
 	}
-	entries := make([]draftListEntry, 0, len(drafts))
-	for _, draft := range drafts {
+	entries := make([]draftListEntry, 0, len(page.Drafts))
+	for _, draft := range page.Drafts {
 		entries = append(entries, draftListEntry{
 			DraftSummary: draft,
 			AgeDays:      int(time.Since(draft.UpdatedAt).Hours() / 24),
 		})
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &entries})
+		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &entries, Page: rawResponsePage(page.Pagination)})
 	}
 	rows := make([][]string, 0, len(entries))
 	for _, entry := range entries {
@@ -254,11 +261,15 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 			sendMarker = "attempt"
 		}
 		rows = append(rows, []string{
-			entry.Ref, string(entry.Kind), entry.UpdatedAt.Format(time.RFC3339),
+			oneLine(entry.Ref), string(entry.Kind), entry.UpdatedAt.Format(time.RFC3339),
 			fmt.Sprintf("%dd", entry.AgeDays), sendMarker, oneLine(entry.Subject),
+			oneLine(entry.StateError),
 		})
 	}
-	if writeTerminalTable(stdout, []string{"REF", "TYPE", "UPDATED", "AGE", "SEND ATTEMPT", "SUBJECT"}, rows) {
+	if writeTerminalTable(stdout, []string{"REF", "TYPE", "UPDATED", "AGE", "SEND ATTEMPT", "SUBJECT", "STATE ERROR"}, rows) {
+		if page.Pagination.NextCursor != "" {
+			writeFormat(stdout, "\nNext cursor: %s\n", page.Pagination.NextCursor)
+		}
 		return 0
 	}
 	for _, entry := range entries {
@@ -266,8 +277,11 @@ func runDraftList(service *mail.Service, args []string, stdout io.Writer, stderr
 		if entry.EverSent {
 			sendMarker = "attempt"
 		}
-		writeFormat(stdout, "%s\t%s\t%s\t%dd\t%s\t%s\n",
-			entry.Ref, entry.Kind, entry.UpdatedAt.Format(time.RFC3339), entry.AgeDays, sendMarker, oneLine(entry.Subject))
+		writeFormat(stdout, "%s\t%s\t%s\t%dd\t%s\t%s\t%s\n",
+			oneLine(entry.Ref), entry.Kind, entry.UpdatedAt.Format(time.RFC3339), entry.AgeDays, sendMarker, oneLine(entry.Subject), oneLine(entry.StateError))
+	}
+	if page.Pagination.NextCursor != "" {
+		writeFormat(stdout, "next_cursor\t%s\n", page.Pagination.NextCursor)
 	}
 	return 0
 }
