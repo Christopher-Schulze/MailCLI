@@ -47,6 +47,7 @@ type fakeServerConfig struct {
 	uidExpungeSupported      bool
 	dropCopyResponse         bool
 	rejectStore              bool
+	storeResponses           [][]byte
 	initialDeletedUIDs       []uint32
 	fetchPayload             []byte
 	fetchPayloadByUID        map[uint32][]byte
@@ -63,11 +64,12 @@ type fakeServerConfig struct {
 	// hugeFetchBytes, when non-zero, makes the next FETCH announce a
 	// literal of that size and then close the connection without sending
 	// payload bytes, simulating an oversized message.
-	hugeFetchBytes int
-	hugeFetchDone  bool
-	statusResponse string
-	statusDelay    time.Duration
-	fetchDelay     time.Duration
+	hugeFetchBytes     int
+	hugeFetchDone      bool
+	statusResponse     string
+	statusDelay        time.Duration
+	fetchDelay         time.Duration
+	fetchStartedEvents chan<- struct{}
 }
 
 type fakeServer struct {
@@ -88,6 +90,8 @@ type fakeServer struct {
 	storeCalled          bool
 	storeUID             uint32
 	storeFlags           string
+	storeCalls           int
+	messageFlags         map[uint32][]string
 	copyCalled           bool
 	copyUID              uint32
 	copyDst              string
@@ -121,7 +125,8 @@ func newFakeServer(t testReporter, cfg fakeServerConfig) *fakeServer {
 	tl := tls.NewListener(l, &tls.Config{Certificates: []tls.Certificate{cert}})
 	s := &fakeServer{
 		listener: tl, cert: cert, config: cfg,
-		deletedUIDs: make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
+		deletedUIDs:  make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
+		messageFlags: make(map[uint32][]string),
 	}
 	for _, uid := range cfg.initialDeletedUIDs {
 		s.deletedUIDs[uid] = struct{}{}
@@ -567,6 +572,8 @@ func (s *fakeServer) handle(conn net.Conn) {
 				}
 				s.mu.Lock()
 				s.storeCalled = true
+				storeIndex := s.storeCalls
+				s.storeCalls++
 				s.storeUID = uint32(uid)
 				if len(args) > 2 {
 					s.storeFlags = strings.Join(args[2:], " ")
@@ -581,7 +588,18 @@ func (s *fakeServer) handle(conn net.Conn) {
 					s.deletedUIDs[uint32(uid)] = struct{}{}
 				}
 				s.mu.Unlock()
-				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d FLAGS (\\Seen))", uid))
+				flags := s.applyStoredFlags(uint32(uid), args[2:])
+				if storeIndex < len(s.config.storeResponses) && len(s.config.storeResponses[storeIndex]) > 0 {
+					response := strings.ReplaceAll(string(s.config.storeResponses[storeIndex]), "<tag>", tag)
+					if _, err := bw.WriteString(response); err != nil {
+						return
+					}
+					if err := bw.Flush(); err != nil {
+						return
+					}
+					continue
+				}
+				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d FLAGS (%s))", uid, strings.Join(flags, " ")))
 				s.writeLine(bw, tag+" OK STORE completed")
 			case "EXPUNGE":
 				if !s.config.uidExpungeSupported {
@@ -639,6 +657,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.mu.Unlock()
 				s.writeLine(bw, tag+" OK MOVE completed")
 			case "FETCH":
+				if s.config.fetchStartedEvents != nil {
+					s.config.fetchStartedEvents <- struct{}{}
+				}
 				if s.config.fetchDelay > 0 {
 					time.Sleep(s.config.fetchDelay)
 				}
@@ -655,6 +676,14 @@ func (s *fakeServer) handle(conn net.Conn) {
 				uid := 0
 				if len(args) > 1 {
 					uid, _ = strconv.Atoi(args[1])
+				}
+				if len(args) == 3 && strings.EqualFold(args[2], "(UID FLAGS)") {
+					s.mu.Lock()
+					flags := append([]string(nil), s.messageFlags[uint32(uid)]...)
+					s.mu.Unlock()
+					s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d FLAGS (%s))", uid, strings.Join(flags, " ")))
+					s.writeLine(bw, tag+" OK FETCH completed")
+					continue
 				}
 				if s.claimHugeFetch() {
 					s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", uid, s.config.hugeFetchBytes))
@@ -698,6 +727,32 @@ func (s *fakeServer) handle(conn net.Conn) {
 			s.writeLine(bw, tag+" BAD unknown command")
 		}
 	}
+}
+
+func (s *fakeServer) applyStoredFlags(uid uint32, args []string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	flags := s.messageFlags[uid]
+	if len(args) != 2 {
+		return append([]string(nil), flags...)
+	}
+	for _, requested := range parseFlagList(args[1]) {
+		found := -1
+		for index, flag := range flags {
+			if strings.EqualFold(flag, requested) {
+				found = index
+				break
+			}
+		}
+		if strings.EqualFold(args[0], "+FLAGS") && found < 0 {
+			flags = append(flags, requested)
+		}
+		if strings.EqualFold(args[0], "-FLAGS") && found >= 0 {
+			flags = append(flags[:found], flags[found+1:]...)
+		}
+	}
+	s.messageFlags[uid] = flags
+	return append([]string(nil), flags...)
 }
 
 func protocolCommandName(command string, args []string) string {

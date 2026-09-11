@@ -103,8 +103,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForSMTPRejection(err)
 	case transport.CodeSMTPSubmissionUnknown:
 		return guidanceForSendUnknown()
-	case transport.CodeIMAPCopyOutcomeUnknown, transport.CodeIMAPMoveOutcomeUnknown:
+	case transport.CodeIMAPCopyOutcomeUnknown, transport.CodeIMAPMoveOutcomeUnknown,
+		transport.CodeIMAPFlagsOutcomeUnknown, transport.CodeIMAPFlagsMismatch:
 		return guidanceForMutationUnknown(err)
+	case transport.CodeIMAPMessageNotFound:
+		var outcome *transport.MutationOutcomeError
+		if errors.As(err, &outcome) && outcome.Evidence.Command == "STORE" {
+			return guidanceForMutationUnknown(err)
+		}
 	case transport.CodeIMAPAppendOutcomeUnknown:
 		return guidanceForMirrorUnknown()
 	case "send_mirror_pending", "send_mirror_outcome_unknown":
@@ -142,9 +148,8 @@ func guidanceErrorCode(err error) string {
 	if err == nil {
 		return ""
 	}
-	var coded interface{ ErrorCode() string }
-	if errors.As(err, &coded) && coded.ErrorCode() != "" {
-		return coded.ErrorCode()
+	if code := transport.ErrorCode(err); code != "" {
+		return code
 	}
 	if errors.Is(err, context.Canceled) {
 		return "operation_canceled"

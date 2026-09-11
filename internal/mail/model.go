@@ -552,6 +552,11 @@ type ServerMutationEvidence struct {
 	CopySourceUID          uint32   `json:"copy_source_uid,omitempty"`
 	CopyDestinationUID     uint32   `json:"copy_destination_uid,omitempty"`
 	CompletedEffects       []string `json:"completed_effects,omitempty"`
+	// FlagsState is observed, missing, or unverified. An observed empty list
+	// confirms that no flags were set; other states carry no actual flag claim.
+	FlagsState  string   `json:"flags_state,omitempty"`
+	ActualFlags []string `json:"actual_flags,omitempty"`
+	FlagsSource string   `json:"flags_source,omitempty"`
 }
 
 type MessageSummary struct {

@@ -273,7 +273,9 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 			}
 			result.Error = run.itemError(err)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-				(run.ctx.Err() != nil && result.Error.Code == transport.CodeIMAPTimeout) {
+				(run.ctx.Err() != nil && result.Error.Code == transport.CodeIMAPTimeout) ||
+				(state.ServerTruth != nil && state.ServerTruth.Outcome == transport.MutationOutcomeUnknown) ||
+				result.Error.Code == transport.CodeIMAPFlagsOutcomeUnknown {
 				result.State = BatchItemUncertain
 			}
 			return result

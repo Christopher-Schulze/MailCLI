@@ -121,6 +121,7 @@ type stubImapOperator struct {
 	lastCommand            string
 	lastUsername           string
 	lastMailbox            string
+	flags                  []string
 	status                 transport.MailboxStatus
 	err                    error
 	// mutationErrs scripts per-call mutation results: each mutation op
@@ -222,8 +223,30 @@ func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfi
 	s.lastCommand = "STORE"
 	s.lastUsername = cfg.Username
 	s.lastMailbox = mailbox
+	for _, removal := range removeFlags {
+		for index := 0; index < len(s.flags); {
+			if strings.EqualFold(s.flags[index], removal) {
+				s.flags = append(s.flags[:index], s.flags[index+1:]...)
+			} else {
+				index++
+			}
+		}
+	}
+	for _, addition := range addFlags {
+		present := false
+		for _, flag := range s.flags {
+			present = present || strings.EqualFold(flag, addition)
+		}
+		if !present {
+			s.flags = append(s.flags, addition)
+		}
+	}
 	return transport.MutationEvidence{
 		Command:             "STORE",
+		Outcome:             transport.MutationOutcomeCompleted,
+		ActualFlags:         append([]string(nil), s.flags...),
+		FlagsState:          transport.FlagObservationObserved,
+		FlagsSource:         "STORE",
 		ServerResponse:      "OK STORE completed",
 		Mailbox:             mailbox,
 		UID:                 uid,

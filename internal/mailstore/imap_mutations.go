@@ -676,30 +676,49 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 	}
 
 	ev, err := imapOp.SetFlags(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, addFlags, removeFlags)
-	if isUIDValidityChangedError(err) {
+	if transport.ErrorCode(err) == "mailbox_uidvalidity_changed" &&
+		(ev.Outcome == "" || ev.Outcome == transport.MutationOutcomeNotStarted) {
 		retried, retryErr := c.resolveImapTargetForMutation(ctx, request.Ref)
 		if retryErr != nil {
 			return mail.MessageSummary{}, retryErr
 		}
 		ev, err = imapOp.SetFlags(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, addFlags, removeFlags)
-		target.duplicateMatches = retried.duplicateMatches
+		target = retried
 	}
-	if err != nil {
+	if err != nil && ev.Command == "" {
 		return mail.MessageSummary{}, err
+	}
+	identityMismatch := ev.UID != target.uid || ev.Mailbox != target.imapMailbox || ev.UIDValidity != target.uidvalidity
+	if (ev.FlagsState == transport.FlagObservationObserved && identityMismatch) ||
+		(err == nil && (ev.FlagsState != transport.FlagObservationObserved || ev.Outcome != transport.MutationOutcomeCompleted)) {
+		ev.Outcome, ev.FlagsState, ev.ActualFlags = transport.MutationOutcomeUnknown, transport.FlagObservationUnverified, nil
+		err = &transport.MutationOutcomeError{
+			Code: transport.CodeIMAPFlagsOutcomeUnknown, Evidence: ev, Err: err,
+			Message: "IMAP STORE returned no complete flag observation for the resolved message; inspect server state before retrying",
+		}
 	}
 	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 
 	summary := target.summary
-	if request.Read != nil {
-		summary.Read = *request.Read
-	}
-	if request.Flagged != nil {
-		summary.Flagged = *request.Flagged
-	}
-	if request.Junk != nil {
-		summary.Junk = *request.Junk
+	if ev.FlagsState == transport.FlagObservationObserved {
+		summary.Read, summary.Flagged, summary.Junk, summary.Deleted = false, false, false, false
+		for _, flag := range ev.ActualFlags {
+			switch strings.ToLower(flag) {
+			case "\\seen":
+				summary.Read = true
+			case "\\flagged":
+				summary.Flagged = true
+			case "$junk", "junk":
+				summary.Junk = true
+			case "\\deleted":
+				summary.Deleted = true
+			}
+		}
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
+		OperationID:         ev.OperationID,
+		Outcome:             ev.Outcome,
+		SourceAccount:       ev.SourceAccount,
 		Command:             ev.Command,
 		ServerResponse:      ev.ServerResponse,
 		Mailbox:             ev.Mailbox,
@@ -707,9 +726,15 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 		ExpectedUIDValidity: ev.ExpectedUIDValidity,
 		UIDValidity:         ev.UIDValidity,
 		DuplicateMatches:    ev.DuplicateMatches,
+		FlagsState:          string(ev.FlagsState),
+		ActualFlags:         append([]string(nil), ev.ActualFlags...),
+		FlagsSource:         ev.FlagsSource,
 	}
-	summary.StalenessNote = stalenessExplanation
-	return summary, nil
+	summary.StalenessNote = "flags observed on IMAP server at command completion; concurrent clients may change them; local metadata updates on the next Mail.app sync"
+	if ev.FlagsState != transport.FlagObservationObserved {
+		summary.StalenessNote = "server flags are not verified; summary booleans retain local cached values"
+	}
+	return summary, err
 }
 
 // TransferMessage moves or copies a message to another mailbox over IMAP.
