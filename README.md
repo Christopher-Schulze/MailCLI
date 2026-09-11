@@ -29,7 +29,7 @@ Reads and mutations add zero work to the Mail.app process. Sending, marking, mov
 
 ## Capabilities
 
-Run `mailcli capabilities --json` before automation. Its versioned response is the authoritative command contract for agents: command IDs, read/write class, confirmation, Mail-store and Mail.app dependencies, result states, and hard limits. Help text is for humans and must not be parsed as capability data.
+Before automation, request the needed contract with `mailcli capabilities --command COMMAND_ID --json`; use `--family FAMILY` when choosing within a family and the full `mailcli capabilities --json` catalog only for cross-family discovery. Retain inspected contracts for the same binary identity. Its versioned response is authoritative for command IDs, read/write class, confirmation, Mail-store and Mail.app dependencies, result states, and hard limits. Help text is for humans and must not be parsed as capability data.
 
 Detail JSON responses support bounded projections. Use `--view metadata|plain|full` for named views or `--fields field1,field2` for an explicit selection; the supported fields, defaults, and byte limits are published under `data.capabilities.limits.output_projection`. `messages get` and `drafts inspect` default to metadata, while draft creation and update responses default to the canonical plain body. `--max-bytes` defaults to 1 MiB and rejects oversized JSON with `output_too_large` instead of truncating it. `messages get`, `messages raw`, and `drafts inspect` accept `--export /absolute/new/path`; the complete body or raw source is written to a mode-0600 exclusive file and JSON returns verified `data.content_export` size and SHA-256 metadata without embedding the exported bytes.
 
@@ -385,7 +385,7 @@ JSON startup, execution, and teardown are finalized before stdout is written. A 
 
 ## Agent skill
 
-The repository includes a companion skill at [`skills/mailcli`](skills/mailcli). It teaches Codex and compatible agents when to invoke MailCLI, how to paginate every mailbox, how to interpret incomplete search coverage, and how to honor the Mail 16 compose boundary.
+The repository includes a companion skill at [`skills/mailcli/SKILL.md`](skills/mailcli/SKILL.md). Its compact entrypoint maps user intent to scoped capabilities and seven portable guides under `references/`. Agents load only the guide for the current action, request only needed detail fields, and assess only that command's dependencies. The common entrypoint retains pagination, content completeness, reviewed draft revisions, transport evidence, and replay rules. Both installation paths include every guide; tests follow all skill links from isolated installations and reject missing, escaping, or unreachable documents. The repository product manual remains separate from the packaged operational guides.
 
 The release installer and `scripts/build/install-local.sh` place the matching skill at `~/.agents/skills/mailcli`, the personal skill location discovered by Codex. The source installer can redirect it with `MAILCLI_SKILL_DESTINATION`; it stages and verifies the binary and skill together. Use `scripts/tests/report-skill-drift.sh` for a separate read-only comparison of a user installation: pass `--repository PATH --installed PATH` for explicit inputs, and it reports `match`, `missing`, `mismatch`, or `unstable` plus a reconciliation command without installing anything. The implementation gate validates repository/package identity only in temporary installation roots. Start a new agent session after either installation method.
 
