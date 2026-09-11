@@ -297,12 +297,13 @@ func TestUpdateInstallerEnvironmentDropsShellInjection(t *testing.T) {
 	environment := updateInstallerEnvironment([]string{
 		"PATH=/tmp/injected", "BASH_ENV=/tmp/inject", "ENV=/tmp/inject",
 		"MAILCLI_SKILL_DESTINATION=/tmp/skill", "BASH_FUNC_mv%%=() { false; }",
+		"MAILCLI_INSTALL_PACKAGE_ROOT=/tmp/alternate", "MAILCLI_INSTALL_PACKAGE_ROOT=",
 		"DYLD_INSERT_LIBRARIES=/tmp/inject.dylib", "LD_PRELOAD=/tmp/inject.so",
 	}, "/Users/test", "/Users/test/.local/bin/mailcli")
 	joined := strings.Join(environment, "\n")
 	for _, forbidden := range []string{
 		"PATH=/tmp/injected", "BASH_ENV=", "ENV=", "MAILCLI_SKILL_DESTINATION=", "BASH_FUNC_",
-		"DYLD_", "LD_",
+		"MAILCLI_INSTALL_PACKAGE_ROOT=", "DYLD_", "LD_",
 	} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("installer environment retained %q: %q", forbidden, joined)
