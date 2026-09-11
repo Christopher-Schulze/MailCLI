@@ -11,10 +11,14 @@ import (
 	"mailcli/internal/transport"
 )
 
-func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult, resultErr error) {
+func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (result SendResult, resultErr error) {
 	if err := draftContextError(ctx, "send"); err != nil {
 		return SendResult{}, err
 	}
+	if request.ExpectedRevision == "" {
+		return SendResult{}, validationError("expected revision is required; inspect the draft and supply its revision")
+	}
+	ref := request.Ref
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return SendResult{}, err
@@ -32,12 +36,16 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	if err := draftContextError(ctx, "send"); err != nil {
 		return SendResult{}, err
 	}
-	draft, err := readDraftForMutation(lease, root, ref)
+	// Keep the lease's lock linked until receipt revision checks complete.
+	draft, err := readDraftFileWithObserver(root, ref, nil, storage)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "not_found" {
 			receipt, receiptErr := readActiveSendReceipt(root, ref, storage)
 			if receiptErr == nil && receipt != nil {
+				if err := requireDraftRevision(ref, request.ExpectedRevision, receipt.DraftRevision); err != nil {
+					return SendResult{}, err
+				}
 				result := resultForReceipt(*receipt)
 				if cleanupErr := errors.Join(removeDraftClaims(root, ref, storage), lease.removeLock()); cleanupErr != nil {
 					return result, &OperationError{
@@ -54,6 +62,12 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 				}
 			}
 		}
+		if errors.As(err, &operation) && operation.Code == "not_found" {
+			err = errors.Join(err, lease.removeLock())
+		}
+		return SendResult{}, err
+	}
+	if err := requireDraftRevision(ref, request.ExpectedRevision, draft.Revision); err != nil {
 		return SendResult{}, err
 	}
 	if err := validateStoredDraftLimits(draft); err != nil {
@@ -75,6 +89,9 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 		return SendResult{}, err
 	}
 	if draft.SendAttempt != nil {
+		if err := requireDraftRevision(ref, request.ExpectedRevision, draft.SendAttempt.DraftRevision); err != nil {
+			return SendResult{}, err
+		}
 		return replaySendAttempt(lease, root, ref, *draft.SendAttempt)
 	}
 	if receipt, receiptErr := readActiveSendReceipt(root, ref, storage); receiptErr != nil {
@@ -83,6 +100,9 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 			return SendResult{}, receiptErr
 		}
 	} else if receipt != nil {
+		if err := requireDraftRevision(ref, request.ExpectedRevision, receipt.DraftRevision); err != nil {
+			return SendResult{}, err
+		}
 		result := resultForReceipt(*receipt)
 		if cleanupErr := discardDraftFiles(lease, root, ref); cleanupErr != nil {
 			return result, &OperationError{
@@ -151,7 +171,8 @@ func (s *Service) SendDraft(ctx context.Context, ref string) (result SendResult,
 	now := time.Now().UTC()
 	attempt := SendAttempt{
 		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
-		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
+		DraftRevision: draft.Revision,
+		MessageID:     messageID, EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
 		MIMEFingerprint: mimeFingerprint, RecoverySpool: cloneAcceptedMessageSpool(recoverySpool),
 	}
 	payload, err := encodeSendAttempt(ref, attempt)

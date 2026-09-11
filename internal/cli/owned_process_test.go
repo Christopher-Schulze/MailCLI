@@ -113,7 +113,7 @@ func TestDraftEditorCancellationCleansOwnedDescendants(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		_, editErr := editDraftInput(
-			ctx, service, draft.Ref, draftInputFromStored(draft), editorPath, nil,
+			ctx, service, draft.Ref, draft.Revision, draftInputFromStored(draft), editorPath, nil,
 		)
 		result <- editErr
 	}()

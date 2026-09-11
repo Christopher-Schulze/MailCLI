@@ -19,6 +19,7 @@ import (
 
 type draftPreview struct {
 	Ref                string                   `json:"ref"`
+	Revision           string                   `json:"revision"`
 	AccountRef         string                   `json:"account_ref,omitempty"`
 	From               string                   `json:"from,omitempty"`
 	To                 []mail.Recipient         `json:"to"`
@@ -230,13 +231,15 @@ func makeDraftPreview(draft mail.Draft, view string) (draftPreview, error) {
 	}
 	return draftPreview{
 		Ref: draft.Ref, AccountRef: draft.AccountRef, From: draft.From, To: draft.To, CC: draft.CC, BCC: draft.BCC,
-		Subject: draft.Subject, BodyFormat: draft.BodyFormat, View: view, Body: body,
+		Revision: draft.Revision,
+		Subject:  draft.Subject, BodyFormat: draft.BodyFormat, View: view, Body: body,
 		ContentDiagnostics: draft.ContentDiagnostics,
 		Attachments:        draft.Attachments,
 	}, nil
 }
 
 func writeHumanDraftPreview(writer io.Writer, preview draftPreview) {
+	writeFormat(writer, "Revision: %s\n", preview.Revision)
 	if preview.AccountRef != "" {
 		writeFormat(writer, "Account: %s\n", preview.AccountRef)
 	}
@@ -302,7 +305,7 @@ func runDraftEdit(
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
 	input := draftInputFromStored(draft)
-	updated, err := editDraftInput(ctx, service, draft.Ref, input, *editor, editorArgs)
+	updated, err := editDraftInput(ctx, service, draft.Ref, draft.Revision, input, *editor, editorArgs)
 	if err != nil {
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -313,6 +316,7 @@ func editDraftInput(
 	ctx context.Context,
 	service *mail.Service,
 	ref string,
+	expectedRevision string,
 	input mail.DraftInput,
 	editor string,
 	editorArgs []string,
@@ -321,7 +325,12 @@ func editDraftInput(
 	if err != nil {
 		return mail.Draft{}, fmt.Errorf("create secure draft editor directory: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(directory) }()
+	retainCandidate := false
+	defer func() {
+		if !retainCandidate {
+			_ = os.RemoveAll(directory)
+		}
+	}()
 	path := filepath.Join(directory, "draft.json")
 	if err := writeDraftEditorFile(path, input); err != nil {
 		return mail.Draft{}, err
@@ -344,7 +353,15 @@ func editDraftInput(
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
 	defer cancel()
-	return service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: ref, Input: edited})
+	updated, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{
+		Ref: ref, ExpectedRevision: expectedRevision, Input: edited,
+	})
+	var conflict *mail.DraftRevisionConflict
+	if errors.As(err, &conflict) {
+		retainCandidate = true
+		conflict.CandidatePath = path
+	}
+	return updated, err
 }
 
 func writeDraftEditorFile(path string, input mail.DraftInput) error {

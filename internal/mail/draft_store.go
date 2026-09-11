@@ -28,6 +28,9 @@ func (s *Service) CreateDraftContext(ctx context.Context, request CreateDraftReq
 	if err != nil {
 		return Draft{}, err
 	}
+	if err := refreshDraftRevision(&draft); err != nil {
+		return Draft{}, err
+	}
 	if err := writeDraftFile(root, draft); err != nil {
 		return Draft{}, err
 	}
@@ -151,6 +154,7 @@ func draftSendAttemptSummaryFrom(attempt *SendAttempt) *DraftSendAttemptSummary 
 	}
 	summary := &DraftSendAttemptSummary{
 		ID:                  attempt.ID,
+		DraftRevision:       attempt.DraftRevision,
 		StartedAt:           attempt.StartedAt,
 		UpdatedAt:           attempt.UpdatedAt,
 		MessageID:           attempt.MessageID,
@@ -229,6 +233,9 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	if err := draftContextError(ctx, "update"); err != nil {
 		return Draft{}, err
 	}
+	if err := requireDraftRevision(request.Ref, request.ExpectedRevision, current.Revision); err != nil {
+		return Draft{}, err
+	}
 	if err := rejectClaimedDraft(current); err != nil {
 		return Draft{}, err
 	}
@@ -245,6 +252,9 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	}
 	replacement.Ref = current.Ref
 	replacement.CreatedAt = current.CreatedAt
+	if err := refreshDraftRevision(&replacement); err != nil {
+		return Draft{}, err
+	}
 	if err := writeDraftFile(root, replacement, lease.storage); err != nil {
 		return Draft{}, err
 	}

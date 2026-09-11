@@ -87,6 +87,7 @@ type messageProjection struct {
 
 type draftProjection struct {
 	Ref                *string                       `json:"ref,omitempty"`
+	Revision           *string                       `json:"revision,omitempty"`
 	Kind               *mail.DraftKind               `json:"kind,omitempty"`
 	AccountRef         *string                       `json:"account_ref,omitempty"`
 	SourceRef          *string                       `json:"source_ref,omitempty"`
@@ -279,7 +280,7 @@ func projectionFieldNames(target projectionTarget) []string {
 	case projectionTargetMessage:
 		return []string{"summary", "reply_to", "to", "cc", "bcc", "headers", "content", "content_source", "content_complete", "missing_parts", "hydration", "attachments"}
 	case projectionTargetDraft:
-		return []string{"ref", "kind", "account_ref", "source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "subject", "body", "body_format", "body_source", "body_html", "content_diagnostics", "attachments", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt"}
+		return []string{"ref", "revision", "kind", "account_ref", "source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "subject", "body", "body_format", "body_source", "body_html", "content_diagnostics", "attachments", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt"}
 	case projectionTargetAttachment:
 		return []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}
 	case projectionTargetRaw:
@@ -330,7 +331,7 @@ func requiredProjectionField(target projectionTarget, field string, contentRetai
 			field == "missing_parts" || field == "hydration" || (contentRetained && field == "content")
 	case projectionTargetDraft:
 		switch field {
-		case "ref", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt":
+		case "ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt":
 			return true
 		}
 	}
@@ -379,6 +380,8 @@ func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjectio
 		switch field {
 		case "ref":
 			projection.Ref = &draft.Ref
+		case "revision":
+			projection.Revision = &draft.Revision
 		case "kind":
 			projection.Kind = &draft.Kind
 		case "account_ref":
@@ -434,7 +437,8 @@ func draftSendAttemptProjection(attempt *mail.SendAttempt) *mail.DraftSendAttemp
 	}
 	summary := &mail.DraftSendAttemptSummary{
 		ID: attempt.ID, StartedAt: attempt.StartedAt, UpdatedAt: attempt.UpdatedAt,
-		MessageID: attempt.MessageID, EnvelopeFingerprint: attempt.EnvelopeFingerprint,
+		DraftRevision: attempt.DraftRevision,
+		MessageID:     attempt.MessageID, EnvelopeFingerprint: attempt.EnvelopeFingerprint,
 		MIMEFingerprint: attempt.MIMEFingerprint, Outcome: attempt.Outcome,
 		InvocationStarted: attempt.InvocationStarted, AcceptedByMail: attempt.AcceptedByMail,
 		SentStoreObserved: attempt.SentStoreObserved,

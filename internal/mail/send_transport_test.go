@@ -338,7 +338,7 @@ func TestSendDraftRetainsAcceptanceAfterSubmissionReaderCloseFailure(t *testing.
 	})
 	draft := createTransportDraft(t, service)
 
-	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	result, sendErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(sendErr) != transport.CodeIMAPAppendFailed || result.Outcome != SendOutcomeMirrorPending ||
 		!result.Accepted || !result.SubmissionAccepted || !result.DraftRetained || submitter.readerCalls != 1 || mirror.calls != 1 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submitter = %+v, mirror calls = %d", result, sendErr, submitter, mirror.calls)
@@ -360,7 +360,7 @@ func TestSendDraftRetainsAcceptanceAfterSubmissionReaderCloseFailure(t *testing.
 	restarted := NewServiceWithTransport(nil, root, SendTransport{
 		Submitter: restartSubmitter, Mirror: restartMirror, Credentials: &stubCredentials{password: "secret"},
 	})
-	retry, retryErr := restarted.SendDraft(context.Background(), draft.Ref)
+	retry, retryErr := restarted.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(retryErr) != "send_mirror_pending" || !retry.Replayed || !retry.Accepted ||
 		!retry.SubmissionAccepted || !retry.DraftRetained || restartSubmitter.readerCalls != 0 ||
 		restartSubmitter.calls != 0 || restartMirror.calls != 0 || submitter.readerCalls != 1 || mirror.calls != 1 {
@@ -407,7 +407,7 @@ func TestSendDraftPreservesRejectedAndUnknownSubmissionWithReaderCloseFailure(t 
 			})
 			draft := createTransportDraft(t, service)
 
-			result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+			result, sendErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 			if errorCode(sendErr) != test.wantCode || result.Outcome != test.wantOutcome ||
 				result.DraftRetained != test.wantRetained || submitter.readerCalls != 1 {
 				t.Fatalf("SendDraft() = %+v, error = %v, reader calls = %d", result, sendErr, submitter.readerCalls)
@@ -424,7 +424,7 @@ func TestSendDraftPreservesRejectedAndUnknownSubmissionWithReaderCloseFailure(t 
 			}
 			assertNoSendClaim(t, root, draft.Ref)
 			if test.wantRetryCall {
-				if _, retryErr := service.SendDraft(context.Background(), draft.Ref); errorCode(retryErr) != test.wantCode || submitter.readerCalls != 2 {
+				if _, retryErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(retryErr) != test.wantCode || submitter.readerCalls != 2 {
 					t.Fatalf("retry SendDraft() error = %v, reader calls = %d, want definitive retry", retryErr, submitter.readerCalls)
 				}
 			}
@@ -438,10 +438,13 @@ func TestSendDraftRejectsInvalidStoredRecipient(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 	draft.To[0].Address = "not an address"
+	if err := refreshDraftRevision(&draft); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeDraftFile(root, draft); err != nil {
 		t.Fatalf("writeDraftFile() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "invalid_argument" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "invalid_argument" {
 		t.Fatalf("SendDraft() error = %v, want invalid_argument", err)
 	}
 	if submitter.calls != 0 || mirror.calls != 0 {
@@ -480,7 +483,7 @@ func TestSendDraftRejectsHistoricalSaveClaimBeforeTransport(t *testing.T) {
 		t.Fatalf("read save claim before send error = %v", err)
 	}
 
-	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	result, sendErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(sendErr) != "draft_save_retry_blocked" || result != (SendResult{}) {
 		t.Fatalf("SendDraft() = %+v, error = %v, want save-claim rejection", result, sendErr)
 	}
@@ -515,10 +518,13 @@ func TestSendDraftRejectsDuplicateStoredRecipient(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 	draft.CC = []Recipient{{Address: draft.To[0].Address}}
+	if err := refreshDraftRevision(&draft); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeDraftFile(root, draft); err != nil {
 		t.Fatalf("writeDraftFile() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "invalid_argument" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "invalid_argument" {
 		t.Fatalf("SendDraft() error = %v, want invalid_argument", err)
 	}
 	if submitter.calls != 0 || mirror.calls != 0 {
@@ -536,7 +542,7 @@ func TestSendDraftRetainsUnknownSMTPOutcome(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != transport.CodeSMTPSubmissionUnknown || result.Outcome != SendOutcomeUnknown ||
 		!result.DraftRetained || submitter.calls != 1 || mirror.calls != 0 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submitter calls = %d, mirror calls = %d", result, err, submitter.calls, mirror.calls)
@@ -562,7 +568,7 @@ func TestSendDraftRetainsClaimWhenContextIsCanceledDuringUnknownSubmission(t *te
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(ctx, draft.Ref)
+	result, err := service.SendDraft(ctx, SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != transport.CodeSMTPSubmissionUnknown ||
 		result.Outcome != SendOutcomeUnknown || !result.DraftRetained {
 		t.Fatalf("SendDraft() = %+v, error = %v, want retained unknown outcome", result, err)
@@ -583,7 +589,7 @@ func TestReconcileDoesNotReplayUnknownSentAppend(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != transport.CodeIMAPAppendOutcomeUnknown ||
 		result.Outcome != SendOutcomeMirrorPending || mirror.calls != 1 {
 		t.Fatalf("SendDraft() = %+v, error = %v, mirror calls = %d", result, err, mirror.calls)
@@ -630,7 +636,7 @@ func TestReconcileDoesNotReplayJoinedUnknownSentAppend(t *testing.T) {
 			service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 			draft := createTransportDraft(t, service)
 
-			result, err := service.SendDraft(context.Background(), draft.Ref)
+			result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 			if errorCode(err) != transport.CodeIMAPAppendOutcomeUnknown ||
 				result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained || mirror.calls != 1 {
 				t.Fatalf("SendDraft() = %+v, error = %v, mirror calls = %d", result, err, mirror.calls)
@@ -659,7 +665,7 @@ func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
@@ -688,7 +694,7 @@ func TestSendDraftReplaysImmutableReceiptWithoutTransport(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	first, err := service.SendDraft(context.Background(), draft.Ref)
+	first, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if err != nil || first.Receipt == nil {
 		t.Fatalf("first SendDraft() = %+v, error = %v", first, err)
 	}
@@ -704,7 +710,7 @@ func TestSendDraftReplaysImmutableReceiptWithoutTransport(t *testing.T) {
 		t.Fatalf("receipt contains draft content: %s", payload)
 	}
 
-	second, err := service.SendDraft(context.Background(), draft.Ref)
+	second, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if err != nil || !second.Replayed || second.Receipt == nil || submitter.calls != 1 || mirror.calls != 1 {
 		t.Fatalf("replayed SendDraft() = %+v, error = %v, submitter = %d, mirror = %d", second, err, submitter.calls, mirror.calls)
 	}
@@ -725,6 +731,7 @@ func TestSendDraftRecoversReceiptPersistedBeforeDraftCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
+	attempt.DraftRevision = draft.Revision
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
 	attempt.SentStoreObserved = true
@@ -745,7 +752,7 @@ func TestSendDraftRecoversReceiptPersistedBeforeDraftCleanup(t *testing.T) {
 		t.Fatalf("Remove(draft) error = %v", err)
 	}
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if err != nil || !result.Replayed || result.Receipt == nil || !sendReceiptsEqual(*result.Receipt, *written) {
 		t.Fatalf("recovery SendDraft() = %+v, error = %v", result, err)
 	}
@@ -767,7 +774,7 @@ func TestSendDraftRejectsMalformedReceiptWithoutSubmission(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":1,"draft_ref":"broken"}`), 0o600); err != nil {
 		t.Fatalf("WriteFile(receipt) error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_receipt_invalid" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "send_receipt_invalid" {
 		t.Fatalf("SendDraft() error = %v, want send_receipt_invalid", err)
 	}
 	if submitter.calls != 0 || mirror.calls != 0 {
@@ -799,7 +806,7 @@ func TestExpiredSendReceiptIsBlockedAndPruned(t *testing.T) {
 	if _, err := service.GetSendReceipt(draft.Ref); errorCode(err) != "not_found" {
 		t.Fatalf("GetSendReceipt() error = %v, want not_found", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_receipt_expired" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "send_receipt_expired" {
 		t.Fatalf("SendDraft() error = %v, want send_receipt_expired", err)
 	}
 	result, err := service.PruneDraftsContext(context.Background(), PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true})
@@ -822,7 +829,7 @@ func TestSendDraftRetainsClaimWhenContextIsCanceledDuringMirror(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(ctx, draft.Ref)
+	result, err := service.SendDraft(ctx, SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "send_mirror_pending" ||
 		result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained {
 		t.Fatalf("SendDraft() = %+v, error = %v, want retained mirror-pending outcome", result, err)
@@ -839,7 +846,7 @@ func TestSendDraftWithoutTransportIsRejected(t *testing.T) {
 	service := NewServiceWithDraftRoot(nil, root)
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "send_transport_unavailable" || result.AttemptID != "" {
 		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
 	}
@@ -857,7 +864,7 @@ func TestSendDraftMissingCredentialsBlocksSubmission(t *testing.T) {
 	})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "smtp_credentials_missing" || result.AttemptID != "" {
 		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
 	}
@@ -887,14 +894,14 @@ func TestSendDraftRejectedSubmissionClearsClaimAndAllowsRetry(t *testing.T) {
 			service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 			draft := createTransportDraft(t, service)
 
-			result, err := service.SendDraft(context.Background(), draft.Ref)
+			result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 			if errorCode(err) != transport.CodeSMTPRejected || result.AttemptID != "" || !strings.Contains(err.Error(), tc.guidance) {
 				t.Fatalf("SendDraft() = %+v, error = %v", result, err)
 			}
 			assertNoSendClaim(t, root, draft.Ref)
 
 			submitter.err = nil
-			retry, err := service.SendDraft(context.Background(), draft.Ref)
+			retry, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 			if err != nil || retry.Outcome != SendOutcomeSent || submitter.calls != 2 {
 				t.Fatalf("retry SendDraft() = %+v, error = %v, submits = %d", retry, err, submitter.calls)
 			}
@@ -914,7 +921,7 @@ func TestSendDraftUnsupportedProviderIsRejected(t *testing.T) {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
 
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "transport_unsupported_provider" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "transport_unsupported_provider" {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	if submitter.calls != 0 {
@@ -945,7 +952,7 @@ func TestSendDraftUsesReplayableStreamingTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	if submitter.readerCalls != 1 || mirror.readerCalls != 1 || submitter.readerSize <= 0 || submitter.readerSize != mirror.readerSize {
@@ -963,7 +970,7 @@ func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "imap_append_failed" || result.Outcome != SendOutcomeMirrorPending ||
 		!result.DraftRetained || result.AttemptID == "" {
 		t.Fatalf("SendDraft() = %+v, error = %v", result, err)
@@ -980,7 +987,7 @@ func TestSendDraftMirrorPendingKeepsClaimReconcilable(t *testing.T) {
 		t.Fatalf("GetDraft() = %+v, error = %v", retained, err)
 	}
 
-	replayed, replayErr := service.SendDraft(context.Background(), draft.Ref)
+	replayed, replayErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(replayErr) != "send_mirror_pending" || !replayed.Replayed ||
 		replayed.AttemptID != result.AttemptID || submitter.calls != 1 {
 		t.Fatalf("replay SendDraft() = %+v, error = %v, submits = %d", replayed, replayErr, submitter.calls)
@@ -1026,7 +1033,7 @@ func TestReconcileMirrorPendingAdoptsSentAfterAttachmentRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != transport.CodeIMAPAppendFailed {
 		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
 	}
 	retained, err := service.GetDraft(draft.Ref)
@@ -1075,7 +1082,7 @@ func TestReconcileMirrorPendingReplaysDurableSpoolAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != transport.CodeIMAPAppendFailed {
 		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
 	}
 	acceptedBytes := append([]byte(nil), submitter.lastMessage...)
@@ -1147,7 +1154,7 @@ func TestReconcileMirrorPendingBlocksMissingOrCorruptSpool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateDraft() error = %v", err)
 			}
-			if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+			if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != transport.CodeIMAPAppendFailed {
 				t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
 			}
 			spoolPath, err := acceptedMessageSpoolPath(root, draft.Ref)
@@ -1179,7 +1186,7 @@ func TestReconcileMirrorRetryArmsUnknownOutcomeBeforeAppend(t *testing.T) {
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
 
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != transport.CodeIMAPAppendFailed {
 		t.Fatalf("SendDraft() error = %v, want known APPEND failure", err)
 	}
 	first, err := service.GetDraft(draft.Ref)
@@ -1226,7 +1233,7 @@ func TestReconcileMirrorPendingVerifiesExistingSentIdentity(t *testing.T) {
 	}
 	service.send.Imap = imap
 	draft := createTransportDraft(t, service)
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "imap_append_failed" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "imap_append_failed" {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	retained, err := service.GetDraft(draft.Ref)
@@ -1263,7 +1270,7 @@ func TestReconcileMirrorRetryUsesResolvedSentMailbox(t *testing.T) {
 	}
 	service.send.Imap = imap
 	draft := createTransportDraft(t, service)
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != transport.CodeIMAPAppendFailed {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != transport.CodeIMAPAppendFailed {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	retained, err := service.GetDraft(draft.Ref)
@@ -1296,7 +1303,7 @@ func TestReconcileDraftMirrorFailureKeepsClaim(t *testing.T) {
 	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "AUTH failed"}
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err == nil {
 		t.Fatal("SendDraft() error = nil, want mirror pending")
 	}
 
@@ -1353,11 +1360,16 @@ func TestOrphanedSendClaimReplaysWithoutSubmitting(t *testing.T) {
 	submitter, mirror := sendTransportStubs()
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	attempt, err := beginSendAttempt(root, draft.Ref, "", "")
+	if err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
+	attempt.DraftRevision = draft.Revision
+	if err := replaceSendAttempt(root, draft.Ref, attempt); err != nil {
+		t.Fatal(err)
+	}
 
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "send_outcome_unknown" || result.Outcome != SendOutcomeUnknown ||
 		!result.Replayed || submitter.calls != 0 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submits = %d", result, err, submitter.calls)
@@ -1641,7 +1653,7 @@ func TestSendDraftClaimCarriesMessageIDBeforeSubmit(t *testing.T) {
 	draft := createTransportDraft(t, service)
 	spec.ref = draft.Ref
 
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	if spec.messageID == "" || spec.fingerprint == "" || spec.outcome != SendOutcomeUnknown || spec.recoverySpool == nil {
