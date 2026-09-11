@@ -942,7 +942,7 @@ func headerRecipients(header *messageMail.Header, key string) ([]mail.Recipient,
 	}
 	recipients := make([]mail.Recipient, 0, len(addresses))
 	for _, address := range addresses {
-		recipients = append(recipients, mail.Recipient{Name: address.Name, Address: address.Address})
+		recipients = append(recipients, mail.Recipient{Name: address.Name, Address: mail.MailboxAddrSpec(address.Address)})
 	}
 	return recipients, true, nil
 }

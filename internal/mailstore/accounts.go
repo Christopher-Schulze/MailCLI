@@ -450,7 +450,7 @@ func (s *Store) querySenderIdentityRows(
 		key := strings.ToLower(parsed.Address)
 		identity := identities[key]
 		if identity.Address == "" {
-			identity.Address = parsed.Address
+			identity.Address = mail.MailboxAddrSpec(parsed.Address)
 		}
 		identity.MessageCount += messageCount
 		if latestSent > identity.LatestSent {

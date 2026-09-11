@@ -17,7 +17,7 @@ func sendSender(from string) (string, error) {
 	if err != nil || parsed.Address == "" {
 		return "", validationError("invalid from address")
 	}
-	return parsed.Address, nil
+	return MailboxAddrSpec(parsed.Address), nil
 }
 
 func missingCredentialsError(sender string) error {
@@ -95,11 +95,20 @@ func draftEnvelopeRecipients(draft Draft) ([]string, error) {
 	recipients = append(recipients, draft.BCC...)
 	addresses := make([]string, 0, len(recipients))
 	for index, recipient := range recipients {
+		if err := validateComposerHeaderValue("recipient name", recipient.Name); err != nil {
+			return nil, err
+		}
+		if err := validateComposerHeaderValue("recipient address", recipient.Address); err != nil {
+			return nil, err
+		}
 		parsed, err := stdmail.ParseAddress(recipient.Address)
 		if err != nil || parsed.Address == "" {
 			return nil, validationError(fmt.Sprintf("invalid recipient address at position %d", index+1))
 		}
-		addresses = append(addresses, parsed.Address)
+		if err := validateComposerHeaderValue("recipient address display name", parsed.Name); err != nil {
+			return nil, err
+		}
+		addresses = append(addresses, MailboxAddrSpec(parsed.Address))
 	}
 	return addresses, nil
 }

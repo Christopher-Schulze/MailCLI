@@ -70,6 +70,8 @@ Sending requires a user request that covers the reviewed content plus `--expecte
 
 Composition encodes long subjects and display names losslessly within RFC header limits. A header-specific `invalid_argument` stops before SMTP and leaves the reviewed draft unchanged with no new send claim; correct the named value, then review the updated draft before sending.
 
+Keep valid mailbox syntax in recipient `address` fields, including required quotes and escapes such as `"A B"@example.com`; JSON must escape the quotes. A separate `name` never changes mailbox identity or duplicate detection. Preserve quoted addresses returned by reply extraction or account discovery; never repair a rejected unquoted value by guessing a different identity. BCC names receive the same control/UTF-8 validation before SMTP.
+
 An encoded Unicode display name with ASCII addresses does not require SMTPUTF8. Internationalized envelope addresses or raw MIME headers require SMTPUTF8 and 8BITMIME after STARTTLS. `smtp_utf8_unsupported` stops before MAIL/DATA, retains the unchanged draft, and clears the transient send claim; its guidance requires correction before retry. Never transliterate or replace an address to bypass this requirement.
 
 1. Configure a supported Gmail or iCloud sender with `mailcli send setup --from ALIAS [--account REF]`; the password stays in Keychain and is never displayed or logged. Unsupported providers, stale/ambiguous bindings, missing credentials, or invalid addresses stop before transport.
