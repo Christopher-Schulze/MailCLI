@@ -74,6 +74,8 @@ An encoded Unicode display name with ASCII addresses does not require SMTPUTF8. 
 
 ## Output and errors
 
+Human `messages get` and `drafts open` details replace terminal controls with spaces; body LF/TAB and ordinary Unicode remain readable. JSON retains decoded values, body exports retain normalized content, and `messages raw`/raw exports retain exact MIME bytes. Use those explicit data paths when exact content is required.
+
 Keep bodies, addresses, credentials, and attachment bytes out of logs and summaries unless requested. Detail commands default to metadata; use `--view plain|full`, `--fields`, or `--export /absolute/new/path` only when needed. Exports are complete, exclusive mode-0600 files with verified size and SHA-256; never accept truncation or infer missing bytes.
 
 ## Error contract

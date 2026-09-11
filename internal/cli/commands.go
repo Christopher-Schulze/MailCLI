@@ -360,6 +360,10 @@ func failMessageRead(
 		output = options[0]
 	}
 	if message.Hydration == nil {
+		if !jsonOutput {
+			writeLine(stderr, oneLine(err.Error()))
+			return commandExitCode(err)
+		}
 		if jsonOutput && output.target == projectionTargetMessage {
 			if messageHasRecoveryData(message) {
 				return writeProjectedFailure(stdout, command, responseData{Message: &message}, output, err, false)
@@ -378,7 +382,7 @@ func failMessageRead(
 	if writeErr := writeMessage(stdout, message); writeErr != nil {
 		return 1
 	}
-	writeLine(stderr, safeErr)
+	writeLine(stderr, oneLine(safeErr.Error()))
 	return commandExitCode(safeErr)
 }
 
@@ -650,66 +654,66 @@ func writeMessagePage(stdout io.Writer, command string, page mail.MessagePage, j
 }
 
 func writeMessage(stdout io.Writer, message mail.Message) error {
-	if _, err := fmt.Fprintf(stdout, "Ref: %s\n", message.Summary.Ref); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Ref: %s\n", oneLine(message.Summary.Ref)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "From: %s\n", message.Summary.Sender); err != nil {
+	if _, err := fmt.Fprintf(stdout, "From: %s\n", oneLine(message.Summary.Sender)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "To: %s\n", formatRecipients(message.To)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "To: %s\n", oneLine(formatRecipients(message.To))); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "CC: %s\n", formatRecipients(message.CC)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "CC: %s\n", oneLine(formatRecipients(message.CC))); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "BCC: %s\n", formatRecipients(message.BCC)); err != nil {
+	if _, err := fmt.Fprintf(stdout, "BCC: %s\n", oneLine(formatRecipients(message.BCC))); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "Subject: %s\n", message.Summary.Subject); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Subject: %s\n", oneLine(message.Summary.Subject)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "Date received: %s\n", message.Summary.DateReceived); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Date received: %s\n", oneLine(message.Summary.DateReceived)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stdout, "Attachments: %d\n", len(message.Attachments)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "Content source: %s\n", message.ContentSource); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Content source: %s\n", oneLine(message.ContentSource)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(stdout, "Content complete: %t\n", message.ContentComplete); err != nil {
 		return err
 	}
 	if len(message.MissingParts) > 0 {
-		if _, err := fmt.Fprintf(stdout, "Missing parts: %s\n", strings.Join(message.MissingParts, ", ")); err != nil {
+		if _, err := fmt.Fprintf(stdout, "Missing parts: %s\n", oneLine(strings.Join(message.MissingParts, ", "))); err != nil {
 			return err
 		}
 	}
 	if message.Hydration != nil {
-		if _, err := fmt.Fprintf(stdout, "Hydration state: %s\n", message.Hydration.State); err != nil {
+		if _, err := fmt.Fprintf(stdout, "Hydration state: %s\n", oneLine(string(message.Hydration.State))); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(stdout, "Hydration source: %s\n", message.Hydration.AttemptedSource); err != nil {
+		if _, err := fmt.Fprintf(stdout, "Hydration source: %s\n", oneLine(message.Hydration.AttemptedSource)); err != nil {
 			return err
 		}
 		if cause := message.Hydration.Local; cause != nil {
-			if _, err := fmt.Fprintf(stdout, "Hydration local: %s: %s\n", cause.Code, cause.Message); err != nil {
+			if _, err := fmt.Fprintf(stdout, "Hydration local: %s: %s\n", oneLine(cause.Code), oneLine(cause.Message)); err != nil {
 				return err
 			}
 		}
 		if cause := message.Hydration.Remote; cause != nil {
-			if _, err := fmt.Fprintf(stdout, "Hydration remote: %s: %s\n", cause.Code, cause.Message); err != nil {
+			if _, err := fmt.Fprintf(stdout, "Hydration remote: %s: %s\n", oneLine(cause.Code), oneLine(cause.Message)); err != nil {
 				return err
 			}
 		}
-		if _, err := fmt.Fprintf(stdout, "Hydration remediation: %s\n", message.Hydration.Remediation); err != nil {
+		if _, err := fmt.Fprintf(stdout, "Hydration remediation: %s\n", oneLine(message.Hydration.Remediation)); err != nil {
 			return err
 		}
 	}
 	if _, err := fmt.Fprintln(stdout); err != nil {
 		return err
 	}
-	if _, err := stdout.Write([]byte(message.Content)); err != nil {
+	if _, err := io.WriteString(stdout, terminalText(message.Content, true)); err != nil {
 		return err
 	}
 	return nil
@@ -728,7 +732,16 @@ func formatRecipients(recipients []mail.Recipient) string {
 }
 
 func oneLine(value string) string {
+	return terminalText(value, false)
+}
+
+// terminalText follows the shared human-output policy; only body layout may
+// retain LF and TAB. Raw source, exports, and JSON never use this boundary.
+func terminalText(value string, multiline bool) string {
 	return strings.Map(func(char rune) rune {
+		if multiline && (char == '\n' || char == '\t') {
+			return char
+		}
 		if unicode.IsControl(char) || unicode.Is(unicode.Zl, char) || unicode.Is(unicode.Zp, char) {
 			return ' '
 		}
