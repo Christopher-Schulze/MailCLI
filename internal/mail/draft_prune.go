@@ -63,22 +63,26 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 	if err != nil {
 		return PruneDraftsResult{}, err
 	}
-	drafts, err := s.ListDrafts()
-	if err != nil {
-		return PruneDraftsResult{}, err
-	}
-	if err := draftContextError(ctx, "prune"); err != nil {
-		return PruneDraftsResult{}, err
-	}
 	cutoff := time.Now().Add(-request.OlderThan)
 	result := PruneDraftsResult{DryRun: !request.Confirm}
-	for _, draft := range drafts {
-		if !pruneEligible(draft, cutoff) {
-			continue
+	listRequest := ListDraftsRequest{Limit: MaximumDraftListLimit}
+	for {
+		page, err := s.ListDrafts(ctx, listRequest)
+		if err != nil {
+			return PruneDraftsResult{}, err
 		}
-		result.Candidates = append(result.Candidates, PruneCandidate{
-			Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
-		})
+		for _, draft := range page.Drafts {
+			if !pruneEligible(draft, cutoff) {
+				continue
+			}
+			result.Candidates = append(result.Candidates, PruneCandidate{
+				Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
+			})
+		}
+		listRequest.Cursor = page.Pagination.NextCursor
+		if listRequest.Cursor == "" {
+			break
+		}
 	}
 	receiptCandidates, err := listExpiredSendReceipts(root, time.Now().UTC())
 	if err != nil {

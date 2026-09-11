@@ -347,7 +347,8 @@ func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
 		t.Fatalf("CreateDraft() render calls = %d, want 3", calls)
 	}
 	observer.calls.Store(0)
-	summaries, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	summaries := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
@@ -435,7 +436,8 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 		t.Fatalf("draft preparation and validation render calls = %d, want 2", calls)
 	}
 	observer.calls.Store(0)
-	summaries, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	summaries := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
@@ -504,7 +506,8 @@ func TestListDraftsRedactsLegacySaveAttemptMaterializedBody(t *testing.T) {
 		t.Fatalf("replaceDraftSaveAttempt() error = %v", err)
 	}
 
-	summaries, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	summaries := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
@@ -620,7 +623,8 @@ func TestListDraftsBoundsOversizedLegacySaveAttempt(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	summaries, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	summaries := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
@@ -659,7 +663,8 @@ func TestDraftLifecycleAndAttachmentIntegrity(t *testing.T) {
 	if err != nil || updated.Ref != draft.Ref || updated.CreatedAt != draft.CreatedAt {
 		t.Fatalf("UpdateDraft() = %+v, error = %v", updated, err)
 	}
-	drafts, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	drafts := page.Drafts
 	if err != nil || len(drafts) != 1 || drafts[0].Subject != "Updated" {
 		t.Fatalf("ListDrafts() = %+v, error = %v", drafts, err)
 	}
@@ -1294,7 +1299,8 @@ func TestListDraftsSurfacesCorruptFiles(t *testing.T) {
 	if err := os.WriteFile(corruptPath, []byte("{not valid json"), 0o600); err != nil {
 		t.Fatalf("write corrupt draft: %v", err)
 	}
-	drafts, err := service.ListDrafts()
+	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
+	drafts := page.Drafts
 	if err != nil {
 		t.Fatalf("ListDrafts() error = %v", err)
 	}
