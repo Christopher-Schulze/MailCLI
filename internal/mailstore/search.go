@@ -220,13 +220,13 @@ func searchFoldSQL(value string) string {
 
 func appendScalarFilters(where *[]string, arguments *[]any, prepared mail.PreparedQuery) {
 	query := prepared.Query
-	if prepared.AfterUnix != 0 {
+	if prepared.AfterUnix != nil {
 		*where = append(*where, "m.date_received >= ?")
-		*arguments = append(*arguments, prepared.AfterUnix)
+		*arguments = append(*arguments, *prepared.AfterUnix)
 	}
-	if prepared.BeforeUnix != 0 {
+	if prepared.BeforeUnix != nil {
 		*where = append(*where, "m.date_received < ?")
-		*arguments = append(*arguments, prepared.BeforeUnix)
+		*arguments = append(*arguments, *prepared.BeforeUnix)
 	}
 	if query.Read != nil {
 		*where = append(*where, "m.read = ?")
