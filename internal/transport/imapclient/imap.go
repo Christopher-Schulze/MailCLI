@@ -2182,14 +2182,16 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		return ev, moveOutcomeUnknown(ev, err)
 	}
 
-	storeCmd := fmt.Sprintf("%s UID STORE %d +FLAGS (\\Deleted)", sess.nextTag(), uid)
-	storeStatus, storeText, err := c.doCommandResponse(ctx, sess, storeCmd)
+	copyResponse := ev.ServerResponse
+	// Track the flag phase independently; COPY is already a proven effect.
+	ev.Outcome, ev.FlagsState, ev.ServerResponse = transport.MutationOutcomeNotStarted, transport.FlagObservationUnverified, ""
+	ev, err = c.setFlagsAndVerify(ctx, sess, ev, []string{"\\Deleted"}, nil, info.permissions)
+	flagResponse := ev.ServerResponse
+	ev.ServerResponse, ev.Outcome = copyResponse, transport.MutationOutcomePartial
+	if flagResponse != "" {
+		ev.ServerResponse += "; source flag response: " + flagResponse
+	}
 	if err != nil {
-		ev.ServerResponse = fmt.Sprintf(
-			"%s; source flag response: %s",
-			ev.ServerResponse, joinIMAPResponse(storeStatus, storeText),
-		)
-		ev.Outcome = transport.MutationOutcomePartial
 		return ev, moveOutcomeUnknown(ev, err)
 	}
 	appendMutationEffect(&ev, "source_flag")

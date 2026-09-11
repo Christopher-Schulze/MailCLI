@@ -908,10 +908,12 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 			if outcomeErr := verifyMoveDestination(
 				ctx, imapOp, target.cfg, dstImapBox, target.messageID, err,
 			); outcomeErr != nil {
-				return mail.MessageSummary{}, outcomeErr
+				err = outcomeErr
 			}
 		}
-		return mail.MessageSummary{}, err
+		if ev.Command == "" {
+			return mail.MessageSummary{}, err
+		}
 	}
 	if request.Copy {
 		var outcomeErr error
@@ -928,7 +930,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 
 	summary := target.summary
-	if !request.Copy {
+	if !request.Copy && err == nil {
 		summary.MailboxRef = request.DestinationMailbox
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
@@ -952,9 +954,15 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		CopySourceUID:          ev.CopySourceUID,
 		CopyDestinationUID:     ev.CopyDestinationUID,
 		CompletedEffects:       append([]string(nil), ev.CompletedEffects...),
+		FlagsState:             string(ev.FlagsState),
+		ActualFlags:            append([]string(nil), ev.ActualFlags...),
+		FlagsSource:            ev.FlagsSource,
 	}
 	summary.StalenessNote = stalenessExplanation
-	return summary, nil
+	if err != nil {
+		summary.StalenessNote = "MOVE is incomplete; retained source flags and COPY effects are in server_truth; summary booleans retain local cached values"
+	}
+	return summary, err
 }
 
 func duplicateMatchEvidence(matchCount int) int {
@@ -1327,12 +1335,12 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity)
 		target.duplicateMatches = retried.duplicateMatches
 	}
-	if err != nil {
+	if err != nil && ev.Command == "" {
 		return mail.DeleteResult{}, err
 	}
 	ev.DuplicateMatches = duplicateMatchEvidence(target.duplicateMatches)
 	return mail.DeleteResult{
-		MessageRef: request.Ref, Deleted: true,
+		MessageRef: request.Ref, Deleted: err == nil,
 		ServerTruth: &mail.ServerMutationEvidence{
 			OperationID: ev.OperationID, Outcome: ev.Outcome, SourceAccount: ev.SourceAccount,
 			Command: ev.Command, ServerResponse: ev.ServerResponse,
@@ -1344,8 +1352,11 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 			CopyUIDResponse: ev.CopyUIDResponse, CopyUIDValidity: ev.CopyUIDValidity,
 			CopySourceUID: ev.CopySourceUID, CopyDestinationUID: ev.CopyDestinationUID,
 			CompletedEffects: append([]string(nil), ev.CompletedEffects...),
+			FlagsState:       string(ev.FlagsState),
+			ActualFlags:      append([]string(nil), ev.ActualFlags...),
+			FlagsSource:      ev.FlagsSource,
 		},
-	}, nil
+	}, err
 }
 
 // hydrateMessage resolves the IMAP target and fetches the complete raw RFC
@@ -2017,9 +2028,8 @@ func failureCode(ctx context.Context, err error) string {
 	return "sync_check_failed"
 }
 
-// isUIDValidityChangedError reports whether err is the typed mailbox rebuild
-// error returned by checkUIDValidity in the transport layer.
+// Only a definitive pre-mutation rebuild permits a retry. An outer uncertain
+// outcome retains precedence over any nested UIDVALIDITY diagnostic.
 func isUIDValidityChangedError(err error) bool {
-	var typed *transport.TransportError
-	return errors.As(err, &typed) && typed.Code == "mailbox_uidvalidity_changed"
+	return transport.ErrorCode(err) == "mailbox_uidvalidity_changed"
 }
