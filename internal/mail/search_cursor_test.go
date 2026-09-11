@@ -204,6 +204,52 @@ func TestDecodeSearchCursorRejectsUnknownFlagsAndTrailingBytes(t *testing.T) {
 	}
 }
 
+func TestSearchCursorPreservesDateBoundPresence(t *testing.T) {
+	for _, test := range []struct{ name, after, before string }{
+		{"omitted", "", ""},
+		{"epoch after", "1970-01-01T00:00:00Z", ""},
+		{"epoch before", "", "1970-01-01T00:00:00Z"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := Query{After: test.after, Before: test.before, Limit: 1}
+			prepared, err := PrepareQuery(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compact, err := EncodeSearchCursorWithRevision(prepared.Fingerprint, "store", "revision", 0, false, 42)
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy, err := json.Marshal(SearchCursor{Version: legacySearchCursorVersion, Fingerprint: prepared.Fingerprint, StoreUUID: "store", IndexRevision: "revision", ReceivedAt: 0, RowID: 42})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, token := range []string{compact, "scur_" + base64.RawURLEncoding.EncodeToString(legacy)} {
+				query.Cursor, query.Limit = token, 2
+				continued, err := PrepareQuery(query)
+				if err != nil || continued.Fingerprint != prepared.Fingerprint || continued.Cursor == nil || continued.Cursor.ReceivedAt != 0 || continued.Cursor.ReceivedAtNull || continued.Cursor.RowID != 42 ||
+					(continued.AfterUnix != nil) != (test.after != "") || (continued.BeforeUnix != nil) != (test.before != "") {
+					t.Fatalf("continuation changed date presence: %+v, error=%v", continued, err)
+				}
+				if continued.AfterUnix != nil && *continued.AfterUnix != 0 || continued.BeforeUnix != nil && *continued.BeforeUnix != 0 {
+					t.Fatalf("continuation changed epoch value: %+v", continued)
+				}
+				changed := query
+				if test.after != "" {
+					changed.After = ""
+				} else if test.before != "" {
+					changed.Before = ""
+				} else {
+					changed.Before = "1970-01-01T00:00:00Z"
+				}
+				if _, err := PrepareQuery(changed); err == nil {
+					t.Fatal("cursor accepted a change between omitted and explicit epoch bounds")
+				}
+			}
+		})
+	}
+}
+
 func FuzzDecodeSearchCursor(f *testing.F) {
 	valid, _ := EncodeSearchCursorWithRevision("fp", "store", "revision", 1, false, 1)
 	for _, seed := range []string{valid, "", "scur_!!!", "scur_eyJ2ZXJzaW9uIjozfQ"} {
@@ -302,8 +348,8 @@ func TestParseQueryTimeRFC3339(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseQueryTime error = %v", err)
 	}
-	if got <= 0 {
-		t.Errorf("parsed timestamp = %d, want positive", got)
+	if got == nil || *got <= 0 {
+		t.Errorf("parsed timestamp = %v, want a present positive timestamp", got)
 	}
 }
 
@@ -312,8 +358,8 @@ func TestParseQueryTimeDateOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseQueryTime error = %v", err)
 	}
-	if got <= 0 {
-		t.Errorf("parsed timestamp = %d, want positive", got)
+	if got == nil || *got <= 0 {
+		t.Errorf("parsed timestamp = %v, want a present positive timestamp", got)
 	}
 }
 
@@ -322,8 +368,8 @@ func TestParseQueryTimeEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseQueryTime error = %v", err)
 	}
-	if got != 0 {
-		t.Errorf("parsed timestamp = %d, want 0 for empty input", got)
+	if got != nil {
+		t.Errorf("parsed timestamp = %v, want nil for empty input", got)
 	}
 }
 

@@ -74,8 +74,8 @@ type SearchPage struct {
 
 type PreparedQuery struct {
 	Query         Query
-	AfterUnix     int64
-	BeforeUnix    int64
+	AfterUnix     *int64
+	BeforeUnix    *int64
 	Fingerprint   string
 	Cursor        *SearchCursor
 	IndexRevision string
@@ -140,7 +140,7 @@ func PrepareQuery(query Query) (PreparedQuery, error) {
 	if err != nil {
 		return PreparedQuery{}, validationError(fmt.Sprintf("invalid before date: %v", err))
 	}
-	if after != 0 && before != 0 && after >= before {
+	if after != nil && before != nil && *after >= *before {
 		return PreparedQuery{}, validationError("after must be earlier than before")
 	}
 	fingerprint, err := queryFingerprint(query)
@@ -262,17 +262,19 @@ func isLegacyJSONPayload(payload []byte) bool {
 	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
-func parseQueryTime(value string) (int64, error) {
+func parseQueryTime(value string) (*int64, error) {
 	if value == "" {
-		return 0, nil
+		return nil, nil
 	}
-	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-		return parsed.Unix(), nil
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		parsed, err = time.ParseInLocation(time.DateOnly, value, time.Local)
 	}
-	if parsed, err := time.ParseInLocation(time.DateOnly, value, time.Local); err == nil {
-		return parsed.Unix(), nil
+	if err != nil {
+		return nil, fmt.Errorf("use RFC 3339 or YYYY-MM-DD")
 	}
-	return 0, fmt.Errorf("use RFC 3339 or YYYY-MM-DD")
+	timestamp := parsed.Unix()
+	return &timestamp, nil
 }
 
 func queryFingerprint(query Query) (string, error) {

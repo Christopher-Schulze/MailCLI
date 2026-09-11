@@ -308,6 +308,8 @@ MailCLI does not execute Mail.app `whose` searches. Those Apple Events can trigg
 
 Search matching uses NFC normalization followed by Unicode simple lowercasing for query terms, MIME text, attachment names, snippets, and metadata SQL candidates. SQLite applies the same policy through the registered `mailcli_search_fold` function; full case-fold expansions are excluded until offset-preserving mapping is available.
 
+Date filters compare received timestamps in whole Unix seconds: `--after` is inclusive and `--before` is exclusive. Omitted bounds are unbounded; an explicit `1970-01-01T00:00:00Z` is a real zero-valued boundary, and negative timestamps remain supported. RFC3339 offsets select the specified instant; `YYYY-MM-DD` selects midnight in the process's local timezone. When both bounds are present, after must be strictly earlier than before at that resolution. SQL NULL received dates match only when neither date bound is present. Keep the same date strings when continuing with a cursor: both supported cursor formats bind those original filters, including their presence, while allowing a different page size.
+
 An incomplete body search returns `next_cursor` after the last fully classified candidate when later candidates remain. Byte-blocked candidates are retried with the fresh per-page budget; when the first candidate is already too large, an inclusive cursor retries that exact boundary. A cursor is omitted only when the candidate stream has reached its end.
 
 At a result-page boundary, body-search cursors advance to the last candidate actually examined, so sparse and dense matches do not rescan or skip the intervening candidate stream.

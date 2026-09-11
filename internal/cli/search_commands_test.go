@@ -90,6 +90,51 @@ func TestSearchExactCountFlag(t *testing.T) {
 	}
 }
 
+func TestSearchCommandsPreserveEpochDateBounds(t *testing.T) {
+	for _, command := range []string{"filter", "search"} {
+		for _, test := range []struct {
+			name, after, before   string
+			afterUnix, beforeUnix int64
+		}{
+			{name: "omitted"},
+			{name: "epoch before", before: "1970-01-01T00:00:00Z"},
+			{name: "epoch after", after: "1970-01-01T00:00:00Z"},
+			{name: "negative to epoch", after: "1969-12-31T23:59:59Z", before: "1970-01-01T01:00:00+01:00", afterUnix: -1},
+		} {
+			t.Run(command+"/"+test.name, func(t *testing.T) {
+				gateway := &searchQueryCaptureGateway{}
+				args := []string{"messages", command, "--json"}
+				if test.after != "" {
+					args = append(args, "--after", test.after)
+				}
+				if test.before != "" {
+					args = append(args, "--before", test.before)
+				}
+				var stdout, stderr bytes.Buffer
+				code := Run(context.Background(), mail.NewService(gateway), args, &stdout, &stderr)
+				query := gateway.query
+				if code != 0 || stderr.Len() != 0 || query.Fingerprint == "" || query.Query.After != test.after || query.Query.Before != test.before || (query.AfterUnix != nil) != (test.after != "") || (query.BeforeUnix != nil) != (test.before != "") {
+					t.Fatalf("CLI date query: code=%d, query=%+v, stdout=%s, stderr=%s", code, query, &stdout, &stderr)
+				}
+				if query.AfterUnix != nil && *query.AfterUnix != test.afterUnix || query.BeforeUnix != nil && *query.BeforeUnix != test.beforeUnix {
+					t.Fatalf("CLI changed date values: %+v", query)
+				}
+			})
+		}
+	}
+}
+
+func TestSearchCommandsRejectInvalidEpochRangeBeforeDispatch(t *testing.T) {
+	for _, command := range []string{"filter", "search"} {
+		gateway := &searchQueryCaptureGateway{}
+		var stdout, stderr bytes.Buffer
+		code := Run(context.Background(), mail.NewService(gateway), []string{"messages", command, "--after", "1970-01-01T00:00:00Z", "--before", "1969-12-31T23:59:59Z", "--json"}, &stdout, &stderr)
+		if code != 2 || !strings.Contains(stdout.String(), "after must be earlier than before") || gateway.query.Fingerprint != "" {
+			t.Fatalf("invalid epoch range: code=%d, query=%+v, stdout=%s, stderr=%s", code, gateway.query, &stdout, &stderr)
+		}
+	}
+}
+
 func TestSearchHumanOutputIncludesSnippetAndHonestCoverage(t *testing.T) {
 	page := mail.SearchPage{
 		Messages: []mail.SearchMessage{{
