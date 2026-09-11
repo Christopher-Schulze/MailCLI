@@ -100,15 +100,14 @@ func readBatchInput(path string) (mail.BatchRequest, error) {
 	if len(payload) > mail.MaximumBatchInputBytes {
 		return mail.BatchRequest{}, invalidDraftInput("batch input exceeds 16 MiB")
 	}
+	if _, err := validateInputJSON(payload, inputJSONBatch); err != nil {
+		return mail.BatchRequest{}, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var request mail.BatchRequest
 	if err := decoder.Decode(&request); err != nil {
-		return mail.BatchRequest{}, invalidDraftInput("decode batch JSON: " + err.Error())
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return mail.BatchRequest{}, invalidDraftInput("batch input must contain exactly one JSON object")
+		return mail.BatchRequest{}, inputJSONDecodeError(err)
 	}
 	return request, nil
 }
