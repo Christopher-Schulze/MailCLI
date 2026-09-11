@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -72,9 +73,53 @@ type ComposedMessage struct {
 	path            string
 	size            int64
 	messageID       string
+	file            *os.File
 	storage         *draftStorage
 	storageName     string
 	storageIdentity os.FileInfo
+	lifecycleMu     sync.Mutex
+	readers         int
+	removed         bool
+	removeErr       error
+}
+
+type composedMessageReader struct {
+	section   *io.SectionReader
+	remaining int64
+	closeFn   func() error
+	mu        sync.Mutex
+	closed    bool
+}
+
+func (r *composedMessageReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return 0, os.ErrClosed
+	}
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	limit := len(p)
+	if int64(limit) > r.remaining {
+		limit = int(r.remaining)
+	}
+	n, err := r.section.Read(p[:limit])
+	r.remaining -= int64(n)
+	if err == io.EOF && r.remaining > 0 {
+		return n, io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+func (r *composedMessageReader) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return os.ErrClosed
+	}
+	r.closed = true
+	return r.closeFn()
 }
 
 func ComposeMessageSpool(draft Draft, messageID string) (*ComposedMessage, error) {
@@ -132,9 +177,15 @@ func composeMessageSpoolContext(
 		return nil, &ComposerError{Message: "create private message spool", Err: err}
 	}
 	path := file.Name()
+	storageName := path
+	storage := &draftStorage{}
+	identity, err := file.Stat()
+	if err != nil {
+		return nil, &ComposerError{Message: "stat message spool", Err: errors.Join(err, file.Close())}
+	}
 	cleanup := func() {
 		_ = file.Close()
-		_ = os.Remove(path)
+		_ = removeDraftStorageFile(storage, storageName, identity, "")
 	}
 	if err := file.Chmod(0o600); err != nil {
 		cleanup()
@@ -203,24 +254,50 @@ func composeMessageSpoolContext(
 		cleanup()
 		return nil, &ComposerError{Message: "flush message spool", Err: err}
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return nil, &ComposerError{Message: "close message spool", Err: err}
-	}
-	stat, err := os.Stat(path)
+	stat, err := file.Stat()
 	if err != nil {
-		_ = os.Remove(path)
+		cleanup()
 		return nil, &ComposerError{Message: "stat message spool", Err: err}
 	}
-	return &ComposedMessage{path: path, size: stat.Size(), messageID: messageID}, nil
+	if !stat.Mode().IsRegular() || !os.SameFile(identity, stat) {
+		cleanup()
+		return nil, &ComposerError{Message: "stat message spool", Err: errors.New("message spool identity changed while composing")}
+	}
+	return &ComposedMessage{
+		path: path, size: stat.Size(), messageID: messageID,
+		file: file, storage: storage, storageName: storageName, storageIdentity: identity,
+	}, nil
 }
 
 func (m *ComposedMessage) Open() (io.ReadCloser, error) {
-	if m.storage != nil {
-		file, _, err := m.storage.openFile(m.storageName, m.storageIdentity, os.O_RDONLY, 0)
-		return file, err
+	if m == nil {
+		return nil, os.ErrInvalid
 	}
-	return os.Open(m.path)
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.removed {
+		return nil, os.ErrClosed
+	}
+	if m.storage == nil || m.storageIdentity == nil {
+		return nil, errors.New("composed message spool is not identity-pinned")
+	}
+	file := m.file
+	closeFn := m.releaseReader
+	if file == nil {
+		var err error
+		file, _, err = m.storage.openFile(m.storageName, m.storageIdentity, os.O_RDONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		closeFn = file.Close
+	} else {
+		m.readers++
+	}
+	return &composedMessageReader{
+		section:   io.NewSectionReader(file, 0, m.size),
+		remaining: m.size,
+		closeFn:   closeFn,
+	}, nil
 }
 
 func (m *ComposedMessage) Size() int64 { return m.size }
@@ -228,10 +305,44 @@ func (m *ComposedMessage) Size() int64 { return m.size }
 func (m *ComposedMessage) MessageID() string { return m.messageID }
 
 func (m *ComposedMessage) Remove() error {
-	if m.storage != nil {
-		return removeDraftStorageFile(m.storage, m.storageName, m.storageIdentity, "")
+	if m == nil {
+		return nil
 	}
-	return os.Remove(m.path)
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.removed {
+		return m.removeErr
+	}
+	m.removed = true
+	if m.storage == nil || m.storageIdentity == nil {
+		m.removeErr = errors.New("composed message spool is not identity-pinned")
+	} else {
+		m.removeErr = removeDraftStorageFile(m.storage, m.storageName, m.storageIdentity, "")
+	}
+	if m.readers == 0 {
+		_ = m.closeOwnerLocked()
+	}
+	return m.removeErr
+}
+
+func (m *ComposedMessage) releaseReader() error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	m.readers--
+	if m.removed && m.readers == 0 {
+		return m.closeOwnerLocked()
+	}
+	return nil
+}
+
+func (m *ComposedMessage) closeOwnerLocked() error {
+	if m.file == nil {
+		return nil
+	}
+	err := m.file.Close()
+	m.file = nil
+	m.removeErr = errors.Join(m.removeErr, err)
+	return err
 }
 
 func composerAttachmentHeaders(path string) []string {

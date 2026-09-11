@@ -38,7 +38,7 @@ func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessa
 		return nil, err
 	}
 	temporary := filepath.Base(temporaryPath)
-	source, _, err := openRegularAttachment(message.path)
+	source, err := message.Open()
 	if err != nil {
 		return nil, fmt.Errorf("open composed message for recovery: %w", err)
 	}
