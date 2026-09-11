@@ -142,10 +142,9 @@ func (b *mimeParseBudget) reserve(resource mimeBudgetResource, used *int64, amou
 	return true
 }
 
-func (b *mimeParseBudget) visit(path []int) *mimeResourceLimitError {
-	depth := int64(len(path))
-	if depth >= b.limits.depth {
-		return b.exhaust(mimeBudgetDepth, depth+1, b.limits.depth)
+func (b *mimeParseBudget) visit(depth int64) *mimeResourceLimitError {
+	if err := b.checkDepth(depth); err != nil {
+		return err
 	}
 	if !b.reserve(mimeBudgetParts, &b.parts, 1, b.limits.parts) {
 		return b.error()
@@ -500,7 +499,7 @@ func parseMIMEEntity(
 	if err := document.contextErr(); err != nil {
 		return mimeTextRepresentation{}, err
 	}
-	if budgetErr := document.budget.visit(path); budgetErr != nil {
+	if budgetErr := document.budget.visit(int64(len(path))); budgetErr != nil {
 		markMIMEBudgetExceeded(document, budgetErr)
 		return mimeTextRepresentation{}, budgetErr
 	}
@@ -529,11 +528,12 @@ func parseMIMEEntity(
 		filename = parameters["name"]
 	}
 	partID := mimePartID(path)
-	if strings.EqualFold(disposition, "attachment") || filename != "" {
+	embedded := isEmbeddedMessageType(mediaType)
+	if strings.EqualFold(disposition, "attachment") || filename != "" || embedded {
 		if !document.retainMetadata(mimePartMetadataBytes(partID, filename, mediaType, hashAttachments)) {
 			return mimeTextRepresentation{}, document.budget.error()
 		}
-		if document.skipNonTextBodies {
+		if document.skipNonTextBodies && !embedded {
 			// Search path: skip the decode, not the I/O. The walker still
 			// reads and discards raw bytes. Names and counts stay exact.
 			if document.Parts == nil {
@@ -548,10 +548,20 @@ func parseMIMEEntity(
 			}
 			return mimeTextRepresentation{}, nil
 		}
-		size, digest, err := consumeMIMEAttachmentContext(document.ctx, entity.Body, hashAttachments)
+		var size int64
+		var digest string
+		var err error
+		if embedded {
+			size, digest, err = consumeEmbeddedMessage(entity.Body, int64(len(path))+1, document, hashAttachments && !document.skipNonTextBodies)
+		} else {
+			size, digest, err = consumeMIMEAttachmentContext(document.ctx, entity.Body, hashAttachments)
+		}
 		complete := partErr == nil && err == nil && !missingAppleContent(
 			entity.Header.Get("X-Apple-Content-Length"), size, true,
 		)
+		if embedded && partial {
+			complete = false
+		}
 		if !complete {
 			digest = ""
 		}
@@ -700,6 +710,9 @@ func parseMIMEMultipart(
 		childPath := make([]int, len(path)+1)
 		copy(childPath, path)
 		childPath[len(path)] = index
+		if mediaType == "multipart/digest" && !child.Header.Has("Content-Type") {
+			child.Header.Set("Content-Type", "message/rfc822")
+		}
 		representation, childErr := parseMIMEEntity(
 			child, childPath, err, partial, hashAttachments, document,
 		)
@@ -755,6 +768,10 @@ func consumeMIMEAttachmentContext(ctx context.Context, reader io.Reader, withHas
 
 func readRawHeaders(reader io.Reader) (string, error) {
 	buffered := bufio.NewReaderSize(io.LimitReader(reader, int64(maximumHeaderBytes)+1), mimeHeaderReaderBuffer)
+	return readRawHeaderBlock(buffered)
+}
+
+func readRawHeaderBlock(buffered *bufio.Reader) (string, error) {
 	var output strings.Builder
 	output.Grow(mimeHeaderInitialBytes)
 	for output.Len() <= maximumHeaderBytes {

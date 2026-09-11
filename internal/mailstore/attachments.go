@@ -450,15 +450,17 @@ func extractMIMEAttachmentWithEvidence(
 ) (evidence mail.AttachmentEvidence, resultErr error) {
 	errAttachmentExtracted := errors.New("attachment extracted")
 	entity, readErr := message.Read(reader)
-	if entity == nil || (readErr != nil && !message.IsUnknownCharset(readErr) && !message.IsUnknownEncoding(readErr)) {
+	if entity == nil || readErr != nil {
 		return mail.AttachmentEvidence{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC message: %v", readErr))
 	}
 	found := false
 	walkErr := entity.Walk(func(path []int, part *message.Entity, partErr error) error {
-		if mimePartID(path) != attachmentID {
+		// The multipart root and its first child share the legacy ID "1".
+		// Only leaf entities are exposed by MIME part classification.
+		if mimePartID(path) != attachmentID || part.MultipartReader() != nil {
 			return nil
 		}
-		if partErr != nil && !message.IsUnknownCharset(partErr) && !message.IsUnknownEncoding(partErr) {
+		if partErr != nil {
 			return partErr
 		}
 		proof, err := writeExclusiveFileWithEvidence(outputPath, part.Body)

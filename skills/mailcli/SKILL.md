@@ -42,6 +42,7 @@ Never issue raw SQLite, private-file traversal, AppleScript/JXA, UI-coordinate a
 - Request `messages get --ref REF --json` for metadata, `--view plain` for normalized text, and `messages raw --ref REF` for exact RFC 5322 source. Check `content_complete`, `missing_parts`, hydration state, and source before claiming completeness. Retained partial content is evidence, not a complete message.
 - Search is exhaustive only when `data.page.coverage.complete` is true. Inspect candidate-count exactness, partial/missing-source counts, and scan bounds. Body search is bounded on demand; never invent a larger page or scan limit.
 - Attachment IDs are opaque MIME-part paths. Save only to an absolute new path; the command verifies size, SHA-256, ownership, and mode 0600 and never overwrites an existing destination.
+- Embedded RFC messages, including `message/global` and implicit `multipart/digest` entries, appear as attachments even when `name` is empty. Save the selected part to access its complete original embedded MIME bytes; nested content stays inside that object and is not included in outer body/search text. Check `content_complete` and `missing_parts` for decoding, structure or budget failures; a saved-file hash proves bytes, not message validity.
 - Use `mailcli batch --input - --json` only with explicit refs and unique item IDs. Results are ordered per input; there is no automatic retry. Never replay a successful or uncertain mutation.
 
 ## Drafts, compose, and mutations
