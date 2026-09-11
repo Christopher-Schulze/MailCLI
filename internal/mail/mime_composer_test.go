@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -425,6 +426,302 @@ func TestComposeMessageSpoolCanBeRemovedAfterReplay(t *testing.T) {
 	}
 	if _, err := message.Open(); err == nil {
 		t.Fatal("Open() after Remove() succeeded")
+	}
+}
+
+func TestComposeMessageSpoolPinsContentAndProtectsReplacement(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Pinned spool", Body: "Original body",
+	}
+	message, err := ComposeMessageSpool(draft, "<pinned@example.com>")
+	if err != nil {
+		t.Fatalf("ComposeMessageSpool() error = %v", err)
+	}
+	path := message.path
+	movedPath := path + ".moved"
+	t.Cleanup(func() {
+		_ = os.Remove(path)
+		_ = os.Remove(movedPath)
+		_ = message.Remove()
+	})
+
+	initialReader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open(initial) error = %v", err)
+	}
+	original, readErr := io.ReadAll(initialReader)
+	if closeErr := initialReader.Close(); readErr != nil || closeErr != nil {
+		t.Fatalf("initial read/close = %v/%v", readErr, closeErr)
+	}
+	if err := os.Rename(path, movedPath); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	replacement := []byte("replacement bytes")
+	if err := os.WriteFile(path, replacement, 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error = %v", err)
+	}
+
+	replacementReader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open(after replacement) error = %v", err)
+	}
+	got, readErr := io.ReadAll(replacementReader)
+	closeErr := replacementReader.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("replacement read/close = %v/%v", readErr, closeErr)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("replacement path changed composed bytes")
+	}
+
+	if err := message.Remove(); errorCode(err) != "draft_lock_changed" {
+		t.Fatalf("Remove() error = %v, want draft_lock_changed", err)
+	}
+	if message.file != nil {
+		t.Fatal("owner descriptor remains open after replacement cleanup")
+	}
+	retained, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(replacement) error = %v", err)
+	}
+	if string(retained) != string(replacement) {
+		t.Fatalf("replacement path changed to %q", retained)
+	}
+}
+
+func TestComposeMessageSpoolProvidesIndependentBoundedReaders(t *testing.T) {
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Concurrent spool", Body: strings.Repeat("streamed body\n", 16*1024),
+	}
+	message, err := ComposeMessageSpool(draft, "<concurrent@example.com>")
+	if err != nil {
+		t.Fatalf("ComposeMessageSpool() error = %v", err)
+	}
+	t.Cleanup(func() { _ = message.Remove() })
+
+	baselineReader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open(baseline) error = %v", err)
+	}
+	baseline, readErr := io.ReadAll(baselineReader)
+	closeErr := baselineReader.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("baseline read/close = %v/%v", readErr, closeErr)
+	}
+	file, err := os.OpenFile(message.path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("OpenFile(append) error = %v", err)
+	}
+	if _, err := file.WriteString("ignored bytes beyond the composed size"); err != nil {
+		_ = file.Close()
+		t.Fatalf("WriteString(append) error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(append) error = %v", err)
+	}
+
+	readers := make([]io.ReadCloser, 2)
+	for index := range readers {
+		readers[index], err = message.Open()
+		if err != nil {
+			t.Fatalf("Open(%d) error = %v", index, err)
+		}
+	}
+	var (
+		payloads   [2][]byte
+		readErrors [2]error
+		wait       sync.WaitGroup
+		start      = make(chan struct{})
+	)
+	wait.Add(len(readers))
+	for index, reader := range readers {
+		go func(index int, reader io.ReadCloser) {
+			defer wait.Done()
+			<-start
+			payloads[index], readErrors[index] = io.ReadAll(reader)
+			readErrors[index] = errors.Join(readErrors[index], reader.Close())
+		}(index, reader)
+	}
+	close(start)
+	wait.Wait()
+	for index := range payloads {
+		if readErrors[index] != nil {
+			t.Fatalf("reader %d error = %v", index, readErrors[index])
+		}
+		if len(payloads[index]) != len(baseline) || len(payloads[index]) != int(message.Size()) {
+			t.Fatalf("reader %d length = %d, baseline %d, message size %d", index, len(payloads[index]), len(baseline), message.Size())
+		}
+		if string(payloads[index]) != string(baseline) {
+			t.Fatalf("reader %d bytes differ from baseline", index)
+		}
+	}
+	if err := message.Remove(); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if message.file != nil {
+		t.Fatal("owner descriptor remains open after all readers closed")
+	}
+}
+
+func TestComposeMessageSpoolRetainsOwnerUntilLastReaderCloses(t *testing.T) {
+	message, err := ComposeMessageSpool(Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Reader lifetime", Body: strings.Repeat("retained content\n", 1024),
+	}, "<lifetime@example.com>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = message.Remove() })
+	owner := message.file
+	original, err := os.ReadFile(message.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := message.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := message.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	prefix := make([]byte, 97)
+	if _, err := io.ReadFull(first, prefix); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (contextReader{ctx: ctx, reader: first}).Read(prefix); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled consumer error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("second Close() = %v", err)
+	}
+	if _, err := first.Read(prefix); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Read after Close() = %v", err)
+	}
+	if err := message.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(message.path); !os.IsNotExist(err) {
+		t.Fatalf("spool pathname after Remove() = %v", err)
+	}
+	if _, err := message.Open(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Open after Remove() = %v", err)
+	}
+	if _, err := owner.Stat(); err != nil {
+		t.Fatalf("owner closed while a consumer remains: %v", err)
+	}
+	remaining, err := io.ReadAll(second)
+	if err != nil || string(remaining) != string(original) {
+		t.Fatalf("surviving reader: bytes equal %t, error %v", string(remaining) == string(original), err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("owner after last consumer Close() = %v", err)
+	}
+	if err := message.Remove(); err != nil {
+		t.Fatalf("repeated Remove() = %v", err)
+	}
+}
+
+func TestComposeMessageSpoolReportsShortRead(t *testing.T) {
+	message, err := ComposeMessageSpool(Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Short read", Body: "Body",
+	}, "<short-read@example.com>")
+	if err != nil {
+		t.Fatalf("ComposeMessageSpool() error = %v", err)
+	}
+	t.Cleanup(func() { _ = message.Remove() })
+	file, err := os.OpenFile(message.path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatalf("OpenFile(truncate) error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(truncate) error = %v", err)
+	}
+	reader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	_, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) || closeErr != nil {
+		t.Fatalf("short read/close = %v/%v, want io.ErrUnexpectedEOF and nil", readErr, closeErr)
+	}
+}
+
+func TestPersistAcceptedMessageSpoolUsesPinnedComposition(t *testing.T) {
+	message, err := ComposeMessageSpool(Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}},
+		Subject: "Recovery spool", Body: "Accepted bytes",
+	}, "<recovery@example.com>")
+	if err != nil {
+		t.Fatalf("ComposeMessageSpool() error = %v", err)
+	}
+	path := message.path
+	movedPath := path + ".moved"
+	t.Cleanup(func() {
+		_ = os.Remove(path)
+		_ = os.Remove(movedPath)
+		_ = message.Remove()
+	})
+	reader, err := message.Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	original, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read/close = %v/%v", readErr, closeErr)
+	}
+	if err := os.Rename(path, movedPath); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile(replacement) error = %v", err)
+	}
+
+	root := t.TempDir()
+	ref := "draft_123456789012345678901234"
+	pinnedRoot, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatalf("OpenRoot() error = %v", err)
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		_ = pinnedRoot.Close()
+		t.Fatalf("Open(directory) error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pinnedRoot.Close()
+		_ = directory.Close()
+	})
+	state := &draftStorage{rootName: root, root: pinnedRoot, directory: directory}
+	retained, err := persistAcceptedMessageSpool(root, ref, message, state)
+	if err != nil {
+		t.Fatalf("persistAcceptedMessageSpool() error = %v", err)
+	}
+	spoolPath, err := acceptedMessageSpoolPath(root, ref)
+	if err != nil {
+		t.Fatalf("acceptedMessageSpoolPath() error = %v", err)
+	}
+	persisted, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile(recovery spool) error = %v", err)
+	}
+	if string(persisted) != string(original) || retained.Size != int64(len(original)) {
+		t.Fatalf("recovery spool did not preserve pinned bytes: size %d, bytes_equal %t", retained.Size, string(persisted) == string(original))
 	}
 }
 
