@@ -95,7 +95,7 @@ func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentO
 		// Drafts written before diagnostics existed remain readable. New writes
 		// always carry the computed values, and a present value is integrity
 		// checked against the canonical transformation.
-		if len(draft.ContentDiagnostics) > 0 &&
+		if draft.ContentDiagnostics != nil &&
 			!contentDiagnosticsEqual(prepared.Diagnostics, draft.ContentDiagnostics) {
 			return validationError("stored rich draft diagnostics do not match its canonical rendering")
 		}
