@@ -58,6 +58,8 @@ Create or edit a local draft first, inspect it, and obtain explicit user authori
 
 Sending requires a user request that covers the reviewed content plus `--expected-revision REVISION --confirm`. It never uses Mail.app.
 
+Composition encodes long subjects and display names losslessly within RFC header limits. A header-specific `invalid_argument` stops before SMTP and leaves the reviewed draft unchanged with no new send claim; correct the named value, then review the updated draft before sending.
+
 1. Configure a supported Gmail or iCloud sender with `mailcli send setup --from ALIAS [--account REF]`; the password stays in Keychain and is never displayed or logged. Unsupported providers, stale/ambiguous bindings, missing credentials, or invalid addresses stop before transport.
 2. Before provider or credential resolution, composition, send-claim creation, SMTP, or Sent APPEND, `drafts send --ref REF --expected-revision REVISION --confirm --json` rejects a historical native `save_attempt` with `draft_save_retry_blocked`; the original draft and save claim stay unchanged for reconcile-only `drafts save` recovery or explicit discard.
 3. An idle `drafts send --ref REF --expected-revision REVISION --confirm --json` builds RFC 5322/MIME, keeps the composed spool descriptor pinned through every independent bounded SMTP/APPEND read and identity-checked cleanup, atomically retains those bytes in a private mode-0600 recovery spool with size and SHA-256 metadata, submits over SMTP with STARTTLS, and mirrors to Sent over IMAP. A replaced transient pathname cannot redirect reads or delete the replacement. Transfer budgets are size-aware and capped at 15 minutes.

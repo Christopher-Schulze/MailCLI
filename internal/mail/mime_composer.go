@@ -19,12 +19,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	composerLineLength   = 76 // base64 lines per RFC 2045
-	composerHeaderLength = 78 // recommended header line limit per RFC 5322
-	composerCRLF         = "\r\n"
+	composerLineLength          = 76  // base64 lines per RFC 2045
+	composerHeaderLength        = 78  // recommended header line limit per RFC 5322
+	composerHeaderMaximum       = 998 // hard limit excluding CRLF per RFC 5322
+	composerEncodedHeaderLength = 76  // RFC 2047 header fields containing encoded words
+	composerCRLF                = "\r\n"
 )
 
 // ComposerError is the typed error for RFC 5322 message composition failures.
@@ -226,11 +229,14 @@ func composeMessageSpoolContext(
 				cleanup()
 				return nil, &ComposerError{Message: "write attachment boundary", Err: err}
 			}
-			for _, line := range composerAttachmentHeaders(attachment.Path) {
-				if err := write(line + composerCRLF); err != nil {
-					cleanup()
-					return nil, &ComposerError{Message: "write attachment headers", Err: err}
-				}
+			headers, err := composerAttachmentHeaders(attachment.Path)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			if err := write(headers); err != nil {
+				cleanup()
+				return nil, &ComposerError{Message: "write attachment headers", Err: err}
 			}
 			if err := write(composerCRLF); err != nil {
 				cleanup()
@@ -345,16 +351,22 @@ func (m *ComposedMessage) closeOwnerLocked() error {
 	return err
 }
 
-func composerAttachmentHeaders(path string) []string {
+func composerAttachmentHeaders(path string) (string, error) {
 	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	return []string{
-		"Content-Type: " + contentType,
-		"Content-Transfer-Encoding: base64",
-		"Content-Disposition: " + mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)}),
+	var buffer bytes.Buffer
+	for _, header := range []struct{ name, value string }{
+		{"Content-Type", contentType},
+		{"Content-Transfer-Encoding", "base64"},
+		{"Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(path)})},
+	} {
+		if err := writeHeader(&buffer, header.name, header.value); err != nil {
+			return "", err
+		}
 	}
+	return buffer.String(), nil
 }
 
 func streamAttachmentBase64Context(
@@ -492,6 +504,21 @@ func (lw *base64LineWriter) Write(p []byte) (int, error) {
 }
 
 func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentType string) error {
+	if err := validateComposerHeaderValue("Subject", draft.Subject); err != nil {
+		return err
+	}
+	from, err := formatComposerSender(draft.From)
+	if err != nil {
+		return err
+	}
+	to, err := formatAddressList(draft.To)
+	if err != nil {
+		return err
+	}
+	cc, err := formatAddressList(draft.CC)
+	if err != nil {
+		return err
+	}
 	threadingKind := draft.Kind == DraftKindReply || draft.Kind == DraftKindForward
 	threaded := threadingKind && draft.SourceMessageID != ""
 	references := ""
@@ -502,71 +529,128 @@ func writeComposerHeaders(buffer *bytes.Buffer, draft Draft, messageID, contentT
 			return &ComposerError{Message: "validate thread headers", Err: err}
 		}
 	}
-	writeHeader(buffer, "From", draft.From)
-	writeHeader(buffer, "To", formatAddressList(draft.To))
+	headers := []struct{ name, value string }{{"From", from}, {"To", to}}
 	if len(draft.CC) > 0 {
-		writeHeader(buffer, "Cc", formatAddressList(draft.CC))
+		headers = append(headers, struct{ name, value string }{"Cc", cc})
 	}
-	writeHeader(buffer, "Subject", encodeHeaderValue(draft.Subject))
-	writeHeader(buffer, "Date", time.Now().Format(time.RFC1123Z))
-	writeHeader(buffer, "Message-ID", messageID)
-	writeHeader(buffer, "MIME-Version", "1.0")
+	for _, header := range append(headers, []struct{ name, value string }{
+		{"Subject", encodeHeaderValue(draft.Subject)}, {"Date", time.Now().Format(time.RFC1123Z)},
+		{"Message-ID", messageID}, {"MIME-Version", "1.0"},
+	}...) {
+		if err := writeHeader(buffer, header.name, header.value); err != nil {
+			return err
+		}
+	}
 	if threaded {
-		writeHeader(buffer, "In-Reply-To", draft.SourceMessageID)
-		writeHeader(buffer, "References", references)
+		if err := writeHeader(buffer, "In-Reply-To", draft.SourceMessageID); err != nil {
+			return err
+		}
+		if err := writeHeader(buffer, "References", references); err != nil {
+			return err
+		}
 	}
-	writeHeader(buffer, "Content-Type", contentType)
+	return writeHeader(buffer, "Content-Type", contentType)
+}
+
+func writeHeader(buffer *bytes.Buffer, name, value string) error {
+	if err := validateComposerHeaderValue(name, value); err != nil {
+		return err
+	}
+	preferred, maximum := composerHeaderLength, composerHeaderMaximum
+	parts := headerFoldingParts(" " + value)
+	if name == "Subject" || name == "From" || name == "To" || name == "Cc" {
+		for _, part := range parts {
+			word := strings.Trim(part, " \t")
+			if strings.HasPrefix(word, "=?") && strings.HasSuffix(word, "?=") {
+				if _, err := (&mime.WordDecoder{}).Decode(word); err == nil {
+					preferred, maximum = composerEncodedHeaderLength, composerEncodedHeaderLength
+					break
+				}
+			}
+		}
+	}
+	buffer.WriteString(name)
+	buffer.WriteByte(':')
+	column := len(name) + 1
+	if value != "" {
+		for _, part := range parts {
+			if column+len(part) > preferred && strings.Trim(part, " \t") != "" {
+				buffer.WriteString(composerCRLF)
+				column = 0
+			}
+			if column+len(part) > maximum {
+				return validationError(fmt.Sprintf("%s header cannot be folded without changing its value; physical line exceeds %d bytes", name, maximum))
+			}
+			buffer.WriteString(part)
+			column += len(part)
+		}
+	}
+	buffer.WriteString(composerCRLF)
 	return nil
 }
 
-func writeHeader(buffer *bytes.Buffer, name, value string) {
-	if value == "" {
-		buffer.WriteString(name)
-		buffer.WriteString(":")
-		buffer.WriteString(composerCRLF)
-		return
-	}
-	if len(name)+2+len(value) <= composerHeaderLength {
-		buffer.WriteString(name)
-		buffer.WriteString(": ")
-		buffer.WriteString(value)
-		buffer.WriteString(composerCRLF)
-		return
-	}
-	limit := composerHeaderLength - len(name) - 2
-	buffer.WriteString(name)
-	buffer.WriteString(": ")
-	buffer.WriteString(strings.Join(foldAt(value, limit), composerCRLF+" "))
-	buffer.WriteString(composerCRLF)
-}
-
-// foldAt splits value into lines of at most limit bytes, breaking at spaces so
-// continuation lines can carry single-space folding whitespace.
-func foldAt(value string, limit int) []string {
-	if limit < 1 {
-		limit = 1
-	}
-	var lines []string
-	for len(value) > limit {
-		cut := strings.LastIndex(value[:limit+1], " ")
-		if cut < 0 {
-			cut = strings.Index(value, " ")
-			if cut < 0 {
-				break
+// Fold only between structured tokens, preserving whitespace and quoted pairs.
+// Text requiring arbitrary splits is encoded before reaching this writer.
+func headerFoldingParts(value string) []string {
+	var parts []string
+	start, comments := 0, 0
+	quoted, escaped, angle := false, false, false
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if character == '\\' && (quoted || comments > 0) {
+			escaped = true
+			continue
+		}
+		if character == '"' && comments == 0 {
+			quoted = !quoted
+		}
+		if !quoted {
+			switch character {
+			case '(':
+				if !angle {
+					comments++
+				}
+			case ')':
+				if comments > 0 {
+					comments--
+				}
+			case '<':
+				if comments == 0 {
+					angle = true
+				}
+			case '>':
+				if comments == 0 {
+					angle = false
+				}
 			}
 		}
-		lines = append(lines, value[:cut])
-		value = value[cut+1:]
+		if index > 0 && !quoted && !angle && comments == 0 && (character == ' ' || character == '\t') && value[index-1] != ' ' && value[index-1] != '\t' {
+			parts = append(parts, value[start:index])
+			start = index
+		}
 	}
-	if len(value) > 0 || len(lines) == 0 {
-		lines = append(lines, value)
-	}
-	return lines
+	return append(parts, value[start:])
 }
 
-func formatAddressList(recipients []Recipient) string {
+func validateComposerHeaderValue(name, value string) error {
+	if !utf8.ValidString(value) {
+		return validationError(name + " header contains invalid UTF-8")
+	}
+	for _, character := range value {
+		if character == 0x7f || (character < ' ' && character != '\t') {
+			return validationError(name + " header contains control characters")
+		}
+	}
+	return nil
+}
+
+func formatAddressList(recipients []Recipient) (string, error) {
 	if len(recipients) == 0 {
-		return ""
+		return "", nil
 	}
 	var builder strings.Builder
 	builder.Grow(len(recipients) * 32)
@@ -574,13 +658,75 @@ func formatAddressList(recipients []Recipient) string {
 		if i > 0 {
 			builder.WriteString(", ")
 		}
-		builder.WriteString((&mail.Address{Name: recipient.Name, Address: recipient.Address}).String())
+		address, err := formatComposerAddress(recipient)
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(address)
 	}
-	return builder.String()
+	return builder.String(), nil
 }
 
+func formatComposerAddress(recipient Recipient) (string, error) {
+	if err := validateComposerHeaderValue("recipient name", recipient.Name); err != nil {
+		return "", err
+	}
+	if err := validateComposerHeaderValue("recipient address", recipient.Address); err != nil {
+		return "", err
+	}
+	encoded := encodeHeaderValue(recipient.Name)
+	if encoded != recipient.Name {
+		return encoded + " " + (&mail.Address{Address: recipient.Address}).String(), nil
+	}
+	return (&mail.Address{Name: recipient.Name, Address: recipient.Address}).String(), nil
+}
+
+func formatComposerSender(value string) (string, error) {
+	if err := validateComposerHeaderValue("From", value); err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", nil
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil {
+		return "", validationError("invalid From header address")
+	}
+	if err := validateComposerHeaderValue("From display name", address.Name); err != nil {
+		return "", err
+	}
+	if encodeHeaderValue(address.Name) == address.Name {
+		return value, nil
+	}
+	return formatComposerAddress(Recipient{Name: address.Name, Address: address.Address})
+}
+
+// encodeHeaderValue requires validated UTF-8, including decoded sender names.
 func encodeHeaderValue(value string) string {
-	return mime.QEncoding.Encode("UTF-8", value)
+	// Include quoted-pair expansion so ASCII names also fit in mixed fields
+	// containing encoded names, which impose the stricter 76-byte limit.
+	quotedLength := len(value) + strings.Count(value, "\\") + strings.Count(value, "\"")
+	if quotedLength <= composerEncodedHeaderLength-len("Subject: ") && strings.Trim(value, " \t") == value && !strings.Contains(value, "=?") && mime.QEncoding.Encode("UTF-8", value) == value {
+		return value
+	}
+	// The standard WordEncoder intentionally leaves ASCII unchanged. Force
+	// encoding when folding it would lose text, using complete UTF-8 chunks.
+	const maximumChunkBytes = 45 // 60 base64 bytes + 12 framing bytes <= 75.
+	var encoded strings.Builder
+	for len(value) > 0 {
+		end := min(len(value), maximumChunkBytes)
+		for end < len(value) && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		if encoded.Len() > 0 {
+			encoded.WriteByte(' ')
+		}
+		encoded.WriteString("=?UTF-8?b?")
+		encoded.WriteString(base64.StdEncoding.EncodeToString([]byte(value[:end])))
+		encoded.WriteString("?=")
+		value = value[end:]
+	}
+	return encoded.String()
 }
 
 // threadReferences returns the canonical References chain for valid inputs.
