@@ -213,54 +213,23 @@ func decodeDraftInput(reader io.Reader) (mailmodel.DraftInput, error) {
 	if len(payload) > maximumDraftInputBytes {
 		return mailmodel.DraftInput{}, invalidDraftInput("draft input exceeds 16 MiB")
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
-		return mailmodel.DraftInput{}, invalidDraftInput("draft input must be one JSON object")
+	fields, err := validateInputJSON(payload, inputJSONDraft)
+	if err != nil {
+		return mailmodel.DraftInput{}, err
 	}
-	body, present := fields["body"]
-	if !present {
+	if !fields["body"] {
 		return mailmodel.DraftInput{}, invalidDraftInput("draft input requires an explicit body field")
-	}
-	if bytes.Equal(bytes.TrimSpace(body), []byte("null")) {
-		return mailmodel.DraftInput{}, invalidDraftInput("draft input body must be a string")
-	}
-	for _, field := range []string{"subject", "to", "cc"} {
-		if draftJSONFieldIsNull(fields, field) {
-			return mailmodel.DraftInput{}, invalidDraftInput("draft input " + field + " must not be null")
-		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var input mailmodel.DraftInput
 	if err := decoder.Decode(&input); err != nil {
-		return mailmodel.DraftInput{}, invalidDraftInput("decode draft JSON: " + err.Error())
+		return mailmodel.DraftInput{}, inputJSONDecodeError(err)
 	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return mailmodel.DraftInput{}, invalidDraftInput("draft input must contain exactly one JSON object")
-	}
-	input.SubjectSet = draftJSONFieldPresent(fields, "subject")
-	input.ToSet = draftJSONFieldPresent(fields, "to")
-	input.CCSet = draftJSONFieldPresent(fields, "cc")
+	input.SubjectSet = fields["subject"]
+	input.ToSet = fields["to"]
+	input.CCSet = fields["cc"]
 	return input, nil
-}
-
-func draftJSONFieldPresent(fields map[string]json.RawMessage, name string) bool {
-	for field := range fields {
-		if strings.EqualFold(field, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func draftJSONFieldIsNull(fields map[string]json.RawMessage, name string) bool {
-	for field, value := range fields {
-		if strings.EqualFold(field, name) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return true
-		}
-	}
-	return false
 }
 
 func invalidDraftInput(message string) error {
