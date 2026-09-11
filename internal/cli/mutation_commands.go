@@ -84,7 +84,11 @@ func runMessageTransfer(
 	defer cancel()
 	message, err := service.TransferMessage(operationCtx, request)
 	if err != nil {
-		return failCommand(command, *jsonOutput, err, stdout, stderr)
+		data := responseData{}
+		if message.ServerTruth != nil {
+			data.MessageState = &message
+		}
+		return failCommandWithData(command, *jsonOutput, data, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, command, responseData{MessageState: &message})
@@ -117,7 +121,11 @@ func runMessageDelete(
 		Ref: *ref, AllowDraftMutation: *allowDraft,
 	})
 	if err != nil {
-		return failCommand("messages.delete", *jsonOutput, err, stdout, stderr)
+		data := responseData{}
+		if result.ServerTruth != nil {
+			data.DeleteResult = &result
+		}
+		return failCommandWithData("messages.delete", *jsonOutput, data, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.delete", responseData{DeleteResult: &result})
