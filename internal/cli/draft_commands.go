@@ -391,6 +391,9 @@ func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.Sen
 		receipt.DraftRef, receipt.Outcome, receipt.AttemptID, receipt.SubmissionAccepted, receipt.SentCopyObserved,
 		receipt.StartedAt.Format(time.RFC3339), receipt.CompletedAt.Format(time.RFC3339),
 		receipt.ExpiresAt.Format(time.RFC3339))
+	if receipt.DraftRevision != "" {
+		writeFormat(stdout, "Reviewed revision: %s\n", receipt.DraftRevision)
+	}
 	if receipt.MessageID != "" {
 		writeFormat(stdout, "Message-ID: %s\n", receipt.MessageID)
 	}
@@ -409,6 +412,7 @@ func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.Sen
 func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts update", stderr)
 	ref := flags.String("ref", "", "draft ref")
+	expectedRevision := flags.String("expected-revision", "", "required revision from the inspected draft; rejects concurrent changes")
 	inputFlags := registerDraftInputFlags(flags)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
@@ -424,13 +428,17 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 		return failProjectedEmpty("drafts.update", *jsonOutput, output,
 			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
+	if *expectedRevision == "" {
+		return failProjectedEmpty("drafts.update", *jsonOutput, output,
+			invalidDraftInput("missing required --expected-revision; inspect the draft before updating"), stdout, stderr)
+	}
 	input, err := inputFlags.read()
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
 	defer cancel()
-	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, Input: input})
+	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, ExpectedRevision: *expectedRevision, Input: input})
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -440,6 +448,7 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 func runDraftSend(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts send", stderr)
 	ref := flags.String("ref", "", "draft ref")
+	expectedRevision := flags.String("expected-revision", "", "required revision of the reviewed content; rejects concurrent changes")
 	confirm := flags.Bool("confirm", false, "confirm sending the draft via direct SMTP")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
@@ -448,9 +457,12 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 	if !*confirm {
 		return failCommand("drafts.send", *jsonOutput, confirmationRequired("draft send"), stdout, stderr)
 	}
+	if *expectedRevision == "" {
+		return failCommand("drafts.send", *jsonOutput, invalidDraftInput("missing required --expected-revision; review the draft before sending"), stdout, stderr)
+	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftSendTimeout)
 	defer cancel()
-	result, err := service.SendDraft(operationCtx, *ref)
+	result, err := service.SendDraft(operationCtx, mail.SendDraftRequest{Ref: *ref, ExpectedRevision: *expectedRevision})
 	if err != nil {
 		if result.AttemptID != "" {
 			return failCommandWithData(
@@ -576,6 +588,7 @@ func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, json
 		return 0
 	}
 	writeFormat(stdout, "%s\t%s\t%s\n", draft.Ref, draft.Kind, oneLine(draft.Subject))
+	writeFormat(stdout, "Revision: %s\n", draft.Revision)
 	return 0
 }
 

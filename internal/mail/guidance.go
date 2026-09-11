@@ -84,6 +84,8 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForInput()
 	}
 	switch code {
+	case "draft_revision_conflict", "draft_revision_unavailable":
+		return OperationGuidance{Phase: OperationPhaseValidation, EffectCertainty: EffectNone, Retryability: RetryObserveRequired, ReplayAllowed: false, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case "batch_canceled":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
 	case "initialization_failed":

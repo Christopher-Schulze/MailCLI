@@ -22,7 +22,7 @@ Apple Mail's scripting interface can perform targeted mailbox mutations but perf
 - Body search scans the selected `.emlx` sources on demand within explicit message and byte limits. It decodes text parts and keeps attachment names searchable without decoding attachment payloads. MailCLI creates no second mail index.
 - Mark, move, copy, and delete execute directly over IMAP using provisioned account credentials without launching Mail.app. Every mutation returns typed server-truth evidence. COPY arms a stable operation identity before dispatch, preserves COPYUID and destination UID evidence when available, and fails closed with `imap_copy_outcome_unknown` after a lost response until an exact destination observation proves what happened; retries never blindly duplicate a copy. MOVE fallback evidence lists proven phases such as `copy`, `source_flag`, `uid_expunge`, or `cleanup_deferred`.
 - Local-store staleness is documented and honest: IMAP mutations apply immediately on the server; the local read store updates on Mail.app's next background sync. `mailcli sync --check` inspects server vs local message counts over IMAP without launching Mail.app.
-- Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; it rejects a historical native save claim before provider or credential resolution, composition, SMTP, or Sent APPEND, preserving the claim for reconcile-only recovery. When SMTP accepts but Sent mirroring is unresolved, reconciliation reuses the exact retained MIME bytes even if the original attachment paths have changed or disappeared. Unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
+- Local new, reply, reply-all, and forward drafts remain fully reviewable. `drafts send --expected-revision REVISION --confirm` delivers autonomously over SMTP and mirrors the message into Sent over IMAP with no Mail.app involvement; it rejects a historical native save claim before provider or credential resolution, composition, SMTP, or Sent APPEND, preserving the claim for reconcile-only recovery. When SMTP accepts but Sent mirroring is unresolved, reconciliation reuses the exact retained MIME bytes even if the original attachment paths have changed or disappeared. Unreliable scripted save remains blocked before contacting Mail. A new draft can also be handed to Apple's visible Compose Email sharing service without sending.
 - Machine output uses one versioned JSON envelope with typed errors, opaque references, explicit pagination, and search coverage.
 
 Reads and mutations add zero work to the Mail.app process. Sending, marking, moving, copying, and deleting operate autonomously over standard SMTP and IMAP transports. Mail.app is retained solely as the local sync engine feeding the SQLite read store and for optional visible compose handoff.
@@ -41,7 +41,7 @@ Detail JSON responses support bounded projections. Use `--view metadata|plain|fu
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `handoff-reconcile`, `open`, `discard`, `prune`, `reconcile` | Manages plain, Markdown, or safe HTML drafts, prunes stale never-sent drafts, reconciles retained send and handoff claims, and opens a reviewed new draft visibly; scripted `save` remains blocked |
-| Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--confirm`; no Mail.app required. Short protocol phases use a 30 s budget; encoded SMTP DATA and IMAP APPEND transfers scale with message size at a 1 MiB/s floor, up to a 15 min cap |
+| Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--expected-revision REVISION --confirm`; no Mail.app required. Short protocol phases use a 30 s budget; encoded SMTP DATA and IMAP APPEND transfers scale with message size at a 1 MiB/s floor, up to a 15 min cap |
 | Synchronization | `sync` | `--check` reports server-vs-local deltas over IMAP; `--require-complete` makes incomplete checks exit 3; without `--check` asks Mail.app to synchronize |
 | Maintenance | `update` | Checks GitHub, verifies a pinned Ed25519 signature plus checksum, and atomically updates the binary and companion skill |
 
@@ -72,7 +72,7 @@ flowchart LR
     CLI -->|"sync without --check"| Gate["Cross-process access gate"]
     Gate --> Bridge["Targeted Apple Events bridge"]
     Bridge --> Mail["Already-running Mail.app"]
-    CLI -->|"drafts send --confirm"| Transport["SMTP submit + IMAP Sent mirror"]
+    CLI -->|"drafts send --expected-revision REVISION --confirm"| Transport["SMTP submit + IMAP Sent mirror"]
     CLI -->|"send setup"| Keychain["macOS Keychain credential"]
 ```
 
@@ -274,6 +274,10 @@ When local content is retained after failed hydration, JSON includes `content_co
 
 MailCLI uses local structured drafts as the review boundary. Creating or editing a local draft never sends mail.
 
+Each draft read or update returns an opaque `revision`. Review the full draft with `drafts inspect --ref DRAFT_REF --view full --json` and retain `data.draft.revision`. Both `drafts update` and `drafts send` require that value in `--expected-revision`; send also requires `--confirm`. A changed recipient, body, attachment fingerprint, or other send field invalidates the review. Metadata-only views and list summaries are insufficient for content review.
+
+If an external editor finishes after another writer changed the draft, `draft_revision_conflict` preserves the newer draft and the editor candidate. JSON includes `error.draft_revision_conflict` with the expected/current revisions and `candidate_path`. Inspect both versions, explicitly merge as needed, then save with `drafts update --ref DRAFT_REF --expected-revision REVIEWED_REVISION --input CANDIDATE_PATH --json`. Never blindly copy the current revision from an error into a retry. Claims and receipts retain the reviewed revision; old evidence without it remains inspect/reconcile-only and returns `draft_revision_unavailable` from send.
+
 ```bash
 printf '%s' '{
   "from": "me@example.com",
@@ -306,7 +310,7 @@ mailcli drafts handoff --ref DRAFT_REF
 mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened --confirm --json
 ```
 
-Markdown is rendered with Goldmark. HTML uses a strict allowlist of semantic typography, headings, links, lists, preformatted blocks, and table elements. Only absolute `http`, `https`, or `mailto` link targets and anchor titles survive; CSS, `style` attributes, event handlers, forms, media, scripts, SVG, MathML, templates, and remote resources are removed. Images are not embedded, while a supplied `alt` value remains in the plain alternative. Rich drafts expose deterministic value-free `content_diagnostics` entries for removed elements, attributes, URLs, styles, and resources. The plain alternative retains non-redundant absolute link targets as `(URL)`, preserves `<pre>` and `<code>` whitespace, emits indented list markers and pipe-delimited table rows, and ignores unsafe links and active subtrees. Incoming `text/html` message parts use the same semantic conversion. `drafts edit` invokes the configured editor directly without a shell and in a private process group, validates the complete result, and only then atomically replaces the local draft. Cancellation terminates the editor and its owned descendants before returning, while the original draft remains unchanged.
+Markdown is rendered with Goldmark. HTML uses a strict allowlist of semantic typography, headings, links, lists, preformatted blocks, and table elements. Only absolute `http`, `https`, or `mailto` link targets and anchor titles survive; CSS, `style` attributes, event handlers, forms, media, scripts, SVG, MathML, templates, and remote resources are removed. Images are not embedded, while a supplied `alt` value remains in the plain alternative. Rich drafts expose deterministic value-free `content_diagnostics` entries for removed elements, attributes, URLs, styles, and resources. The plain alternative retains non-redundant absolute link targets as `(URL)`, preserves `<pre>` and `<code>` whitespace, emits indented list markers and pipe-delimited table rows, and ignores unsafe links and active subtrees. Incoming `text/html` message parts use the same semantic conversion. `drafts edit` invokes the configured editor directly without a shell and in a private process group, validates the complete result, and atomically replaces the local draft only if its initial revision still matches under the draft lock. Cancellation terminates the editor and its owned descendants before returning, while the original draft remains unchanged.
 
 `drafts handoff` uses Apple's documented `NSSharingServiceNameComposeEmail`, waits for its delegate to confirm the handoff, opens a visible compose window, retains the local draft, and never sends. It requires Mail.app to be the current default email application so a misconfigured `mailto:` handler cannot launch another app. Apple's API cannot guarantee From, CC, BCC, or reply/forward threading, so handoff rejects those semantics instead of silently dropping them. Select the sender and add CC/BCC in Mail.app when required. The command persists an attempt ID and attachment snapshots around the native dispatch boundary. Cancellation before dispatch returns `canceled_before_dispatch` and cleans the staged evidence; cancellation, timeout, or an unparseable native result after dispatch returns `handoff_outcome_unknown`, suppresses late success, retains the snapshots, and blocks retry. Inspect Mail.app and then run `mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened|failed --confirm --json` to remove the retained claim and snapshots. `confirmed_opened` means only that the sharing-service delegate reported success; `confirmed_failed` means it reported failure. AppKit exposes no supported cancellation or compose-window close operation, so MailCLI never claims that an external window was closed.
 
@@ -325,7 +329,8 @@ Before that transport lifecycle starts, `drafts send` rejects any historical `sa
 
 ```bash
 mailcli send setup --from me@example.com
-mailcli drafts send --ref DRAFT_REF --confirm --json
+mailcli drafts inspect --ref DRAFT_REF --view full --json
+mailcli drafts send --ref DRAFT_REF --expected-revision REVIEWED_REVISION --confirm --json
 ```
 
 For an alias that needs an explicit account binding, run `mailcli send setup --account ACCOUNT_REF --from ALIAS [--credential-account LOGIN]`. The binding selects the Keychain credential for SMTP and IMAP, supports accounts with no Sent history, and fails closed with typed ambiguity or stale-account errors when identity cannot be proven.

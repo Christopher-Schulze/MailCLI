@@ -211,6 +211,7 @@ type DraftAttachment struct {
 
 type Draft struct {
 	Ref                           string                   `json:"ref"`
+	Revision                      string                   `json:"revision"`
 	Kind                          DraftKind                `json:"kind"`
 	AccountRef                    string                   `json:"account_ref,omitempty"`
 	SourceRef                     string                   `json:"source_ref,omitempty"`
@@ -274,6 +275,7 @@ type DraftSummary struct {
 // SentCopyObserved for precise send evidence.
 type DraftSendAttemptSummary struct {
 	ID                  string                   `json:"id"`
+	DraftRevision       string                   `json:"draft_revision,omitempty"`
 	StartedAt           time.Time                `json:"started_at"`
 	UpdatedAt           time.Time                `json:"updated_at"`
 	MessageID           string                   `json:"message_id,omitempty"`
@@ -371,8 +373,14 @@ type CreateDraftRequest struct {
 }
 
 type UpdateDraftRequest struct {
-	Ref   string
-	Input DraftInput
+	Ref              string
+	ExpectedRevision string
+	Input            DraftInput
+}
+
+type SendDraftRequest struct {
+	Ref              string
+	ExpectedRevision string
 }
 
 type SendOutcome string
@@ -402,6 +410,7 @@ type AcceptedMessageSpool struct {
 
 type SendAttempt struct {
 	ID                  string                   `json:"id"`
+	DraftRevision       string                   `json:"draft_revision,omitempty"`
 	StartedAt           time.Time                `json:"started_at"`
 	UpdatedAt           time.Time                `json:"updated_at"`
 	MessageID           string                   `json:"message_id,omitempty"`
@@ -464,6 +473,7 @@ type SendEvidence struct {
 // alias; the canonical fields separate SMTP submission from Sent persistence.
 type SendReceipt struct {
 	DraftRef           string      `json:"draft_ref"`
+	DraftRevision      string      `json:"draft_revision,omitempty"`
 	AttemptID          string      `json:"attempt_id"`
 	StartedAt          time.Time   `json:"started_at"`
 	CompletedAt        time.Time   `json:"completed_at"`

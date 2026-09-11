@@ -142,7 +142,7 @@ func TestRequiresMailServiceSkipsDirectReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil {
+	if _, err := service.SendDraft(context.Background(), mail.SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err == nil {
 		t.Fatal("SendDraft() error = nil, want unknown submission")
 	} else {
 		var submissionErr *transport.SubmissionError

@@ -197,6 +197,9 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 	if !validObservationBaseline(attempt.ObservationBaseline) {
 		return false
 	}
+	if !validStoredDraftRevision(attempt.DraftRevision) {
+		return false
+	}
 	if !validAcceptedMessageSpool(attempt.RecoverySpool) {
 		return false
 	}
@@ -296,6 +299,7 @@ type storedSendReceipt struct {
 func receiptFromAttempt(ref string, attempt SendAttempt) SendReceipt {
 	receipt := SendReceipt{
 		DraftRef:           ref,
+		DraftRevision:      attempt.DraftRevision,
 		AttemptID:          attempt.ID,
 		StartedAt:          attempt.StartedAt,
 		CompletedAt:        attempt.UpdatedAt,
@@ -416,6 +420,9 @@ func validSendReceipt(stored storedSendReceipt, ref string) bool {
 	if receipt.ExpiresAt.Sub(receipt.CompletedAt) != SendReceiptRetention {
 		return false
 	}
+	if !validStoredDraftRevision(receipt.DraftRevision) {
+		return false
+	}
 	switch receipt.Outcome {
 	case SendOutcomeObserved, SendOutcomeSent:
 		return true
@@ -426,6 +433,7 @@ func validSendReceipt(stored storedSendReceipt, ref string) bool {
 
 func sendReceiptsEqual(left SendReceipt, right SendReceipt) bool {
 	return left.DraftRef == right.DraftRef && left.AttemptID == right.AttemptID &&
+		left.DraftRevision == right.DraftRevision &&
 		left.StartedAt.Equal(right.StartedAt) && left.CompletedAt.Equal(right.CompletedAt) &&
 		left.ExpiresAt.Equal(right.ExpiresAt) && left.Outcome == right.Outcome &&
 		left.Accepted == right.Accepted && left.SubmissionAccepted == right.SubmissionAccepted &&
@@ -487,6 +495,7 @@ func ensureSendReceipt(root string, ref string, attempt SendAttempt, storage ...
 			return nil, &OperationError{Code: "send_receipt_expired", Message: "the terminal send receipt has expired; the retained claim remains available for explicit recovery"}
 		}
 		if receipt.DraftRef != derived.DraftRef || receipt.AttemptID != derived.AttemptID ||
+			receipt.DraftRevision != derived.DraftRevision ||
 			receipt.Outcome != derived.Outcome || receipt.Accepted != derived.Accepted ||
 			receipt.SubmissionAccepted != derived.SubmissionAccepted ||
 			receipt.SentCopyObserved != derived.SentCopyObserved {

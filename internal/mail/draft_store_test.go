@@ -132,7 +132,7 @@ func TestMissingGatewayRejectsComposeWithoutPanicking(t *testing.T) {
 	if _, err := service.SaveDraft(context.Background(), draft.Ref); errorCode(err) != "compose_automation_unsupported" {
 		t.Fatalf("SaveDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "send_transport_unavailable" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "send_transport_unavailable" {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	if _, err := service.GetDraft(draft.Ref); err != nil {
@@ -148,7 +148,7 @@ func TestSendDraftStopsWhenContextIsCanceledBeforeStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := service.SendDraft(ctx, draft.Ref); errorCode(err) != "draft_operation_canceled" {
+	if _, err := service.SendDraft(ctx, SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "draft_operation_canceled" {
 		t.Fatalf("SendDraft() error = %v, want draft_operation_canceled", err)
 	}
 	if submitter.calls != 0 || mirror.calls != 0 {
@@ -651,7 +651,7 @@ func TestDraftLifecycleAndAttachmentIntegrity(t *testing.T) {
 	if len(draft.Attachments) != 1 || draft.Attachments[0].SHA256 == "" {
 		t.Fatalf("draft attachments = %+v", draft.Attachments)
 	}
-	updated, err := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, Input: DraftInput{
+	updated, err := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision, Input: DraftInput{
 		From: "sender@icloud.com", To: []Recipient{{Address: "ada@example.com"}},
 		Subject: "Updated", Body: "Exact body\n",
 		Attachments: []string{attachmentPath},
@@ -666,14 +666,14 @@ func TestDraftLifecycleAndAttachmentIntegrity(t *testing.T) {
 	if err := os.WriteFile(attachmentPath, []byte("version two"), 0o600); err != nil {
 		t.Fatalf("change attachment: %v", err)
 	}
-	result, sendErr := service.SendDraft(context.Background(), draft.Ref)
+	result, sendErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: updated.Ref, ExpectedRevision: updated.Revision})
 	if sendErr == nil || submitter.calls != 0 || !strings.Contains(sendErr.Error(), filepath.Base(attachmentPath)) {
 		t.Fatalf("changed attachment send result = %+v, error = %v, submits = %d", result, sendErr, submitter.calls)
 	}
 	if err := os.WriteFile(attachmentPath, []byte("version one"), 0o600); err != nil {
 		t.Fatalf("restore attachment: %v", err)
 	}
-	result, err = service.SendDraft(context.Background(), draft.Ref)
+	result, err = service.SendDraft(context.Background(), SendDraftRequest{Ref: updated.Ref, ExpectedRevision: updated.Revision})
 	if err != nil || result.Outcome != SendOutcomeSent || !result.Accepted || submitter.calls != 1 || mirror.calls != 1 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submits = %d", result, err, submitter.calls)
 	}
@@ -709,7 +709,7 @@ func TestSendDraftUsesVerifiedAttachmentSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	if submitter.calls != 1 {
@@ -731,7 +731,7 @@ func TestSendNewDraftRequiresExplicitSender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); errorCode(err) != "invalid_argument" {
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); errorCode(err) != "invalid_argument" {
 		t.Fatalf("SendDraft() error = %v, want invalid_argument", err)
 	}
 }
@@ -789,7 +789,7 @@ func TestClaimedDraftBlocksMutationUntilExplicitDiscard(t *testing.T) {
 	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
-	_, updateErr := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, Input: DraftInput{
+	_, updateErr := service.UpdateDraft(UpdateDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision, Input: DraftInput{
 		To: []Recipient{{Address: "recipient@example.com"}}, Body: "changed",
 	}})
 	if errorCode(updateErr) != "send_retry_blocked" {
@@ -1060,7 +1060,7 @@ func TestSendDraftRemovesLockFileOnSuccess(t *testing.T) {
 	submitter, mirror := sendTransportStubs()
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	result, err := service.SendDraft(context.Background(), draft.Ref)
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}

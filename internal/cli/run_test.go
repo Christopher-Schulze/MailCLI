@@ -614,7 +614,7 @@ func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err != nil {
+	if _, err := service.SendDraft(context.Background(), mail.SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err != nil {
 		t.Fatalf("SendDraft() error = %v", err)
 	}
 	var stdout bytes.Buffer
@@ -640,7 +640,7 @@ func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runDraftSend(context.Background(), service, []string{"--ref", draft.Ref, "--confirm"}, &stdout, &stderr); code != 0 {
+	if code := runDraftSend(context.Background(), service, []string{"--ref", draft.Ref, "--expected-revision", draft.Revision, "--confirm"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("human replay send code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "submission_accepted=true") ||
@@ -662,7 +662,7 @@ func TestDraftSendWithoutTransportIsJSONFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	code := runDraftSend(
 		context.Background(), service,
-		[]string{"--ref", draft.Ref, "--confirm", "--json"}, &stdout, &stderr,
+		[]string{"--ref", draft.Ref, "--expected-revision", draft.Revision, "--confirm", "--json"}, &stdout, &stderr,
 	)
 	if code != 1 || stderr.Len() != 0 ||
 		!strings.Contains(stdout.String(), `"ok":false`) ||
@@ -684,7 +684,7 @@ func TestDraftSendMirrorPendingJSONPreservesOutcomeEvidence(t *testing.T) {
 	var stderr bytes.Buffer
 	code := runDraftSend(
 		context.Background(), service,
-		[]string{"--ref", draft.Ref, "--confirm", "--json"}, &stdout, &stderr,
+		[]string{"--ref", draft.Ref, "--expected-revision", draft.Revision, "--confirm", "--json"}, &stdout, &stderr,
 	)
 	if code != 1 || stderr.Len() != 0 ||
 		!strings.Contains(stdout.String(), `"ok":false`) ||
@@ -715,7 +715,7 @@ func TestDraftReconcileJSONReplaysWithoutSendingAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
 	}
-	if _, err := service.SendDraft(context.Background(), draft.Ref); err == nil {
+	if _, err := service.SendDraft(context.Background(), mail.SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err == nil {
 		t.Fatal("SendDraft() error = nil, want mirror pending")
 	}
 	var stdout bytes.Buffer

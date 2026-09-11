@@ -86,14 +86,22 @@ func searchResponsePage(page *mail.SearchPage) *json.RawMessage {
 }
 
 type errorData struct {
-	Code     string                  `json:"code"`
-	Message  string                  `json:"message"`
-	Guidance *mail.OperationGuidance `json:"guidance"`
+	Code                  string                      `json:"code"`
+	Message               string                      `json:"message"`
+	Guidance              *mail.OperationGuidance     `json:"guidance"`
+	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
 	guidance := guidanceForResponse(command, data, err)
-	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance}
+	var conflict *mail.DraftRevisionConflict
+	if errors.As(err, &conflict) {
+		guidance.Recovery = mail.RecoveryGuidance{
+			Action: mail.RecoveryInspect, Command: "drafts.inspect",
+			Args: []string{"--ref", conflict.Ref, "--view", "full", "--json"},
+		}
+	}
+	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance, DraftRevisionConflict: conflict}
 }
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {

@@ -166,8 +166,9 @@ func TestUpdateDraftUsesLeasedRootWhenPathSwapsDuringPreparation(t *testing.T) {
 	}
 	service.contentObserver = observer
 	updated, err := service.UpdateDraft(UpdateDraftRequest{
-		Ref:   draft.Ref,
-		Input: DraftInput{To: []Recipient{{Address: "recipient@example.com"}}, Subject: "updated", Body: "body 2"},
+		Ref:              draft.Ref,
+		ExpectedRevision: draft.Revision,
+		Input:            DraftInput{To: []Recipient{{Address: "recipient@example.com"}}, Subject: "updated", Body: "body 2"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateDraft() error = %v", err)
