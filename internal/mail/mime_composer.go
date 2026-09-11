@@ -115,6 +115,19 @@ func (r *composedMessageReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (r *composedMessageReader) Seek(offset int64, whence int) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return 0, os.ErrClosed
+	}
+	position, err := r.section.Seek(offset, whence)
+	if err == nil {
+		r.remaining = r.section.Size() - position
+	}
+	return position, err
+}
+
 func (r *composedMessageReader) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -275,7 +288,7 @@ func composeMessageSpoolContext(
 	}, nil
 }
 
-func (m *ComposedMessage) Open() (io.ReadCloser, error) {
+func (m *ComposedMessage) Open() (io.ReadSeekCloser, error) {
 	if m == nil {
 		return nil, os.ErrInvalid
 	}
