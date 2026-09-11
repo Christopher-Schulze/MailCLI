@@ -101,7 +101,8 @@ func prepareDraftWithAttachmentsObserverContext(
 		BCC: nonNilRecipients(request.Input.BCC), Subject: request.Input.Subject,
 		Body: content.Plain, BodyFormat: content.Format,
 		BodySource: content.Source, BodyHTML: content.HTML, Attachments: attachments,
-		CreatedAt: now, UpdatedAt: now,
+		ContentDiagnostics: content.Diagnostics,
+		CreatedAt:          now, UpdatedAt: now,
 	}, nil
 }
 
