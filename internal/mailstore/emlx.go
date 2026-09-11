@@ -90,8 +90,8 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
-			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
-			COALESCE(m.date_received, 0), m.read, m.flagged, m.deleted,
+			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0), m.date_sent IS NULL,
+			COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 			EXISTS(
 				SELECT 1 FROM server_messages sm
 				WHERE sm.message = m.ROWID AND sm.junk_level > 0
