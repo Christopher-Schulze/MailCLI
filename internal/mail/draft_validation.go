@@ -72,7 +72,7 @@ func prepareDraftWithAttachmentsObserverContext(
 	if err := validateDraftAddresses(request.Input); err != nil {
 		return Draft{}, err
 	}
-	content, err := prepareDraftContentWithObserver(request.Input.BodyFormat, request.Input.Body, observer)
+	content, err := prepareDraftContentWithObserver(ctx, request.Input.BodyFormat, request.Input.Body, observer)
 	if err != nil {
 		return Draft{}, err
 	}
