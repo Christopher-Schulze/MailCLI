@@ -50,7 +50,7 @@ func TestSetFlagsObservesServerResult(t *testing.T) {
 		{name: "unsolicited literal does not spoof UIDVALIDITY", store: "* 9 FETCH (UID 99 BODY[] {31}\r\n* OK [UIDVALIDITY 54321] fake\r\n FLAGS (\\Seen))\r\n* 7 FETCH (UID 42 FLAGS ())\r\n<tag> OK STORE done\r\n", wantFlags: []string{}, wantState: transport.FlagObservationObserved, wantSource: "STORE"},
 		{name: "response count bounded", store: strings.Repeat("* OK unrelated\r\n", maxFlagResponseCount) + "<tag> OK STORE done\r\n", wantState: transport.FlagObservationUnverified, wantCode: transport.CodeIMAPFlagsOutcomeUnknown, wantSource: "STORE"},
 		{name: "response bytes bounded", store: strings.Repeat("* OK "+strings.Repeat("x", 8192)+"\r\n", 520) + "<tag> OK STORE done\r\n", wantState: transport.FlagObservationUnverified, wantCode: transport.CodeIMAPFlagsOutcomeUnknown, wantSource: "STORE"},
-		{name: "first STORE rejected", store: "<tag> NO STORE denied\r\n", wantState: transport.FlagObservationUnverified, wantCode: transport.CodeIMAPMutationFailed, wantSource: "STORE"},
+		{name: "first STORE rejected", store: "<tag> NO STORE denied\r\n", wantFlags: []string{}, wantState: transport.FlagObservationObserved, wantCode: transport.CodeIMAPMutationFailed, wantSource: "FETCH", wantFetches: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestSetFlagsCompoundAndInterruptedVerification(t *testing.T) {
 		wantStores  int
 	}{
 		{name: "both commands reflected", config: fakeServerConfig{authOK: true}, add: []string{"\\Seen", "\\Flagged"}, remove: []string{"\\Draft"}, wantFlags: []string{"\\Seen", "\\Flagged"}, wantStores: 2},
-		{name: "second command rejected", config: fakeServerConfig{authOK: true, storeResponses: [][]byte{nil, []byte("<tag> NO remove rejected\r\n")}}, add: []string{"\\Seen"}, remove: []string{"\\Draft"}, wantCode: transport.CodeIMAPFlagsOutcomeUnknown, wantStores: 2},
+		{name: "second command rejected", config: fakeServerConfig{authOK: true, rejectStoreCall: 2}, add: []string{"\\Seen"}, remove: []string{"\\Draft"}, wantCode: transport.CodeIMAPFlagsPartial, wantFlags: []string{"\\Seen"}, wantStores: 2},
 		{name: "verification deadline", config: fakeServerConfig{authOK: true, storeResponses: [][]byte{[]byte("<tag> OK STORE done\r\n")}, fetchDelay: 200 * time.Millisecond}, add: []string{"\\Seen"}, wantCode: transport.CodeIMAPFlagsOutcomeUnknown, deadline: 100 * time.Millisecond, wantStores: 1},
 		{name: "verification connection lost", config: fakeServerConfig{authOK: true, storeResponses: [][]byte{[]byte("<tag> OK STORE done\r\n")}, dropAfterCommands: 4}, add: []string{"\\Seen"}, wantCode: transport.CodeIMAPFlagsOutcomeUnknown, wantStores: 1},
 	}

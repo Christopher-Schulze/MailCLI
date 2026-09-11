@@ -47,7 +47,11 @@ type fakeServerConfig struct {
 	uidExpungeSupported      bool
 	dropCopyResponse         bool
 	rejectStore              bool
+	rejectStoreCall          int
 	storeResponses           [][]byte
+	initialFlags             map[uint32][]string
+	permanentFlags           []string
+	selectResponse           string
 	initialDeletedUIDs       []uint32
 	fetchPayload             []byte
 	fetchPayloadByUID        map[uint32][]byte
@@ -130,6 +134,9 @@ func newFakeServer(t testReporter, cfg fakeServerConfig) *fakeServer {
 	}
 	for _, uid := range cfg.initialDeletedUIDs {
 		s.deletedUIDs[uid] = struct{}{}
+	}
+	for uid, flags := range cfg.initialFlags {
+		s.messageFlags[uid] = append([]string(nil), flags...)
 	}
 	go s.run()
 	t.Cleanup(func() { _ = s.Close() })
@@ -326,6 +333,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 			}
 			s.writeLine(bw, tag+" OK LIST completed")
 		case "SELECT", "EXAMINE":
+			if s.config.selectResponse != "" {
+				if _, err := bw.WriteString(strings.ReplaceAll(s.config.selectResponse, "<tag>", tag)); err != nil {
+					return
+				}
+				if err := bw.Flush(); err != nil {
+					return
+				}
+				continue
+			}
 			if s.config.selectFailBox != "" && len(args) > 0 && args[0] == s.config.selectFailBox {
 				s.writeLine(bw, tag+" NO SELECT failed")
 				continue
@@ -340,6 +356,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.writeLine(bw, fmt.Sprintf("* OK [UIDVALIDITY %d] UIDs valid", uidvalidity))
 			}
 			s.writeLine(bw, "* 0 EXISTS")
+			if s.config.permanentFlags != nil {
+				s.writeLine(bw, "* OK [PERMANENTFLAGS ("+strings.Join(s.config.permanentFlags, " ")+")] permitted")
+			}
 			s.writeLine(bw, "* 0 RECENT")
 			s.writeLine(bw, tag+" OK [READ-WRITE] SELECT completed")
 		case "SEARCH":
@@ -579,7 +598,7 @@ func (s *fakeServer) handle(conn net.Conn) {
 					s.storeFlags = strings.Join(args[2:], " ")
 				}
 				s.mu.Unlock()
-				if s.config.rejectStore {
+				if s.config.rejectStore || s.config.rejectStoreCall == storeIndex+1 {
 					s.writeLine(bw, tag+" NO STORE rejected")
 					continue
 				}

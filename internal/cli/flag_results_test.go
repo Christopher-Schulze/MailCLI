@@ -29,6 +29,8 @@ func TestMarkFailureJSONRetainsActualStateAndNoReplayGuidance(t *testing.T) {
 		{"conflicting", transport.CodeIMAPFlagsMismatch, transport.FlagObservationObserved, true},
 		{"missing", transport.CodeIMAPMessageNotFound, transport.FlagObservationMissing, false},
 		{"unverified", transport.CodeIMAPFlagsOutcomeUnknown, transport.FlagObservationUnverified, false},
+		{"partial", transport.CodeIMAPFlagsPartial, transport.FlagObservationObserved, false},
+		{"unsupported", transport.CodeIMAPFlagsUnsupported, transport.FlagObservationObserved, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			evidence := transport.MutationEvidence{OperationID: "store_retained", Command: "STORE", FlagsState: test.state, Outcome: transport.MutationOutcomeUnknown}

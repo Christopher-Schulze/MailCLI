@@ -669,9 +669,11 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 	}
 	if request.Junk != nil {
 		if *request.Junk {
-			addFlags = append(addFlags, "$Junk", "Junk")
+			addFlags = append(addFlags, "$Junk")
+			removeFlags = append(removeFlags, "$NotJunk")
 		} else {
-			removeFlags = append(removeFlags, "$Junk", "Junk", "$NotJunk")
+			addFlags = append(addFlags, "$NotJunk")
+			removeFlags = append(removeFlags, "$Junk")
 		}
 	}
 
@@ -702,18 +704,23 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 	summary := target.summary
 	if ev.FlagsState == transport.FlagObservationObserved {
 		summary.Read, summary.Flagged, summary.Junk, summary.Deleted = false, false, false, false
+		var notJunk bool
 		for _, flag := range ev.ActualFlags {
 			switch strings.ToLower(flag) {
 			case "\\seen":
 				summary.Read = true
 			case "\\flagged":
 				summary.Flagged = true
-			case "$junk", "junk":
+			case "$junk":
 				summary.Junk = true
+			case "$notjunk":
+				notJunk = true
 			case "\\deleted":
 				summary.Deleted = true
 			}
 		}
+		// RFC 9051 treats a conflicting pair as no definite classification.
+		summary.Junk = summary.Junk && !notJunk
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
 		OperationID:         ev.OperationID,

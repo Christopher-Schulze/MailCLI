@@ -80,6 +80,10 @@ type OperationGuidance struct {
 // command and operation identity after this base classification.
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
+	var mutation *transport.MutationOutcomeError
+	if errors.As(err, &mutation) && mutation.Evidence.Command == "STORE" {
+		return guidanceForMutationUnknown(err)
+	}
 	if isInputErrorCode(code) {
 		return guidanceForInput()
 	}
@@ -227,6 +231,8 @@ func guidanceForMutationUnknown(err error) OperationGuidance {
 		guidance.Recovery.OperationID = outcome.Evidence.OperationID
 		if len(outcome.Evidence.CompletedEffects) > 0 || outcome.Evidence.Outcome == transport.MutationOutcomePartial {
 			guidance.EffectCertainty = EffectPartial
+		} else if outcome.Evidence.Command == "STORE" && (outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted || outcome.Evidence.Outcome == transport.MutationOutcomeRejected) {
+			guidance.EffectCertainty = EffectNone
 		}
 	}
 	return guidance

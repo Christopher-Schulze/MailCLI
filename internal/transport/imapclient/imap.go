@@ -1255,6 +1255,7 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 type selectInfo struct {
 	uidvalidity uint32
 	exists      int
+	permissions flagPermissions
 }
 
 func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox string) (selectInfo, error) {
@@ -1269,14 +1270,30 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 	if err := c.writeLine(sess, tag+" SELECT "+quotedMailbox); err != nil {
 		return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT write")
 	}
-	for {
-		line, err := c.readLine(sess)
+	remaining := int64(maxFlagResponseBytes)
+	for range maxFlagResponseCount {
+		line, literals, err := c.readLogicalLineWithLiterals(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount)
 		if err != nil {
 			return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT read")
 		}
+		remaining -= int64(len(line) + 2)
+		for _, literal := range literals {
+			remaining -= int64(len(literal))
+		}
+		if remaining < 0 {
+			break
+		}
+		code, err := flagResponseCode(line, tag)
+		if err == nil {
+			err = info.observeFlagCode(code)
+		}
+		if err != nil {
+			sess.dirty = true
+			return info, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP SELECT metadata malformed", Err: err}
+		}
 		if strings.HasPrefix(line, tag+" ") {
 			status := parseStatus(line, tag)
-			if status == "OK" {
+			if strings.EqualFold(status, "OK") {
 				return info, nil
 			}
 			return info, &transport.TransportError{
@@ -1285,9 +1302,6 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 			}
 		}
 		if strings.HasPrefix(line, "* ") {
-			if strings.Contains(line, "UIDVALIDITY ") {
-				info.uidvalidity = parseUIDValidity(line)
-			}
 			if strings.HasSuffix(line, " EXISTS") {
 				fields := strings.Fields(line)
 				if len(fields) >= 3 {
@@ -1298,23 +1312,8 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 			}
 		}
 	}
-}
-
-func parseUIDValidity(line string) uint32 {
-	idx := strings.Index(line, "UIDVALIDITY ")
-	if idx == -1 {
-		return 0
-	}
-	rest := line[idx+len("UIDVALIDITY "):]
-	end := strings.IndexAny(rest, " ]")
-	if end != -1 {
-		rest = rest[:end]
-	}
-	v, err := strconv.ParseUint(strings.TrimSpace(rest), 10, 32)
-	if err != nil {
-		return 0
-	}
-	return uint32(v)
+	sess.dirty = true
+	return info, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP SELECT exceeded its response budget"}
 }
 
 // ListMailboxes returns all mailboxes on the IMAP server with their flags.
@@ -1834,7 +1833,7 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 	}
 
 	ev.UIDValidity = info.uidvalidity
-	return c.setFlagsAndVerify(ctx, ps.sess, ev, addFlags, removeFlags)
+	return c.setFlagsAndVerify(ctx, ps.sess, ev, addFlags, removeFlags, info.permissions)
 }
 
 // checkUIDValidity rejects an identity-sensitive operation before it runs when
@@ -2512,7 +2511,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 			if response.flagsPresent {
 				return fetchResponse{}, errors.New("duplicate FETCH FLAGS attribute")
 			}
-			flags, err := parseFetchFlagsValue(parser.input[valueStart:parser.position])
+			flags, err := parseFlagListValue(parser.input[valueStart:parser.position], false)
 			if err != nil {
 				return fetchResponse{}, err
 			}
