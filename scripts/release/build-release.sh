@@ -52,10 +52,9 @@ cleanup_staging() {
 }
 trap cleanup_staging EXIT
 
-mkdir -p "${STAGING_ROOT}/bin" "${STAGING_ROOT}/skills/mailcli/agents" "${RELEASE_DIRECTORY}"
+mkdir -p "${STAGING_ROOT}/bin" "${STAGING_ROOT}/skills" "${RELEASE_DIRECTORY}"
 cp "${BINARY}" "${STAGING_ROOT}/bin/mailcli"
-cp "${MAILCLI_ROOT}/skills/mailcli/SKILL.md" "${STAGING_ROOT}/skills/mailcli/SKILL.md"
-cp "${MAILCLI_ROOT}/skills/mailcli/agents/openai.yaml" "${STAGING_ROOT}/skills/mailcli/agents/openai.yaml"
+cp -R "${MAILCLI_ROOT}/skills/mailcli" "${STAGING_ROOT}/skills/mailcli"
 cp "${MAILCLI_ROOT}/scripts/release/install.sh" "${STAGING_ROOT}/install.sh"
 cp "${MAILCLI_ROOT}/README.md" "${STAGING_ROOT}/README.md"
 cp "${MAILCLI_ROOT}/LICENSE" "${STAGING_ROOT}/LICENSE"

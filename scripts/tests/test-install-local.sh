@@ -36,6 +36,11 @@ verify_install() {
   local skill_destination="$2"
   cmp -s "${MAILCLI_ROOT}/bin/mailcli" "${binary_destination}"
   diff -qr "${MAILCLI_ROOT}/skills/mailcli" "${skill_destination}" >/dev/null
+  (
+    cd "${MAILCLI_ROOT}"
+    MAILCLI_TEST_SKILL_DIRECTORY="${skill_destination}" \
+      go test ./internal/cli -run '^TestSkillDocumentationSelfContained$' -count=1
+  )
   [[ "$(${binary_destination} version)" == "$("${MAILCLI_ROOT}/bin/mailcli" version)" ]]
   [[ ! -e "${binary_destination}.mailcli-backup" ]]
   [[ ! -e "${skill_destination}.mailcli-backup" ]]

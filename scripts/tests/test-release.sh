@@ -115,6 +115,11 @@ INSTALLED_BINARY="${TEST_HOME}/.local/bin/mailcli"
 INSTALLED_SKILL="${TEST_HOME}/.agents/skills/mailcli"
 cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${INSTALLED_BINARY}"
 diff -qr "${PACKAGE_ROOT}/skills/mailcli" "${INSTALLED_SKILL}" >/dev/null
+(
+  cd "${MAILCLI_ROOT}"
+  MAILCLI_TEST_SKILL_DIRECTORY="${INSTALLED_SKILL}" \
+    go test ./internal/cli -run '^TestSkillDocumentationSelfContained$' -count=1
+)
 [[ "$("${INSTALLED_BINARY}" version)" == "mailcli ${TEST_VERSION}" ]]
 CAPABILITIES_JSON="$("${INSTALLED_BINARY}" capabilities --json)"
 if ! grep -Fq '"raw_mime_send":true' <<<"${CAPABILITIES_JSON}"; then

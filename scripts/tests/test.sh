@@ -42,15 +42,16 @@ REQUIRED_SKILL_STRINGS=(
   'Never cache `doctor --live`'
 )
 for REQUIRED_STRING in "${REQUIRED_SKILL_STRINGS[@]}"; do
-  if ! grep -Fq "${REQUIRED_STRING}" "${MAILCLI_ROOT}/skills/mailcli/SKILL.md"; then
+  if ! grep -Fq "${REQUIRED_STRING}" "${MAILCLI_ROOT}/skills/mailcli/SKILL.md" \
+    "${MAILCLI_ROOT}/skills/mailcli/references/"*.md; then
     printf 'Agent skill is missing required contract text: %s\n' "${REQUIRED_STRING}" >&2
     exit 1
   fi
 done
 SKILL_BYTES="$(wc -c <"${MAILCLI_ROOT}/skills/mailcli/SKILL.md")"
 SKILL_BYTES="${SKILL_BYTES//[[:space:]]/}"
-if ((SKILL_BYTES >= 21925)); then
-  printf 'Agent skill exceeds the TASK 222 size threshold: %s bytes\n' "${SKILL_BYTES}" >&2
+if ((SKILL_BYTES > 9000)); then
+  printf 'Agent skill entrypoint exceeds its 9000-byte context budget: %s bytes\n' "${SKILL_BYTES}" >&2
   exit 1
 fi
 
