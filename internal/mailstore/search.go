@@ -348,7 +348,7 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 		COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
-		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
+		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0), m.date_sent IS NULL,
 		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
 		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
@@ -386,22 +386,20 @@ func (st *searchCandidateStream) next(limit int) (chunk []messageRecord, resultE
 	lastDateNull := false
 	for rows.Next() {
 		var item messageRecord
-		var dateNull int
 		if err := rows.Scan(
 			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
 			&item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
+			&item.DateSent, &item.DateSentNull, &item.DateReceived, &item.DateReceivedNull,
+			&item.Read, &item.Flagged, &item.Deleted,
 			&item.Junk, &item.Size, &item.AttachmentCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
-		// Only the chunk's last row seeds the next keyset cursor; track
-		// whether that row's raw date is NULL (messageRecord carries the
-		// COALESCEd value only).
-		lastDateNull = dateNull != 0
-		item.DateReceivedNull = lastDateNull
+		// Only the chunk's last row seeds the next keyset cursor; preserve
+		// its raw NULL state independently of the coalesced timestamp.
+		lastDateNull = item.DateReceivedNull
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -606,7 +604,7 @@ func (s *Store) querySearchRecords(
 		COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 		m.mailbox, mb.url,
 		subject.subject, sender.address, sender.comment,
-		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
+		COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0), m.date_sent IS NULL,
 		COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 		EXISTS (SELECT 1 FROM server_messages sm WHERE sm.message = m.ROWID AND sm.junk_level > 0),
 		m.size, (SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
@@ -621,18 +619,17 @@ func (s *Store) querySearchRecords(
 	var items []messageRecord
 	for rows.Next() {
 		var item messageRecord
-		var dateNull bool
 		if err := rows.Scan(
 			&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
 			&item.StoreMailboxID,
 			&item.PhysicalURL,
 			&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-			&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
+			&item.DateSent, &item.DateSentNull, &item.DateReceived, &item.DateReceivedNull,
+			&item.Read, &item.Flagged, &item.Deleted,
 			&item.Junk, &item.Size, &item.AttachmentCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan Envelope Index search candidate: %w", err)
 		}
-		item.DateReceivedNull = dateNull
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

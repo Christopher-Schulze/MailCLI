@@ -36,6 +36,7 @@ type messageRecord struct {
 	SenderName       string
 	SummaryText      string
 	DateSent         int64
+	DateSentNull     bool
 	DateReceived     int64
 	DateReceivedNull bool
 	Read             bool
@@ -136,7 +137,7 @@ func (s *Store) queryMailboxMessages(
 	defer joinCloseError(&resultErr, rows, "message rows")
 	items := make([]messageRecord, 0, limit)
 	for rows.Next() {
-		item, err := scanMessageRecordWithDateNull(rows)
+		item, err := scanMessageRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +161,7 @@ func mailboxMessagesSQL(cursorClause string) string {
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
-			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0),
+			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0), m.date_sent IS NULL,
 			COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 			EXISTS(
 				SELECT 1 FROM server_messages sm
@@ -192,28 +193,12 @@ func scanMessageRecord(row rowScanner) (messageRecord, error) {
 		&item.StoreMailboxID,
 		&item.PhysicalURL,
 		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-		&item.DateSent, &item.DateReceived, &item.Read, &item.Flagged, &item.Deleted,
+		&item.DateSent, &item.DateSentNull, &item.DateReceived, &item.DateReceivedNull,
+		&item.Read, &item.Flagged, &item.Deleted,
 		&item.Junk, &item.Size, &item.AttachmentCount,
 	); err != nil {
 		return messageRecord{}, fmt.Errorf("scan Envelope Index message: %w", err)
 	}
-	return item, nil
-}
-
-func scanMessageRecordWithDateNull(row rowScanner) (messageRecord, error) {
-	var item messageRecord
-	var dateNull bool
-	if err := row.Scan(
-		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
-		&item.StoreMailboxID,
-		&item.PhysicalURL,
-		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
-		&item.DateSent, &item.DateReceived, &dateNull, &item.Read, &item.Flagged, &item.Deleted,
-		&item.Junk, &item.Size, &item.AttachmentCount,
-	); err != nil {
-		return messageRecord{}, fmt.Errorf("scan Envelope Index message: %w", err)
-	}
-	item.DateReceivedNull = dateNull
 	return item, nil
 }
 
@@ -266,8 +251,9 @@ func mapMessageSummary(
 	return mail.MessageSummary{
 		Ref: messageRef, MailboxRef: mailboxRef, Subject: item.Subject,
 		Sender:       formatSender(item.SenderName, item.SenderAddress),
-		DateReceived: formatUnixTime(item.DateReceived), DateSent: formatUnixTime(item.DateSent),
-		Read: item.Read, Flagged: item.Flagged, Junk: item.Junk, Deleted: item.Deleted,
+		DateReceived: formatUnixTime(item.DateReceived, item.DateReceivedNull),
+		DateSent:     formatUnixTime(item.DateSent, item.DateSentNull),
+		Read:         item.Read, Flagged: item.Flagged, Junk: item.Junk, Deleted: item.Deleted,
 		Size: item.Size, AttachmentCount: item.AttachmentCount,
 	}, nil
 }
@@ -302,8 +288,8 @@ func formatSender(name string, address string) string {
 	return (&stdmail.Address{Name: name, Address: address}).String()
 }
 
-func formatUnixTime(value int64) string {
-	if value == 0 {
+func formatUnixTime(value int64, isNull bool) string {
+	if isNull {
 		return ""
 	}
 	return time.Unix(value, 0).UTC().Format(time.RFC3339)
