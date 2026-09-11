@@ -62,7 +62,7 @@ type streamingSubmitter struct {
 }
 
 func (s *streamingSubmitter) SubmitReader(
-	_ context.Context, _ transport.SubmitConfig, _ string, _ []string, messageID string, reader io.Reader, size int64,
+	_ context.Context, _ transport.SubmitConfig, _ string, _ []string, messageID string, reader io.ReadSeeker, size int64,
 ) (transport.SubmitEvidence, error) {
 	s.readerCalls++
 	s.readerSize = size

@@ -30,20 +30,24 @@ type fakeSMTPServer struct {
 	tlsCert tls.Certificate
 	closed  chan struct{}
 
-	mu        sync.Mutex
-	mailFrom  string
-	rcpts     []string
-	data      []byte
-	authCalls int
+	mu          sync.Mutex
+	mailFrom    string
+	mailCommand string
+	rcpts       []string
+	data        []byte
+	authCalls   int
 
-	authUser      string
-	authPass      string
-	authFail      bool
-	rejectRcpt    string
-	stallGreeting bool
-	noStartTLS    bool
-	startTLSDelay time.Duration
-	stallStartTLS bool
+	authUser          string
+	authPass          string
+	authFail          bool
+	rejectRcpt        string
+	stallGreeting     bool
+	noStartTLS        bool
+	smtpUTF8          bool
+	eightBitMIME      bool
+	utf8BeforeTLSOnly bool
+	startTLSDelay     time.Duration
+	stallStartTLS     bool
 	// stallFinalReply withholds the 250 reply after DATA until the server
 	// closes, simulating a hung server for ctx-cancel tests.
 	stallFinalReply bool
@@ -130,14 +134,20 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 		upper := strings.ToUpper(cmd)
 		switch {
 		case strings.HasPrefix(upper, "EHLO"):
-			if s.noStartTLS {
-				if !writeLine(conn, "250-fake greets you") || !writeLine(conn, "250 AUTH PLAIN") {
-					return
-				}
-			} else {
-				if !writeLine(conn, "250-fake greets you") || !writeLine(conn, "250-STARTTLS") || !writeLine(conn, "250 AUTH PLAIN") {
-					return
-				}
+			if !writeLine(conn, "250-fake greets you") {
+				return
+			}
+			if !s.noStartTLS && !writeLine(conn, "250-STARTTLS") {
+				return
+			}
+			if (s.smtpUTF8 || (s.utf8BeforeTLSOnly && !isTLS)) && !writeLine(conn, "250-SMTPUTF8") {
+				return
+			}
+			if s.eightBitMIME && !writeLine(conn, "250-8BITMIME") {
+				return
+			}
+			if !writeLine(conn, "250 AUTH PLAIN") {
+				return
 			}
 		case upper == "STARTTLS":
 			if isTLS {
@@ -185,6 +195,7 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 		case strings.HasPrefix(upper, "MAIL FROM:"):
 			s.mu.Lock()
 			s.mailFrom = extractAddress(cmd)
+			s.mailCommand = cmd
 			s.mu.Unlock()
 			if !writeLine(conn, "250 2.1.0 OK") {
 				return
@@ -280,7 +291,11 @@ func extractAddress(cmd string) string {
 		return ""
 	}
 	addr := strings.TrimSpace(cmd[i+1:])
-	return strings.TrimSuffix(strings.TrimPrefix(addr, "<"), ">")
+	end := strings.LastIndexByte(addr, '>')
+	if !strings.HasPrefix(addr, "<") || end < 1 {
+		return ""
+	}
+	return addr[1:end]
 }
 
 // selfSignedCert generates a throwaway certificate for the fake server.

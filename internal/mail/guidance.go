@@ -129,7 +129,7 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryUserInputRequired, Recovery: RecoveryGuidance{Action: RecoveryCorrect}}
 	case "content_export_too_large":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case transport.CodeSMTPAuthFailed, transport.CodeSMTPCredentialsMissing, transport.CodeIMAPAuthFailed, transport.CodeSMTPTLSFailed, transport.CodeUnsupportedProvider:
+	case transport.CodeSMTPAuthFailed, transport.CodeSMTPCredentialsMissing, transport.CodeIMAPAuthFailed, transport.CodeSMTPTLSFailed, transport.CodeUnsupportedProvider, transport.CodeSMTPUTF8Unsupported:
 		return guidanceForInput()
 	}
 	if effectfulCommand(command) {

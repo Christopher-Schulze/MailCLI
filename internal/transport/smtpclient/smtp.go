@@ -68,13 +68,17 @@ func (c *Client) Submit(ctx context.Context, cfg transport.SubmitConfig, from st
 
 // SubmitReader streams a replayable RFC 5322 source through SMTP without
 // retaining the complete message in memory.
-func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, from string, rcpts []string, messageID string, msg io.Reader, size int64) (transport.SubmitEvidence, error) {
+func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, from string, rcpts []string, messageID string, msg io.ReadSeeker, size int64) (transport.SubmitEvidence, error) {
 	var evidence transport.SubmitEvidence
 	if size < 0 {
 		return evidence, &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "message size cannot be negative"}
 	}
 	if len(rcpts) == 0 {
 		return evidence, &transport.TransportError{Code: transport.CodeSMTPRejected, Message: "no recipients"}
+	}
+	requiresUTF8, err := submissionRequiresUTF8(ctx, from, rcpts, msg, size)
+	if err != nil {
+		return evidence, err
 	}
 
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
@@ -128,6 +132,11 @@ func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, f
 	if err := client.StartTLS(tlsCfg); err != nil {
 		return evidence, startTLSError(ctx, err)
 	}
+	utf8Supported, _ := client.Extension("SMTPUTF8")
+	eightBitSupported, _ := client.Extension("8BITMIME")
+	if requiresUTF8 && (!utf8Supported || !eightBitSupported) {
+		return evidence, &transport.TransportError{Code: transport.CodeSMTPUTF8Unsupported, Message: "internationalized envelope or MIME headers require SMTPUTF8 and 8BITMIME after STARTTLS"}
+	}
 
 	if err := bumpDeadline(conn, ctx); err != nil {
 		return evidence, sessionError(ctx, "AUTH", err)
@@ -143,7 +152,7 @@ func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, f
 	if err := bumpDeadline(conn, ctx); err != nil {
 		return evidence, sessionError(ctx, "MAIL", err)
 	}
-	if err := client.Mail(from); err != nil {
+	if err := sendMailCommand(client, from, requiresUTF8, eightBitSupported); err != nil {
 		return evidence, sessionError(ctx, "MAIL", err)
 	}
 

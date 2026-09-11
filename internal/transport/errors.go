@@ -115,6 +115,7 @@ const (
 	CodeSMTPAuthFailed           = "smtp_auth_failed"
 	CodeSMTPTLSFailed            = "smtp_tls_failed"
 	CodeSMTPRejected             = "smtp_rejected"
+	CodeSMTPUTF8Unsupported      = "smtp_utf8_unsupported"
 	CodeSMTPTimeout              = "smtp_timeout"
 	CodeSMTPTransferTimeout      = "smtp_transfer_timeout"
 	CodeSMTPSubmissionUnknown    = "smtp_submission_unknown"

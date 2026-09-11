@@ -192,7 +192,7 @@ type Submitter interface {
 // StreamingSubmitter is an optional transport extension for bounded-memory
 // submission of a replayable RFC 5322 source.
 type StreamingSubmitter interface {
-	SubmitReader(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, messageID string, msg io.Reader, size int64) (SubmitEvidence, error)
+	SubmitReader(ctx context.Context, cfg SubmitConfig, from string, rcpts []string, messageID string, msg io.ReadSeeker, size int64) (SubmitEvidence, error)
 }
 
 // SentMirror mirrors an accepted message into the account's Sent mailbox.

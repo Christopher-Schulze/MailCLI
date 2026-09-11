@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	stdmail "net/mail"
 
 	"mailcli/internal/transport"
 )
@@ -23,6 +24,16 @@ func submitComposedMessage(
 	recipients []string,
 	message *ComposedMessage,
 ) (evidence transport.SubmitEvidence, accepted bool, resultErr error) {
+	// These are already parsed mailbox identities. Restore the SMTP quoting
+	// that net/mail removes when it exposes Address, without changing identity.
+	encodedFrom := (&stdmail.Address{Address: from}).String()
+	from = encodedFrom[1 : len(encodedFrom)-1]
+	envelope := make([]string, len(recipients))
+	for index, recipient := range recipients {
+		encoded := (&stdmail.Address{Address: recipient}).String()
+		envelope[index] = encoded[1 : len(encoded)-1]
+	}
+	recipients = envelope
 	if streaming, ok := submitter.(transport.StreamingSubmitter); ok {
 		reader, err := message.Open()
 		if err != nil {
