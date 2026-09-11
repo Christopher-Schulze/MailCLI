@@ -93,7 +93,7 @@ func TestDraftEditValidatesThenAtomicallyUpdates(t *testing.T) {
 	t.Setenv("MAILCLI_TEST_EDITOR", "1")
 	updated, err := editDraftInput(
 		context.Background(), service, draft.Ref, draft.Revision, draftInputFromStored(draft), os.Args[0],
-		[]string{"-test.run=TestDraftEditorHelperProcess", "--"},
+		[]string{"-test.run=TestDraftEditorHelperProcess", "--"}, draftEditorStreams{},
 	)
 	if err != nil {
 		t.Fatal(err)

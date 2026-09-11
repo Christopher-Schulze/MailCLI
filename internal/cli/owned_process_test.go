@@ -113,7 +113,7 @@ func TestDraftEditorCancellationCleansOwnedDescendants(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		_, editErr := editDraftInput(
-			ctx, service, draft.Ref, draft.Revision, draftInputFromStored(draft), editorPath, nil,
+			ctx, service, draft.Ref, draft.Revision, draftInputFromStored(draft), editorPath, nil, draftEditorStreams{},
 		)
 		result <- editErr
 	}()
@@ -123,9 +123,18 @@ func TestDraftEditorCancellationCleansOwnedDescendants(t *testing.T) {
 	select {
 	case err := <-result:
 		var coded codedError
-		if !errors.As(err, &coded) || coded.ErrorCode() != "editor_failed" {
+		if !errors.As(err, &coded) || coded.ErrorCode() != "editor_canceled" || !errors.Is(err, context.Canceled) {
 			t.Fatalf("editDraftInput() error = %v", err)
 		}
+		var editorErr *draftEditorError
+		if !errors.As(err, &editorErr) {
+			t.Fatal("missing retained editor candidate")
+		}
+		t.Cleanup(func() {
+			if err := os.RemoveAll(filepath.Dir(editorErr.evidence.CandidatePath)); err != nil {
+				t.Error(err)
+			}
+		})
 	case <-time.After(5 * time.Second):
 		t.Fatal("editDraftInput() did not complete after cancellation")
 	}
