@@ -132,6 +132,12 @@ run_group \
   '^BenchmarkAttachmentCatalogShortcut$' \
   1x
 run_group \
+  rich-content \
+  '100 KiB repeated tags; rich HTML, plain text, links, captioned tables, Markdown, depth-250 content, and a 1 MB text body under one or 250 removed wrappers' \
+  ./internal/mail \
+  '^BenchmarkPrepareDraftContent$' \
+  10x
+run_group \
   draft-list \
   '1-byte and 1 MiB draft bodies; full-record baseline, streaming summary, and paginated service; 25-entry pages over 1 and 2049 records; file bytes and serialized output are separate metrics' \
   ./internal/mail \

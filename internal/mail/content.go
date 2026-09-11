@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/url"
@@ -31,16 +32,23 @@ type preparedDraftContent struct {
 }
 
 func prepareDraftContent(format DraftBodyFormat, source string) (preparedDraftContent, error) {
-	return prepareDraftContentWithObserver(format, source, nil)
+	return prepareDraftContentWithObserver(context.Background(), format, source, nil)
 }
 
 func prepareDraftContentWithObserver(
+	ctx context.Context,
 	format DraftBodyFormat,
 	source string,
 	observer draftContentObserver,
 ) (preparedDraftContent, error) {
+	if err := ctx.Err(); err != nil {
+		return preparedDraftContent{}, err
+	}
 	if observer != nil {
 		observer.ContentRendered()
+	}
+	if err := ctx.Err(); err != nil {
+		return preparedDraftContent{}, err
 	}
 	if format == "" {
 		format = DraftBodyPlain
@@ -52,9 +60,9 @@ func prepareDraftContentWithObserver(
 	case DraftBodyPlain:
 		return preparedDraftContent{Format: format, Plain: source}, nil
 	case DraftBodyMarkdown:
-		return renderMarkdownContent(source)
+		return renderMarkdownContent(ctx, source)
 	case DraftBodyHTML:
-		return canonicalRichContent(format, source, []byte(source))
+		return canonicalRichContent(ctx, format, source, strings.NewReader(source))
 	default:
 		return preparedDraftContent{}, validationError("draft body format must be plain, markdown, or html")
 	}
@@ -77,7 +85,7 @@ func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentO
 		if draft.BodySource == "" && (draft.Body != "" || draft.BodyHTML != "") {
 			return validationError("rich draft is missing its source body")
 		}
-		prepared, err := prepareDraftContentWithObserver(draft.BodyFormat, draft.BodySource, observer)
+		prepared, err := prepareDraftContentWithObserver(context.Background(), draft.BodyFormat, draft.BodySource, observer)
 		if err != nil {
 			return err
 		}
@@ -98,32 +106,32 @@ func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentO
 	return validateStoredDraftLimits(*draft)
 }
 
-func renderMarkdownContent(source string) (preparedDraftContent, error) {
-	var rendered bytes.Buffer
+func renderMarkdownContent(ctx context.Context, source string) (preparedDraftContent, error) {
+	rendered := draftHTMLWriter{ctx: ctx}
 	if err := markdown.Convert([]byte(source), &rendered); err != nil {
 		return preparedDraftContent{}, fmt.Errorf("render Markdown body: %w", err)
 	}
-	return canonicalRichContent(DraftBodyMarkdown, source, rendered.Bytes())
+	return canonicalRichContent(ctx, DraftBodyMarkdown, source, strings.NewReader(rendered.value.String()))
 }
 
-func canonicalRichContent(format DraftBodyFormat, source string, value []byte) (preparedDraftContent, error) {
-	sanitized, diagnostics, err := sanitizeEmailHTML(value)
+func canonicalRichContent(ctx context.Context, format DraftBodyFormat, source string, input io.Reader) (preparedDraftContent, error) {
+	body, diagnostics, err := sanitizeEmailHTML(ctx, input)
 	if err != nil {
-		return preparedDraftContent{}, validationError("draft body contains invalid HTML")
+		return preparedDraftContent{}, err
 	}
-	sanitized = bytes.TrimSpace(sanitized)
-	if len(sanitized) > MaximumDraftBodyBytes {
-		return preparedDraftContent{}, validationError("rendered draft body exceeds 4 MiB")
-	}
-	plain, err := htmlDraftText(bytes.NewReader(sanitized))
+	sanitized, err := renderSanitizedHTML(ctx, body)
 	if err != nil {
-		return preparedDraftContent{}, validationError("draft body contains invalid HTML")
+		return preparedDraftContent{}, err
+	}
+	plain, err := renderPreparedDraftText(ctx, body, sanitized)
+	if err != nil {
+		return preparedDraftContent{}, err
 	}
 	if len(plain) > MaximumDraftBodyBytes {
 		return preparedDraftContent{}, validationError("plain-text draft body exceeds 4 MiB")
 	}
 	return preparedDraftContent{
-		Format: format, Source: source, Plain: plain, HTML: string(sanitized), Diagnostics: diagnostics,
+		Format: format, Source: source, Plain: plain, HTML: sanitized, Diagnostics: diagnostics,
 	}, nil
 }
 
@@ -161,12 +169,17 @@ func contentDiagnosticsEqual(left, right []ContentDiagnostic) bool {
 	return true
 }
 
-func sanitizeEmailHTML(value []byte) ([]byte, []ContentDiagnostic, error) {
-	document, err := html.Parse(bytes.NewReader(value))
+func sanitizeEmailHTML(ctx context.Context, input io.Reader) (*html.Node, []ContentDiagnostic, error) {
+	document, err := html.Parse(contextReader{ctx: ctx, reader: input})
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, nil, contextErr
+		}
+		return nil, nil, validationError("draft body contains invalid HTML")
+	}
+	if err := validateDraftContentTree(ctx, document); err != nil {
 		return nil, nil, err
 	}
-	var output bytes.Buffer
 	var diagnostics contentDiagnosticCollector
 	body := findHTMLElement(document, "body")
 	if body == nil {
@@ -180,14 +193,11 @@ func sanitizeEmailHTML(value []byte) ([]byte, []ContentDiagnostic, error) {
 	if body.Type == html.ElementNode && strings.EqualFold(body.Data, "body") {
 		recordRemovedAttributes("body", body.Attr, &diagnostics)
 	}
-	for child := body.FirstChild; child != nil; child = child.NextSibling {
-		for _, sanitized := range sanitizeHTMLNode(child, &diagnostics) {
-			if err := html.Render(&output, sanitized); err != nil {
-				return nil, nil, err
-			}
-		}
+	body.Attr = nil
+	if err := sanitizeHTMLChildren(ctx, body, &diagnostics); err != nil {
+		return nil, nil, err
 	}
-	return output.Bytes(), diagnostics.values, nil
+	return body, diagnostics.values, nil
 }
 
 func collectHTMLDiagnostics(node *html.Node, diagnostics *contentDiagnosticCollector) {
@@ -212,47 +222,82 @@ func collectHTMLDiagnostics(node *html.Node, diagnostics *contentDiagnosticColle
 	}
 }
 
-func sanitizeHTMLNode(node *html.Node, diagnostics *contentDiagnosticCollector) []*html.Node {
+func sanitizeHTMLNode(ctx context.Context, node, parent, before *html.Node, diagnostics *contentDiagnosticCollector) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	switch node.Type {
 	case html.TextNode:
-		return []*html.Node{{Type: html.TextNode, Data: node.Data}}
 	case html.ElementNode:
 		name := strings.ToLower(node.Data)
 		if dropsHTMLSubtree(name) {
 			diagnostics.add(ContentDiagnosticRemovedElement, name, "")
 			recordDroppedResourceDiagnostics(name, node.Attr, diagnostics)
+			alt := ""
 			if name == "img" {
-				if alt := htmlAttributeValue(node.Attr, "alt"); alt != "" {
-					return []*html.Node{{Type: html.TextNode, Data: alt}}
-				}
+				alt = htmlAttributeValue(node.Attr, "alt")
 			}
-			return nil
+			if alt == "" {
+				node.Parent.RemoveChild(node)
+				return false, nil
+			}
+			for node.FirstChild != nil {
+				node.RemoveChild(node.FirstChild)
+			}
+			node.Type, node.Data, node.DataAtom, node.Namespace, node.Attr = html.TextNode, alt, 0, "", nil
+			break
 		}
-		children := sanitizeHTMLChildren(node, diagnostics)
 		if !allowsHTMLElement(name) {
-			recordRemovedAttributes(name, node.Attr, diagnostics)
-			if len(children) == 0 {
-				diagnostics.add(ContentDiagnosticRemovedElement, name, "")
-			}
-			return children
+			return unwrapSanitizedHTMLNode(ctx, node, parent, before, diagnostics)
 		}
-		clean := &html.Node{Type: html.ElementNode, Data: name}
-		clean.Attr = sanitizeElementAttributes(name, node.Attr, diagnostics)
-		for _, child := range children {
-			clean.AppendChild(child)
+		if err := sanitizeHTMLChildren(ctx, node, diagnostics); err != nil {
+			return false, err
 		}
-		return []*html.Node{clean}
+		node.Data, node.DataAtom, node.Namespace = name, 0, ""
+		node.Attr = sanitizeElementAttributes(name, node.Attr, diagnostics)
 	default:
-		return nil
+		node.Parent.RemoveChild(node)
+		return false, nil
 	}
+	if node.Parent != parent {
+		node.Parent.RemoveChild(node)
+		parent.InsertBefore(node, before)
+	}
+	return true, nil
 }
 
-func sanitizeHTMLChildren(node *html.Node, diagnostics *contentDiagnosticCollector) []*html.Node {
-	var children []*html.Node
-	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		children = append(children, sanitizeHTMLNode(child, diagnostics)...)
+// Descendants skip removed wrappers and move directly to their retained
+// parent. Each surviving node is reparented at most once, even through deep
+// wrapper chains, and text is joined only at that final parent.
+func unwrapSanitizedHTMLNode(ctx context.Context, node, parent, before *html.Node, diagnostics *contentDiagnosticCollector) (bool, error) {
+	retained := false
+	for child := node.FirstChild; child != nil; {
+		next := child.NextSibling
+		keep, err := sanitizeHTMLNode(ctx, child, parent, before, diagnostics)
+		if err != nil {
+			return false, err
+		}
+		retained = retained || keep
+		child = next
 	}
-	return children
+	name := strings.ToLower(node.Data)
+	recordRemovedAttributes(name, node.Attr, diagnostics)
+	if !retained {
+		diagnostics.add(ContentDiagnosticRemovedElement, name, "")
+	}
+	node.Parent.RemoveChild(node)
+	return retained, nil
+}
+
+func sanitizeHTMLChildren(ctx context.Context, node *html.Node, diagnostics *contentDiagnosticCollector) error {
+	for child := node.FirstChild; child != nil; {
+		next := child.NextSibling
+		if _, err := sanitizeHTMLNode(ctx, child, node, child, diagnostics); err != nil {
+			return err
+		}
+		child = next
+	}
+	return mergeHTMLTextNodes(ctx, node)
 }
 
 func sanitizeElementAttributes(name string, attributes []html.Attribute, diagnostics *contentDiagnosticCollector) []html.Attribute {
@@ -426,7 +471,7 @@ type plainTextToken struct {
 
 type plainTextLink struct {
 	href          string
-	label         strings.Builder
+	label         []byte
 	nestedTargets []string
 }
 
@@ -441,6 +486,10 @@ type plainTextTable struct {
 }
 
 type plainTextRenderer struct {
+	ctx            context.Context
+	err            error
+	maximumBytes   int
+	labelBytes     int
 	tokens         []plainTextToken
 	links          []plainTextLink
 	lists          []plainTextList
@@ -456,13 +505,23 @@ func htmlDraftText(reader io.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	renderer := plainTextRenderer{tokens: make([]plainTextToken, 0, 32)}
+	return renderDraftText(context.Background(), root, 0)
+}
+
+func renderDraftText(ctx context.Context, root *html.Node, maximumBytes int) (string, error) {
+	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes, tokens: make([]plainTextToken, 0, 32)}
 	renderer.renderNode(root)
-	return renderer.text(), nil
+	if renderer.err != nil {
+		return "", renderer.err
+	}
+	return renderer.text()
 }
 
 func (renderer *plainTextRenderer) renderNode(node *html.Node) {
-	if node == nil {
+	if renderer.err != nil || node == nil {
+		return
+	}
+	if renderer.err = renderer.ctx.Err(); renderer.err != nil {
 		return
 	}
 	switch node.Type {
@@ -550,7 +609,7 @@ func (renderer *plainTextRenderer) renderLink(node *html.Node) {
 	renderer.renderChildren(node)
 	link := &renderer.links[len(renderer.links)-1]
 	href := link.href
-	label := normalizeLinkLabel(link.label.String())
+	label := normalizeLinkLabel(link.label)
 	nestedTargets := link.nestedTargets
 	represented := label != "" && href != ""
 	if represented && !redundantLinkTarget(label, href) && !containsLinkTarget(nestedTargets, href) {
@@ -634,11 +693,18 @@ func (renderer *plainTextRenderer) renderTableCell(node *html.Node) {
 }
 
 func (renderer *plainTextRenderer) appendText(value string) {
-	if value == "" {
+	if renderer.err != nil || value == "" {
 		return
 	}
+	if renderer.maximumBytes > 0 && len(renderer.links) > 0 {
+		if len(value) > (4*renderer.maximumBytes-renderer.labelBytes)/len(renderer.links) {
+			renderer.err = validationError("draft HTML exceeds 16 MiB of link-label text")
+			return
+		}
+		renderer.labelBytes += len(value) * len(renderer.links)
+	}
 	for index := range renderer.links {
-		renderer.links[index].label.WriteString(value)
+		renderer.links[index].label = append(renderer.links[index].label, value...)
 	}
 	if strings.TrimSpace(value) != "" {
 		renderer.linePrefix = false
@@ -653,7 +719,7 @@ func (renderer *plainTextRenderer) appendText(value string) {
 }
 
 func (renderer *plainTextRenderer) appendRaw(value string) {
-	if value == "" {
+	if renderer.err != nil || value == "" {
 		return
 	}
 	renderer.tokens = append(renderer.tokens, plainTextToken{text: value, preserve: true, raw: true})
@@ -680,22 +746,38 @@ func (renderer *plainTextRenderer) appendBlockBreak() {
 	renderer.appendBreak()
 }
 
-func (renderer *plainTextRenderer) text() string {
-	output := plainTextOutput{}
-	output.output.Grow(len(renderer.tokens) * 8)
+func (renderer *plainTextRenderer) text() (string, error) {
+	output := plainTextOutput{ctx: renderer.ctx, maximumBytes: renderer.maximumBytes}
+	capacity := len(renderer.tokens) * 8
+	if renderer.maximumBytes > 0 {
+		capacity = min(capacity, renderer.maximumBytes)
+	}
+	output.output.Grow(capacity)
 	for _, token := range renderer.tokens {
 		output.write(token)
+		if output.err != nil {
+			return "", output.err
+		}
 	}
-	return strings.Trim(output.output.String(), "\n")
+	return strings.Trim(output.output.String(), "\n"), renderer.ctx.Err()
 }
 
 type plainTextOutput struct {
+	ctx           context.Context
+	err           error
+	maximumBytes  int
 	output        strings.Builder
 	pendingBreaks int
 	pendingSpace  bool
 }
 
 func (output *plainTextOutput) write(token plainTextToken) {
+	if output.err != nil {
+		return
+	}
+	if output.err = output.ctx.Err(); output.err != nil {
+		return
+	}
 	if token.lineBreak {
 		output.pendingSpace = false
 		if output.output.Len() > 0 && output.pendingBreaks < 2 {
@@ -716,18 +798,28 @@ func (output *plainTextOutput) write(token plainTextToken) {
 func (output *plainTextOutput) writePreserved(token plainTextToken) {
 	value := normalizeLineEndings(token.text)
 	if token.raw && output.pendingSpace && output.output.Len() > 0 && output.pendingBreaks == 0 {
-		output.output.WriteByte(' ')
+		output.writeString(" ")
 		value = strings.TrimLeft(value, " \t")
 	} else if !token.block && output.pendingSpace && output.output.Len() > 0 && output.pendingBreaks == 0 {
-		output.output.WriteByte(' ')
+		output.writeString(" ")
 	}
 	output.flushBreaks()
 	output.pendingSpace = false
-	output.output.WriteString(value)
+	output.writeString(value)
 }
 
 func (output *plainTextOutput) writeProse(value string) {
+	nextContextCheck := 0
 	for index := 0; index < len(value); {
+		if output.err != nil {
+			return
+		}
+		if index >= nextContextCheck {
+			if output.err = output.ctx.Err(); output.err != nil {
+				return
+			}
+			nextContextCheck = index + 4096
+		}
 		character, size := utf8.DecodeRuneInString(value[index:])
 		index += size
 		if unicode.IsSpace(character) {
@@ -738,18 +830,41 @@ func (output *plainTextOutput) writeProse(value string) {
 		}
 		output.flushBreaks()
 		if output.pendingSpace && output.output.Len() > 0 {
-			output.output.WriteByte(' ')
+			output.writeString(" ")
 		}
 		output.pendingSpace = false
-		output.output.WriteRune(character)
+		if output.canAppend(utf8.RuneLen(character)) {
+			if _, err := output.output.WriteRune(character); err != nil {
+				output.err = err
+			}
+		}
 	}
 }
 
 func (output *plainTextOutput) flushBreaks() {
 	for output.pendingBreaks > 0 {
-		output.output.WriteByte('\n')
+		output.writeString("\n")
 		output.pendingBreaks--
 	}
+}
+
+func (output *plainTextOutput) writeString(value string) {
+	if output.canAppend(len(value)) {
+		if _, err := output.output.WriteString(value); err != nil {
+			output.err = err
+		}
+	}
+}
+
+func (output *plainTextOutput) canAppend(size int) bool {
+	if output.err != nil {
+		return false
+	}
+	if output.maximumBytes > 0 && size > output.maximumBytes-output.output.Len() {
+		output.err = validationError("plain-text draft body exceeds 4 MiB")
+		return false
+	}
+	return true
 }
 
 func normalizeLineEndings(value string) string {
@@ -770,10 +885,12 @@ func plainLinkTarget(node *html.Node) string {
 	return ""
 }
 
-func normalizeLinkLabel(value string) string {
+func normalizeLinkLabel(value []byte) string {
 	var output strings.Builder
 	pendingSpace := false
-	for _, character := range value {
+	for len(value) > 0 {
+		character, size := utf8.DecodeRune(value)
+		value = value[size:]
 		if unicode.IsSpace(character) {
 			pendingSpace = true
 			continue
