@@ -43,6 +43,8 @@ Never issue raw SQLite, private-file traversal, AppleScript/JXA, UI-coordinate a
 
 ## Execute with minimal output
 
+Require explicit user authorization for sending or destructive changes and pass the advertised confirmation flags. Reuse existing authorization while its scope and reviewed content remain unchanged; do not ask for the same confirmation again.
+
 - List or search metadata first; fetch `messages get --ref REF --view plain --json` only for relevant messages. Use `--fields` for a schema-supported selection or `--export /absolute/new/path` for complete content outside the response. Never substitute a summary for a required full-content review.
 - Follow `data.page.next_cursor` until empty for exhaustive requests. Search completeness additionally requires `data.page.coverage.complete`; inspect `content_complete` and `missing_parts` before claiming complete content. `imap_ambiguous_message_id` stops identity-dependent work.
 - Use `batch` for supported operations on explicit refs, with unique item IDs and published limits. Inspect every item; a failed or uncertain item never authorizes replay of successful siblings. Read the output guide before batching.
