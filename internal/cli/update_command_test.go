@@ -128,7 +128,7 @@ func TestPerformUpdatePreservesInstallationWhenInstallerFails(t *testing.T) {
 	defer server.Close()
 	environment := updateTestEnvironment(t, server, "1.0.4")
 	createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
-	environment.installPackage = func(context.Context, string, string, string) error {
+	environment.installPackage = func(context.Context, string, string, string, *os.File) error {
 		return errors.New("injected installer failure")
 	}
 
@@ -345,7 +345,7 @@ func TestUpdateLockSerializesConcurrentInstallers(t *testing.T) {
 	if updateErrorCodeForTest(err) != "update_busy" {
 		t.Fatalf("second acquireUpdateLock() error = %v", err)
 	}
-	if err := release(); err != nil {
+	if err := release.Close(); err != nil {
 		t.Fatalf("release update lock error = %v", err)
 	}
 }
