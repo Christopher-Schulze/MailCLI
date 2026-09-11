@@ -96,6 +96,7 @@ func ErrorCode(err error) string {
 		CodeIMAPMoveOutcomeUnknown,
 		CodeIMAPAmbiguousMessageID,
 		CodeIMAPCopyOutcomeUnknown,
+		CodeIMAPFlagsOutcomeUnknown,
 	} {
 		if errors.Is(err, transportCode(code)) {
 			return code
@@ -137,6 +138,8 @@ const (
 	CodeIMAPAmbiguousMessageID   = "imap_ambiguous_message_id"
 	CodeIMAPMoveOutcomeUnknown   = "imap_move_outcome_unknown"
 	CodeIMAPCopyOutcomeUnknown   = "imap_copy_outcome_unknown"
+	CodeIMAPFlagsOutcomeUnknown  = "imap_flags_outcome_unknown"
+	CodeIMAPFlagsMismatch        = "imap_flags_mismatch"
 	CodeIMAPMessageUIDUnknown    = "imap_message_uid_unknown"
 	CodeIMAPUIDValidityUnknown   = "mailbox_uidvalidity_unknown"
 	CodeIMAPRawSourceTooLarge    = "raw_source_too_large"

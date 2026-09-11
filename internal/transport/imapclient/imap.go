@@ -769,7 +769,7 @@ func (c *Client) readLogicalLineWithLiterals(
 			return "", nil, &malformedResponseError{err: err}
 		}
 		if !hasLiteral {
-			if int64(reconstructed.Len()+len(line)) > maxResponseBytes {
+			if int64(reconstructed.Len()+len(line)) > maxResponseBytes-literalBytes {
 				sess.dirty = true
 				return "", nil, &malformedResponseError{err: fmt.Errorf(
 					"IMAP logical response exceeds %d bytes", maxResponseBytes,
@@ -791,7 +791,7 @@ func (c *Client) readLogicalLineWithLiterals(
 				size: size64, maxLiteral: maxLiteralBytes, maxResponse: maxResponseBytes,
 			}
 		}
-		if int64(reconstructed.Len()+len(prefix)+1) > maxResponseBytes {
+		if int64(reconstructed.Len()+len(prefix)+1) > maxResponseBytes-literalBytes-size64 {
 			sess.dirty = true
 			return "", nil, &malformedResponseError{err: fmt.Errorf(
 				"IMAP logical response exceeds %d bytes", maxResponseBytes,
@@ -1806,8 +1806,17 @@ func malformedUIDSearchResponse(sess *session, message string) error {
 
 // SetFlags adds and removes IMAP flags on a message.
 func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
-	var ev transport.MutationEvidence
+	ev := transport.MutationEvidence{
+		OperationID: transport.MutationOperationID("STORE", cfg.Username, mailbox, uid, expectedUIDValidity,
+			"+FLAGS "+strings.Join(addFlags, " ")+" -FLAGS "+strings.Join(removeFlags, " ")),
+		Outcome: transport.MutationOutcomeNotStarted, SourceAccount: cfg.Username,
+		Command: "STORE", Mailbox: mailbox, UID: uid, ExpectedUIDValidity: expectedUIDValidity,
+		FlagsState: transport.FlagObservationUnverified,
+	}
 	if err := validateMessageUID(uid); err != nil {
+		return ev, err
+	}
+	if err := validateFlagChanges(addFlags, removeFlags); err != nil {
 		return ev, err
 	}
 	ps, release, err := c.acquireMutation(ctx, cfg)
@@ -1824,33 +1833,8 @@ func (c *Client) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox
 		return ev, err
 	}
 
-	var lastStatus string
-	if len(addFlags) > 0 {
-		cmd := fmt.Sprintf("%s UID STORE %d +FLAGS (%s)", ps.sess.nextTag(), uid, strings.Join(addFlags, " "))
-		status, err := c.doCommand(ctx, ps.sess, cmd)
-		if err != nil {
-			return ev, err
-		}
-		lastStatus = status
-	}
-
-	if len(removeFlags) > 0 {
-		cmd := fmt.Sprintf("%s UID STORE %d -FLAGS (%s)", ps.sess.nextTag(), uid, strings.Join(removeFlags, " "))
-		status, err := c.doCommand(ctx, ps.sess, cmd)
-		if err != nil {
-			return ev, err
-		}
-		lastStatus = status
-	}
-
-	return transport.MutationEvidence{
-		Command:             "STORE",
-		ServerResponse:      lastStatus,
-		Mailbox:             mailbox,
-		UID:                 uid,
-		UIDValidity:         info.uidvalidity,
-		ExpectedUIDValidity: expectedUIDValidity,
-	}, nil
+	ev.UIDValidity = info.uidvalidity
+	return c.setFlagsAndVerify(ctx, ps.sess, ev, addFlags, removeFlags)
 }
 
 // checkUIDValidity rejects an identity-sensitive operation before it runs when
@@ -1886,17 +1870,6 @@ func validateMessageUID(uid uint32) error {
 		Code:    transport.CodeIMAPMessageUIDUnknown,
 		Message: "message UID is unresolved; refusing the IMAP operation",
 	}
-}
-
-func (c *Client) doCommand(ctx context.Context, sess *session, cmd string) (string, error) {
-	status, text, err := c.doCommandResponse(ctx, sess, cmd)
-	if err != nil {
-		return "", err
-	}
-	if text != "" {
-		return status + " " + text, nil
-	}
-	return status, nil
 }
 
 func (c *Client) doCommandResponse(ctx context.Context, sess *session, cmd string) (string, string, error) {
@@ -2463,11 +2436,14 @@ func parseFetchUID(line string) (uint32, bool) {
 }
 
 type fetchResponse struct {
-	uid         uint32
-	uidPresent  bool
-	body        []byte
-	bodyPresent bool
-	bodyLiteral bool
+	sequence     uint32
+	uid          uint32
+	uidPresent   bool
+	flags        []string
+	flagsPresent bool
+	body         []byte
+	bodyPresent  bool
+	bodyLiteral  bool
 }
 
 type fetchValueKind uint8
@@ -2491,6 +2467,7 @@ type fetchResponseParser struct {
 	literals    [][]byte
 	nextLiteral int
 	position    int
+	sequence    uint32
 }
 
 func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
@@ -2498,7 +2475,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 	if err := parser.parsePrefix(); err != nil {
 		return fetchResponse{}, err
 	}
-	var response fetchResponse
+	response := fetchResponse{sequence: parser.sequence}
 	for {
 		parser.skipSpace()
 		if parser.position >= len(parser.input) {
@@ -2522,6 +2499,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 		if parser.position >= len(parser.input) || !isSpace(parser.input[parser.position]) {
 			return fetchResponse{}, fmt.Errorf("FETCH attribute %q has no separating space", key)
 		}
+		valueStart := parser.position
 		value, err := parser.parseValue(0)
 		if err != nil {
 			return fetchResponse{}, fmt.Errorf("FETCH attribute %q: %w", key, err)
@@ -2530,6 +2508,15 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 			return fetchResponse{}, fmt.Errorf("FETCH attribute %q value has no separator", key)
 		}
 		switch {
+		case strings.EqualFold(key, "FLAGS"):
+			if response.flagsPresent {
+				return fetchResponse{}, errors.New("duplicate FETCH FLAGS attribute")
+			}
+			flags, err := parseFetchFlagsValue(parser.input[valueStart:parser.position])
+			if err != nil {
+				return fetchResponse{}, err
+			}
+			response.flags, response.flagsPresent = flags, true
 		case strings.EqualFold(key, "UID"):
 			if response.uidPresent {
 				return fetchResponse{}, errors.New("duplicate FETCH UID attribute")
@@ -2569,9 +2556,11 @@ func (p *fetchResponseParser) parsePrefix() error {
 	if err != nil {
 		return fmt.Errorf("FETCH response sequence: %w", err)
 	}
-	if _, err := strconv.ParseUint(sequence, 10, 32); err != nil {
+	number, err := parsePositiveUIDValue(sequence)
+	if err != nil {
 		return fmt.Errorf("invalid FETCH response sequence %q", sequence)
 	}
+	p.sequence = number
 	p.skipSpace()
 	command, err := p.parseAtom()
 	if err != nil || !strings.EqualFold(command, "FETCH") {

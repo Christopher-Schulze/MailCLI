@@ -106,7 +106,20 @@ type MutationEvidence struct {
 	// CompletedEffects lists independently proven phases of a compound
 	// mutation, such as copy and source_flag in a MOVE fallback.
 	CompletedEffects []string
+	// FlagsState distinguishes an observed empty set from unavailable proof.
+	// ActualFlags is populated only for a complete target-specific observation.
+	FlagsState  FlagObservationState
+	ActualFlags []string
+	FlagsSource string // STORE or FETCH; empty before flag verification
 }
+
+type FlagObservationState string
+
+const (
+	FlagObservationObserved   FlagObservationState = "observed"
+	FlagObservationMissing    FlagObservationState = "missing"
+	FlagObservationUnverified FlagObservationState = "unverified"
+)
 
 const (
 	MutationOutcomeNotStarted = "not_started"

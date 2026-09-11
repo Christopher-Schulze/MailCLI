@@ -36,7 +36,11 @@ func runMessageMark(
 	defer cancel()
 	message, err := service.MarkMessage(operationCtx, request)
 	if err != nil {
-		return failCommand("messages.mark", *jsonOutput, err, stdout, stderr)
+		data := responseData{}
+		if message.ServerTruth != nil {
+			data.MessageState = &message
+		}
+		return failCommandWithData("messages.mark", *jsonOutput, data, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "messages.mark", responseData{MessageState: &message})
