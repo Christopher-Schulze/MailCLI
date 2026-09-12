@@ -102,6 +102,8 @@ Detail JSON responses are bounded at the CLI serialization boundary. `messages g
 
 Retained draft handoff attempts appear as required `handoff_attempt` recovery metadata in every detail view, custom field selection, output-size fallback and body-export response. The shared list/detail summary includes the attempt ID, timestamps, outcome, dispatch state, snapshot retention flag, count and byte total, without snapshot names, paths or contents. An absent or successfully cleared attempt is omitted. Inspect the retained ID/outcome before reconciliation; projection does not authorize replay or change the native cancellation contract.
 
+When local create, update, edit, reply or forward succeeds but its JSON response exceeds the output budget, the failure reports `effect_certainty:"complete"`, `replay_allowed:false` and `recovery.action:"inspect"` with the saved draft ref and revision. Run the supplied `drafts.inspect` command to read that existing result; do not repeat the mutation to repair output. Read-only output limits and rejected writes never gain completion merely from a known ref. Export is suggested only on commands that support it. The budget applies to JSON, not human summaries; a broken output writer returns failure and cannot guarantee delivery of a recovery envelope.
+
 Command surface:
 
 | Command | Status | Purpose |

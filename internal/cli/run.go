@@ -66,6 +66,7 @@ type responseData struct {
 	Finalization             *finalizationData            `json:"finalization,omitempty"`
 	UpdateResult             *updateResult                `json:"update_result,omitempty"`
 	serialization            *serializedProjection        `json:"-"`
+	draftMutationCompleted   bool                         `json:"-"`
 }
 
 func rawResponsePage(value any) *json.RawMessage {
@@ -117,6 +118,14 @@ func newErrorData(command string, data responseData, err error) *errorData {
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if data.draftMutationCompleted && data.Draft != nil && data.Draft.Ref != "" && errorCode(err) == "output_too_large" {
+		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectComplete
+		guidance.Retryability, guidance.ReplayAllowed = mail.RetryObserveRequired, false
+		guidance.Recovery = mail.RecoveryGuidance{
+			Action: mail.RecoveryInspect, Command: "drafts.inspect",
+			Args: []string{"--ref", data.Draft.Ref, "--view", "full", "--json"},
+		}
+	}
 	if result := data.DraftHandoff; handoffNeedsReconciliation(result, err) {
 		guidance.Phase = mail.OperationPhaseExecution
 		guidance.EffectCertainty = mail.EffectUnknown

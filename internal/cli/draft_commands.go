@@ -220,6 +220,7 @@ func runDraftCreateContext(ctx context.Context, service *mail.Service, args []st
 	if err != nil {
 		return failProjectedEmpty("drafts.create", *jsonOutput, output, err, stdout, stderr)
 	}
+	output.draftMutationCompleted = true
 	return writeDraftResponse(stdout, "drafts.create", draft, *jsonOutput, output)
 }
 
@@ -463,6 +464,7 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
+	output.draftMutationCompleted = true
 	return writeDraftResponse(stdout, "drafts.update", draft, *jsonOutput, output)
 }
 
@@ -575,6 +577,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
+	output.draftMutationCompleted = true
 	return writeDraftResponse(stdout, "messages."+string(kind), draft, *jsonOutput, output)
 }
 
@@ -602,7 +605,9 @@ func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, json
 		exported = &value
 	}
 	if jsonOutput {
-		return writeProjectedSuccess(stdout, command, responseData{Draft: &draft, ContentExport: exported}, output)
+		return writeProjectedSuccess(stdout, command, responseData{
+			Draft: &draft, ContentExport: exported, draftMutationCompleted: output.draftMutationCompleted,
+		}, output)
 	}
 	if output.exportPath != "" {
 		writeFormat(stdout, "%s\t%d\t%s\n", exported.Path, exported.Size, exported.SHA256)
