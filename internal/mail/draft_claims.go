@@ -147,9 +147,9 @@ type storedSendAttempt struct {
 }
 
 func encodeSendAttempt(ref string, attempt SendAttempt) ([]byte, error) {
-	payload, err := json.MarshalIndent(storedSendAttempt{
+	payload, err := json.Marshal(storedSendAttempt{
 		Version: 1, DraftRef: ref, Attempt: attempt,
-	}, "", "  ")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("encode send claim: %w", err)
 	}
@@ -348,9 +348,9 @@ func resultForReceipt(receipt SendReceipt) SendResult {
 }
 
 func encodeSendReceipt(receipt SendReceipt) ([]byte, error) {
-	payload, err := json.MarshalIndent(storedSendReceipt{
+	payload, err := json.Marshal(storedSendReceipt{
 		Version: 1, DraftRef: receipt.DraftRef, Receipt: receipt,
-	}, "", "  ")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("encode send receipt: %w", err)
 	}
@@ -517,9 +517,9 @@ type storedDraftSaveAttempt struct {
 }
 
 func encodeDraftSaveAttempt(ref string, attempt DraftSaveAttempt) ([]byte, error) {
-	payload, err := json.MarshalIndent(storedDraftSaveAttempt{
+	payload, err := json.Marshal(storedDraftSaveAttempt{
 		Version: 1, DraftRef: ref, Attempt: attempt,
-	}, "", "  ")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("encode draft-save claim: %w", err)
 	}

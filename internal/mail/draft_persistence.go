@@ -22,7 +22,7 @@ func writeDraftFile(root string, draft Draft, storage ...*draftStorage) error {
 	draft.SendAttempt = nil
 	draft.SaveAttempt = nil
 	draft.HandoffAttempt = nil
-	payload, err := json.MarshalIndent(draft, "", "  ")
+	payload, err := json.Marshal(draft)
 	if err != nil {
 		return fmt.Errorf("encode draft: %w", err)
 	}
