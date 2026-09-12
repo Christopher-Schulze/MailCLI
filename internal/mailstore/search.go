@@ -932,6 +932,16 @@ func normalizedSearchTerms(value string) []string {
 // the number of runes; full case-fold expansions such as ß -> ss would require
 // a separate offset map.
 func foldSearchText(value string) string {
+	// ASCII is already NFC. ToLower returns unchanged input without allocating.
+	for index := range len(value) {
+		if value[index] >= utf8.RuneSelf {
+			return foldUnicodeSearchText(value)
+		}
+	}
+	return strings.ToLower(value)
+}
+
+func foldUnicodeSearchText(value string) string {
 	value = norm.NFC.String(value)
 	var folded strings.Builder
 	folded.Grow(len(value))

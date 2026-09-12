@@ -126,6 +126,12 @@ run_group \
   '^BenchmarkSearchFixture603$' \
   20x
 run_group \
+  search-fold \
+  '1 MiB lowercase and mixed ASCII plus decomposed Unicode; the shared SQL and body search folding policy' \
+  ./internal/mailstore \
+  '^BenchmarkSearchFold$' \
+  5x
+run_group \
   catalog-shortcut \
   '256 generated messages with 1 MiB attachments; catalog-proven search versus MIME-scan baseline' \
   ./internal/mailstore \
