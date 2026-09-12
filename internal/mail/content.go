@@ -219,7 +219,7 @@ func sanitizeEmailHTML(ctx context.Context, input io.Reader) (*html.Node, []Cont
 	if err := validateDraftContentTree(ctx, document); err != nil {
 		return nil, nil, err
 	}
-	var diagnostics contentDiagnosticCollector
+	diagnostics := contentDiagnosticCollector{values: []ContentDiagnostic{}}
 	body := findHTMLElement(document, "body")
 	if body == nil {
 		body = document
