@@ -121,9 +121,9 @@ run_group \
   1x
 run_group \
   mime-read \
-  'one multipart message with a 1 MiB binary attachment; skip and full MIME parsing' \
+  'one multipart message with a 1 MiB binary attachment; skip and full MIME parsing; small/medium/maximum raw headers' \
   ./internal/mailstore \
-  '^BenchmarkSkipVsFullAttachment1MiB$' \
+  '^Benchmark(SkipVsFullAttachment1MiB|ReadRawHeaders)$' \
   5x
 run_group \
   search-fixture \

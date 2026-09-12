@@ -790,14 +790,29 @@ func readRawHeaders(reader io.Reader) (string, error) {
 func readRawHeaderBlock(buffered *bufio.Reader) (string, error) {
 	var output strings.Builder
 	output.Grow(mimeHeaderInitialBytes)
+	lineLength := 0
+	var first byte
 	for output.Len() <= maximumHeaderBytes {
-		line, err := buffered.ReadBytes('\n')
-		output.Write(line)
-		if output.Len() > maximumHeaderBytes {
+		fragment, err := buffered.ReadSlice('\n')
+		if len(fragment) > maximumHeaderBytes-output.Len() {
 			return "", operationError("invalid_message_source", "RFC message headers exceed the safety limit")
 		}
-		if len(line) == 1 && line[0] == '\n' || len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
+		if lineLength == 0 && len(fragment) > 0 {
+			first = fragment[0]
+		}
+		lineLength += len(fragment)
+		// Grow explicitly so long physical lines do not cause repeated
+		// small append growth. Copy the borrowed fragment before any refill.
+		if lineLength >= mimeHeaderReaderBuffer {
+			output.Grow(len(fragment))
+		}
+		output.Write(fragment)
+		if lineLength == 1 && first == '\n' ||
+			lineLength == 2 && first == '\r' && len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
 			return output.String(), nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -805,6 +820,7 @@ func readRawHeaderBlock(buffered *bufio.Reader) (string, error) {
 			}
 			return "", fmt.Errorf("read RFC message headers: %w", err)
 		}
+		lineLength = 0
 	}
 	return "", operationError("invalid_message_source", "RFC message headers exceed the safety limit")
 }
