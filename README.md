@@ -106,13 +106,13 @@ MailCLI fails closed when the Mail store profile changes. This protects the loca
 
 ## Install
 
-The published `v1.3.0` archive installs both the native CLI and its companion agent skill:
+The `v1.4.0` release archive installs both the native CLI and its companion agent skill:
 
 Before downloading release files, install and independently verify an OpenSSL 3 binary with Ed25519 support through a trusted package-management workflow. With Homebrew, for example, install `openssl@3` and set `OPENSSL_BIN` to `$(brew --prefix openssl@3)/bin/openssl`, then verify that binary before continuing. macOS `/usr/bin/openssl` is LibreSSL and does not provide the required verifier. The commands below authenticate the exact signed `SHA256SUMS` bytes before downloading the archive, then verify the exact `darwin/arm64` archive digest before extraction or installer execution.
 
 ```bash
 set -euo pipefail
-VERSION=1.3.0
+VERSION=1.4.0
 if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Release version must use MAJOR.MINOR.PATCH: %s\n' "${VERSION}" >&2
   exit 1
