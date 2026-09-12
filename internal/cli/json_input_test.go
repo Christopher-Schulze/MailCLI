@@ -117,14 +117,13 @@ func assertInputJSONPublishedFields(t *testing.T, fields []inputJSONField, publi
 
 func TestDraftJSONPreservesDecodedValuesAndPresence(t *testing.T) {
 	for _, test := range []struct {
-		name, payload   string
-		subject, to, cc bool
+		name, payload string
 	}{
-		{"omitted fields", `{"body":""}`, false, false, false},
-		{"explicit empty", `{"body":"","subject":"","to":[],"cc":[]}`, true, true, true},
-		{"escaped keys", `{"bo\u0064y":"こんにちは 🌍\n\\\"{}","sub\u006aect":"ÄÖß","t\u006f":[],"\u0063c":[]}`, true, true, true},
-		{"nested unicode", `{"body":"Text","to":[{"name":"Jörg 🌍","address":"one@example.com"},{"name":"李","address":"two@example.com"}],"cc":[{"name":"CC","address":"cc@example.com"}],"bcc":[{"name":"BCC","address":"bcc@example.com"}],"account_ref":"acct","from":"from@example.com","subject":"S","body_format":"plain","attachments":["/tmp/Ä.txt","/tmp/李.txt"]}`, true, true, true},
-		{"previously nullable fields", `{"body":"","bcc":null,"from":null,"account_ref":null,"body_format":null,"attachments":null}`, false, false, false},
+		{"omitted fields", `{"body":""}`},
+		{"explicit empty", `{"body":"","subject":"","to":[],"cc":[]}`},
+		{"escaped keys", `{"bo\u0064y":"こんにちは 🌍\n\\\"{}","sub\u006aect":"ÄÖß","t\u006f":[],"\u0063c":[]}`},
+		{"nested unicode", `{"body":"Text","to":[{"name":"Jörg 🌍","address":"one@example.com"},{"name":"李","address":"two@example.com"}],"cc":[{"name":"CC","address":"cc@example.com"}],"bcc":[{"name":"BCC","address":"bcc@example.com"}],"account_ref":"acct","from":"from@example.com","subject":"S","body_format":"plain","attachments":["/tmp/Ä.txt","/tmp/李.txt"]}`},
+		{"previously nullable fields", `{"body":"","bcc":null,"from":null,"account_ref":null,"body_format":null,"attachments":null}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := decodeDraftInput(strings.NewReader(test.payload))
@@ -135,7 +134,19 @@ func TestDraftJSONPreservesDecodedValuesAndPresence(t *testing.T) {
 			if err := json.Unmarshal([]byte(test.payload), &want); err != nil {
 				t.Fatal(err)
 			}
-			want.SubjectSet, want.ToSet, want.CCSet = test.subject, test.to, test.cc
+			var present map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(test.payload), &present); err != nil {
+				t.Fatal(err)
+			}
+			want.AccountRefSet = present["account_ref"] != nil
+			want.FromSet = present["from"] != nil
+			want.ToSet = present["to"] != nil
+			want.CCSet = present["cc"] != nil
+			want.BCCSet = present["bcc"] != nil
+			want.SubjectSet = present["subject"] != nil
+			want.BodySet = present["body"] != nil
+			want.BodyFormatSet = present["body_format"] != nil
+			want.AttachmentsSet = present["attachments"] != nil
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("decoded values differ: got=%+v want=%+v", got, want)
 			}

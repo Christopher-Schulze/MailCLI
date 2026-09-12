@@ -446,12 +446,20 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 		return failProjectedEmpty("drafts.update", *jsonOutput, output,
 			invalidDraftInput("missing required --expected-revision; inspect the draft before updating"), stdout, stderr)
 	}
-	input, err := inputFlags.read()
+	input, err := inputFlags.readUpdate()
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
 	defer cancel()
+	current, err := service.GetDraft(*ref)
+	if err != nil {
+		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
+	}
+	input, err = mergeDraftUpdateInput(current, input)
+	if err != nil {
+		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
+	}
 	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, ExpectedRevision: *expectedRevision, Input: input})
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
