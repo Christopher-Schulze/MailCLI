@@ -56,7 +56,7 @@ func HTMLToPlainTextContext(ctx context.Context, source []byte, maximumBytes int
 	if err := checkIncomingHTMLTree(ctx, root, maximumIncomingHTMLNodes); err != nil {
 		return "", err
 	}
-	text, err := renderDraftText(ctx, root, maximumBytes)
+	text, err := renderPlainText(ctx, root, maximumBytes)
 	if err != nil && ctx.Err() == nil {
 		return "", &HTMLConversionError{Stage: "render", Cause: err}
 	}
