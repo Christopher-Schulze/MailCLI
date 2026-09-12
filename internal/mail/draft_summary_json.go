@@ -15,9 +15,13 @@ const maximumDraftSummaryBytes = 1024 * 1024
 // document still passes through the existing strict typed decoder and claim
 // validators. This lexer validates skipped escapes and control bytes without
 // building the omitted string; it does not replace JSON structure validation.
-func projectDraftSummaryJSON(ctx context.Context, input io.Reader) ([]byte, int64, error) {
+func projectDraftSummaryJSON(ctx context.Context, input io.Reader, size int64) ([]byte, int64, error) {
 	limited := &io.LimitedReader{R: contextReader{ctx: ctx, reader: input}, N: maximumDraftStateBytes + 1}
-	reader := bufio.NewReaderSize(limited, 4096)
+	bufferSize := 4096
+	if size >= 64*1024 {
+		bufferSize = 16 * 1024
+	}
+	reader := bufio.NewReaderSize(limited, bufferSize)
 	projection, err := readDraftSummaryJSON(reader)
 	readBytes := maximumDraftStateBytes + 1 - limited.N
 	if readBytes > maximumDraftStateBytes {
@@ -98,6 +102,29 @@ func omittedDraftSummaryString(field string) bool {
 func readDraftSummaryString(reader *bufio.Reader, output []byte, omit bool) ([]byte, error) {
 	output = append(output, '"')
 	for {
+		if _, err := reader.Peek(1); err != nil {
+			return nil, err
+		}
+		chunk, err := reader.Peek(reader.Buffered())
+		if err != nil {
+			return nil, err
+		}
+		count := 0
+		for count < len(chunk) && chunk[count] >= 0x20 && chunk[count] != '"' && chunk[count] != '\\' {
+			count++
+		}
+		if !omit {
+			if count > maximumDraftSummaryBytes-len(output) {
+				return nil, errors.New("draft summary metadata exceeds 1 MiB")
+			}
+			output = append(output, chunk[:count]...)
+		}
+		if _, err := reader.Discard(count); err != nil {
+			return nil, err
+		}
+		if count == len(chunk) {
+			continue
+		}
 		value, err := reader.ReadByte()
 		if err != nil {
 			return nil, err

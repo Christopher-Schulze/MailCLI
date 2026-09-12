@@ -105,7 +105,7 @@ func readDraftSummaryProjection(ctx context.Context, name string, state *draftSt
 	if !opened.Mode().IsRegular() || opened.Size() != expected.Size() || !opened.ModTime().Equal(expected.ModTime()) {
 		return nil, errors.New("draft record changed while opening")
 	}
-	projection, _, err := projectDraftSummaryJSON(ctx, file)
+	projection, _, err := projectDraftSummaryJSON(ctx, file, opened.Size())
 	if err != nil {
 		return nil, err
 	}

@@ -165,7 +165,7 @@ run_group \
   draft-list \
   '1-byte and 1 MiB draft bodies; full-record baseline, streaming summary, and paginated service; 25-entry pages over 1 and 2049 records; file bytes and serialized output are separate metrics' \
   ./internal/mail \
-  '^BenchmarkDraft(SummaryBodies|ListPage)$' \
+  '^BenchmarkDraft(SummaryBodies|SummaryBuffer|ListPage)$' \
   5x
 run_group \
   projected-output \
