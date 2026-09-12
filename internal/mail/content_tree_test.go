@@ -311,8 +311,9 @@ func TestCreateRichDraftCancellationPreventsPersistence(t *testing.T) {
 			service := NewServiceWithDraftRoot(nil, root)
 			base, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			ctx := &draftListBoundaryContext{Context: base, trigger: 30, action: cancel}
-			draft, err := service.CreateDraftContext(ctx, CreateDraftRequest{Input: DraftInput{
+			service.contentObserver = cancelOnRenderObserver{cancel: cancel}
+			t.Cleanup(func() { service.contentObserver = nil })
+			draft, err := service.CreateDraftContext(base, CreateDraftRequest{Input: DraftInput{
 				To: []Recipient{{Address: "recipient@example.com"}}, BodyFormat: format,
 				Body: strings.Repeat("<p>Content</p>\n\n**Content**\n\n", 20000),
 			}})
@@ -325,6 +326,12 @@ func TestCreateRichDraftCancellationPreventsPersistence(t *testing.T) {
 		})
 	}
 }
+
+type cancelOnRenderObserver struct {
+	cancel context.CancelFunc
+}
+
+func (o cancelOnRenderObserver) ContentRendered() { o.cancel() }
 
 func TestUpdateRichDraftCancellationPreservesReviewedFile(t *testing.T) {
 	for _, format := range []DraftBodyFormat{DraftBodyHTML, DraftBodyMarkdown} {
@@ -344,8 +351,9 @@ func TestUpdateRichDraftCancellationPreservesReviewedFile(t *testing.T) {
 			}
 			base, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			ctx := &draftListBoundaryContext{Context: base, trigger: 30, action: cancel}
-			replacement, err := service.UpdateDraftContext(ctx, UpdateDraftRequest{
+			service.contentObserver = cancelOnRenderObserver{cancel: cancel}
+			t.Cleanup(func() { service.contentObserver = nil })
+			replacement, err := service.UpdateDraftContext(base, UpdateDraftRequest{
 				Ref: draft.Ref, ExpectedRevision: draft.Revision,
 				Input: DraftInput{To: draft.To, BodyFormat: format, Body: strings.Repeat("<p>Replacement</p>\n\n**Replacement**\n\n", 20000)},
 			})

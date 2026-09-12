@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"mailcli/internal/compose"
 	"mailcli/internal/mail"
@@ -91,9 +90,9 @@ func runDraftHandoffWithDispatch(
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	session, err := service.BeginDraftHandoffContext(operationCtx, *ref)
+	// Staging gets its own size-aware budget inside BeginDraftHandoffContext;
+	// the dispatch phase keeps a fixed short deadline.
+	session, err := service.BeginDraftHandoffContext(ctx, *ref)
 	if err != nil {
 		return failCommand("drafts.handoff", *jsonOutput, err, stdout, stderr)
 	}
@@ -104,12 +103,14 @@ func runDraftHandoffWithDispatch(
 	for _, recipient := range draft.To {
 		recipients = append(recipients, recipient.Address)
 	}
+	dispatchCtx, cancel := context.WithTimeout(ctx, draftHandoffDispatchTimeout)
+	defer cancel()
 	var dispatchErr error
-	result, handoffErr := handoff(operationCtx, compose.Request{
+	result, handoffErr := handoff(dispatchCtx, compose.Request{
 		Recipients: recipients, Subject: draft.Subject, PlainBody: draft.Body,
 		HTMLBody: draft.BodyHTML, Attachments: preparation.AttachmentPaths,
 	}, func() error {
-		dispatchErr = session.MarkDispatched(operationCtx)
+		dispatchErr = session.MarkDispatched(dispatchCtx)
 		return dispatchErr
 	})
 	if dispatchErr != nil {

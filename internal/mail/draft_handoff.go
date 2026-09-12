@@ -313,6 +313,15 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 		_ = lease.release()
 		return nil, err
 	}
+	// Attachment preflight and staging are byte-proportional: the staging
+	// budget scales with the stored fingerprint sizes while the caller
+	// context keeps governing the lease and draft load phases.
+	stagingBytes := int64(0)
+	for _, attachment := range draft.Attachments {
+		stagingBytes += attachment.Size
+	}
+	stagingCtx, cancelStaging := context.WithTimeout(ctx, draftOperationBudget(stagingBytes))
+	defer cancelStaging()
 	if draft.HandoffAttempt != nil && !draft.HandoffAttempt.DispatchStarted && draft.HandoffAttempt.Outcome == HandoffOutcomePrepared {
 		cleanupErr := errors.Join(
 			removePersistentHandoffSnapshotRoot(ref, draft.HandoffAttempt.ID, draft.HandoffAttempt.Snapshots, storage),
@@ -324,7 +333,7 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 		}
 		draft.HandoffAttempt = nil
 	}
-	if err := validateDraftHandoffContext(ctx, draft); err != nil {
+	if err := validateDraftHandoffContext(stagingCtx, draft); err != nil {
 		_ = lease.release()
 		return nil, err
 	}
@@ -370,7 +379,7 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 			snapshots = append(snapshots, HandoffSnapshot{
 				Name: filepath.Base(attachment.Path), Size: attachment.Size, SHA256: attachment.SHA256,
 			})
-			path, stageErr := stageDraftAttachmentAt(ctx, storage, snapshotName, index, attachment)
+			path, stageErr := stageDraftAttachmentAt(stagingCtx, storage, snapshotName, index, attachment)
 			if stageErr != nil {
 				err = stageErr
 				break
@@ -383,7 +392,7 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 			removePersistentHandoffSnapshotRoot(ref, attemptID, snapshots, storage),
 			removeHandoffAttempt(ref, storage),
 		)
-		return nil, errors.Join(classifyDraftContextError(ctx, err, "handoff"), cleanupErr, lease.release())
+		return nil, errors.Join(classifyDraftContextError(stagingCtx, err, "handoff"), cleanupErr, lease.release())
 	}
 	attempt.Snapshots = snapshots
 	attempt.SnapshotsRetained = len(snapshots) > 0

@@ -13,6 +13,10 @@ func (s *Service) CreateDraftContext(ctx context.Context, request CreateDraftReq
 	if err := draftContextError(ctx, "create"); err != nil {
 		return Draft{}, err
 	}
+	// Attachment fingerprinting is byte-proportional work; the operation
+	// budget scales with the input sizes instead of a flat limit.
+	ctx, cancel := context.WithTimeout(ctx, draftOperationBudget(draftAttachmentPathBytes(request.Input.Attachments)))
+	defer cancel()
 	draft, err := prepareDraftWithAttachmentsObserverContext(ctx, request, nil, s.contentObserver)
 	if err != nil {
 		return Draft{}, classifyDraftContextError(ctx, err, "create")
@@ -173,6 +177,10 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	if err := draftContextError(ctx, "update"); err != nil {
 		return Draft{}, err
 	}
+	// Re-fingerprinting every attachment is byte-proportional work, so the
+	// operation budget scales with the input sizes instead of a flat limit.
+	ctx, cancel := context.WithTimeout(ctx, draftOperationBudget(draftAttachmentPathBytes(request.Input.Attachments)))
+	defer cancel()
 	root, err := s.resolveDraftRoot()
 	if err != nil {
 		return Draft{}, err

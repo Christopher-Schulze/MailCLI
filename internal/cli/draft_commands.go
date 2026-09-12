@@ -17,6 +17,7 @@ const (
 	draftDiscardTimeout          = 15 * time.Second
 	draftPruneTimeout            = 2 * time.Minute
 	draftReconcileTimeout        = draftSendTimeout
+	draftHandoffDispatchTimeout  = 10 * time.Second
 	draftHandoffReconcileTimeout = 15 * time.Second
 	draftSaveTimeout             = 2 * time.Minute
 	draftSendTimeout             = 15 * time.Minute
@@ -450,8 +451,6 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, draftUpdateTimeout)
-	defer cancel()
 	current, err := service.GetDraft(*ref)
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
@@ -460,7 +459,7 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
-	draft, err := service.UpdateDraftContext(operationCtx, mail.UpdateDraftRequest{Ref: *ref, ExpectedRevision: *expectedRevision, Input: input})
+	draft, err := service.UpdateDraftContext(ctx, mail.UpdateDraftRequest{Ref: *ref, ExpectedRevision: *expectedRevision, Input: input})
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
