@@ -70,9 +70,9 @@ func validHandoffAttemptID(value string) bool {
 }
 
 func encodeHandoffAttempt(ref string, attempt HandoffAttempt) ([]byte, error) {
-	payload, err := json.MarshalIndent(storedHandoffAttempt{
+	payload, err := json.Marshal(storedHandoffAttempt{
 		Version: 1, DraftRef: ref, Attempt: attempt,
-	}, "", "  ")
+	})
 	if err != nil {
 		return nil, fmt.Errorf("encode handoff claim: %w", err)
 	}
