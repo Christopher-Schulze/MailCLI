@@ -108,6 +108,12 @@ run_group \
   '^BenchmarkBuildMessage(Plain4KiB|Attachment64KiB|Attachment1MiB)$' \
   50x
 run_group \
+  body-large \
+  '4 MiB ASCII and Unicode bodies through real spool composition; Unicode spool buffers at 32/128/256/512 KiB and 1 MiB' \
+  ./internal/mail \
+  '^Benchmark(LargeBodySpool|BodySpoolBuffer)$' \
+  3x
+run_group \
   attachment-large \
   '4 KiB body plus one 64 MiB attachment; compatibility, redundant-read baseline, and production streaming paths' \
   ./internal/mail \

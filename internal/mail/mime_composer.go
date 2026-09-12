@@ -28,6 +28,9 @@ const (
 	composerHeaderMaximum       = 998 // hard limit excluding CRLF per RFC 5322
 	composerEncodedHeaderLength = 76  // RFC 2047 header fields containing encoded words
 	composerCRLF                = "\r\n"
+	composerSpoolBufferBytes    = 32 * 1024
+	composerLargeBufferBytes    = 1024 * 1024
+	composerDirectBodyBytes     = 4096
 )
 
 // ComposerError is the typed error for RFC 5322 message composition failures.
@@ -184,9 +187,6 @@ func composeMessageSpoolContext(
 		return nil, err
 	}
 	header.WriteString(composerCRLF)
-	alternative := &bytes.Buffer{}
-	writeAlternativeMultipart(alternative, alternativeBoundary, draft)
-	alternative.WriteString(composerCRLF)
 
 	file, err := os.CreateTemp("", "mailcli-message-")
 	if err != nil {
@@ -207,7 +207,11 @@ func composeMessageSpoolContext(
 		cleanup()
 		return nil, &ComposerError{Message: "protect private message spool", Err: err}
 	}
-	writer := bufio.NewWriterSize(file, 32*1024)
+	bufferBytes := composerSpoolBufferBytes
+	if len(draft.Body) >= composerLargeBufferBytes || len(draft.BodyHTML) >= composerLargeBufferBytes {
+		bufferBytes = composerLargeBufferBytes
+	}
+	writer := bufio.NewWriterSize(file, bufferBytes)
 	write := func(value string) error {
 		if _, err := io.WriteString(writer, value); err != nil {
 			return err
@@ -219,7 +223,7 @@ func composeMessageSpoolContext(
 		return nil, &ComposerError{Message: "write message headers", Err: err}
 	}
 	if len(draft.Attachments) == 0 {
-		if _, err := writer.Write(alternative.Bytes()); err != nil {
+		if err := writeAlternativeMultipart(ctx, writer, alternativeBoundary, draft); err != nil {
 			cleanup()
 			return nil, &ComposerError{Message: "write message body", Err: err}
 		}
@@ -229,7 +233,7 @@ func composeMessageSpoolContext(
 			cleanup()
 			return nil, &ComposerError{Message: "write multipart headers", Err: err}
 		}
-		if _, err := writer.Write(alternative.Bytes()); err != nil {
+		if err := writeAlternativeMultipart(ctx, writer, alternativeBoundary, draft); err != nil {
 			cleanup()
 			return nil, &ComposerError{Message: "write multipart body", Err: err}
 		}
@@ -430,59 +434,63 @@ func (r contextReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-// writeAlternativeMultipart writes the multipart/alternative section
-// directly into buffer, streaming quoted-printable encoding without
-// intermediate string copies.
-func writeAlternativeMultipart(buffer *bytes.Buffer, boundary string, draft Draft) {
-	buffer.WriteString("--")
-	buffer.WriteString(boundary)
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("Content-Type: text/plain; charset=utf-8")
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("Content-Transfer-Encoding: quoted-printable")
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString(composerCRLF)
-	if err := writeQuotedPrintable(buffer, draft.Body); err != nil {
-		// quotedprintable.Writer cannot fail on valid UTF-8 input; the error
-		// path is unreachable for well-formed drafts but we write nothing
-		// extra on failure to keep the buffer consistent.
-		return
+// writeAlternativeMultipart streams a complete alternative section, including
+// its terminating CRLF, into the private spool. No encoded body is staged.
+func writeAlternativeMultipart(ctx context.Context, output io.Writer, boundary string, draft Draft) error {
+	writer := composerBodyWriter{ctx: ctx, writer: output}
+	for _, part := range []struct{ mediaType, body string }{{"text/plain", draft.Body}, {"text/html", draft.BodyHTML}} {
+		if part.mediaType == "text/html" && part.body == "" {
+			continue
+		}
+		header := "--" + boundary + composerCRLF + "Content-Type: " + part.mediaType + "; charset=utf-8" + composerCRLF +
+			"Content-Transfer-Encoding: quoted-printable" + composerCRLF + composerCRLF
+		if _, err := io.WriteString(writer, header); err != nil {
+			return err
+		}
+		if err := writeQuotedPrintable(ctx, writer, part.body); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(writer, composerCRLF); err != nil {
+			return err
+		}
 	}
-	buffer.WriteString(composerCRLF)
-
-	if draft.BodyHTML == "" {
-		buffer.WriteString("--")
-		buffer.WriteString(boundary)
-		buffer.WriteString("--")
-		return
-	}
-
-	buffer.WriteString("--")
-	buffer.WriteString(boundary)
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("Content-Type: text/html; charset=utf-8")
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("Content-Transfer-Encoding: quoted-printable")
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString(composerCRLF)
-	if err := writeQuotedPrintable(buffer, draft.BodyHTML); err != nil {
-		return
-	}
-	buffer.WriteString(composerCRLF)
-	buffer.WriteString("--")
-	buffer.WriteString(boundary)
-	buffer.WriteString("--")
+	_, err := io.WriteString(writer, "--"+boundary+"--"+composerCRLF)
+	return err
 }
 
-// writeQuotedPrintable encodes body as quoted-printable directly into buffer
-// without an intermediate bytes.Buffer and string conversion.
-func writeQuotedPrintable(buffer *bytes.Buffer, body string) error {
-	writer := quotedprintable.NewWriter(buffer)
-	if _, err := writer.Write([]byte(body)); err != nil {
-		_ = writer.Close()
+type composerBodyWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (writer composerBodyWriter) Write(value []byte) (int, error) {
+	if err := writer.ctx.Err(); err != nil {
+		return 0, err
+	}
+	written, err := writer.writer.Write(value)
+	if err == nil && written != len(value) {
+		err = io.ErrShortWrite
+	}
+	return written, err
+}
+
+func writeQuotedPrintable(ctx context.Context, output io.Writer, body string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	writer := quotedprintable.NewWriter(output)
+	var copyErr error
+	if len(body) <= composerDirectBodyBytes {
+		_, copyErr = writer.Write([]byte(body))
+	} else {
+		// Hide strings.Reader.WriteTo: io.WriteString would otherwise convert
+		// the entire body to []byte when the encoder has no WriteString method.
+		_, copyErr = io.CopyBuffer(writer, contextReader{ctx: ctx, reader: strings.NewReader(body)}, make([]byte, composerSpoolBufferBytes))
+	}
+	if err := errors.Join(copyErr, writer.Close(), ctx.Err()); err != nil {
 		return fmt.Errorf("quote-printable encode body: %w", err)
 	}
-	return writer.Close()
+	return nil
 }
 
 // base64LineWriter wraps a writer and inserts CRLF every composerLineLength
