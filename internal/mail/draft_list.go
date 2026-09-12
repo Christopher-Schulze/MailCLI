@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -35,9 +36,9 @@ type DraftPage struct {
 
 // ListDrafts returns one reference-ordered page. Continuation is bound to the
 // directory identity and modification time, covering atomic draft/claim
-// publication and membership changes. Each page takes one sorted directory
-// snapshot and decodes only its selected records; it does not retain an
-// immutable copy.
+// publication and membership changes. Each request traverses the directory
+// once in bounded chunks, retains only its page references and decodes those
+// records. Later page requests traverse again; no immutable snapshot is retained.
 func (s *Service) ListDrafts(ctx context.Context, request ListDraftsRequest) (result DraftPage, resultErr error) {
 	if err := draftContextError(ctx, "list"); err != nil {
 		return DraftPage{}, err
@@ -115,29 +116,38 @@ func readDraftPage(ctx context.Context, state *draftStorage, limit int, revision
 }
 
 func selectDraftListRefs(ctx context.Context, directory *os.File, after string, limit int) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	// ReadDir(-1) returns one snapshot slice; File.ReadDir keeps directory
-	// order, so the refs are sorted here and the page window is a slice.
-	entries, err := directory.ReadDir(-1)
-	if err != nil {
-		return nil, fmt.Errorf("list drafts: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	refs := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
-			continue
+	refs := make([]string, 0, limit)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		refs = append(refs, strings.TrimSuffix(name, ".json"))
+		entries, err := directory.ReadDir(256)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("list drafts: %w", err)
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			ref := strings.TrimSuffix(name, ".json")
+			if ref <= after {
+				continue
+			}
+			index := sort.SearchStrings(refs, ref)
+			if index == limit {
+				continue
+			}
+			if len(refs) < limit {
+				refs = append(refs, "")
+			}
+			copy(refs[index+1:], refs[index:len(refs)-1])
+			refs[index] = ref
+		}
+		if errors.Is(err, io.EOF) {
+			return refs, nil
+		}
 	}
-	sort.Strings(refs)
-	index := sort.Search(len(refs), func(i int) bool { return refs[i] > after })
-	return refs[index:min(index+limit, len(refs))], nil
 }
 
 func draftListRevision(root string, identity os.FileInfo) (string, error) {
