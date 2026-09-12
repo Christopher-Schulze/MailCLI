@@ -196,7 +196,11 @@ func mergeDraftUpdateInput(current mailmodel.Draft, input mailmodel.DraftInput) 
 		input.BodyFormat = current.BodyFormat
 	}
 	if !input.BodySet {
-		if input.BodyFormatSet {
+		effectiveFormat := input.BodyFormat
+		if effectiveFormat == "" {
+			effectiveFormat = mailmodel.DraftBodyPlain
+		}
+		if effectiveFormat != current.BodyFormat {
 			return mailmodel.DraftInput{}, invalidDraftInput(
 				"changing body format requires a new body; supply --body/--body-file or a JSON body field")
 		}
