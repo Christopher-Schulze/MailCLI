@@ -93,6 +93,8 @@ printf 'MailCLI deterministic performance evidence\n'
 printf 'environment.git_head=%s\n' "$(git rev-parse HEAD)"
 printf 'environment.git_worktree=%s\n' "${GIT_WORKTREE_STATE}"
 printf 'environment.go=%s\n' "$(go version)"
+printf 'environment.goflags=%s\n' "$(go env GOFLAGS)"
+printf 'environment.cgo_enabled=%s\n' "$(go env CGO_ENABLED)"
 printf 'environment.os=%s\n' "$(uname -srv)"
 printf 'environment.arch=%s\n' "$(uname -m)"
 printf 'environment.cpu=%s\n' "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || printf unknown)"

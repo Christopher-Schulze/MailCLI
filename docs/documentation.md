@@ -331,7 +331,7 @@ Self-update, direct release installation, and local source installation share th
 
 The native release is linker ad-hoc signed but not Apple-notarized because the release host has no Developer ID signing identity. Browser downloads may therefore require an explicit user-approved Gatekeeper remediation after SHA-256 verification. Notarized distribution requires a future Developer ID certificate and Apple notary credentials; absence of those credentials must never be hidden by automatically clearing quarantine.
 
-Release builds disable inlining in `internal/mail`, `internal/mailstore`, `internal/cli`, and `internal/transport/imapclient` to keep mail operations, store access, CLI dispatch, and IMAP parsing within the enforced 12 MiB binary limit; debug and test builds use the default compiler settings.
+Release builds retain normal compiler inlining for mail operations, store access, CLI dispatch, and IMAP parsing. Stripping, path trimming and native dead-code removal remain enabled, and the release gate still enforces the 12 MiB executable limit. Do not disable package-wide inlining solely to reduce size when the normal build already meets that budget; compare representative hot paths under the actual build flags.
 
 ## Scope
 

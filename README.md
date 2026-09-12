@@ -438,7 +438,7 @@ The main gate checks every shell script's syntax and executable bit, then runs `
 
 Bootstrap authenticity is covered by `scripts/tests/test-bootstrap.sh`, which signs a local fixture with Ed25519 and proves tampered manifests, signatures, keys, archive bytes, names, and duplicate entries cannot reach extraction or installer execution.
 
-Release builds disable inlining in `internal/mail`, `internal/mailstore`, `internal/cli`, and `internal/transport/imapclient` to stay within the enforced 12 MiB binary limit; debug and test builds use the default compiler settings.
+Release builds retain normal compiler inlining, with stripping, path trimming and native dead-code removal. The release gate continues to enforce the 12 MiB executable limit.
 
 ## License
 
