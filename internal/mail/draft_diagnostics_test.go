@@ -18,6 +18,8 @@ func TestDraftDiagnosticsSurviveCreationAndUpdate(t *testing.T) {
 		want   []ContentDiagnostic
 	}{
 		{name: "plain", format: DraftBodyPlain, body: "Plain body"},
+		{name: "lossless HTML", format: DraftBodyHTML, body: "<p>Hello</p>", want: []ContentDiagnostic{}},
+		{name: "lossless Markdown", format: DraftBodyMarkdown, body: "**Hello**", want: []ContentDiagnostic{}},
 		{name: "HTML", format: DraftBodyHTML, body: `<p onclick="private()">Visible</p><p onclick="again()">Again</p><img src="https://private.example/pixel">`, want: []ContentDiagnostic{
 			{Code: ContentDiagnosticUnsafeAttribute, Element: "p", Attribute: "onclick"},
 			{Code: ContentDiagnosticRemovedElement, Element: "img"},
@@ -95,7 +97,7 @@ func TestDraftUpdateReplacesContentDiagnostics(t *testing.T) {
 	}{
 		{DraftBodyHTML, `<p onclick="private()">Visible</p>`, []ContentDiagnostic{{Code: ContentDiagnosticUnsafeAttribute, Element: "p", Attribute: "onclick"}}},
 		{DraftBodyHTML, `<p>Changed</p><script>private()</script>`, []ContentDiagnostic{{Code: ContentDiagnosticRemovedElement, Element: "script"}}},
-		{DraftBodyMarkdown, "**Safe**", nil},
+		{DraftBodyMarkdown, "**Safe**", []ContentDiagnostic{}},
 		{DraftBodyPlain, "Plain", nil},
 	} {
 		t.Run(string(test.format)+"/"+test.body, func(t *testing.T) {

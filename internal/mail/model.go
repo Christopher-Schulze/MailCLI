@@ -235,7 +235,7 @@ type Draft struct {
 	BodyFormat                    DraftBodyFormat          `json:"body_format"`
 	BodySource                    string                   `json:"body_source,omitempty"`
 	BodyHTML                      string                   `json:"body_html,omitempty"`
-	ContentDiagnostics            []ContentDiagnostic      `json:"content_diagnostics,omitempty"`
+	ContentDiagnostics            []ContentDiagnostic      `json:"content_diagnostics"`
 	Attachments                   []DraftAttachment        `json:"attachments"`
 	CreatedAt                     time.Time                `json:"created_at"`
 	UpdatedAt                     time.Time                `json:"updated_at"`
