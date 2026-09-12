@@ -1,7 +1,6 @@
 package mailstore
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -179,9 +178,13 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		}
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, summary, rawErr := c.hydrateMessage(ctx, ref, false)
-		if rawErr == nil && len(rawBytes) > 0 {
-			return messageFromRawFallback(ctx, local, summary, string(rawBytes))
+		rawSource, size, summary, rawErr := c.hydrateMessageSource(ctx, ref, false)
+		if rawErr == nil {
+			if size > 0 {
+				message, err := messageFromRawReader(ctx, local, summary, rawSource)
+				return message, errors.Join(err, rawSource.Close())
+			}
+			rawErr = rawSource.Close()
 		}
 		// IMAP fallback failed. Preserve both local and remote causes so the
 		// caller sees the full picture.
@@ -205,11 +208,20 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 }
 
 func messageFromRawFallback(ctx context.Context, base mail.Message, summary mail.MessageSummary, raw string) (mail.Message, error) {
-	document, err := parseMIMEDocumentWithContext(ctx, strings.NewReader(raw), false, false, false)
+	return messageFromRawReader(ctx, base, summary, strings.NewReader(raw))
+}
+
+func messageFromRawReader(ctx context.Context, base mail.Message, summary mail.MessageSummary, raw io.ReadSeeker) (mail.Message, error) {
+	// A completed source is replayable local data. Keep its Close ownership
+	// with the caller; context-aware reads need no separate close watcher.
+	document, err := parseMIMEDocumentWithContext(ctx, mimeContextReader{ctx: ctx, reader: raw}, false, false, false)
 	if err != nil {
 		return mail.Message{}, err
 	}
-	headers, err := readRawHeaders(strings.NewReader(raw))
+	if _, err := raw.Seek(0, io.SeekStart); err != nil {
+		return mail.Message{}, err
+	}
+	headers, err := readRawHeaders(mimeContextReader{ctx: ctx, reader: raw})
 	if err != nil {
 		return mail.Message{}, err
 	}
@@ -260,12 +272,16 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref, true)
 		if rawErr != nil {
 			return "", newHydrationError("read raw source", localErr, rawErr)
 		}
-		if len(rawBytes) > 0 {
-			return string(rawBytes), nil
+		raw, rawErr := readHydratedRawSource(ctx, source, size)
+		if rawErr != nil {
+			return "", newHydrationError("read raw source", localErr, rawErr)
+		}
+		if size > 0 {
+			return raw, nil
 		}
 	}
 	if localErr != nil {
@@ -287,13 +303,15 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, ref, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref, true)
 		if rawErr != nil {
 			return newHydrationError("write raw source", localErr, rawErr)
 		}
-		if len(rawBytes) > 0 {
-			_, werr := writer.Write(rawBytes)
-			return werr
+		if size > 0 {
+			return errors.Join(copyHydratedSource(ctx, writer, source, size), source.Close())
+		}
+		if err := source.Close(); err != nil {
+			return err
 		}
 	}
 	if localErr != nil {
@@ -342,12 +360,16 @@ func (c *Client) SaveAttachmentToWithEvidence(
 		}
 	}
 	if c.send.ImapClient() != nil {
-		rawBytes, rawErr := c.HydrateMessageBytes(ctx, messageRef, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, messageRef, true)
 		if rawErr != nil {
 			return mail.AttachmentEvidence{}, newHydrationError("save attachment", localErr, rawErr)
 		}
-		if len(rawBytes) > 0 {
-			return extractMIMEAttachmentWithEvidence(bytes.NewReader(rawBytes), attachmentID, outputPath)
+		if size > 0 {
+			evidence, err := extractMIMEAttachmentWithEvidence(mimeContextReader{ctx: ctx, reader: source}, attachmentID, outputPath)
+			return evidence, errors.Join(err, source.Close())
+		}
+		if err := source.Close(); err != nil {
+			return mail.AttachmentEvidence{}, err
 		}
 	}
 	if localErr != nil {

@@ -165,6 +165,13 @@ type ImapOperator interface {
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }
 
+// StreamingFetcher optionally returns an owned, replayable RFC source after
+// validating the complete FETCH response. The source is positioned at zero;
+// size is nonnegative and bounded by maxBytes. The caller must close it.
+type StreamingFetcher interface {
+	FetchMessageReader(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) (io.ReadSeekCloser, int64, error)
+}
+
 // ImapConcurrencyProvider optionally reports the configured per-account pool
 // capacity so callers can bound independent STATUS work without creating an
 // unbounded number of goroutines. Implementations must return a positive limit

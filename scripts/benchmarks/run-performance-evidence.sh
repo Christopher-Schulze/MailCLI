@@ -121,9 +121,9 @@ run_group \
   1x
 run_group \
   mime-read \
-  'one multipart message with a 1 MiB binary attachment; skip and full MIME parsing; small/medium/maximum raw headers' \
+  '1 MiB attachment skip/full MIME parsing; small/medium/maximum headers; 4 MiB attachment hydration with owned-string and reader paths' \
   ./internal/mailstore \
-  '^Benchmark(SkipVsFullAttachment1MiB|ReadRawHeaders)$' \
+  '^Benchmark(SkipVsFullAttachment1MiB|ReadRawHeaders|HydratedSource)$' \
   5x
 run_group \
   search-fixture \
@@ -172,6 +172,12 @@ run_group \
   'tiny, 1 MiB and 8 MiB raw JSON; accepted and oversized output including finalization' \
   ./internal/cli \
   '^BenchmarkProjectedRawOutput$' \
+  5x
+run_group \
+  imap-fetch-memory \
+  '4 KiB and 4 MiB TLS FETCH responses; owned bytes versus replayable readers, including consumption' \
+  ./internal/transport/imapclient \
+  '^BenchmarkFetchPayload$' \
   5x
 run_group \
   imap-concurrency \
