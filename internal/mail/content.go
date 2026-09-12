@@ -821,7 +821,12 @@ func (renderer *plainTextRenderer) appendBlockBreak() {
 }
 
 func (renderer *plainTextRenderer) text() (string, error) {
-	return strings.Trim(renderer.output.output.String(), "\n"), renderer.ctx.Err()
+	text := strings.Trim(renderer.output.output.String(), "\n")
+	// A tiny trimmed result must not retain a large builder backing array.
+	if renderer.output.output.Cap() >= 4096 && len(text) < renderer.output.output.Cap()/4 {
+		text = strings.Clone(text)
+	}
+	return text, renderer.ctx.Err()
 }
 
 type plainTextBudgetError struct {

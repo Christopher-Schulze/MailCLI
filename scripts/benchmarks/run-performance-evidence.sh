@@ -36,6 +36,16 @@ summarize_results() {
   }
 
   awk -F '\t' -v expected="${EXPECTED_REPETITIONS}" '
+    function percentile_metric(values, name, samples, rank, ordered, sample, position, value) {
+      for (sample = 1; sample <= samples; sample++) {
+        value = values[name, sample] + 0
+        for (position = sample; position > 1 && ordered[position - 1] > value; position--) {
+          ordered[position] = ordered[position - 1]
+        }
+        ordered[position] = value
+      }
+      return ordered[rank]
+    }
     {
       name = $1
       if (!(name in seen)) {
@@ -61,7 +71,8 @@ summarize_results() {
         p50 = int((samples + 1) / 2)
         p95 = int((95 * samples + 99) / 100)
         printf "summary benchmark=%s repetitions=%d p50_ns/op=%.0f p95_ns/op=%.0f p50_B/op=%.0f p50_allocs/op=%.0f\n",
-          name, samples, ns[name, p50], ns[name, p95], bytes[name, p50], allocs[name, p50]
+          name, samples, ns[name, p50], ns[name, p95],
+          percentile_metric(bytes, name, samples, p50), percentile_metric(allocs, name, samples, p50)
       }
       exit failed
     }
@@ -86,7 +97,7 @@ run_group() {
 
 cd "${MAILCLI_ROOT}"
 GIT_WORKTREE_STATE=clean
-if ! git diff --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
   GIT_WORKTREE_STATE=dirty
 fi
 printf 'MailCLI deterministic performance evidence\n'
@@ -156,6 +167,18 @@ run_group \
   'ordinary, dense, link-heavy and large-text parsed trees; streaming output versus the frozen token-buffered reference' \
   ./internal/mail \
   '^BenchmarkPlainTextRendering$' \
+  5x
+run_group \
+  content-ownership \
+  'ordinary and 2 MiB trimmed plaintext; single, repeated and distinct content diagnostics; retained_B is net process heap after GC' \
+  ./internal/mail \
+  '^Benchmark(PlainTextOwnership|ContentDiagnosticKeys)$' \
+  5x
+run_group \
+  mime-ownership \
+  'ordinary, trimmed, empty and untrimmed 4 MiB plain MIME text; retained_B is net process heap after GC' \
+  ./internal/mailstore \
+  '^BenchmarkMIMETextOwnership$' \
   5x
 run_group \
   incoming-html \

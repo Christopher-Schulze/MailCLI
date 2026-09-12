@@ -666,7 +666,7 @@ func parseMIMEEntity(
 		}
 		rank = mimeTextHTML
 	} else {
-		text = strings.TrimSpace(string(body))
+		text = string(bytes.TrimSpace(body))
 	}
 	if text == "" {
 		return mimeTextRepresentation{}, err
