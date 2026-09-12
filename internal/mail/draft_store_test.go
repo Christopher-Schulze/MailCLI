@@ -397,7 +397,8 @@ func TestListDraftsReturnsSummariesWithoutRender(t *testing.T) {
 }
 
 // A draft whose body fails canonical validation still appears in the list
-// (inspect keeps the full gate and rejects it).
+// and in inspect: read paths validate structure only, while the mutation
+// gates keep the full canonical check and reject the tampered draft.
 func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "drafts")
@@ -407,10 +408,14 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	t.Cleanup(func() { service.contentObserver = nil })
 	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
 		From: "sender@example.com", To: []Recipient{{Address: "a@example.com"}},
-		Subject: "Rich", Body: "# Title\n", BodyFormat: DraftBodyMarkdown,
+		Subject: "Rich", BodyFormat: DraftBodyHTML,
+		Body: `<p onclick="private()">Visible</p><script>private()</script>`,
 	}})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	if len(draft.ContentDiagnostics) == 0 {
+		t.Fatal("fixture draft stores no diagnostics; the trust path is not exercised")
 	}
 	path := filepath.Join(root, draft.Ref+".json")
 	payload, err := os.ReadFile(path)
@@ -429,11 +434,17 @@ func TestListDraftsKeepsCorruptBodyDraft(t *testing.T) {
 	if err := os.WriteFile(path, tampered, 0o600); err != nil {
 		t.Fatalf("write tampered draft: %v", err)
 	}
-	if _, err := service.GetDraft(draft.Ref); err == nil {
-		t.Fatal("GetDraft() accepted a tampered body; the inspect gate is broken")
+	if _, err := service.GetDraft(draft.Ref); err != nil {
+		t.Fatalf("GetDraft() rejected a structurally valid draft: %v", err)
 	}
-	if calls := observer.calls.Load(); calls != 2 {
-		t.Fatalf("draft preparation and validation render calls = %d, want 2", calls)
+	if calls := observer.calls.Load(); calls != 1 {
+		t.Fatalf("draft preparation render calls = %d, want 1 (inspect must not re-render)", calls)
+	}
+	if _, err := service.UpdateDraftContext(context.Background(), UpdateDraftRequest{
+		Ref: draft.Ref, ExpectedRevision: draft.Revision,
+		Input: DraftInput{To: draft.To, Subject: draft.Subject, Body: draft.Body, BodyFormat: draft.BodyFormat},
+	}); err == nil {
+		t.Fatal("UpdateDraftContext() accepted a tampered body; the mutation gate is broken")
 	}
 	observer.calls.Store(0)
 	page, err := service.ListDrafts(context.Background(), ListDraftsRequest{})
