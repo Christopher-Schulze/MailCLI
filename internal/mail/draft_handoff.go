@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -94,7 +95,7 @@ func readHandoffAttempt(ref string, state *draftStorage) (*HandoffAttempt, error
 	if err != nil {
 		return nil, fmt.Errorf("read handoff claim: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var stored storedHandoffAttempt
 	if err := decoder.Decode(&stored); err != nil {

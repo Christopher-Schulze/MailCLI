@@ -1,13 +1,13 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 const maximumDraftStateBytes = int64(20 * 1024 * 1024)
@@ -112,7 +112,7 @@ func loadDraftDocument(root string, ref string, storage ...*draftStorage) (Draft
 	if err != nil {
 		return Draft{}, fmt.Errorf("read draft: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var draft Draft
 	if err := decoder.Decode(&draft); err != nil {
