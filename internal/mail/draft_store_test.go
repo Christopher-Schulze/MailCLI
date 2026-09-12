@@ -889,6 +889,14 @@ func TestDraftLeaseTimeoutAndCancellationDoNotReleaseOtherOwner(t *testing.T) {
 				observed: make(chan struct{}),
 				err:      test.contextErr,
 			}
+			if err := controlled.Err(); err != nil {
+				t.Fatalf("uncanceled context = %v", err)
+			}
+			select {
+			case <-controlled.observed:
+				t.Fatal("preflight context check incorrectly signaled lock contention")
+			default:
+			}
 			result := make(chan error, 1)
 			go func() {
 				_, err := acquireDraftLease(controlled, root, ref)
@@ -974,10 +982,13 @@ type controlledDraftContext struct {
 
 func (c *controlledDraftContext) Deadline() (time.Time, bool) { return time.Time{}, false }
 
-func (c *controlledDraftContext) Done() <-chan struct{} { return c.done }
+func (c *controlledDraftContext) Done() <-chan struct{} {
+	// Signal only after acquisition observed the held lock and began waiting.
+	c.once.Do(func() { close(c.observed) })
+	return c.done
+}
 
 func (c *controlledDraftContext) Err() error {
-	c.once.Do(func() { close(c.observed) })
 	select {
 	case <-c.done:
 		return c.err

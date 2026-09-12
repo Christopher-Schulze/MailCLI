@@ -87,7 +87,7 @@ func readDraftPage(ctx context.Context, state *draftStorage, limit int, revision
 	if err := verifyDraftListDirectory(state, identity); err != nil {
 		return DraftPage{}, err
 	}
-	refs, err := selectDraftListRefs(ctx, state.directory, after, limit+1)
+	refs, err := selectDraftListRefs(ctx, state.root, state.directory, after, limit+1)
 	if err != nil {
 		return DraftPage{}, err
 	}
@@ -115,23 +115,27 @@ func readDraftPage(ctx context.Context, state *draftStorage, limit int, revision
 	return page, nil
 }
 
-func selectDraftListRefs(ctx context.Context, directory *os.File, after string, limit int) ([]string, error) {
+func selectDraftListRefs(ctx context.Context, root *os.Root, directory *os.File, after string, limit int) ([]string, error) {
 	refs := make([]string, 0, limit)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		entries, err := directory.ReadDir(256)
+		names, err := directory.Readdirnames(256)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("list drafts: %w", err)
 		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
+		for _, name := range names {
+			if !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
 				continue
 			}
 			ref := strings.TrimSuffix(name, ".json")
-			if ref <= after {
+			if ref <= after || len(refs) == limit && (limit == 0 || ref >= refs[limit-1]) {
+				continue
+			}
+			// Only candidates need type metadata. Keep unreadable records visible
+			// for the authoritative summary read to report their state error.
+			if info, inspectErr := root.Lstat(name); inspectErr == nil && info.IsDir() {
 				continue
 			}
 			index := sort.SearchStrings(refs, ref)

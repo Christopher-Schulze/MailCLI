@@ -81,24 +81,50 @@ func finishInstallerTestProcess(t *testing.T, process *installerTestProcess, wan
 	}
 }
 
-func pauseInstallerTestProcess(t *testing.T, fixture installerFixture, destination string) (*installerTestProcess, int, string) {
+func pauseInstallerTestProcess(t *testing.T, fixture installerFixture, destination string, extraEnvironment ...string) (*installerTestProcess, int, string) {
 	t.Helper()
 	root := t.TempDir()
 	ready := filepath.Join(root, "ready")
 	resume := filepath.Join(root, "resume")
 	script := filepath.Join(root, "pause.sh")
-	writeExecutableTestScript(t, script, `mv() {
+	writeExecutableTestScript(t, script, `set -x
+mv() {
   command mv "$@" || return
   if [[ "${2:-}" == "$MAILCLI_TEST_PAUSE_PATH" ]]; then
+    if [[ -n "${MAILCLI_TEST_READY_DELAY:-}" ]]; then /bin/sleep "$MAILCLI_TEST_READY_DELAY"; fi
     printf '%s\n' "$$" > "$MAILCLI_TEST_READY"
     while [[ ! -e "$MAILCLI_TEST_RESUME" ]]; do /bin/sleep 0.02; done
   fi
 }
 `)
-	process := startInstallerTestProcess(t, fixture, "BASH_ENV="+script, "MAILCLI_TEST_PAUSE_PATH="+destination,
-		"MAILCLI_TEST_READY="+ready, "MAILCLI_TEST_RESUME="+resume)
-	processIDs := waitForTestProcessIDs(t, ready, 1)
+	environment := append([]string{"BASH_ENV=" + script, "MAILCLI_TEST_PAUSE_PATH=" + destination,
+		"MAILCLI_TEST_READY=" + ready, "MAILCLI_TEST_RESUME=" + resume}, extraEnvironment...)
+	process := startInstallerTestProcess(t, fixture, environment...)
+	processIDs := waitForInstallerTestReady(t, process, ready)
 	return process, processIDs[0], resume
+}
+
+// Reaching the publication checkpoint includes real shell, validation and disk
+// work. The owned process already has a 40-second lifetime bound; a second,
+// shorter readiness timer can fail before that real lifecycle reports an error.
+func waitForInstallerTestReady(t *testing.T, process *installerTestProcess, path string) []int {
+	t.Helper()
+	poll := time.NewTicker(ownedProcessPollInterval)
+	defer poll.Stop()
+	for {
+		payload, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(string(payload), "\n") {
+			return waitForTestProcessIDs(t, path, 1)
+		}
+		select {
+		case <-process.done:
+			t.Fatalf("installer exited before its publication checkpoint: %v: %s", process.err, process.output.String())
+		case <-poll.C:
+		}
+	}
 }
 
 func installerTestManifest(t *testing.T, fixture installerFixture) (string, []byte) {
@@ -113,6 +139,16 @@ func installerTestManifest(t *testing.T, fixture installerFixture) (string, []by
 		t.Fatal(err)
 	}
 	return path, contents
+}
+
+func TestInstallerCheckpointAllowsDelayedReadiness(t *testing.T) {
+	fixture := newInstallerFixture(t)
+	owner, _, resume := pauseInstallerTestProcess(t, fixture, fixture.environment.executablePath, "MAILCLI_TEST_READY_DELAY=2.1")
+	installerTestManifest(t, fixture)
+	if err := os.WriteFile(resume, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finishInstallerTestProcess(t, owner, true)
 }
 
 func TestInstallerSharedLockSerializesRecoveryAndCancellation(t *testing.T) {
