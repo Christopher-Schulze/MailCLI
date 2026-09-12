@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unsafe"
 )
 
 const (
@@ -250,8 +249,7 @@ func decodeAccountPayload(payload []byte) (*Account, int, error) {
 		}
 		return nil, version, err
 	}
-	compact.Version = FormatVersion
-	return (*Account)(unsafe.Pointer(compact)), FormatVersion, nil
+	return &Account{Version: FormatVersion, AccountID: compact.AccountID}, FormatVersion, nil
 }
 
 func decodeMailboxPayload(payload []byte) (*Mailbox, error) {
@@ -269,8 +267,7 @@ func decodeMailboxPayload(payload []byte) (*Mailbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	compact.Version = FormatVersion
-	return (*Mailbox)(unsafe.Pointer(compact)), nil
+	return &Mailbox{Version: FormatVersion, AccountID: compact.AccountID, Path: compact.MailboxPath}, nil
 }
 
 func decodeMessagePayload(payload []byte) (*Message, error) {
@@ -288,8 +285,21 @@ func decodeMessagePayload(payload []byte) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	compact.Version = FormatVersion
-	return (*Message)(unsafe.Pointer(compact)), nil
+	return &Message{
+		Version:                 FormatVersion,
+		AccountID:               compact.AccountID,
+		MailboxPath:             compact.MailboxPath,
+		LibraryID:               compact.LibraryID,
+		ExpectedMessageID:       compact.ExpectedMessageID,
+		ExpectedIMAPUID:         compact.ExpectedIMAPUID,
+		ExpectedIMAPUIDValidity: compact.ExpectedIMAPUIDValidity,
+		ExpectedIMAPMailboxID:   compact.ExpectedIMAPMailboxID,
+		ExpectedSubject:         compact.ExpectedSubject,
+		ExpectedStoreUUID:       compact.ExpectedStoreUUID,
+		ExpectedStoreMailboxID:  compact.ExpectedStoreMailboxID,
+		ExpectedStoreMessageID:  compact.ExpectedStoreMessageID,
+		ExpectedStoreGlobalID:   compact.ExpectedStoreGlobalID,
+	}, nil
 }
 
 func decodeListCursorPayload(payload []byte) (*ListCursor, error) {
@@ -310,8 +320,12 @@ func decodeListCursorPayload(payload []byte) (*ListCursor, error) {
 	if compact.Offset < int64(-int(^uint(0)>>1)-1) || compact.Offset > int64(int(^uint(0)>>1)) {
 		return nil, fmt.Errorf("list cursor offset overflows int")
 	}
-	compact.ExpectedStoreGlobalID = int64(FormatVersion)
-	return (*ListCursor)(unsafe.Pointer(&compact.ExpectedStoreGlobalID)), nil
+	return &ListCursor{
+		Version:    FormatVersion,
+		MailboxRef: compact.MailboxRef,
+		Offset:     int(compact.Offset),
+		PreviousID: compact.PreviousID,
+	}, nil
 }
 
 // CompactSearchCursor carries the fields needed to continue a search.
