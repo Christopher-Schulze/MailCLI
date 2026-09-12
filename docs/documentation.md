@@ -100,6 +100,8 @@ Detail JSON responses are bounded at the CLI serialization boundary. `messages g
 
 `--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON. MailCLI measures the complete encoded envelope before writing it; an oversized response returns exit code `1` with `error.code:"output_too_large"` and never truncates content. `messages get`, `messages raw`, and `drafts inspect` additionally accept `--export /absolute/new/path`. The exporter creates a mode-0600 file with exclusive creation, writes complete normalized body or raw RFC 5322 bytes, then verifies path identity, size, and SHA-256. JSON reports only `data.content_export` metadata for an export, an invalid destination fails before retrieval, and incomplete normalized content fails without creating an export. Failed message hydration keeps the safe `data.message.hydration` evidence and retains recovered content only when it was not redirected to an export file.
 
+Retained draft handoff attempts appear as required `handoff_attempt` recovery metadata in every detail view, custom field selection, output-size fallback and body-export response. The shared list/detail summary includes the attempt ID, timestamps, outcome, dispatch state, snapshot retention flag, count and byte total, without snapshot names, paths or contents. An absent or successfully cleared attempt is omitted. Inspect the retained ID/outcome before reconciliation; projection does not authorize replay or change the native cancellation contract.
+
 Command surface:
 
 | Command | Status | Purpose |

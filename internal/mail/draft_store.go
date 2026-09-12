@@ -106,7 +106,7 @@ func draftSummaryFrom(draft Draft) DraftSummary {
 		EverSent:        draft.SendAttempt != nil,
 		SendAttempt:     draftSendAttemptSummaryFrom(draft.SendAttempt),
 		SaveAttempt:     draftSaveAttemptSummaryFrom(draft.SaveAttempt),
-		HandoffAttempt:  draftHandoffAttemptSummaryFrom(draft.HandoffAttempt),
+		HandoffAttempt:  DraftHandoffAttemptSummaryFrom(draft.HandoffAttempt),
 	}
 }
 
@@ -153,7 +153,9 @@ func draftSaveAttemptSummaryFrom(attempt *DraftSaveAttempt) *DraftSaveAttemptSum
 	}
 }
 
-func draftHandoffAttemptSummaryFrom(attempt *HandoffAttempt) *DraftHandoffAttemptSummary {
+// DraftHandoffAttemptSummaryFrom provides the shared list/detail recovery
+// projection without exposing retained attachment names, hashes or contents.
+func DraftHandoffAttemptSummaryFrom(attempt *HandoffAttempt) *DraftHandoffAttemptSummary {
 	if attempt == nil {
 		return nil
 	}

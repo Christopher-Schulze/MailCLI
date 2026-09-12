@@ -86,30 +86,31 @@ type messageProjection struct {
 }
 
 type draftProjection struct {
-	Ref                *string                       `json:"ref,omitempty"`
-	Revision           *string                       `json:"revision,omitempty"`
-	Kind               *mail.DraftKind               `json:"kind,omitempty"`
-	AccountRef         *string                       `json:"account_ref,omitempty"`
-	SourceRef          *string                       `json:"source_ref,omitempty"`
-	ReplyAll           *bool                         `json:"reply_all,omitempty"`
-	SourceMessageID    *string                       `json:"source_message_id,omitempty"`
-	SourceReferences   *string                       `json:"source_references,omitempty"`
-	From               *string                       `json:"from,omitempty"`
-	To                 *[]mail.Recipient             `json:"to,omitempty"`
-	CC                 *[]mail.Recipient             `json:"cc,omitempty"`
-	BCC                *[]mail.Recipient             `json:"bcc,omitempty"`
-	Subject            *string                       `json:"subject,omitempty"`
-	Body               *string                       `json:"body,omitempty"`
-	BodyFormat         *mail.DraftBodyFormat         `json:"body_format,omitempty"`
-	BodySource         *string                       `json:"body_source,omitempty"`
-	BodyHTML           *string                       `json:"body_html,omitempty"`
-	ContentDiagnostics *[]mail.ContentDiagnostic     `json:"content_diagnostics,omitempty"`
-	Attachments        *[]mail.DraftAttachment       `json:"attachments,omitempty"`
-	AttachmentCount    int                           `json:"attachment_count"`
-	CreatedAt          *time.Time                    `json:"created_at,omitempty"`
-	UpdatedAt          *time.Time                    `json:"updated_at,omitempty"`
-	SendAttempt        *mail.DraftSendAttemptSummary `json:"send_attempt,omitempty"`
-	SaveAttempt        *mail.DraftSaveAttemptSummary `json:"save_attempt,omitempty"`
+	Ref                *string                          `json:"ref,omitempty"`
+	Revision           *string                          `json:"revision,omitempty"`
+	Kind               *mail.DraftKind                  `json:"kind,omitempty"`
+	AccountRef         *string                          `json:"account_ref,omitempty"`
+	SourceRef          *string                          `json:"source_ref,omitempty"`
+	ReplyAll           *bool                            `json:"reply_all,omitempty"`
+	SourceMessageID    *string                          `json:"source_message_id,omitempty"`
+	SourceReferences   *string                          `json:"source_references,omitempty"`
+	From               *string                          `json:"from,omitempty"`
+	To                 *[]mail.Recipient                `json:"to,omitempty"`
+	CC                 *[]mail.Recipient                `json:"cc,omitempty"`
+	BCC                *[]mail.Recipient                `json:"bcc,omitempty"`
+	Subject            *string                          `json:"subject,omitempty"`
+	Body               *string                          `json:"body,omitempty"`
+	BodyFormat         *mail.DraftBodyFormat            `json:"body_format,omitempty"`
+	BodySource         *string                          `json:"body_source,omitempty"`
+	BodyHTML           *string                          `json:"body_html,omitempty"`
+	ContentDiagnostics *[]mail.ContentDiagnostic        `json:"content_diagnostics,omitempty"`
+	Attachments        *[]mail.DraftAttachment          `json:"attachments,omitempty"`
+	AttachmentCount    int                              `json:"attachment_count"`
+	CreatedAt          *time.Time                       `json:"created_at,omitempty"`
+	UpdatedAt          *time.Time                       `json:"updated_at,omitempty"`
+	SendAttempt        *mail.DraftSendAttemptSummary    `json:"send_attempt,omitempty"`
+	SaveAttempt        *mail.DraftSaveAttemptSummary    `json:"save_attempt,omitempty"`
+	HandoffAttempt     *mail.DraftHandoffAttemptSummary `json:"handoff_attempt,omitempty"`
 }
 
 type attachmentProjection struct {
@@ -280,7 +281,7 @@ func projectionFieldNames(target projectionTarget) []string {
 	case projectionTargetMessage:
 		return []string{"summary", "reply_to", "to", "cc", "bcc", "headers", "content", "content_source", "content_complete", "missing_parts", "hydration", "attachments"}
 	case projectionTargetDraft:
-		return []string{"ref", "revision", "kind", "account_ref", "source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "subject", "body", "body_format", "body_source", "body_html", "content_diagnostics", "attachments", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt"}
+		return []string{"ref", "revision", "kind", "account_ref", "source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "subject", "body", "body_format", "body_source", "body_html", "content_diagnostics", "attachments", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt"}
 	case projectionTargetAttachment:
 		return []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}
 	case projectionTargetRaw:
@@ -331,7 +332,7 @@ func requiredProjectionField(target projectionTarget, field string, contentRetai
 			field == "missing_parts" || field == "hydration" || (contentRetained && field == "content")
 	case projectionTargetDraft:
 		switch field {
-		case "ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt":
+		case "ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt":
 			return true
 		}
 	}
@@ -426,6 +427,8 @@ func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjectio
 			projection.SendAttempt = draftSendAttemptProjection(draft.SendAttempt)
 		case "save_attempt":
 			projection.SaveAttempt = draftSaveAttemptProjection(draft.SaveAttempt)
+		case "handoff_attempt":
+			projection.HandoffAttempt = mail.DraftHandoffAttemptSummaryFrom(draft.HandoffAttempt)
 		}
 	}
 	return projection
