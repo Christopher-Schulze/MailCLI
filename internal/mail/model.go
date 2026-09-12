@@ -194,12 +194,20 @@ type DraftInput struct {
 	Body        string          `json:"body"`
 	BodyFormat  DraftBodyFormat `json:"body_format,omitempty"`
 	Attachments []string        `json:"attachments,omitempty"`
-	// SubjectSet, ToSet, and CCSet preserve whether a caller supplied a
-	// derivable field. They are intentionally excluded from JSON because the
-	// field's presence is carried by the corresponding JSON key itself.
-	SubjectSet bool `json:"-"`
-	ToSet      bool `json:"-"`
-	CCSet      bool `json:"-"`
+	// The Set fields preserve whether a caller supplied a field. They are
+	// intentionally excluded from JSON because the field's presence is
+	// carried by the corresponding JSON key itself. SubjectSet, ToSet, and
+	// CCSet drive reply derivation; the full set additionally drives
+	// patch-merge semantics on draft update.
+	AccountRefSet  bool `json:"-"`
+	FromSet        bool `json:"-"`
+	ToSet          bool `json:"-"`
+	CCSet          bool `json:"-"`
+	BCCSet         bool `json:"-"`
+	SubjectSet     bool `json:"-"`
+	BodySet        bool `json:"-"`
+	BodyFormatSet  bool `json:"-"`
+	AttachmentsSet bool `json:"-"`
 }
 
 type DraftAttachment struct {
