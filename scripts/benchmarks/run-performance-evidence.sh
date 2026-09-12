@@ -144,6 +144,12 @@ run_group \
   '^BenchmarkPrepareDraftContent$' \
   10x
 run_group \
+  incoming-html \
+  'ordinary, dense 512 KiB, and excessive-token received HTML; legacy and context-bounded conversion' \
+  ./internal/mail \
+  '^BenchmarkIncomingHTML$' \
+  5x
+run_group \
   draft-list \
   '1-byte and 1 MiB draft bodies; full-record baseline, streaming summary, and paginated service; 25-entry pages over 1 and 2049 records; file bytes and serialized output are separate metrics' \
   ./internal/mail \

@@ -647,7 +647,23 @@ func parseMIMEEntity(
 	rank := mimeTextPlain
 	var text string
 	if mediaType == "text/html" {
-		text = htmlToText(body)
+		maximumOutput := int64(len(body)) + document.budget.remainingTextBytes()
+		var conversionErr error
+		text, conversionErr = mail.HTMLToPlainTextContext(document.ctx, body, int(maximumOutput))
+		if conversionErr != nil {
+			if contextErr := document.contextErr(); contextErr != nil {
+				return mimeTextRepresentation{}, contextErr
+			}
+			stage := "parse"
+			var htmlErr *mail.HTMLConversionError
+			if errors.As(conversionErr, &htmlErr) {
+				stage = htmlErr.Stage
+			}
+			markMissingPart(document, "mime:html:"+stage)
+		}
+		if extra := len(text) - len(body); extra > 0 && !document.budget.consumeText(int64(extra)) {
+			return mimeTextRepresentation{}, document.budget.error()
+		}
 		rank = mimeTextHTML
 	} else {
 		text = strings.TrimSpace(string(body))
