@@ -168,6 +168,12 @@ run_group \
   '^BenchmarkDraft(SummaryBodies|SummaryBuffer|ListPage)$' \
   5x
 run_group \
+  draft-directory \
+  '0/32/10000 generated draft names, first/middle/last cursors and 1/51/201 refs through the production pinned directory boundary' \
+  ./internal/mail \
+  '^BenchmarkDraftReferenceSelection$' \
+  5x
+run_group \
   projected-output \
   'tiny, 1 MiB and 8 MiB raw JSON; accepted and oversized output including finalization' \
   ./internal/cli \
