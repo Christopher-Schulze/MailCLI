@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,8 +26,10 @@ type PruneDraftsResult struct {
 	DryRun          bool             `json:"dry_run"`
 	Candidates      []PruneCandidate `json:"candidates,omitempty"`
 	ExpiredReceipts []string         `json:"expired_receipts,omitempty"`
+	OrphanArtifacts []string         `json:"orphan_artifacts,omitempty"`
 	Removed         []string         `json:"removed,omitempty"`
 	SweptLocks      []string         `json:"swept_locks,omitempty"`
+	SweptArtifacts  []string         `json:"swept_artifacts,omitempty"`
 	Failed          []PruneFailure   `json:"failed,omitempty"`
 }
 
@@ -88,8 +91,13 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 	if err != nil {
 		return result, err
 	}
+	orphanRefs, err := listOrphanDraftArtifactRefs(root)
+	if err != nil {
+		return result, err
+	}
 	if !request.Confirm {
 		result.ExpiredReceipts = receiptCandidates
+		result.OrphanArtifacts = orphanRefs
 		return result, nil
 	}
 	for _, candidate := range result.Candidates {
@@ -121,6 +129,12 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		result.ExpiredReceipts = append(result.ExpiredReceipts, ref)
 	}
 	if err := draftContextError(ctx, "prune"); err != nil {
+		return result, err
+	}
+	sweptArtifacts, artifactFailures, err := sweepOrphanDraftArtifacts(ctx, root)
+	result.SweptArtifacts = sweptArtifacts
+	result.Failed = append(result.Failed, artifactFailures...)
+	if err != nil {
 		return result, err
 	}
 	swept, failures, err := sweepOrphanDraftLocks(root)
@@ -308,4 +322,185 @@ func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Ti
 	}
 release:
 	return errors.Join(resultErr, lease.release())
+}
+
+// listOrphanDraftArtifactRefs returns refs that own send/save/handoff claim,
+// spool, or snapshot files while their draft JSON is absent. Terminal send
+// receipts are excluded; they carry their own expiry path.
+func listOrphanDraftArtifactRefs(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("list orphan draft artifacts: %w", err)
+	}
+	refs := make(map[string]struct{})
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "draft_") {
+			continue
+		}
+		var ref string
+		switch {
+		case entry.IsDir() && strings.HasSuffix(name, handoffSnapshotSuffix):
+			ref = strings.TrimSuffix(name, handoffSnapshotSuffix)
+		case entry.IsDir():
+			continue
+		case strings.HasSuffix(name, ".send-claim"):
+			ref = strings.TrimSuffix(name, ".send-claim")
+		case strings.HasSuffix(name, ".send-spool"):
+			ref = strings.TrimSuffix(name, ".send-spool")
+		case strings.HasSuffix(name, ".save-claim"):
+			ref = strings.TrimSuffix(name, ".save-claim")
+		case strings.HasSuffix(name, handoffClaimSuffix):
+			ref = strings.TrimSuffix(name, handoffClaimSuffix)
+		default:
+			continue
+		}
+		draftFile, err := draftPath(root, ref)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Lstat(draftFile); err == nil || !os.IsNotExist(err) {
+			continue
+		}
+		refs[ref] = struct{}{}
+	}
+	out := make([]string, 0, len(refs))
+	for ref := range refs {
+		out = append(out, ref)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// sweepOrphanDraftArtifacts removes claim, spool, and handoff snapshot files
+// whose draft is gone, using the same lease evidence as draft mutation: a
+// busy lock means a live operation, so the ref is skipped rather than swept.
+func sweepOrphanDraftArtifacts(ctx context.Context, root string) ([]string, []PruneFailure, error) {
+	refs, err := listOrphanDraftArtifactRefs(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	var swept []string
+	var failures []PruneFailure
+	for _, ref := range refs {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return swept, failures, err
+		}
+		sweptRef, err := pruneOrphanDraftArtifactsOnce(ctx, root, ref)
+		if err != nil {
+			var operation *OperationError
+			if errors.As(err, &operation) && operation.Code == "draft_operation_canceled" {
+				return swept, failures, err
+			}
+			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			continue
+		}
+		if sweptRef {
+			swept = append(swept, ref)
+		}
+	}
+	return swept, failures, nil
+}
+
+func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string) (bool, error) {
+	lockContext, cancel := draftLockContext(ctx)
+	defer cancel()
+	lease, err := acquireDraftLease(lockContext, root, ref)
+	if err != nil {
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.Code == "draft_busy" {
+			return false, nil
+		}
+		return false, classifyDraftContextError(ctx, err, "prune")
+	}
+	var resultErr error
+	swept := false
+	err = draftContextError(ctx, "prune")
+	if err != nil {
+		resultErr = err
+		goto release
+	}
+	if _, err = lease.storage.lstat(ref + ".json"); err == nil || !os.IsNotExist(err) {
+		goto release
+	}
+	resultErr = errors.Join(
+		removeOrphanHandoffSnapshotTree(ref, lease.storage),
+		removeDraftClaims(root, ref, lease.storage),
+		removeDraftStorageFile(lease.storage, ref+".send-claim", nil, "send claim"),
+		removeDraftStorageFile(lease.storage, ref+".send-spool", nil, "send spool"),
+		removeDraftStorageFile(lease.storage, ref+".save-claim", nil, "draft-save claim"),
+		removeDraftStorageFile(lease.storage, ref+handoffClaimSuffix, nil, "handoff claim"),
+	)
+	if resultErr == nil {
+		resultErr = lease.removeLock()
+		swept = resultErr == nil
+	}
+release:
+	return swept, errors.Join(resultErr, lease.release())
+}
+
+// removeOrphanHandoffSnapshotTree removes ref+".handoff-snapshots" with the
+// fixed attempt-dir/index-dir/file layout, including the parent directory
+// that normal claim cleanup leaves behind.
+func removeOrphanHandoffSnapshotTree(ref string, storage *draftStorage) error {
+	parentName := ref + handoffSnapshotSuffix
+	parent, err := storage.root.Open(parentName)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open orphan handoff snapshots: %w", err)
+	}
+	attempts, readErr := parent.ReadDir(-1)
+	closeErr := parent.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return fmt.Errorf("list orphan handoff snapshots: %w", err)
+	}
+	for _, attemptEntry := range attempts {
+		if !attemptEntry.IsDir() {
+			continue
+		}
+		attemptPath := filepath.Join(parentName, attemptEntry.Name())
+		attemptRoot, err := storage.root.Open(attemptPath)
+		if err != nil {
+			return fmt.Errorf("open orphan handoff snapshot attempt: %w", err)
+		}
+		indexes, readErr := attemptRoot.ReadDir(-1)
+		closeErr := attemptRoot.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return fmt.Errorf("list orphan handoff snapshot attempt: %w", err)
+		}
+		for _, indexEntry := range indexes {
+			if !indexEntry.IsDir() {
+				continue
+			}
+			indexPath := filepath.Join(attemptPath, indexEntry.Name())
+			indexRoot, err := storage.root.Open(indexPath)
+			if err != nil {
+				return fmt.Errorf("open orphan handoff snapshot index: %w", err)
+			}
+			files, readErr := indexRoot.ReadDir(-1)
+			closeErr := indexRoot.Close()
+			if err := errors.Join(readErr, closeErr); err != nil {
+				return fmt.Errorf("list orphan handoff snapshot index: %w", err)
+			}
+			for _, file := range files {
+				if err := removeDraftStorageFile(
+					storage, filepath.Join(indexPath, file.Name()), nil, "",
+				); err != nil {
+					return err
+				}
+			}
+			if err := removeDraftStorageFile(storage, indexPath, nil, ""); err != nil {
+				return err
+			}
+		}
+		if err := removeDraftStorageFile(storage, attemptPath, nil, ""); err != nil {
+			return err
+		}
+	}
+	if err := removeDraftStorageFile(storage, parentName, nil, ""); err != nil {
+		return err
+	}
+	return storage.apply(draftStorageSync, "", "", 0)
 }
