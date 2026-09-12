@@ -144,6 +144,12 @@ run_group \
   '^BenchmarkPrepareDraftContent$' \
   10x
 run_group \
+  plaintext-renderer \
+  'ordinary, dense, link-heavy and large-text parsed trees; streaming output versus the frozen token-buffered reference' \
+  ./internal/mail \
+  '^BenchmarkPlainTextRendering$' \
+  5x
+run_group \
   incoming-html \
   'ordinary, dense 512 KiB, and excessive-token received HTML; legacy and context-bounded conversion' \
   ./internal/mail \

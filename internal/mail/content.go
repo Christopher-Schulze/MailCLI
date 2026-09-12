@@ -529,7 +529,9 @@ type plainTextRenderer struct {
 	err            error
 	maximumBytes   int
 	labelBytes     int
-	tokens         []plainTextToken
+	output         plainTextOutput
+	previous       plainTextToken
+	hasPrevious    bool
 	links          []plainTextLink
 	lists          []plainTextList
 	tables         []plainTextTable
@@ -548,7 +550,24 @@ func htmlDraftText(reader io.Reader) (string, error) {
 }
 
 func renderDraftText(ctx context.Context, root *html.Node, maximumBytes int) (string, error) {
-	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes, tokens: make([]plainTextToken, 0, 32)}
+	text, err := renderPlainText(ctx, root, maximumBytes)
+	if limit, ok := err.(*plainTextBudgetError); ok {
+		if limit.resource == "link-label text" {
+			return "", validationError("draft HTML exceeds 16 MiB of link-label text")
+		}
+		return "", validationError("plain-text draft body exceeds 4 MiB")
+	}
+	return text, err
+}
+
+func renderPlainText(ctx context.Context, root *html.Node, maximumBytes int) (string, error) {
+	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes,
+		output: plainTextOutput{ctx: ctx, maximumBytes: maximumBytes}}
+	capacity := 256
+	if maximumBytes > 0 {
+		capacity = min(capacity, maximumBytes)
+	}
+	renderer.output.output.Grow(capacity)
 	renderer.renderNode(root)
 	if renderer.err != nil {
 		return "", renderer.err
@@ -639,6 +658,9 @@ func (renderer *plainTextRenderer) renderElement(node *html.Node) {
 
 func (renderer *plainTextRenderer) renderChildren(node *html.Node) {
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if renderer.err != nil {
+			return
+		}
 		renderer.renderNode(child)
 	}
 }
@@ -646,6 +668,10 @@ func (renderer *plainTextRenderer) renderChildren(node *html.Node) {
 func (renderer *plainTextRenderer) renderLink(node *html.Node) {
 	renderer.links = append(renderer.links, plainTextLink{href: plainLinkTarget(node)})
 	renderer.renderChildren(node)
+	if renderer.err != nil {
+		renderer.links = renderer.links[:len(renderer.links)-1]
+		return
+	}
 	link := &renderer.links[len(renderer.links)-1]
 	href := link.href
 	label := normalizeLinkLabel(link.label)
@@ -737,7 +763,7 @@ func (renderer *plainTextRenderer) appendText(value string) {
 	}
 	if renderer.maximumBytes > 0 && len(renderer.links) > 0 {
 		if len(value) > (4*renderer.maximumBytes-renderer.labelBytes)/len(renderer.links) {
-			renderer.err = validationError("draft HTML exceeds 16 MiB of link-label text")
+			renderer.err = &plainTextBudgetError{resource: "link-label text", limit: 4 * renderer.maximumBytes}
 			return
 		}
 		renderer.labelBytes += len(value) * len(renderer.links)
@@ -751,7 +777,7 @@ func (renderer *plainTextRenderer) appendText(value string) {
 	if renderer.tableCellDepth > 0 {
 		value = strings.ReplaceAll(value, "|", `\|`)
 	}
-	renderer.tokens = append(renderer.tokens, plainTextToken{
+	renderer.appendToken(plainTextToken{
 		text: value, preserve: renderer.preDepth > 0 || renderer.codeDepth > 0,
 		block: renderer.preDepth > 0,
 	})
@@ -761,23 +787,32 @@ func (renderer *plainTextRenderer) appendRaw(value string) {
 	if renderer.err != nil || value == "" {
 		return
 	}
-	renderer.tokens = append(renderer.tokens, plainTextToken{text: value, preserve: true, raw: true})
+	renderer.appendToken(plainTextToken{text: value, preserve: true, raw: true})
 }
 
 func (renderer *plainTextRenderer) appendBreak() {
-	renderer.tokens = append(renderer.tokens, plainTextToken{lineBreak: true})
+	renderer.appendToken(plainTextToken{lineBreak: true})
 	renderer.linePrefix = false
+}
+
+func (renderer *plainTextRenderer) appendToken(token plainTextToken) {
+	if renderer.err != nil {
+		return
+	}
+	renderer.output.write(token)
+	renderer.err = renderer.output.err
+	renderer.previous, renderer.hasPrevious = token, true
 }
 
 func (renderer *plainTextRenderer) appendBlockBreak() {
 	if renderer.linePrefix {
 		return
 	}
-	if len(renderer.tokens) > 0 && renderer.tokens[len(renderer.tokens)-1].lineBreak {
+	if renderer.hasPrevious && renderer.previous.lineBreak {
 		return
 	}
-	if len(renderer.tokens) > 0 {
-		last := renderer.tokens[len(renderer.tokens)-1]
+	if renderer.hasPrevious {
+		last := renderer.previous
 		if last.preserve && last.block && strings.HasSuffix(normalizeLineEndings(last.text), "\n") {
 			return
 		}
@@ -786,19 +821,16 @@ func (renderer *plainTextRenderer) appendBlockBreak() {
 }
 
 func (renderer *plainTextRenderer) text() (string, error) {
-	output := plainTextOutput{ctx: renderer.ctx, maximumBytes: renderer.maximumBytes}
-	capacity := len(renderer.tokens) * 8
-	if renderer.maximumBytes > 0 {
-		capacity = min(capacity, renderer.maximumBytes)
-	}
-	output.output.Grow(capacity)
-	for _, token := range renderer.tokens {
-		output.write(token)
-		if output.err != nil {
-			return "", output.err
-		}
-	}
-	return strings.Trim(output.output.String(), "\n"), renderer.ctx.Err()
+	return strings.Trim(renderer.output.output.String(), "\n"), renderer.ctx.Err()
+}
+
+type plainTextBudgetError struct {
+	resource string
+	limit    int
+}
+
+func (err *plainTextBudgetError) Error() string {
+	return fmt.Sprintf("plain-text %s exceeds %d bytes", err.resource, err.limit)
 }
 
 type plainTextOutput struct {
@@ -900,7 +932,7 @@ func (output *plainTextOutput) canAppend(size int) bool {
 		return false
 	}
 	if output.maximumBytes > 0 && size > output.maximumBytes-output.output.Len() {
-		output.err = validationError("plain-text draft body exceeds 4 MiB")
+		output.err = &plainTextBudgetError{resource: "output", limit: output.maximumBytes}
 		return false
 	}
 	return true
