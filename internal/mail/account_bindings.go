@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -339,7 +340,7 @@ func (s *fileAccountBindingStore) LoadAccountBindings() (AccountBindingFile, err
 	if err != nil {
 		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_unavailable", Message: "read account-binding file", Err: err}
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var document AccountBindingFile
 	if err := decoder.Decode(&document); err != nil {

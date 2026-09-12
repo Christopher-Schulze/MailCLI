@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -172,7 +173,7 @@ func readSendAttempt(root string, ref string, storage ...*draftStorage) (*SendAt
 	if err != nil {
 		return nil, fmt.Errorf("read send claim: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var stored storedSendAttempt
 	if err := decoder.Decode(&stored); err != nil {
@@ -380,7 +381,7 @@ func readSendReceipt(root string, ref string, storage ...*draftStorage) (*SendRe
 	if err != nil {
 		return nil, fmt.Errorf("read send receipt: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var stored storedSendReceipt
 	if err := decoder.Decode(&stored); err != nil {
@@ -546,7 +547,7 @@ func readDraftSaveAttempt(root string, ref string, storage ...*draftStorage) (*D
 	if err != nil {
 		return nil, fmt.Errorf("read draft-save claim: %w", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var stored storedDraftSaveAttempt
 	if err := decoder.Decode(&stored); err != nil {
