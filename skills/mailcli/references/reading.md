@@ -1,5 +1,6 @@
 # Reading, search, and attachments
 
+- Complete local reads work while Mail.app is closed. List/search discover messages from Apple's local index; they do not poll the server for newly arrived messages. An empty or complete local result does not prove current server absence or recipient delivery. sync --check compares counts without downloading new mail; sync without --check requires the already-running Mail.app and only triggers its synchronization.
 - Resolve account and mailbox references through list/resolve commands. Preserve the exact server mailbox name and path; never guess localized display names. Traverse every returned mailbox for an all-mail request.
 - Inspect account `complete`, `identity_coverage`, and degraded remediation. A degraded account is not a valid send or mutation target; an ambiguous or stale binding must be fixed before transport.
 - Message pages are bounded to 25. Continue until `data.page.next_cursor` is empty. References and cursors are opaque, query/store bound, and short-lived; list or search again after copy, move, delete, or synchronization.
