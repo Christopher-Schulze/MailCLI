@@ -49,13 +49,15 @@ type outputFlagState struct {
 }
 
 type outputOptions struct {
-	target         projectionTarget
-	view           string
-	fields         map[string]struct{}
-	fieldsProvided bool
-	exportPath     string
-	maxBytes       int64
-	stderr         io.Writer
+	target                 projectionTarget
+	view                   string
+	fields                 map[string]struct{}
+	fieldsProvided         bool
+	exportPath             string
+	maxBytes               int64
+	stderr                 io.Writer
+	allowExport            bool
+	draftMutationCompleted bool
 }
 
 type projectionInfo struct {
@@ -123,16 +125,25 @@ type attachmentProjection struct {
 }
 
 type outputTooLargeError struct {
-	actual int
-	limit  int64
-	target string
+	actual            int
+	limit             int64
+	target            string
+	allowExport       bool
+	completedDraftRef string
 }
 
 func (e *outputTooLargeError) Error() string {
-	return fmt.Sprintf(
-		"%s JSON output is %d bytes, above the %d-byte limit; use --export PATH for complete content or raise --max-bytes",
+	message := fmt.Sprintf(
+		"%s JSON output is %d bytes, above the %d-byte limit",
 		e.target, e.actual, e.limit,
 	)
+	if e.completedDraftRef != "" {
+		return fmt.Sprintf("%s; draft mutation already completed; inspect with 'mailcli drafts inspect --ref %s --view full --json' instead of repeating the mutation", message, e.completedDraftRef)
+	}
+	if e.allowExport {
+		return message + "; use --export PATH with a content-capable view for complete content or raise --max-bytes"
+	}
+	return message + "; narrow --fields or raise --max-bytes"
 }
 
 func (e *outputTooLargeError) ErrorCode() string {
@@ -159,6 +170,7 @@ func addOutputFlags(flags *flag.FlagSet, target projectionTarget, defaultView st
 
 func (s outputFlagState) options(target projectionTarget) (outputOptions, error) {
 	options := outputOptions{target: target, view: strings.ToLower(strings.TrimSpace(*s.view)), maxBytes: *s.maxBytes}
+	options.allowExport = s.export != nil
 	viewProvided, fieldsProvided, exportProvided := false, false, false
 	s.flags.Visit(func(option *flag.Flag) {
 		switch option.Name {
@@ -599,9 +611,14 @@ func writeProjectedSuccess(stdout io.Writer, command string, data responseData, 
 		return 1
 	}
 	if int64(len(payload)) > options.maxBytes {
-		return writeProjectedFailure(stdout, command, data, options, &outputTooLargeError{
+		limitErr := &outputTooLargeError{
 			actual: len(payload), limit: options.maxBytes, target: string(options.target),
-		}, false)
+			allowExport: options.allowExport,
+		}
+		if data.draftMutationCompleted && data.Draft != nil {
+			limitErr.completedDraftRef = data.Draft.Ref
+		}
+		return writeProjectedFailure(stdout, command, data, options, limitErr, false)
 	}
 	return writeEnvelopeBytes(stdout, payload)
 }

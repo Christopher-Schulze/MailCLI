@@ -311,6 +311,7 @@ func runDraftEdit(
 	if err != nil {
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
+	output.draftMutationCompleted = true
 	return writeDraftResponse(stdout, "drafts.edit", updated, *jsonOutput, output)
 }
 
