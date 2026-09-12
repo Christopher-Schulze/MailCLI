@@ -165,9 +165,18 @@ func TestStoredDraftDiagnosticIntegrity(t *testing.T) {
 			}
 			read, err := service.GetDraft(draft.Ref)
 			if test.invalid {
+				// The inspection path trusts stored diagnostics; the canonical
+				// mutation gate still rejects them.
+				if err != nil {
+					t.Fatalf("GetDraft() structural read failed: %v", err)
+				}
+				_, err = service.UpdateDraftContext(context.Background(), UpdateDraftRequest{
+					Ref: draft.Ref, ExpectedRevision: read.Revision,
+					Input: DraftInput{To: read.To, Body: read.Body, BodyFormat: read.BodyFormat},
+				})
 				var operation *OperationError
 				if !errors.As(err, &operation) || operation.Code != "draft_state_error" {
-					t.Errorf("tampered diagnostics accepted: %+v, %v", read.ContentDiagnostics, err)
+					t.Errorf("tampered diagnostics accepted by mutation gate: %+v, %v", read.ContentDiagnostics, err)
 				}
 			} else if err != nil || !reflect.DeepEqual(read.ContentDiagnostics, want) || read.Revision != draft.Revision || read.Body != draft.Body || read.BodyHTML != draft.BodyHTML || read.BodySource != draft.BodySource {
 				t.Errorf("valid stored content changed: %+v, %v", read, err)

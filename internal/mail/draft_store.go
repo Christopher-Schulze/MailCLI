@@ -42,7 +42,7 @@ func (s *Service) GetDraft(ref string) (Draft, error) {
 	if err != nil {
 		return Draft{}, err
 	}
-	return readDraftFileWithObserver(root, ref, s.contentObserver)
+	return readDraftFileForInspection(root, ref, s.contentObserver)
 }
 
 // GetSendReceipt returns the compact terminal proof for a consumed draft.

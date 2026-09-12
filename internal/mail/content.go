@@ -106,6 +106,45 @@ func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentO
 	return validateStoredDraftLimits(*draft)
 }
 
+// validateStoredDraftContentStructuralWithObserver checks stored shape,
+// format, and limits without re-rendering rich bodies. A draft whose stored
+// diagnostics are absent (legacy layout) still runs the canonical pass so
+// display receives computed diagnostics; a present diagnostics value is
+// trusted on read paths and re-verified canonically on mutation gates.
+func validateStoredDraftContentStructuralWithObserver(draft *Draft, observer draftContentObserver) error {
+	if draft == nil {
+		return validationError("stored draft is missing")
+	}
+	switch draft.BodyFormat {
+	case DraftBodyPlain:
+		if draft.BodySource != "" || draft.BodyHTML != "" || len(draft.ContentDiagnostics) > 0 {
+			return validationError("plain draft contains unexpected rich content")
+		}
+	case DraftBodyMarkdown, DraftBodyHTML:
+		if draft.BodySource == "" && (draft.Body != "" || draft.BodyHTML != "") {
+			return validationError("rich draft is missing its source body")
+		}
+		if len(draft.BodySource) > MaximumDraftBodyBytes {
+			return validationError("draft body exceeds 4 MiB")
+		}
+		if draft.ContentDiagnostics == nil {
+			prepared, err := prepareDraftContentWithObserver(
+				context.Background(), draft.BodyFormat, draft.BodySource, observer,
+			)
+			if err != nil {
+				return err
+			}
+			if prepared.Plain != draft.Body || prepared.HTML != draft.BodyHTML {
+				return validationError("stored rich draft does not match its canonical rendering")
+			}
+			draft.ContentDiagnostics = prepared.Diagnostics
+		}
+	default:
+		return validationError("stored draft has an unsupported body format")
+	}
+	return validateStoredDraftLimits(*draft)
+}
+
 func renderMarkdownContent(ctx context.Context, source string) (preparedDraftContent, error) {
 	rendered := draftHTMLWriter{ctx: ctx}
 	if err := markdown.Convert([]byte(source), &rendered); err != nil {

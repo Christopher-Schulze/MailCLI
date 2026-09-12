@@ -44,11 +44,26 @@ func readDraftFile(root string, ref string, storage ...*draftStorage) (Draft, er
 }
 
 func readDraftFileWithObserver(root string, ref string, observer draftContentObserver, storage ...*draftStorage) (Draft, error) {
+	return readDraftFileChecked(root, ref, observer, true, storage...)
+}
+
+// readDraftFileForInspection loads a draft for display without the canonical
+// re-render; mutation gates still verify the canonical transformation.
+func readDraftFileForInspection(root string, ref string, observer draftContentObserver, storage ...*draftStorage) (Draft, error) {
+	return readDraftFileChecked(root, ref, observer, false, storage...)
+}
+
+func readDraftFileChecked(root string, ref string, observer draftContentObserver, canonical bool, storage ...*draftStorage) (Draft, error) {
 	draft, err := loadDraftDocument(root, ref, storage...)
 	if err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, err)
 	}
-	if err := validateStoredDraftContentWithObserver(&draft, observer); err != nil {
+	if canonical {
+		err = validateStoredDraftContentWithObserver(&draft, observer)
+	} else {
+		err = validateStoredDraftContentStructuralWithObserver(&draft, observer)
+	}
+	if err != nil {
 		return Draft{}, wrapDraftStateError(root, ref, fmt.Errorf("validate draft content: %w", err))
 	}
 	if err := refreshDraftRevision(&draft); err != nil {
