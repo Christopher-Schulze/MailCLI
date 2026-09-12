@@ -320,6 +320,9 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 		OlderThan: time.Duration(*olderThan) * pruneDayDuration,
 		Confirm:   *confirm,
 	})
+	if !*jsonOutput {
+		writeDraftPruneResult(stdout, result, err == nil)
+	}
 	if err != nil {
 		return failCommandWithData(
 			"drafts.prune", *jsonOutput, responseData{PruneResult: &result}, err, stdout, stderr,
@@ -328,18 +331,25 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 	if *jsonOutput {
 		return writeSuccess(stdout, "drafts.prune", responseData{PruneResult: &result})
 	}
-	if len(result.Candidates) == 0 && len(result.ExpiredReceipts) == 0 && len(result.SweptLocks) == 0 {
+	return 0
+}
+
+func writeDraftPruneResult(stdout io.Writer, result mail.PruneDraftsResult, complete bool) {
+	if complete && len(result.Candidates)+len(result.ExpiredReceipts)+len(result.OrphanArtifacts)+
+		len(result.Removed)+len(result.SweptLocks)+len(result.SweptArtifacts)+len(result.Failed) == 0 {
 		writeLine(stdout, "no stale never-sent drafts")
-		return 0
+		return
 	}
-	if !*confirm {
+	if result.DryRun {
 		for _, candidate := range result.Candidates {
 			writeFormat(stdout, "would remove\t%s\t%d days\t%s\n", candidate.Ref, candidate.AgeDays, oneLine(candidate.Subject))
 		}
 		for _, ref := range result.ExpiredReceipts {
 			writeFormat(stdout, "would remove receipt\t%s\n", ref)
 		}
-		return 0
+		for _, ref := range result.OrphanArtifacts {
+			writeFormat(stdout, "would sweep artifacts\t%s\n", ref)
+		}
 	}
 	for _, ref := range result.Removed {
 		writeFormat(stdout, "removed\t%s\n", ref)
@@ -347,13 +357,17 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 	for _, ref := range result.SweptLocks {
 		writeFormat(stdout, "swept_lock\t%s\n", ref)
 	}
-	for _, ref := range result.ExpiredReceipts {
-		writeFormat(stdout, "removed receipt\t%s\n", ref)
+	if !result.DryRun {
+		for _, ref := range result.ExpiredReceipts {
+			writeFormat(stdout, "removed receipt\t%s\n", ref)
+		}
+	}
+	for _, ref := range result.SweptArtifacts {
+		writeFormat(stdout, "swept_artifacts\t%s\n", ref)
 	}
 	for _, failure := range result.Failed {
-		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, failure.Error)
+		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, oneLine(failure.Error))
 	}
-	return 0
 }
 
 func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
