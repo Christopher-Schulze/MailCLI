@@ -35,7 +35,7 @@ func TestDraftSummaryProjectionValidatesSkippedStrings(t *testing.T) {
 		{"wrong delimiters", `{"body":["secret"}}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			projected, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(test.input))
+			projected, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(test.input), int64(len(test.input)))
 			valid := err == nil && json.Valid(projected)
 			if valid != test.valid {
 				t.Fatalf("projection validity = %t, want %t, error = %v", valid, test.valid, err)
@@ -50,17 +50,17 @@ func TestDraftSummaryProjectionValidatesSkippedStrings(t *testing.T) {
 func TestDraftSummaryProjectionBoundsMetadataAndReadsBodyFully(t *testing.T) {
 	for _, size := range []int{1, 1024 * 1024} {
 		payload := `{"body":"` + strings.Repeat("b", size) + `","subject":"retained"}`
-		projection, readBytes, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload))
+		projection, readBytes, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload), int64(len(payload)))
 		if err != nil || string(projection) != `{"body":"","subject":"retained"}` || readBytes != int64(len(payload)) {
 			t.Fatalf("size %d: projected=%q, read=%d, error=%v", size, projection, readBytes, err)
 		}
 	}
 	payload := `{"subject":"` + strings.Repeat("s", maximumDraftSummaryBytes) + `"}`
-	if _, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload)); err == nil {
+	if _, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload), int64(len(payload))); err == nil {
 		t.Fatal("oversized metadata accepted")
 	}
 	payload = `{"body":"` + strings.Repeat("b", int(maximumDraftStateBytes)) + `"}`
-	if _, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload)); err == nil {
+	if _, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(payload), int64(len(payload))); err == nil {
 		t.Fatal("oversized record accepted")
 	}
 }
@@ -76,7 +76,7 @@ func TestDraftSummaryProjectionCancelsDuringLargeBody(t *testing.T) {
 			cancel()
 		}
 	}}
-	_, readBytes, err := projectDraftSummaryJSON(ctx, reader)
+	_, readBytes, err := projectDraftSummaryJSON(ctx, reader, int64(len(payload)))
 	if !errors.Is(err, context.Canceled) || readBytes >= int64(len(payload)) || readBytes != int64(reads) {
 		t.Fatalf("mid-body cancellation: bytes=%d, error=%v", readBytes, err)
 	}
@@ -136,7 +136,7 @@ func FuzzDraftSummaryProjectionPreservesJSONValidity(f *testing.F) {
 		if len(input) > 64*1024 {
 			return
 		}
-		projection, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(input))
+		projection, _, err := projectDraftSummaryJSON(context.Background(), strings.NewReader(input), int64(len(input)))
 		if err == nil && json.Valid(projection) && !json.Valid([]byte(input)) {
 			t.Fatal("projection made malformed JSON valid")
 		}
