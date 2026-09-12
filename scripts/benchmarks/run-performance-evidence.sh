@@ -150,6 +150,12 @@ run_group \
   '^BenchmarkDraft(SummaryBodies|ListPage)$' \
   5x
 run_group \
+  projected-output \
+  'tiny, 1 MiB and 8 MiB raw JSON; accepted and oversized output including finalization' \
+  ./internal/cli \
+  '^BenchmarkProjectedRawOutput$' \
+  5x
+run_group \
   imap-concurrency \
   'two concurrent STATUS or FETCH operations against a loopback fake server with 2 ms command delay and one or two sessions' \
   ./internal/transport/imapclient \
