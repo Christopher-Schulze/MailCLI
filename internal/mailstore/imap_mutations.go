@@ -1387,8 +1387,8 @@ func (c *Client) HydrateMessageBytes(ctx context.Context, messageRef string, enf
 	return raw, err
 }
 
-// rawFetchBound applies the same in-memory bound to both raw-source and
-// content hydration so an IMAP literal cannot bypass the local size limit.
+// rawFetchBound applies the same source-size bound to raw-source and content
+// hydration, including replayable spools, so no literal bypasses the local limit.
 func rawFetchBound(_ bool) int64 {
 	return mail.MaximumRawSourceBytes
 }

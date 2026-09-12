@@ -755,6 +755,16 @@ func (c *Client) readLogicalLineWithLiterals(
 	maxResponseBytes int64,
 	maxLiteralCount int,
 ) (string, [][]byte, error) {
+	return c.readLogicalLineWithLiteralReader(sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, nil)
+}
+
+func (c *Client) readLogicalLineWithLiteralReader(
+	sess *session,
+	maxLiteralBytes int64,
+	maxResponseBytes int64,
+	maxLiteralCount int,
+	readLiteral func(int) ([]byte, error),
+) (string, [][]byte, error) {
 	var reconstructed strings.Builder
 	var literals [][]byte
 	var literalBytes int64
@@ -800,8 +810,14 @@ func (c *Client) readLogicalLineWithLiterals(
 
 		reconstructed.WriteString(prefix)
 		reconstructed.WriteString(imapLiteralMarker)
-		literal := make([]byte, size)
-		if _, err := io.ReadFull(sess.br, literal); err != nil {
+		var literal []byte
+		if readLiteral == nil {
+			literal = make([]byte, size)
+			_, err = io.ReadFull(sess.br, literal)
+		} else {
+			literal, err = readLiteral(size)
+		}
+		if err != nil {
 			sess.dirty = true
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return "", nil, &literalReadError{err: err}
@@ -2270,6 +2286,14 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 // FetchMessage fetches the raw RFC 5322 bytes for a message by UID using BODY.PEEK[].
 // maxBytes bounds the announced literal.
 func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
+	source, err := c.fetchMessage(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	return source.data, nil
+}
+
+func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64, spool bool) (*fetchSource, error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
@@ -2299,7 +2323,7 @@ func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchLiteral(ctx, ps.sess, tag, uid, maxBytes)
+	payload, err := c.readFetchSource(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool)
 	if err != nil {
 		return nil, err
 	}
@@ -2317,6 +2341,14 @@ func validateFetchLimit(maxBytes int64) error {
 }
 
 func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64) ([]byte, error) {
+	source, err := c.readFetchSource(ctx, sess, tag, requestedUID, 0, maxBytes, false)
+	if err != nil {
+		return nil, err
+	}
+	return source.data, nil
+}
+
+func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool) (result *fetchSource, resultErr error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
@@ -2324,14 +2356,42 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 	if responseLimit <= int64(^uint64(0)>>1)-maxIMAPResponseLineBytes {
 		responseLimit += maxIMAPResponseLineBytes
 	}
-	var payload []byte
+	var payload *fetchSource
+	var pending []*fetchSource
+	defer func() {
+		closeErr := closeFetchSources(pending)
+		if resultErr != nil || closeErr != nil {
+			closeErr = errors.Join(closeErr, payload.Close())
+			result = nil
+		}
+		resultErr = errors.Join(resultErr, closeErr)
+	}()
 	found := false
 	bodyReady := false
 	var mismatchedUID uint32
 	mismatchSeen := false
 	for {
-		line, literals, err := c.readLogicalLineWithLiterals(
+		if err := closeFetchSources(pending); err != nil {
+			return nil, err
+		}
+		pending = nil
+		if err := ctx.Err(); err != nil {
+			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
+		}
+		var memoryBytes int64
+		line, literals, err := c.readLogicalLineWithLiteralReader(
 			sess, maxBytes, responseLimit, maxFetchLiteralCount,
+			func(size int) ([]byte, error) {
+				source, err := readFetchSourceLiteral(ctx, sess.br, size, spool && int64(size)+memoryBytes >= fetchMemoryThreshold)
+				if err != nil {
+					return nil, err
+				}
+				pending = append(pending, source)
+				if source.file == nil {
+					memoryBytes += source.size
+				}
+				return source.data, nil
+			},
 		)
 		if err != nil {
 			var limitErr *literalLimitError
@@ -2359,6 +2419,10 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 			}
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
+		if err := validateFetchResponseValidity(line, tag, expectedUIDValidity); err != nil {
+			sess.dirty = true
+			return nil, err
+		}
 		if strings.HasPrefix(line, tag+" ") {
 			status := parseStatus(line, tag)
 			if status == "OK" {
@@ -2383,6 +2447,9 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 						Code:    transport.CodeIMAPMessageNotFound,
 						Message: "message BODY value not returned by IMAP FETCH",
 					}
+				}
+				if err := ctx.Err(); err != nil {
+					return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH completion")
 				}
 				return payload, nil
 			}
@@ -2422,7 +2489,12 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 		}
 		found = true
 		if parsed.bodyLiteral {
-			payload = parsed.body
+			if parsed.bodyIndex >= 0 {
+				payload = pending[parsed.bodyIndex]
+				pending[parsed.bodyIndex] = nil
+			} else {
+				payload = fetchedBytes(parsed.body)
+			}
 			bodyReady = true
 		}
 	}
@@ -2445,6 +2517,7 @@ type fetchResponse struct {
 	body         []byte
 	bodyPresent  bool
 	bodyLiteral  bool
+	bodyIndex    int
 }
 
 type fetchValueKind uint8
@@ -2458,9 +2531,10 @@ const (
 )
 
 type fetchValue struct {
-	kind    fetchValueKind
-	text    string
-	literal []byte
+	kind         fetchValueKind
+	text         string
+	literal      []byte
+	literalIndex int
 }
 
 type fetchResponseParser struct {
@@ -2476,7 +2550,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 	if err := parser.parsePrefix(); err != nil {
 		return fetchResponse{}, err
 	}
-	response := fetchResponse{sequence: parser.sequence}
+	response := fetchResponse{sequence: parser.sequence, bodyIndex: -1}
 	for {
 		parser.skipSpace()
 		if parser.position >= len(parser.input) {
@@ -2539,6 +2613,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 			switch value.kind {
 			case fetchValueLiteral:
 				response.body = value.literal
+				response.bodyIndex = value.literalIndex
 				response.bodyLiteral = true
 			case fetchValueQuoted:
 				response.body = []byte(value.text)
@@ -2666,7 +2741,7 @@ func (p *fetchResponseParser) parseValue(depth int) (fetchValue, error) {
 		if p.nextLiteral >= len(p.literals) {
 			return fetchValue{}, errors.New("missing FETCH response literal")
 		}
-		value := fetchValue{kind: fetchValueLiteral, literal: p.literals[p.nextLiteral]}
+		value := fetchValue{kind: fetchValueLiteral, literal: p.literals[p.nextLiteral], literalIndex: p.nextLiteral}
 		p.nextLiteral++
 		p.position++
 		return value, nil
