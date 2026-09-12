@@ -117,19 +117,9 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 				closeErr := errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
 				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, closeErr)
 			}
-			var storage *draftStorage
-			if runtime.GOOS == "darwin" {
-				pinnedRoot, storageErr := os.OpenRoot(fmt.Sprintf("/dev/fd/%d", lock.directory.Fd()))
-				if storageErr != nil {
-					return nil, errors.Join(fmt.Errorf("open pinned draft directory: %w", storageErr), syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
-				}
-				storage = &draftStorage{root: pinnedRoot, rootName: root, directory: lock.directory}
-			} else {
-				var storageErr error
-				storage, storageErr = openPinnedDraftStorage(root, lock, ref)
-				if storageErr != nil {
-					return nil, errors.Join(storageErr, syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
-				}
+			storage, storageErr := openPinnedDraftStorage(root, lock, ref)
+			if storageErr != nil {
+				return nil, errors.Join(storageErr, syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
 			}
 			return &draftLease{lock: lock, storage: storage}, nil
 		}
