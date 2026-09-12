@@ -15,3 +15,11 @@ type AccountCatalog struct {
 type AccountCatalogReader interface {
 	ListAccountCatalog(context.Context) (AccountCatalog, error)
 }
+
+// BindingValidationCatalogReader is an optional capability that lists the
+// account catalog for send-time binding validation. Bound accounts skip the
+// Sent-history sender scan because their senders validate against configured
+// aliases; unbound accounts keep the full identity resolution.
+type BindingValidationCatalogReader interface {
+	ListBindingValidationCatalog(context.Context) (AccountCatalog, error)
+}

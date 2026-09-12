@@ -76,6 +76,18 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 }
 
 func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, error) {
+	return s.listAccountCatalog(ctx, false)
+}
+
+// ListBindingValidationCatalog lists the account catalog for send-time
+// binding validation. Bound accounts skip the Sent-history sender scan:
+// their permitted senders come from configured aliases, so the scan cannot
+// change the validation outcome. Unbound accounts keep full resolution.
+func (s *Store) ListBindingValidationCatalog(ctx context.Context) (mail.AccountCatalog, error) {
+	return s.listAccountCatalog(ctx, true)
+}
+
+func (s *Store) listAccountCatalog(ctx context.Context, skipBoundIdentityScan bool) (mail.AccountCatalog, error) {
 	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
@@ -95,7 +107,7 @@ func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, er
 	for _, location := range s.activeAccounts {
 		// Degraded accounts stay listed (state+reason on the Account); only
 		// hard SQL failures abort discovery for everyone.
-		account, err := s.loadAccountWithBindings(ctx, location, recordsByPath, bindings)
+		account, err := s.loadAccountWithBindings(ctx, location, recordsByPath, bindings, skipBoundIdentityScan)
 		if err != nil {
 			var issue *accountCatalogIssue
 			if errors.As(err, &issue) {
@@ -133,7 +145,7 @@ func (s *Store) loadAccount(
 ) (mail.Account, error) {
 	return s.loadAccountWithBindings(ctx, location, records, mail.AccountBindingFile{
 		Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{},
-	})
+	}, false)
 }
 
 func (s *Store) loadAccountWithBindings(
@@ -141,6 +153,7 @@ func (s *Store) loadAccountWithBindings(
 	location mailboxLocation,
 	records map[string]mailboxRecord,
 	bindings mail.AccountBindingFile,
+	skipBoundIdentityScan bool,
 ) (mail.Account, error) {
 	ref, err := mailref.EncodeAccount(location.AccountID)
 	if err != nil {
@@ -201,6 +214,18 @@ func (s *Store) loadAccountWithBindings(
 		baseAccount.IdentityCoverage = mail.SenderIdentityCoverage{
 			Source: mail.SenderIdentityCoverageSourceNotApplicable,
 			State:  mail.SenderIdentityCoverageStateNotApplicable,
+		}
+		return baseAccount, nil
+	}
+	if skipBoundIdentityScan && bindingFound && accountType == mail.AccountTypeIMAP {
+		if len(binding.SenderAliases) > 0 {
+			baseAccount.DisplayName = binding.SenderAliases[0]
+		}
+		baseAccount.Name = baseAccount.DisplayName
+		baseAccount.EmailAddresses = mergeAccountAddresses(baseAccount.ConfiguredSenderAliases)
+		baseAccount.IdentityCoverage = mail.SenderIdentityCoverage{
+			Source: mail.SenderIdentityCoverageSourceAccountBinding,
+			State:  mail.SenderIdentityCoverageStateConfigured,
 		}
 		return baseAccount, nil
 	}
