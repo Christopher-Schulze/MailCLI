@@ -45,7 +45,7 @@ func TestPruneSweepsOrphanHandoffArtifacts(t *testing.T) {
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
 	snapshotFile := filepath.Join(
-		root, draft.Ref+handoffSnapshotSuffix, "attempt-id-1", "0", "staged.eml",
+		root, draft.Ref+handoffSnapshotSuffix, "handoff_123456789012345678901234", "0", "staged.eml",
 	)
 	if err := os.MkdirAll(filepath.Dir(snapshotFile), 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
