@@ -97,11 +97,23 @@ func (s *Service) validateBindingCatalog(
 	if accountID == "" {
 		accountID = binding.AccountID
 	}
-	accounts, err := s.ListAccounts(ctx)
-	if err != nil {
-		return &OperationError{
-			Code:    "account_catalog_incomplete",
-			Message: fmt.Sprintf("cannot validate account binding %s before send: %v", binding.AccountID, err),
+	var accounts []Account
+	if reader, ok := s.gateway.(BindingValidationCatalogReader); ok {
+		catalog, err := reader.ListBindingValidationCatalog(ctx)
+		if err != nil {
+			return &OperationError{
+				Code:    "account_catalog_incomplete",
+				Message: fmt.Sprintf("cannot validate account binding %s before send: %v", binding.AccountID, err),
+			}
+		}
+		accounts = catalog.Accounts
+	} else {
+		accounts, err = s.ListAccounts(ctx)
+		if err != nil {
+			return &OperationError{
+				Code:    "account_catalog_incomplete",
+				Message: fmt.Sprintf("cannot validate account binding %s before send: %v", binding.AccountID, err),
+			}
 		}
 	}
 	for _, account := range accounts {

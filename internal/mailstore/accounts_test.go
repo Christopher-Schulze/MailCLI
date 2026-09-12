@@ -194,3 +194,57 @@ func addLocalCatalogAccount(t *testing.T, store *Store) string {
 	}
 	return ref
 }
+
+func TestListBindingValidationCatalogSkipsBoundIdentityScan(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	installSentMailboxFixture(t, store)
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	if _, err := writer.Exec(
+		`INSERT INTO addresses(ROWID,address,comment) VALUES (3,'observed@example.com','Observed')`,
+	); err != nil {
+		closeTestResourceNow(t, writer, "observed sender writer")
+		t.Fatalf("insert observed sender: %v", err)
+	}
+	if _, err := writer.Exec(
+		`INSERT INTO messages(ROWID,sender,date_sent,date_received,mailbox,deleted) VALUES (20000,3,1000000,1000000,4,0)`,
+	); err != nil {
+		closeTestResourceNow(t, writer, "observed sender writer")
+		t.Fatalf("insert observed sent message: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close observed sender writer: %v", err)
+	}
+	bindingStore := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	if err := bindingStore.UpsertAccountBinding(mail.AccountBinding{
+		AccountID: testAccountID, SenderAliases: []string{"alias@gmail.com"}, CredentialAccount: "login@gmail.com",
+	}); err != nil {
+		t.Fatalf("UpsertAccountBinding() error = %v", err)
+	}
+	store.accountBindings = bindingStore
+
+	full, err := store.ListAccountCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountCatalog() error = %v", err)
+	}
+	if len(full.Accounts) != 1 || len(full.Accounts[0].DiscoveredSenderIdentities) == 0 {
+		t.Fatalf("full catalog = %+v, want discovered sent identity", full)
+	}
+
+	validation, err := store.ListBindingValidationCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListBindingValidationCatalog() error = %v", err)
+	}
+	if !validation.Complete || len(validation.Accounts) != 1 {
+		t.Fatalf("validation catalog = %+v", validation)
+	}
+	account := validation.Accounts[0]
+	if account.State != "ok" || len(account.DiscoveredSenderIdentities) != 0 ||
+		len(account.ConfiguredSenderAliases) != 1 || account.ConfiguredSenderAliases[0] != "alias@gmail.com" ||
+		len(account.EmailAddresses) != 1 || account.EmailAddresses[0] != "alias@gmail.com" ||
+		account.DisplayName != "alias@gmail.com" ||
+		account.IdentityCoverage.Source != mail.SenderIdentityCoverageSourceAccountBinding ||
+		account.IdentityCoverage.State != mail.SenderIdentityCoverageStateConfigured {
+		t.Fatalf("validation account = %+v", account)
+	}
+}
