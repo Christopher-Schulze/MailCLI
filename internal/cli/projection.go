@@ -625,11 +625,16 @@ func writeProjectedSuccess(stdout io.Writer, command string, data responseData, 
 
 func writeProjectedFailure(stdout io.Writer, command string, data responseData, options outputOptions, err error, failed bool) int {
 	data = dataForProjection(data, options, failed)
-	payload, marshalErr := marshalEnvelope(envelope{
-		SchemaVersion: schemaVersion, OK: false, Command: command, Data: data,
-		Error: newErrorData(command, data, err),
-	})
-	if marshalErr != nil || int64(len(payload)) > options.maxBytes {
+	var payload []byte
+	var marshalErr error
+	var oversized *outputTooLargeError
+	if !errors.As(err, &oversized) {
+		payload, marshalErr = marshalEnvelope(envelope{
+			SchemaVersion: schemaVersion, OK: false, Command: command, Data: data,
+			Error: newErrorData(command, data, err),
+		})
+	}
+	if payload == nil || marshalErr != nil || int64(len(payload)) > options.maxBytes {
 		// An error envelope must remain parseable even when the requested view is
 		// too large. Keep the identity and recovery evidence that fits without
 		// replaying the omitted body or headers.
@@ -703,66 +708,33 @@ func writeEnvelopeBytes(writer io.Writer, payload []byte) int {
 
 func (data responseData) MarshalJSON() ([]byte, error) {
 	type responseDataAlias responseData
-	copy := data
-	copy.Message, copy.Draft, copy.RawSource, copy.Attachments = nil, nil, nil, nil
-	var messageRaw, draftRaw, rawSourceRaw, attachmentsRaw json.RawMessage
-	if data.Message != nil {
-		var encoded []byte
-		var err error
-		if data.serialization != nil && data.serialization.message != nil {
-			encoded, err = json.Marshal(data.serialization.message)
-		} else {
-			encoded, err = json.Marshal(data.Message)
-		}
-		if err != nil {
-			return nil, err
-		}
-		messageRaw = encoded
+	copy := responseDataAlias(data)
+	projection := data.serialization
+	if projection == nil {
+		return json.Marshal(copy)
 	}
-	if data.Draft != nil {
-		var encoded []byte
-		var err error
-		if data.serialization != nil && data.serialization.draft != nil {
-			encoded, err = json.Marshal(data.serialization.draft)
-		} else {
-			encoded, err = json.Marshal(data.Draft)
-		}
-		if err != nil {
-			return nil, err
-		}
-		draftRaw = encoded
+	if projection.hideRaw {
+		copy.RawSource = nil
 	}
-	if data.RawSource != nil && (data.serialization == nil || !data.serialization.hideRaw) {
-		encoded, err := json.Marshal(data.RawSource)
-		if err != nil {
-			return nil, err
-		}
-		rawSourceRaw = encoded
+	// Projection constructors select one target. Shadow its field with the
+	// typed view so encoding visits body strings once, without RawMessage copies.
+	switch {
+	case data.Message != nil && projection.message != nil:
+		return json.Marshal(struct {
+			*responseDataAlias
+			Message *messageProjection `json:"message,omitempty"`
+		}{&copy, projection.message})
+	case data.Draft != nil && projection.draft != nil:
+		return json.Marshal(struct {
+			*responseDataAlias
+			Draft *draftProjection `json:"draft,omitempty"`
+		}{&copy, projection.draft})
+	case data.Attachments != nil && projection.attachments != nil:
+		return json.Marshal(struct {
+			*responseDataAlias
+			Attachments *[]attachmentProjection `json:"attachments,omitempty"`
+		}{&copy, projection.attachments})
+	default:
+		return json.Marshal(copy)
 	}
-	if data.Attachments != nil {
-		var encoded []byte
-		var err error
-		if data.serialization != nil && data.serialization.attachments != nil {
-			encoded, err = json.Marshal(data.serialization.attachments)
-		} else {
-			encoded, err = json.Marshal(data.Attachments)
-		}
-		if err != nil {
-			return nil, err
-		}
-		attachmentsRaw = encoded
-	}
-	return json.Marshal(struct {
-		*responseDataAlias
-		Message     json.RawMessage `json:"message,omitempty"`
-		Draft       json.RawMessage `json:"draft,omitempty"`
-		RawSource   json.RawMessage `json:"raw_source,omitempty"`
-		Attachments json.RawMessage `json:"attachments,omitempty"`
-	}{
-		responseDataAlias: (*responseDataAlias)(&copy),
-		Message:           messageRaw,
-		Draft:             draftRaw,
-		RawSource:         rawSourceRaw,
-		Attachments:       attachmentsRaw,
-	})
 }
