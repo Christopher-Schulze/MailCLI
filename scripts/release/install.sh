@@ -124,6 +124,15 @@ path_identity() {
   stat -f '%d:%i' "$1"
 }
 
+file_digest() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
+tree_digest() {
+  (cd "$1" && find . -type f -exec shasum -a 256 {} +) |
+    LC_ALL=C sort | shasum -a 256 | awk '{print $1}'
+}
+
 verify_install_lock() {
   if ! validate_existing_directory_chain "${INSTALL_LOCK_ROOT}" ||
     [[ "$(path_identity "${INSTALL_LOCK_ROOT}")" != "${INSTALL_LOCK_ROOT_IDENTITY}" ||
@@ -650,9 +659,14 @@ if [[ ! -f "${SOURCE_BINARY}" || -L "${SOURCE_BINARY}" || ! -x "${SOURCE_BINARY}
   printf 'Release binary is missing or not executable: %s\n' "${SOURCE_BINARY}" >&2
   exit 1
 fi
+SOURCE_BINARY_DIGEST="$(file_digest "${SOURCE_BINARY}")"
 if ! SOURCE_VERSION_OUTPUT="$("${SOURCE_BINARY}" version)" ||
   [[ ! "${SOURCE_VERSION_OUTPUT}" =~ ^mailcli\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Release binary version output is invalid\n' >&2
+  exit 1
+fi
+if [[ "$(file_digest "${SOURCE_BINARY}")" != "${SOURCE_BINARY_DIGEST}" ]]; then
+  printf 'Release binary changed during verification\n' >&2
   exit 1
 fi
 if [[ ! -f "${SOURCE_SKILL}/SKILL.md" || ! -f "${SOURCE_SKILL}/agents/openai.yaml" ]]; then
@@ -663,6 +677,7 @@ if find "${SOURCE_SKILL}" -type l -print -quit | grep -q .; then
   printf 'Release skill must not contain symbolic links\n' >&2
   exit 1
 fi
+SOURCE_SKILL_DIGEST="$(tree_digest "${SOURCE_SKILL}")"
 if [[ -L "${BINARY_DESTINATION}" || -L "${SKILL_DESTINATION}" ]]; then
   printf 'Refusing to replace a symbolic-link destination\n' >&2
   exit 1
@@ -754,20 +769,34 @@ fi
 chmod 0755 "${BINARY_STAGE}"
 cp "${SOURCE_BINARY}" "${BINARY_STAGE}"
 chmod 0755 "${BINARY_STAGE}"
-cmp -s "${SOURCE_BINARY}" "${BINARY_STAGE}"
+[[ "$(file_digest "${BINARY_STAGE}")" == "${SOURCE_BINARY_DIGEST}" ]] || {
+  printf 'Binary staging content differs from the verified release binary\n' >&2
+  exit 1
+}
 BINARY_STAGE_IDENTITY="$(path_identity "${BINARY_STAGE}")"
 if path_present "${SKILL_STAGE}" || ! mkdir -m 0700 "${SKILL_STAGE}"; then
   printf 'Could not create exclusive skill staging path\n' >&2
   exit 1
 fi
 cp -R "${SOURCE_SKILL}/." "${SKILL_STAGE}/"
+[[ "$(tree_digest "${SKILL_STAGE}")" == "${SOURCE_SKILL_DIGEST}" ]] || {
+  printf 'Skill staging content differs from the verified release skill\n' >&2
+  exit 1
+}
 diff -qr "${SOURCE_SKILL}" "${SKILL_STAGE}" >/dev/null
 SKILL_STAGE_IDENTITY="$(path_identity "${SKILL_STAGE}")"
 cp "${SOURCE_BINARY}" "${BINARY_SNAPSHOT}"
 chmod 0755 "${BINARY_SNAPSHOT}"
 mkdir -m 0700 "${SKILL_SNAPSHOT}"
 cp -R "${SOURCE_SKILL}/." "${SKILL_SNAPSHOT}/"
-cmp -s "${SOURCE_BINARY}" "${BINARY_SNAPSHOT}"
+[[ "$(file_digest "${BINARY_SNAPSHOT}")" == "${SOURCE_BINARY_DIGEST}" ]] || {
+  printf 'Binary snapshot content differs from the verified release binary\n' >&2
+  exit 1
+}
+[[ "$(tree_digest "${SKILL_SNAPSHOT}")" == "${SOURCE_SKILL_DIGEST}" ]] || {
+  printf 'Skill snapshot content differs from the verified release skill\n' >&2
+  exit 1
+}
 diff -qr "${SOURCE_SKILL}" "${SKILL_SNAPSHOT}" >/dev/null
 manifest_write prepared
 
@@ -805,7 +834,14 @@ sync_filesystem
 component_matches_snapshot skill
 manifest_write skill_installed
 
-cmp -s "${SOURCE_BINARY}" "${BINARY_DESTINATION}"
+[[ "$(file_digest "${BINARY_DESTINATION}")" == "${SOURCE_BINARY_DIGEST}" ]] || {
+  printf 'Installed binary differs from the verified release binary\n' >&2
+  exit 1
+}
+[[ "$(tree_digest "${SKILL_DESTINATION}")" == "${SOURCE_SKILL_DIGEST}" ]] || {
+  printf 'Installed skill differs from the verified release skill\n' >&2
+  exit 1
+}
 diff -qr "${SOURCE_SKILL}" "${SKILL_DESTINATION}" >/dev/null
 [[ "$("${BINARY_DESTINATION}" version)" == "${SOURCE_VERSION_OUTPUT}" ]]
 
