@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 MAILCLI_BINARY="${MAILCLI_BINARY:-${MAILCLI_ROOT}/bin/mailcli}"
 MAILCLI_MAX_POST_SECONDS="${MAILCLI_MAX_POST_SECONDS:-2.0}"
 

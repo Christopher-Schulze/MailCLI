@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-preflight-test.XXXXXX")"
 cleanup() {
   if [[ "${TEST_ROOT}" == *"/mailcli-preflight-test."* && -d "${TEST_ROOT}" ]]; then

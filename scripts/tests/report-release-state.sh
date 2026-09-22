@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DIST_DIRECTORY="${MAILCLI_DIST_DIRECTORY:-${MAILCLI_ROOT}/dist}"
 BINARY_DESTINATION="${MAILCLI_BINARY_DESTINATION:-${HOME}/.local/bin/mailcli}"
 SKILL_DESTINATION="${MAILCLI_SKILL_DESTINATION:-${HOME}/.agents/skills/mailcli}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 REPOSITORY_SKILL="${MAILCLI_ROOT}/skills/mailcli"
 INSTALLED_SKILL="${MAILCLI_SKILL_DESTINATION:-}"
 SNAPSHOT_ROOT=""

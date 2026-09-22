@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 EXPORT_TOOL="${MAILCLI_ROOT}/scripts/utils/export-task-history.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-task-history-export.XXXXXX")"
 

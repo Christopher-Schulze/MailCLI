@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-${SCRIPT_BASE}}"
+export MAILCLI_ROOT
 cd "${MAILCLI_ROOT}"
 unset MAILCLI_BINARY_DESTINATION MAILCLI_SKILL_DESTINATION
 
@@ -55,10 +57,10 @@ if ((SKILL_BYTES > 9000)); then
   exit 1
 fi
 
-"${MAILCLI_ROOT}/scripts/tests/test-preflight-cache.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-bootstrap.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-install-local.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-skill-drift.sh"
+"${SCRIPT_BASE}/scripts/tests/test-preflight-cache.sh"
+"${SCRIPT_BASE}/scripts/tests/test-bootstrap.sh"
+"${SCRIPT_BASE}/scripts/tests/test-install-local.sh"
+"${SCRIPT_BASE}/scripts/tests/test-skill-drift.sh"
 
 while IFS= read -r -d '' SCRIPT_PATH; do
   if [[ ! -x "${SCRIPT_PATH}" ]]; then
@@ -110,13 +112,13 @@ fi
 
 go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
   -parallel "${MAILCLI_TEST_CPUS}" ./...
-"${MAILCLI_ROOT}/scripts/tests/test-task-history-export.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-write-coordination.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-commit-authority.sh"
-"${MAILCLI_ROOT}/scripts/tests/test-release-authority.sh"
+"${SCRIPT_BASE}/scripts/tests/test-task-history-export.sh"
+"${SCRIPT_BASE}/scripts/tests/test-write-coordination.sh"
+"${SCRIPT_BASE}/scripts/tests/test-commit-authority.sh"
+"${SCRIPT_BASE}/scripts/tests/test-release-authority.sh"
 RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
   refs/heads refs/remotes refs/tags)"
-"${MAILCLI_ROOT}/scripts/tests/test-release.sh"
+"${SCRIPT_BASE}/scripts/tests/test-release.sh"
 RELEASE_REFS_AFTER="$(git for-each-ref --format='%(refname) %(objectname)' \
   refs/heads refs/remotes refs/tags)"
 if [[ "${RELEASE_REFS_AFTER}" != "${RELEASE_REFS_BEFORE}" ]]; then

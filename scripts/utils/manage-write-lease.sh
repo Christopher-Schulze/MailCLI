@@ -263,7 +263,32 @@ gate_lease() {
 
   rm -f "$(lease_file gate_patch_sha256)" "$(lease_file gate_head)" "$(lease_file gate_at)"
   local GATE_STATUS=0
-  "${MAILCLI_ROOT}/scripts/tests/test.sh" || GATE_STATUS=$?
+  local HARNESS_DIR
+  local HARNESS_SCRIPT
+  local HARNESS_CAPABLE=true
+  HARNESS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-gate-harness.XXXXXX")"
+  if ! git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |
+    tar -x -C "${HARNESS_DIR}"; then
+    rm -rf "${HARNESS_DIR}"
+    fail "Could not extract the baseline gate harness from ${BASELINE_HEAD}"
+  fi
+  while IFS= read -r -d '' HARNESS_SCRIPT; do
+    if ! grep -q 'MAILCLI_ROOT:-' "${HARNESS_SCRIPT}"; then
+      HARNESS_CAPABLE=false
+      break
+    fi
+  done < <(find "${HARNESS_DIR}/scripts/tests" -type f -name '*.sh' -print0)
+  if [[ "${HARNESS_CAPABLE}" == true &&
+    -x "${HARNESS_DIR}/scripts/tests/test.sh" ]]; then
+    MAILCLI_ROOT="${MAILCLI_ROOT}" \
+      "${HARNESS_DIR}/scripts/tests/test.sh" || GATE_STATUS=$?
+    rm -rf "${HARNESS_DIR}"
+    printf 'gate_harness=baseline\n'
+  else
+    rm -rf "${HARNESS_DIR}"
+    printf 'gate_harness=worktree_transitional\n' >&2
+    "${MAILCLI_ROOT}/scripts/tests/test.sh" || GATE_STATUS=$?
+  fi
   if [[ "${GATE_STATUS}" -ne 0 ]]; then
     printf 'Full gate failed with status %s; commit proof was not recorded\n' "${GATE_STATUS}" >&2
     return "${GATE_STATUS}"

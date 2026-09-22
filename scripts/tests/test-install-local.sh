@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 GOMODCACHE_ROOT="$(go env GOMODCACHE)"
 GOCACHE_ROOT="$(go env GOCACHE)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-local-install-test.XXXXXX")"

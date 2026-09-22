@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 LEASE_TOOL="${MAILCLI_ROOT}/scripts/utils/manage-write-lease.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-write-coordination.XXXXXX")"
 TEST_REPOSITORY="${TEST_ROOT}/repo"
@@ -19,7 +19,11 @@ git -C "${TEST_REPOSITORY}" config user.name "MailCLI Test"
 git -C "${TEST_REPOSITORY}" config user.email "mailcli-test@example.invalid"
 printf 'original\n' >"${TEST_REPOSITORY}/tracked.txt"
 printf 'other\n' >"${TEST_REPOSITORY}/other.txt"
-printf '%s\n' '#!/usr/bin/env bash' "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"' \
+  'printf "baseline-harness\\n"' \
+  "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
 
 stage_fixture_path() {
@@ -97,4 +101,41 @@ fi
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" abort "${ABORT_TOKEN}" >/dev/null
 
-printf 'Write coordination passed: one writer, exact path scope, failure-preserving gate, and tested commit identity\n'
+HARNESS_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" acquire 176 harness-writer scripts/tests/test.sh)"
+HARNESS_TOKEN="$(printf '%s\n' "${HARNESS_ACQUIRE_OUTPUT}" |
+  sed -n 's/^write_lease_token=//p')"
+[[ -n "${HARNESS_TOKEN}" ]]
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"' \
+  'printf "patched-harness\\n"' \
+  "printf 'x' >\"${TEST_REPOSITORY}/patched-harness-ran\"" \
+  "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
+chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
+stage_fixture_path scripts/tests/test.sh 100755
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" review "${HARNESS_TOKEN}" >/dev/null
+GATE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" gate "${HARNESS_TOKEN}" 2>&1)"
+printf '%s\n' "${GATE_OUTPUT}" | grep -Fq 'baseline-harness' || {
+  printf 'Gate did not run the baseline harness\n' >&2
+  exit 1
+}
+if printf '%s\n' "${GATE_OUTPUT}" | grep -Fq 'patched-harness'; then
+  printf 'Gate ran the staged harness patch instead of the baseline harness\n' >&2
+  exit 1
+fi
+[[ ! -e "${TEST_REPOSITORY}/patched-harness-ran" ]] || {
+  printf 'Staged harness patch executed inside the gate\n' >&2
+  exit 1
+}
+TASK_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
+TASK_COMMIT="$(printf 'TASK 176: baseline harness fixture\n' |
+  git -C "${TEST_REPOSITORY}" commit-tree "${TASK_TREE}" -p "${TASK_COMMIT}")"
+git -C "${TEST_REPOSITORY}" checkout -q --detach "${TASK_COMMIT}"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" release "${HARNESS_TOKEN}" >/dev/null
+[[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+
+printf 'Write coordination passed: one writer, exact path scope, failure-preserving gate, baseline-bound harness, and tested commit identity\n'
