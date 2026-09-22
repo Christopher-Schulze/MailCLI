@@ -92,7 +92,42 @@ func (c *Client) ProbeWithDiagnostics(
 		Name: "mail-store-read", Status: "pass",
 		Detail: "strict read-only WAL access; schema " + c.store.SchemaFingerprint(),
 	})
+	if profile, known := c.StoreProfile(); known {
+		checks = append(checks, mail.Check{
+			Name: "mail-store-profile", Status: "pass", Detail: storeProfileDetail(profile),
+		})
+	}
 	return mail.DiagnosticReport{Checks: checks}, timings
+}
+
+// StoreProfile reports whether the opened Envelope Index carries the exact
+// verified profile or an unverified writer build whose format generation and
+// required capabilities still verify.
+func (c *Client) StoreProfile() (mail.StoreProfile, bool) {
+	if c == nil || c.store == nil {
+		return mail.StoreProfile{}, false
+	}
+	capability := c.store.capability
+	profile := mail.StoreProfile{
+		State:                     mail.StoreProfileVerified,
+		FrameworkVersion:          capability.FrameworkVersion,
+		SupportedFrameworkVersion: supportedFrameworkVersion,
+	}
+	if !capability.ProfileVerified {
+		profile.State = mail.StoreProfileUnverified
+		profile.Code = mail.StoreProfileUnverifiedCode
+	}
+	return profile, true
+}
+
+func storeProfileDetail(profile mail.StoreProfile) string {
+	if profile.Unverified() {
+		return fmt.Sprintf(
+			"profile unverified: framework %s differs from verified %s; schema capabilities verified",
+			profile.FrameworkVersion, profile.SupportedFrameworkVersion,
+		)
+	}
+	return "profile verified"
 }
 
 func (c *Client) platformChecks(ctx context.Context, live bool) []mail.Check {

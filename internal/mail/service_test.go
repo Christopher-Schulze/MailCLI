@@ -219,6 +219,37 @@ func TestServicePassthroughAndHealth(t *testing.T) {
 	}
 }
 
+type profiledGatewayStub struct {
+	*gatewayStub
+	profile StoreProfile
+}
+
+func (g *profiledGatewayStub) StoreProfile() (StoreProfile, bool) {
+	return g.profile, true
+}
+
+func TestServiceStoreProfile(t *testing.T) {
+	want := StoreProfile{
+		State:                     StoreProfileUnverified,
+		Code:                      StoreProfileUnverifiedCode,
+		FrameworkVersion:          "9999.1",
+		SupportedFrameworkVersion: "3826.700.81",
+	}
+	profile, known := NewService(&profiledGatewayStub{
+		gatewayStub: &gatewayStub{}, profile: want,
+	}).StoreProfile()
+	if !known || profile != want || !profile.Unverified() {
+		t.Fatalf("StoreProfile() = %#v, %v", profile, known)
+	}
+	if _, known := NewService(&gatewayStub{}).StoreProfile(); known {
+		t.Fatal("StoreProfile() known for gateway without profiler")
+	}
+	var nilService *Service
+	if _, known := nilService.StoreProfile(); known {
+		t.Fatal("StoreProfile() known for nil service")
+	}
+}
+
 type credentialInvalidatingImapStub struct {
 	transport.ImapOperator
 	configs []transport.ImapConfig

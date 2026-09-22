@@ -2898,3 +2898,49 @@ func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
 		t.Fatalf("missing Message-ID error = %v", err)
 	}
 }
+
+func TestClientStoreProfileAndProbeCheck(t *testing.T) {
+	unverified := &Client{store: &Store{capability: schemaCapability{
+		FrameworkVersion: "9999.1",
+	}}}
+	profile, known := unverified.StoreProfile()
+	if !known || !profile.Unverified() || profile.Code != mail.StoreProfileUnverifiedCode ||
+		profile.FrameworkVersion != "9999.1" || profile.SupportedFrameworkVersion != supportedFrameworkVersion {
+		t.Fatalf("StoreProfile() = %#v, %v", profile, known)
+	}
+	report := unverified.Probe(context.Background(), false)
+	var profileCheck *mail.Check
+	for index := range report.Checks {
+		if report.Checks[index].Name == "mail-store-profile" {
+			profileCheck = &report.Checks[index]
+		}
+	}
+	if profileCheck == nil || profileCheck.Status != "pass" ||
+		!strings.Contains(profileCheck.Detail, "unverified") ||
+		!strings.Contains(profileCheck.Detail, "9999.1") {
+		t.Fatalf("mail-store-profile check = %+v", profileCheck)
+	}
+
+	verified := &Client{store: &Store{capability: schemaCapability{
+		FrameworkVersion: supportedFrameworkVersion, ProfileVerified: true,
+	}}}
+	profile, known = verified.StoreProfile()
+	if !known || profile.Unverified() || profile.Code != "" {
+		t.Fatalf("verified StoreProfile() = %#v, %v", profile, known)
+	}
+	report = verified.Probe(context.Background(), false)
+	foundVerified := false
+	for _, check := range report.Checks {
+		if check.Name == "mail-store-profile" && check.Detail == "profile verified" {
+			foundVerified = true
+		}
+	}
+	if !foundVerified {
+		t.Fatalf("verified probe checks = %+v", report.Checks)
+	}
+
+	var empty *Client
+	if _, known := empty.StoreProfile(); known {
+		t.Fatal("StoreProfile() known for nil store")
+	}
+}

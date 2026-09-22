@@ -21,6 +21,7 @@ type schemaCapability struct {
 	StoreVersion     string
 	MinorVersion     string
 	FrameworkVersion string
+	ProfileVerified  bool
 	Fingerprint      string
 }
 
@@ -72,9 +73,13 @@ func validateSchema(
 	if err != nil {
 		return schemaCapability{}, err
 	}
+	// The format generation (version/minor_version) and store UUID stay exact
+	// pins: a different generation can change column semantics even when every
+	// probed capability happens to match. Only the writer's build stamp
+	// (last_write_framework_version) degrades to an unverified profile because
+	// point updates bump it without touching the required capabilities.
 	if capability.StoreVersion != supportedStoreVersion ||
 		capability.MinorVersion != supportedMinorVersion ||
-		capability.FrameworkVersion != supportedFrameworkVersion ||
 		!validUUID(capability.StoreUUID) {
 		return schemaCapability{}, operationError(
 			"unsupported_mail_store_schema",
@@ -85,6 +90,7 @@ func validateSchema(
 			),
 		)
 	}
+	capability.ProfileVerified = capability.FrameworkVersion == supportedFrameworkVersion
 	facts = append(facts,
 		"store_version:"+capability.StoreVersion,
 		"minor_version:"+capability.MinorVersion,

@@ -159,8 +159,8 @@ func TestValidateSchemaRejectsUnknownSemanticProfile(t *testing.T) {
 		key   string
 		value string
 	}{
+		{name: "future version", key: "version", value: "5"},
 		{name: "future minor", key: "minor_version", value: "99999"},
-		{name: "future framework", key: "last_write_framework_version", value: "9999.1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -187,6 +187,67 @@ func TestValidateSchemaRejectsUnknownSemanticProfile(t *testing.T) {
 				t.Fatalf("validateSchema() error = %v, want unsupported profile", err)
 			}
 		})
+	}
+}
+
+func TestValidateSchemaDegradesOnUnverifiedFrameworkOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "future framework", key: "last_write_framework_version", value: "9999.1"},
+		{name: "missing framework value", key: "last_write_framework_version", value: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "Envelope Index")
+			writer := openTestWriter(t, path)
+			createTestSchema(t, writer, "")
+			if _, err := writer.ExecContext(
+				ctx, "UPDATE properties SET value = ? WHERE key = ?", test.value, test.key,
+			); err != nil {
+				t.Fatalf("update schema profile: %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close writer: %v", err)
+			}
+			reader, err := openReadOnlyDatabase(ctx, path)
+			if err != nil {
+				t.Fatalf("openReadOnlyDatabase() error = %v", err)
+			}
+			closeTestResource(t, reader, "read-only database")
+			capability, err := validateSchema(ctx, reader)
+			if err != nil {
+				t.Fatalf("validateSchema() error = %v, want degraded success", err)
+			}
+			if capability.ProfileVerified || capability.FrameworkVersion != test.value {
+				t.Fatalf("degraded capability = %#v", capability)
+			}
+		})
+	}
+}
+
+func TestValidateSchemaReportsVerifiedProfile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "Envelope Index")
+	writer := openTestWriter(t, path)
+	createTestSchema(t, writer, "")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	reader, err := openReadOnlyDatabase(ctx, path)
+	if err != nil {
+		t.Fatalf("openReadOnlyDatabase() error = %v", err)
+	}
+	closeTestResource(t, reader, "read-only database")
+	capability, err := validateSchema(ctx, reader)
+	if err != nil || !capability.ProfileVerified {
+		t.Fatalf("validateSchema() = %#v, %v, want verified profile", capability, err)
 	}
 }
 

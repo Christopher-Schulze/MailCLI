@@ -1069,3 +1069,82 @@ func TestRuntimeErrorClassifiedAsOperationFailed(t *testing.T) {
 		t.Fatalf("stdout = %s; want operation_failed error code", stdout.String())
 	}
 }
+
+type profiledTestGateway struct {
+	testGateway
+	profile mail.StoreProfile
+}
+
+func (g profiledTestGateway) StoreProfile() (mail.StoreProfile, bool) {
+	return g.profile, true
+}
+
+func TestEnvelopeCarriesStoreProfileWhenUnverified(t *testing.T) {
+	service := mail.NewService(profiledTestGateway{profile: mail.StoreProfile{
+		State:                     mail.StoreProfileUnverified,
+		Code:                      mail.StoreProfileUnverifiedCode,
+		FrameworkVersion:          "9999.1",
+		SupportedFrameworkVersion: "3826.700.81",
+	}})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"version", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stdout = %s", code, stdout.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	profile := response.Data.StoreProfile
+	if profile == nil || profile.State != mail.StoreProfileUnverified ||
+		profile.Code != mail.StoreProfileUnverifiedCode || profile.FrameworkVersion != "9999.1" {
+		t.Fatalf("envelope store_profile = %+v", profile)
+	}
+}
+
+func TestHumanOutputWarnsOnceOnUnverifiedStoreProfile(t *testing.T) {
+	service := mail.NewService(profiledTestGateway{profile: mail.StoreProfile{
+		State:                     mail.StoreProfileUnverified,
+		Code:                      mail.StoreProfileUnverifiedCode,
+		FrameworkVersion:          "9999.1",
+		SupportedFrameworkVersion: "3826.700.81",
+	}})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"version"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "store_profile_unverified") ||
+		!strings.Contains(stderr.String(), "9999.1") {
+		t.Fatalf("stderr = %q, want store_profile_unverified warning", stderr.String())
+	}
+	if strings.Count(stderr.String(), "store_profile_unverified") != 1 {
+		t.Fatalf("warning emitted more than once: %q", stderr.String())
+	}
+}
+
+func TestEnvelopeOmitsStoreProfileWarningWhenVerified(t *testing.T) {
+	service := mail.NewService(profiledTestGateway{profile: mail.StoreProfile{
+		State: mail.StoreProfileVerified, FrameworkVersion: "3826.700.81",
+		SupportedFrameworkVersion: "3826.700.81",
+	}})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"version", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d", code)
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.StoreProfile == nil || response.Data.StoreProfile.State != mail.StoreProfileVerified ||
+		response.Data.StoreProfile.Code != "" {
+		t.Fatalf("verified store_profile = %+v", response.Data.StoreProfile)
+	}
+	if strings.Contains(stderr.String(), "store_profile_unverified") {
+		t.Fatalf("stderr warned on verified profile: %q", stderr.String())
+	}
+}

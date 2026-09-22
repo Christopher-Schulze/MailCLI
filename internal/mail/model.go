@@ -695,6 +695,36 @@ type DeleteResult struct {
 	ServerTruth *ServerMutationEvidence `json:"server_truth,omitempty"`
 }
 
+const (
+	StoreProfileVerified       = "verified"
+	StoreProfileUnverified     = "unverified"
+	StoreProfileUnverifiedCode = "store_profile_unverified"
+)
+
+// StoreProfile reports whether the opened Envelope Index profile is the exact
+// verified profile or an unverified-but-capability-compatible writer build.
+// An unverified profile means last_write_framework_version differs from the
+// verified build while the format generation and every required schema
+// capability still verify; the warning code distinguishes that state in JSON
+// responses. A missing field means no store profile is attached to the
+// invocation at all.
+type StoreProfile struct {
+	State                     string `json:"state"`
+	Code                      string `json:"code,omitempty"`
+	FrameworkVersion          string `json:"framework_version,omitempty"`
+	SupportedFrameworkVersion string `json:"supported_framework_version,omitempty"`
+}
+
+func (p StoreProfile) Unverified() bool {
+	return p.State == StoreProfileUnverified
+}
+
+// StoreProfiler is an optional gateway extension that exposes the opened
+// Mail-store profile state for envelope and diagnostic surfacing.
+type StoreProfiler interface {
+	StoreProfile() (StoreProfile, bool)
+}
+
 type SyncResult struct {
 	AccountRef string `json:"account_ref,omitempty"`
 	Triggered  bool   `json:"triggered"`

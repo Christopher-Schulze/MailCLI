@@ -65,6 +65,7 @@ type responseData struct {
 	SyncResult               *mail.SyncResult             `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult        `json:"sync_check,omitempty"`
 	BatchResult              *mail.BatchResult            `json:"batch_result,omitempty"`
+	StoreProfile             *mail.StoreProfile           `json:"store_profile,omitempty"`
 	Finalization             *finalizationData            `json:"finalization,omitempty"`
 	UpdateResult             *updateResult                `json:"update_result,omitempty"`
 	serialization            *serializedProjection        `json:"-"`
@@ -215,6 +216,18 @@ func Run(
 	trackedStderr := &errorTrackingWriter{writer: stderr}
 	stdout = trackedStdout
 	stderr = trackedStderr
+
+	if profile, known := mailService.StoreProfile(); known {
+		invocationStoreProfile = &profile
+		defer func() { invocationStoreProfile = nil }()
+		if !jsonOutput && profile.Unverified() {
+			writeFormat(
+				stderr,
+				"warning: %s: Mail store framework %s differs from verified %s; reads proceed on verified schema capabilities\n",
+				mail.StoreProfileUnverifiedCode, profile.FrameworkVersion, profile.SupportedFrameworkVersion,
+			)
+		}
+	}
 
 	code := 0
 	if len(args) == 0 {
@@ -449,6 +462,12 @@ type commandSpec struct {
 	run commandRunner
 }
 
+// invocationStoreProfile carries the opened Mail-store profile into every
+// envelope written by this invocation. It is set once by Run before dispatch
+// and cleared on return; the CLI is a single-shot process and tests invoke Run
+// serially, so no command can observe another invocation's profile.
+var invocationStoreProfile *mail.StoreProfile
+
 var commandRegistry = map[string]commandSpec{
 	"help": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
 		writeHelp(stdout)
@@ -649,6 +668,9 @@ func parseBooleanFlags(args []string, allowed ...string) (map[string]bool, error
 }
 
 func writeJSON(writer io.Writer, value envelope) int {
+	if value.Data.StoreProfile == nil && invocationStoreProfile != nil {
+		value.Data.StoreProfile = invocationStoreProfile
+	}
 	payload, err := marshalEnvelope(value)
 	if err != nil {
 		return 1

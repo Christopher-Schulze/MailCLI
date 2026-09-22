@@ -124,6 +124,19 @@ func (s *Service) Probe(ctx context.Context, live bool) DiagnosticReport {
 	return s.gateway.Probe(ctx, live)
 }
 
+// StoreProfile reports the opened Mail-store profile state when the gateway
+// exposes it; an absent gateway or closed store reports false.
+func (s *Service) StoreProfile() (StoreProfile, bool) {
+	if s == nil || s.gateway == nil {
+		return StoreProfile{}, false
+	}
+	profiler, supported := s.gateway.(StoreProfiler)
+	if !supported {
+		return StoreProfile{}, false
+	}
+	return profiler.StoreProfile()
+}
+
 func (s *Service) ProbeWithDiagnostics(ctx context.Context, live bool) (DiagnosticReport, []DiagnosticTiming) {
 	if prober, ok := s.gateway.(interface {
 		ProbeWithDiagnostics(context.Context, bool) (DiagnosticReport, []DiagnosticTiming)
