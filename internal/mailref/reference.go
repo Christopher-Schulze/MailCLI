@@ -576,8 +576,6 @@ type CompactEncoder struct {
 }
 
 // NewCompactEncoder starts a payload with its explicit format version.
-//
-//go:noinline
 func NewCompactEncoder(version byte, capacity int) *CompactEncoder {
 	if capacity < 0 || capacity > MaxCompactPayloadBytes-2 {
 		capacity = 0
@@ -588,8 +586,6 @@ func NewCompactEncoder(version byte, capacity int) *CompactEncoder {
 }
 
 // PutString appends one bounded string.
-//
-//go:noinline
 func (e *CompactEncoder) PutString(value string) {
 	if e.err != nil {
 		return
@@ -603,8 +599,6 @@ func (e *CompactEncoder) PutString(value string) {
 }
 
 // PutUvarint appends an unsigned varint.
-//
-//go:noinline
 func (e *CompactEncoder) PutUvarint(value uint64) {
 	if e.err != nil {
 		return
@@ -613,8 +607,6 @@ func (e *CompactEncoder) PutUvarint(value uint64) {
 }
 
 // PutCount appends a collection length after checking its bound.
-//
-//go:noinline
 func (e *CompactEncoder) PutCount(value int, max int) {
 	if e.err != nil {
 		return
@@ -627,8 +619,6 @@ func (e *CompactEncoder) PutCount(value int, max int) {
 }
 
 // PutVarint appends a signed varint.
-//
-//go:noinline
 func (e *CompactEncoder) PutVarint(value int64) {
 	if e.err != nil {
 		return
@@ -637,8 +627,6 @@ func (e *CompactEncoder) PutVarint(value int64) {
 }
 
 // Bytes returns the complete payload or its first encoding error.
-//
-//go:noinline
 func (e *CompactEncoder) Bytes() ([]byte, error) {
 	if e.err != nil {
 		return nil, e.err
@@ -673,8 +661,6 @@ func NewCompactDecoder(payload []byte, expectedVersion byte) (*CompactDecoder, e
 }
 
 // CompactPayloadVersion returns the version when payload framing is present.
-//
-//go:noinline
 func CompactPayloadVersion(payload []byte) (byte, bool) {
 	if len(payload) < 2 || payload[0] != compactPayloadMarker {
 		return 0, false
@@ -683,8 +669,6 @@ func CompactPayloadVersion(payload []byte) (byte, bool) {
 }
 
 // Count reads a bounded collection length.
-//
-//go:noinline
 func (d *CompactDecoder) Count(max int) (int, error) {
 	value, err := d.Uvarint()
 	if err != nil {
@@ -697,8 +681,6 @@ func (d *CompactDecoder) Count(max int) (int, error) {
 }
 
 // String reads one bounded length-prefixed string.
-//
-//go:noinline
 func (d *CompactDecoder) String() (string, error) {
 	length, err := d.Uvarint()
 	if err != nil {
@@ -714,8 +696,6 @@ func (d *CompactDecoder) String() (string, error) {
 }
 
 // Uvarint reads one unsigned varint.
-//
-//go:noinline
 func (d *CompactDecoder) Uvarint() (uint64, error) {
 	value, count := binary.Uvarint(d.data[d.index:])
 	if count == 0 {
@@ -729,8 +709,6 @@ func (d *CompactDecoder) Uvarint() (uint64, error) {
 }
 
 // Varint reads one signed varint.
-//
-//go:noinline
 func (d *CompactDecoder) Varint() (int64, error) {
 	value, count := binary.Varint(d.data[d.index:])
 	if count == 0 {
@@ -744,8 +722,6 @@ func (d *CompactDecoder) Varint() (int64, error) {
 }
 
 // Done rejects trailing bytes after the expected fields.
-//
-//go:noinline
 func (d *CompactDecoder) Done() error {
 	if d.index != len(d.data) {
 		return fmt.Errorf("compact payload has %d trailing bytes", len(d.data)-d.index)
