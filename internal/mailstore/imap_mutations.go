@@ -724,7 +724,7 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
 		OperationID:         ev.OperationID,
-		Outcome:             ev.Outcome,
+		Outcome:             mail.ServerMutationOutcome(ev.Outcome),
 		SourceAccount:       ev.SourceAccount,
 		Command:             ev.Command,
 		ServerResponse:      ev.ServerResponse,
@@ -935,7 +935,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	}
 	summary.ServerTruth = &mail.ServerMutationEvidence{
 		OperationID:            ev.OperationID,
-		Outcome:                ev.Outcome,
+		Outcome:                mail.ServerMutationOutcome(ev.Outcome),
 		SourceAccount:          ev.SourceAccount,
 		Command:                ev.Command,
 		ServerResponse:         ev.ServerResponse,
@@ -1342,7 +1342,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 	return mail.DeleteResult{
 		MessageRef: request.Ref, Deleted: err == nil,
 		ServerTruth: &mail.ServerMutationEvidence{
-			OperationID: ev.OperationID, Outcome: ev.Outcome, SourceAccount: ev.SourceAccount,
+			OperationID: ev.OperationID, Outcome: mail.ServerMutationOutcome(ev.Outcome), SourceAccount: ev.SourceAccount,
 			Command: ev.Command, ServerResponse: ev.ServerResponse,
 			Mailbox: ev.Mailbox, TargetMailbox: ev.TargetMailbox, UID: ev.UID,
 			ExpectedUIDValidity: ev.ExpectedUIDValidity, UIDValidity: ev.UIDValidity,

@@ -99,7 +99,7 @@ func TestMoveFlagEvidenceSurvivesStoreResults(t *testing.T) {
 				if proof == nil {
 					t.Fatal("store discarded the mutation evidence")
 				}
-				if proof.OperationID == "" || proof.Outcome != evidence.Outcome || proof.Mailbox != "INBOX" || proof.UID != 101 || proof.UIDValidity != 12345 || proof.ExpectedUIDValidity != 12345 || proof.CopyUIDValidity != 23456 || proof.CopySourceUID != 101 || proof.CopyDestinationUID != 500 || proof.DestinationUIDValidity != 23456 || proof.DestinationUID != 500 || proof.CopyUIDResponse != "COPYUID 23456 101 500" || !reflect.DeepEqual(proof.CompletedEffects, evidence.CompletedEffects) {
+				if proof.OperationID == "" || string(proof.Outcome) != evidence.Outcome || proof.Mailbox != "INBOX" || proof.UID != 101 || proof.UIDValidity != 12345 || proof.ExpectedUIDValidity != 12345 || proof.CopyUIDValidity != 23456 || proof.CopySourceUID != 101 || proof.CopyDestinationUID != 500 || proof.DestinationUIDValidity != 23456 || proof.DestinationUID != 500 || proof.CopyUIDResponse != "COPYUID 23456 101 500" || !reflect.DeepEqual(proof.CompletedEffects, evidence.CompletedEffects) {
 					t.Errorf("COPY/source evidence changed: %+v", proof)
 				}
 				if proof.FlagsState != string(test.state) || proof.FlagsSource != "FETCH" || !reflect.DeepEqual(proof.ActualFlags, append([]string(nil), test.flags...)) {

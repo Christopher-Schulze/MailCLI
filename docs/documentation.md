@@ -38,7 +38,7 @@ The implementation has these package boundaries:
 
 1. `cmd/mailcli` owns process startup, resource finalization, and process-level output routing.
 2. `internal/cli` owns command parsing, validation, output selection, exit codes, and confirmation policy.
-3. `internal/mail` owns typed use cases, filters, drafts, send claims, and outcome semantics without platform I/O.
+3. `internal/mail` owns typed use cases, filters, drafts, send claims, and outcome semantics without platform I/O. It consumes the failure-classification predicates in `internal/transport/classification.go` and the transport-neutral `ServerMutationOutcome` vocabulary on `ServerMutationEvidence` instead of comparing transport error codes or outcome constants; `internal/mailstore` performs that wire-to-domain mapping at the boundary.
 4. `internal/mailstore` owns the zero-Apple-Events read path: strict read-only access to Mail's existing Envelope Index, safe mailbox mapping, `.emlx` parsing, attachment extraction, on-demand search, reference revalidation, and store-based mutation observation.
 5. `internal/mailapp` owns the optional Mail.app integration: live environment diagnostics (`doctor --live`) and triggering Mail.app's local sync (`sync` without `--check`). Its fallback gateway is intentionally read-only and exposes only account listing, message listing, probing, and sync; compose-save and mutation bridges are not part of the production fallback surface.
 6. `internal/compose` owns the visible AppKit compose handoff (`drafts handoff`) without Apple Events or sending.

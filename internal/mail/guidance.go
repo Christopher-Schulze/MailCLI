@@ -81,65 +81,64 @@ type OperationGuidance struct {
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
 	var mutation *transport.MutationOutcomeError
-	if errors.As(err, &mutation) && mutation.Evidence.Command == "STORE" {
+	if errors.As(err, &mutation) && mutation.Evidence.IsStore() {
 		return guidanceForMutationUnknown(err)
 	}
 	if isInputErrorCode(code) {
 		return guidanceForInput()
 	}
-	switch code {
-	case "draft_revision_conflict", "draft_revision_unavailable":
+	switch {
+	case code == "draft_revision_conflict" || code == "draft_revision_unavailable":
 		return OperationGuidance{Phase: OperationPhaseValidation, EffectCertainty: EffectNone, Retryability: RetryObserveRequired, ReplayAllowed: false, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case "batch_canceled":
+	case code == "batch_canceled":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
-	case "initialization_failed":
+	case code == "initialization_failed":
 		return guidanceForInput()
-	case "finalization_failed":
+	case code == "finalization_failed":
 		return OperationGuidance{Phase: OperationPhaseCleanup, EffectCertainty: EffectUnknown, Retryability: RetryObserveRequired, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case "serialization_failed":
+	case code == "serialization_failed":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectUnknown, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case "operation_canceled", "operation_timeout", transport.CodeSMTPTimeout, transport.CodeSMTPTransferTimeout, transport.CodeIMAPConnectFailed, transport.CodeIMAPTimeout, transport.CodeIMAPFetchFailed:
+	case code == "operation_canceled" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
 		if effectfulCommand(command) {
 			return guidanceForUnknown(defaultPhase(command))
 		}
 		return guidanceForRead()
-	case transport.CodeSMTPRejected:
+	case transport.IsRejectedSubmission(err):
 		return guidanceForSMTPRejection(err)
-	case transport.CodeSMTPSubmissionUnknown:
+	case transport.IsSubmissionOutcomeUnknown(err):
 		return guidanceForSendUnknown()
-	case transport.CodeIMAPCopyOutcomeUnknown, transport.CodeIMAPMoveOutcomeUnknown,
-		transport.CodeIMAPFlagsOutcomeUnknown, transport.CodeIMAPFlagsMismatch:
+	case transport.IsMutationOutcomeUnknown(err) || transport.IsFlagsStateMismatch(err):
 		return guidanceForMutationUnknown(err)
-	case transport.CodeIMAPMessageNotFound:
+	case transport.IsMessageNotFound(err):
 		var outcome *transport.MutationOutcomeError
-		if errors.As(err, &outcome) && outcome.Evidence.Command == "STORE" {
+		if errors.As(err, &outcome) && outcome.Evidence.IsStore() {
 			return guidanceForMutationUnknown(err)
 		}
-	case transport.CodeIMAPAppendOutcomeUnknown:
+	case transport.IsAppendOutcomeUnknown(err):
 		return guidanceForMirrorUnknown()
-	case "send_mirror_pending", "send_mirror_outcome_unknown":
+	case code == "send_mirror_pending" || code == "send_mirror_outcome_unknown":
 		return guidanceForMirrorUnknown()
-	case "send_outcome_unknown", "send_outcome_unverifiable", "send_state_unknown":
+	case code == "send_outcome_unknown" || code == "send_outcome_unverifiable" || code == "send_state_unknown":
 		return guidanceForSendUnknown()
-	case "handoff_outcome_unknown", "handoff_retry_blocked", "handoff_attachment_cleanup_failed", "handoff_claim_cleanup_failed":
+	case code == "handoff_outcome_unknown" || code == "handoff_retry_blocked" || code == "handoff_attachment_cleanup_failed" || code == "handoff_claim_cleanup_failed":
 		return guidanceForHandoffUnknown()
-	case "handoff_canceled_before_dispatch":
+	case code == "handoff_canceled_before_dispatch":
 		return OperationGuidance{
 			Phase: OperationPhaseExecution, EffectCertainty: EffectNone,
 			Retryability: RetrySafe, ReplayAllowed: true,
 			Recovery: RecoveryGuidance{Action: RecoveryRetry},
 		}
-	case transport.CodeIMAPAppendFailed:
+	case transport.IsAppendFailed(err):
 		if command == "drafts.send" || command == "drafts.reconcile" {
 			return guidanceForMirrorUnknown()
 		}
-	case transport.CodeIMAPRawSourceTooLarge:
+	case transport.IsSourceTooLarge(err):
 		return OperationGuidance{Phase: OperationPhaseHydration, EffectCertainty: EffectNone, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case "output_too_large":
+	case code == "output_too_large":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryUserInputRequired, Recovery: RecoveryGuidance{Action: RecoveryCorrect}}
-	case "content_export_too_large":
+	case code == "content_export_too_large":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
-	case transport.CodeSMTPAuthFailed, transport.CodeSMTPCredentialsMissing, transport.CodeIMAPAuthFailed, transport.CodeSMTPTLSFailed, transport.CodeUnsupportedProvider, transport.CodeSMTPUTF8Unsupported:
+	case transport.IsConfigurationFailure(err):
 		return guidanceForInput()
 	}
 	if effectfulCommand(command) {
@@ -229,9 +228,9 @@ func guidanceForMutationUnknown(err error) OperationGuidance {
 	var outcome *transport.MutationOutcomeError
 	if errors.As(err, &outcome) {
 		guidance.Recovery.OperationID = outcome.Evidence.OperationID
-		if len(outcome.Evidence.CompletedEffects) > 0 || outcome.Evidence.Outcome == transport.MutationOutcomePartial {
+		if outcome.Evidence.HasPartialEffects() {
 			guidance.EffectCertainty = EffectPartial
-		} else if outcome.Evidence.Command == "STORE" && (outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted || outcome.Evidence.Outcome == transport.MutationOutcomeRejected) {
+		} else if outcome.Evidence.StoreRejectedOrNotStarted() {
 			guidance.EffectCertainty = EffectNone
 		}
 	}

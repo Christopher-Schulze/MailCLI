@@ -33,11 +33,11 @@ func TestMoveFlagFailureJSONRetainsCompoundEvidence(t *testing.T) {
 	for _, state := range []transport.FlagObservationState{transport.FlagObservationObserved, transport.FlagObservationMissing, transport.FlagObservationUnverified} {
 		for _, operation := range []string{"move", "delete"} {
 			t.Run(string(state)+"/"+operation, func(t *testing.T) {
-				proof := &mail.ServerMutationEvidence{OperationID: "move_retained", Outcome: transport.MutationOutcomePartial, Command: "MOVE", Mailbox: "INBOX", TargetMailbox: "Archive", UID: 42, UIDValidity: 12345, ExpectedUIDValidity: 12345, CopyUIDValidity: 23456, CopySourceUID: 42, CopyDestinationUID: 100, CompletedEffects: []string{"copy"}, FlagsState: string(state), FlagsSource: "FETCH"}
+				proof := &mail.ServerMutationEvidence{OperationID: "move_retained", Outcome: mail.ServerMutationOutcomePartial, Command: "MOVE", Mailbox: "INBOX", TargetMailbox: "Archive", UID: 42, UIDValidity: 12345, ExpectedUIDValidity: 12345, CopyUIDValidity: 23456, CopySourceUID: 42, CopyDestinationUID: 100, CompletedEffects: []string{"copy"}, FlagsState: string(state), FlagsSource: "FETCH"}
 				if state == transport.FlagObservationObserved {
 					proof.ActualFlags = []string{"\\Seen"}
 				}
-				evidence := transport.MutationEvidence{OperationID: proof.OperationID, Outcome: proof.Outcome, Command: proof.Command, CompletedEffects: proof.CompletedEffects}
+				evidence := transport.MutationEvidence{OperationID: proof.OperationID, Outcome: string(proof.Outcome), Command: proof.Command, CompletedEffects: proof.CompletedEffects}
 				gateway := &moveFlagResultGateway{
 					state: mail.MessageSummary{Ref: "msg_ref", MailboxRef: "source_ref", ServerTruth: proof}, deleted: mail.DeleteResult{MessageRef: "msg_ref", ServerTruth: proof},
 					err: &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Message: "COPY completed; inspect source flags before another operation", Evidence: evidence},

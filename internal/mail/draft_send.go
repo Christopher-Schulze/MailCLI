@@ -509,17 +509,14 @@ func (s *Service) reconcileUnknownViaImap(
 	}
 	sentBox, resolveErr := transport.ResolveSentMailbox(mailboxes)
 	if resolveErr != nil {
-		if transport.ErrorCode(resolveErr) == transport.CodeIMAPSentMailboxNotFound {
+		if transport.IsSentMailboxNotFound(resolveErr) {
 			return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft, "no Sent mailbox found on the IMAP server")
 		}
 		return resultForReconcile(ref, attempt), resolveErr
 	}
 	uid, uidValidity, matchCount, err := imap.SearchUID(ctx, cfg, sentBox, attempt.MessageID)
-	if err != nil {
-		var transportErr *transport.TransportError
-		if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
-			return resultForReconcile(ref, attempt), err
-		}
+	if err != nil && !transport.IsMessageNotFound(err) {
+		return resultForReconcile(ref, attempt), err
 	}
 	if matchCount > 1 {
 		return resultForReconcile(ref, attempt), unverifiableSendError(attempt, draft,
@@ -635,7 +632,7 @@ func (s *Service) reconcileMirrorPending(
 		var resolveErr error
 		sentBox, resolveErr = transport.ResolveSentMailbox(mailboxes)
 		if resolveErr != nil {
-			if transport.ErrorCode(resolveErr) == transport.CodeIMAPSentMailboxNotFound {
+			if transport.IsSentMailboxNotFound(resolveErr) {
 				return result, &OperationError{Code: "send_reconcile_unavailable", Message: "no Sent mailbox is available to verify the accepted message before mirroring"}
 			}
 			return result, resolveErr
@@ -646,11 +643,8 @@ func (s *Service) reconcileMirrorPending(
 			sentBox,
 			attempt.MessageID,
 		)
-		if searchErr != nil {
-			var transportErr *transport.TransportError
-			if !errors.As(searchErr, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
-				return result, mirrorPendingError(searchErr)
-			}
+		if searchErr != nil && !transport.IsMessageNotFound(searchErr) {
+			return result, mirrorPendingError(searchErr)
 		}
 		if matchCount > 1 {
 			return result, unverifiableSendError(attempt, draft,
@@ -712,11 +706,8 @@ func (s *Service) reconcileMirrorPending(
 			sentBox,
 			attempt.MessageID,
 		)
-		if searchErr != nil {
-			var transportErr *transport.TransportError
-			if !errors.As(searchErr, &transportErr) || transportErr.Code != transport.CodeIMAPMessageNotFound {
-				return result, mirrorPendingError(searchErr)
-			}
+		if searchErr != nil && !transport.IsMessageNotFound(searchErr) {
+			return result, mirrorPendingError(searchErr)
 		}
 		if matchCount > 0 {
 			return s.adoptObservedSentMessage(
@@ -770,8 +761,7 @@ func persistMirrorAttemptBeforeDispatch(root string, ref string, attempt *SendAt
 }
 
 func mirrorOutcomeUnknown(err error) bool {
-	code := transport.ErrorCode(err)
-	return code == transport.CodeIMAPAppendOutcomeUnknown || code == transport.CodeIMAPAmbiguousMessageID
+	return transport.IsMirrorOutcomeUncertain(err)
 }
 
 // envelopeFingerprint identifies the exact claimed envelope: Message-ID,

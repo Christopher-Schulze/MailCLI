@@ -537,15 +537,31 @@ type SendResult struct {
 	Receipt            *SendReceipt `json:"receipt,omitempty"`
 }
 
+// ServerMutationOutcome is the transport-neutral outcome vocabulary carried
+// by ServerMutationEvidence.Outcome. Adapters at the transport boundary map
+// wire-level mutation outcomes onto these values; domain code compares them
+// instead of referencing transport outcome constants.
+type ServerMutationOutcome string
+
+const (
+	ServerMutationOutcomeNotStarted ServerMutationOutcome = "not_started"
+	ServerMutationOutcomeAttempted  ServerMutationOutcome = "attempted"
+	ServerMutationOutcomeCompleted  ServerMutationOutcome = "completed"
+	ServerMutationOutcomePartial    ServerMutationOutcome = "partial"
+	ServerMutationOutcomeRejected   ServerMutationOutcome = "rejected"
+	ServerMutationOutcomeUnknown    ServerMutationOutcome = "unknown"
+	ServerMutationOutcomeObserved   ServerMutationOutcome = "observed"
+)
+
 type ServerMutationEvidence struct {
-	OperationID    string `json:"operation_id,omitempty"`
-	Outcome        string `json:"outcome,omitempty"`
-	SourceAccount  string `json:"source_account,omitempty"`
-	Command        string `json:"command"`
-	ServerResponse string `json:"server_response"`
-	Mailbox        string `json:"mailbox"`
-	TargetMailbox  string `json:"target_mailbox,omitempty"`
-	UID            uint32 `json:"uid"`
+	OperationID    string                `json:"operation_id,omitempty"`
+	Outcome        ServerMutationOutcome `json:"outcome,omitempty"`
+	SourceAccount  string                `json:"source_account,omitempty"`
+	Command        string                `json:"command"`
+	ServerResponse string                `json:"server_response"`
+	Mailbox        string                `json:"mailbox"`
+	TargetMailbox  string                `json:"target_mailbox,omitempty"`
+	UID            uint32                `json:"uid"`
 	// ExpectedUIDValidity is the UIDVALIDITY resolved before the mutation;
 	// with UIDValidity it forms the compared pair (048: fail closed on rebuild).
 	ExpectedUIDValidity    uint32   `json:"expected_uidvalidity,omitempty"`
@@ -565,6 +581,12 @@ type ServerMutationEvidence struct {
 	FlagsState  string   `json:"flags_state,omitempty"`
 	ActualFlags []string `json:"actual_flags,omitempty"`
 	FlagsSource string   `json:"flags_source,omitempty"`
+}
+
+// OutcomeUnknown reports whether the server-truth evidence records a final
+// outcome the transport boundary could not prove.
+func (e *ServerMutationEvidence) OutcomeUnknown() bool {
+	return e != nil && e.Outcome == ServerMutationOutcomeUnknown
 }
 
 type MessageSummary struct {
