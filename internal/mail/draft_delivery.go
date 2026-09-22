@@ -32,15 +32,10 @@ func missingCredentialsErrorFor(sender, credential string) error {
 	if strings.EqualFold(sender, credential) {
 		return missingCredentialsError(sender)
 	}
-	account := sender
-	setup := "'mailcli send setup --from " + sender + "'"
-	if !strings.EqualFold(sender, credential) {
-		account = credential
-		setup = "'mailcli send setup --from " + sender + " --credential-account " + credential + "'"
-	}
 	return &OperationError{
-		Code:    "smtp_credentials_missing",
-		Message: "no app-specific password is stored for " + account + "; run " + setup + " to store one",
+		Code: "smtp_credentials_missing",
+		Message: "no app-specific password is stored for " + credential +
+			"; run 'mailcli send setup --from " + sender + " --credential-account " + credential + "' to store one",
 	}
 }
 
@@ -59,8 +54,15 @@ func newMessageID(sender string) (string, error) {
 	if _, err := rand.Read(value[:]); err != nil {
 		return "", fmt.Errorf("generate message id: %w", err)
 	}
-	domain := sender[strings.LastIndex(sender, "@")+1:]
-	return "<" + hex.EncodeToString(value[:]) + "@" + domain + ">", nil
+	parsed, err := stdmail.ParseAddress(sender)
+	if err != nil || parsed.Address == "" {
+		return "", validationError("invalid sender address")
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	if at <= 0 || at == len(parsed.Address)-1 {
+		return "", validationError("invalid sender address")
+	}
+	return "<" + hex.EncodeToString(value[:]) + "@" + parsed.Address[at+1:] + ">", nil
 }
 
 func validateStoredDraftAddresses(draft Draft) error {
