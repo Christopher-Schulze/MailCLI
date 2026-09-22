@@ -522,9 +522,9 @@ func bodyMatchesDraft(actual string, draft mail.Draft) bool {
 	if draft.ExpectedBody == nil {
 		return false
 	}
-	expected := canonicalSentText(*draft.ExpectedBody)
+	expected := collapseInlineWhitespace(canonicalSentText(*draft.ExpectedBody))
 	for _, candidate := range normalizedBodyCandidates(actual) {
-		if candidate == expected {
+		if collapseInlineWhitespace(candidate) == expected {
 			return true
 		}
 	}
@@ -566,12 +566,77 @@ func normalizedBodyCandidates(value string) []string {
 		}
 		candidates = append(candidates, canonicalSentText(unquoted))
 	}
+	// Mail.app appends a signature after a bare "--"/"-- " delimiter line and
+	// appends reply attribution plus quoted text after the draft body. Both are
+	// send-time additions; a stripped prefix only counts while it stays
+	// non-empty so an unmaterialized tail alone can never prove the body.
+	if stripped := stripSignatureTail(normalized); stripped != normalized && stripped != "" {
+		candidates = append(candidates, stripped)
+	}
+	if stripped := stripReplyTail(normalized); stripped != normalized && stripped != "" {
+		candidates = append(candidates, stripped)
+		if doubly := stripSignatureTail(stripped); doubly != stripped && doubly != "" {
+			candidates = append(candidates, doubly)
+		}
+	}
 	return candidates
+}
+
+// stripSignatureTail cuts everything from the first bare signature delimiter
+// line ("--" or "-- ") onward. Apple Mail inserts signatures after that
+// delimiter; text appended without one is not a signature and stays.
+func stripSignatureTail(value string) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		if line == "-- " || line == "--" {
+			return strings.TrimRight(strings.Join(lines[:i], "\n"), "\n")
+		}
+	}
+	return value
+}
+
+// stripReplyTail removes a trailing reply-quote block (lines quoted with
+// "> ") plus the single attribution line above it. The attribution heuristic
+// covers localized forms — "On ... wrote:", "Am ... schrieb ...", "Le ... a
+// écrit :" — because every variant terminates the line with a colon.
+func stripReplyTail(value string) string {
+	lines := strings.Split(value, "\n")
+	i := len(lines)
+	for i > 0 && (lines[i-1] == ">" || strings.HasPrefix(lines[i-1], "> ")) {
+		i--
+	}
+	if i == len(lines) {
+		return value
+	}
+	lines = lines[:i]
+	for len(lines) > 0 && strings.TrimRight(lines[len(lines)-1], " ") == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > 0 && strings.HasSuffix(lines[len(lines)-1], ":") {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && strings.TrimRight(lines[len(lines)-1], " ") == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// collapseInlineWhitespace folds every run of horizontal whitespace (spaces,
+// tabs, non-breaking spaces) into a single space per line, so Mail.app's
+// reflowed indentation cannot hide an otherwise identical body.
+func collapseInlineWhitespace(value string) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = strings.Join(strings.Fields(line), " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func canonicalSentText(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, " ", "\n")
+	value = strings.ReplaceAll(value, " ", "\n")
 	return strings.Trim(norm.NFC.String(value), "\n")
 }
 

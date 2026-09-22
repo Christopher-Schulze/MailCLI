@@ -330,6 +330,67 @@ func TestBodyMatchesExactEmptyNativeMaterialization(t *testing.T) {
 	}
 }
 
+func TestBodyMatchesSendTimeSignatureTail(t *testing.T) {
+	expected := "Reviewed body."
+	draft := observedDraft("Reviewed body")
+	draft.ExpectedBody = &expected
+	if !bodyMatchesDraft("Reviewed body.\n\n-- \nMail signature", draft) {
+		t.Fatal("bodyMatchesDraft() rejected a Mail.app signature tail")
+	}
+	if !bodyMatchesDraft("Reviewed body.\n\n--\nMail signature", draft) {
+		t.Fatal("bodyMatchesDraft() rejected a bare-delimiter signature tail")
+	}
+	if bodyMatchesDraft("Reviewed body.\n\nSigned differently", draft) {
+		t.Fatal("bodyMatchesDraft() accepted a tail without a signature delimiter")
+	}
+	if bodyMatchesDraft("Different body.\n\n-- \nMail signature", draft) {
+		t.Fatal("bodyMatchesDraft() accepted a signature tail on foreign content")
+	}
+}
+
+func TestBodyMatchesSendTimeReplyTail(t *testing.T) {
+	expected := "My reply."
+	draft := observedDraft("My reply")
+	draft.ExpectedBody = &expected
+	for name, actual := range map[string]string{
+		"english attribution": "My reply.\n\nOn Jan 1, 2024, Bob wrote:\n> earlier text\n> more text",
+		"german attribution":  "My reply.\n\nAm 01.01.2024 schrieb Bob:\n> earlier text\n> more text",
+		"french attribution":  "My reply.\n\nLe 1 janv. 2024, Bob a écrit :\n> earlier text\n> more text",
+		"signature and reply": "My reply.\n\n-- \nMail signature\nOn Jan 1, 2024, Bob wrote:\n> earlier text",
+	} {
+		if !bodyMatchesDraft(actual, draft) {
+			t.Fatalf("bodyMatchesDraft() rejected %s tail: %q", name, actual)
+		}
+	}
+	if bodyMatchesDraft("My reply.\n\nOn Jan 1, 2024, Bob wrote:\n> earlier text\n trailing change", draft) {
+		t.Fatal("bodyMatchesDraft() accepted changed content after the reply block")
+	}
+	if bodyMatchesDraft("Other reply.\n\nOn Jan 1, 2024, Bob wrote:\n> earlier text", draft) {
+		t.Fatal("bodyMatchesDraft() accepted a reply tail on foreign content")
+	}
+}
+
+func TestBodyMatchesCollapsedWhitespaceAndLineSeparators(t *testing.T) {
+	expected := "a  b\nsecond"
+	draft := observedDraft("a  b")
+	draft.ExpectedBody = &expected
+	if !bodyMatchesDraft("a b\nsecond", draft) {
+		t.Fatal("bodyMatchesDraft() rejected collapsed spacing")
+	}
+	if !bodyMatchesDraft("a\tb\nsecond", draft) {
+		t.Fatal("bodyMatchesDraft() rejected a tab variant")
+	}
+	if !bodyMatchesDraft("a b\nsecond", draft) {
+		t.Fatal("bodyMatchesDraft() rejected a non-breaking space variant")
+	}
+	if !bodyMatchesDraft("a  b second", draft) {
+		t.Fatal("bodyMatchesDraft() rejected a unicode line separator")
+	}
+	if bodyMatchesDraft("a  b\nsecond changed", draft) {
+		t.Fatal("bodyMatchesDraft() accepted changed trailing content")
+	}
+}
+
 func TestAttachmentFingerprintsAllowOnlyMaterializedMailOwnedExtras(t *testing.T) {
 	reviewed := writeDraftAttachmentFixture(t, "reviewed.bin", []byte("reviewed"))
 	reviewedDigest, err := hashRegularFileForTest(reviewed.Path)
