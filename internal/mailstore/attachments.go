@@ -525,7 +525,27 @@ func writeAttachmentOutputWithEvidence(
 	reader io.Reader,
 	expected *attachmentOutputExpectation,
 ) (proof attachmentOutputEvidence, resultErr error) {
-	file, identity, err := openExclusiveAttachmentOutput(path)
+	parentPath := filepath.Dir(path)
+	parentIdentity, err := os.Lstat(parentPath)
+	if err != nil {
+		return attachmentOutputEvidence{}, fmt.Errorf("inspect attachment output directory: %w", err)
+	}
+	if !parentIdentity.IsDir() || parentIdentity.Mode()&os.ModeSymlink != 0 {
+		return attachmentOutputEvidence{}, operationError(
+			"unsafe_message_source", "attachment output parent is not a directory",
+		)
+	}
+	root, err := os.OpenRoot(parentPath)
+	if err != nil {
+		return attachmentOutputEvidence{}, fmt.Errorf("open attachment output directory: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close attachment output directory: %w", err))
+		}
+	}()
+	name := filepath.Base(path)
+	file, identity, err := openExclusiveAttachmentOutput(root, parentPath, parentIdentity, name)
 	if err != nil {
 		return attachmentOutputEvidence{}, err
 	}
@@ -539,7 +559,7 @@ func writeAttachmentOutputWithEvidence(
 			}
 		}
 		if resultErr != nil {
-			if cleanupErr := removeOwnedAttachmentOutput(path, identity); cleanupErr != nil {
+			if cleanupErr := removeOwnedAttachmentOutput(root, name, identity); cleanupErr != nil {
 				resultErr = errors.Join(resultErr, cleanupErr)
 			}
 		}
@@ -557,7 +577,7 @@ func writeAttachmentOutputWithEvidence(
 	if copied != expected.size || actualDigest != expected.digest {
 		return attachmentOutputEvidence{}, operationError("store_changed", "attachment bytes changed while copying")
 	}
-	if err := verifyAttachmentOutput(path, file, identity, *expected); err != nil {
+	if err := verifyAttachmentOutput(root, parentPath, parentIdentity, name, file, identity, *expected); err != nil {
 		return attachmentOutputEvidence{}, err
 	}
 	finalIdentity, err := file.Stat()
@@ -567,8 +587,16 @@ func writeAttachmentOutputWithEvidence(
 	return attachmentOutputEvidence{size: copied, digest: actualDigest, identity: finalIdentity}, nil
 }
 
-func openExclusiveAttachmentOutput(path string) (*os.File, os.FileInfo, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+func openExclusiveAttachmentOutput(
+	root *os.Root,
+	parentPath string,
+	parentIdentity os.FileInfo,
+	name string,
+) (*os.File, os.FileInfo, error) {
+	if err := verifyAttachmentOutputParent(root, parentPath, parentIdentity); err != nil {
+		return nil, nil, err
+	}
+	file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create attachment output: %w", err)
 	}
@@ -586,13 +614,42 @@ func openExclusiveAttachmentOutput(path string) (*os.File, os.FileInfo, error) {
 	return file, identity, nil
 }
 
+func verifyAttachmentOutputParent(
+	root *os.Root,
+	parentPath string,
+	parentIdentity os.FileInfo,
+) error {
+	current, err := os.Lstat(parentPath)
+	if err != nil {
+		return operationError("store_changed", fmt.Sprintf("attachment output directory changed: %v", err))
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(parentIdentity, current) {
+		return operationError("store_changed", "attachment output directory changed")
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect pinned attachment output directory: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(parentIdentity, opened) {
+		return operationError("store_changed", "pinned attachment output directory changed")
+	}
+	return nil
+}
+
 func verifyAttachmentOutput(
-	path string,
+	root *os.Root,
+	parentPath string,
+	parentIdentity os.FileInfo,
+	name string,
 	file *os.File,
 	identity os.FileInfo,
 	expected attachmentOutputExpectation,
 ) error {
-	pathInfo, err := os.Lstat(path)
+	if err := verifyAttachmentOutputParent(root, parentPath, parentIdentity); err != nil {
+		return err
+	}
+	pathInfo, err := root.Lstat(name)
 	if err != nil {
 		return fmt.Errorf("inspect attachment output after writing: %w", err)
 	}
@@ -622,15 +679,18 @@ func verifyAttachmentOutput(
 	if err != nil || finalInfo.Size() != expected.size {
 		return operationError("store_changed", "attachment output changed while verifying")
 	}
-	finalPathInfo, err := os.Lstat(path)
+	if err := verifyAttachmentOutputParent(root, parentPath, parentIdentity); err != nil {
+		return err
+	}
+	finalPathInfo, err := root.Lstat(name)
 	if err != nil || !finalPathInfo.Mode().IsRegular() || !os.SameFile(identity, finalPathInfo) {
 		return operationError("store_changed", "attachment output changed while verifying")
 	}
 	return nil
 }
 
-func removeOwnedAttachmentOutput(path string, identity os.FileInfo) error {
-	pathInfo, err := os.Lstat(path)
+func removeOwnedAttachmentOutput(root *os.Root, name string, identity os.FileInfo) error {
+	pathInfo, err := root.Lstat(name)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -640,7 +700,7 @@ func removeOwnedAttachmentOutput(path string, identity os.FileInfo) error {
 	if !pathInfo.Mode().IsRegular() || !os.SameFile(identity, pathInfo) {
 		return nil
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := root.Remove(name); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove attachment output: %w", err)
 	}
 	return nil

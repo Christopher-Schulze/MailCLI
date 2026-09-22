@@ -178,6 +178,79 @@ func TestWriteVerifiedExclusiveFileRejectsShortCopy(t *testing.T) {
 	}
 }
 
+func TestWriteVerifiedExclusiveFileSupportsNestedOutputDir(t *testing.T) {
+	t.Parallel()
+	parent := filepath.Join(t.TempDir(), "nested", "deeper")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	source := []byte("nested attachment bytes")
+	output := filepath.Join(parent, "attachment.bin")
+	if err := writeVerifiedExclusiveFile(output, bytes.NewReader(source), int64(len(source)), sha256.Sum256(source)); err != nil {
+		t.Fatalf("writeVerifiedExclusiveFile() error = %v", err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(got, source) {
+		t.Fatalf("output bytes = %q, want %q", got, source)
+	}
+}
+
+func TestWriteVerifiedExclusiveFileRejectsSymlinkedParent(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	target := t.TempDir()
+	link := filepath.Join(base, "linked")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	source := []byte("attachment bytes")
+	output := filepath.Join(link, "attachment.bin")
+	err := writeVerifiedExclusiveFile(output, bytes.NewReader(source), int64(len(source)), sha256.Sum256(source))
+	if errorCodeForTest(err) != "unsafe_message_source" {
+		t.Fatalf("writeVerifiedExclusiveFile() error = %v, want unsafe_message_source", err)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output exists after rejected symlinked parent: %v", statErr)
+	}
+	entries, readErr := os.ReadDir(target)
+	if readErr != nil {
+		t.Fatalf("ReadDir() error = %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlinked parent target received %d entries, want none", len(entries))
+	}
+}
+
+func TestWriteVerifiedExclusiveFileRejectsParentSwap(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	moved := parent + ".moved"
+	source := []byte("verified bytes")
+	output := filepath.Join(parent, "attachment.bin")
+	reader := &replacingAttachmentReader{
+		reader: bytes.NewReader(source),
+		replace: func() error {
+			if err := os.Rename(parent, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(parent, 0o700)
+		},
+	}
+	err := writeVerifiedExclusiveFile(output, reader, int64(len(source)), sha256.Sum256(source))
+	if errorCodeForTest(err) != "store_changed" {
+		t.Fatalf("writeVerifiedExclusiveFile() error = %v, want store_changed", err)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output exists after rejected parent swap: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(moved, "attachment.bin")); !os.IsNotExist(statErr) {
+		t.Fatalf("moved parent retains orphan output: %v", statErr)
+	}
+}
+
 func TestWriteVerifiedExclusiveFileDoesNotRemoveRegularReplacement(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
