@@ -88,7 +88,11 @@ func TestDraftRevisionReadIgnoresPersistedRevisionAndOperationalMetadata(t *test
 			if err := writeDraftFile(root, draft); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := beginSendAttempt(root, draft.Ref, "<attempt@example.com>", "fingerprint"); err != nil {
+			if _, err := beginSendAttempt(sendAttemptOptions{
+				Root: root, Ref: draft.Ref,
+				MessageID:           "<attempt@example.com>",
+				EnvelopeFingerprint: "fingerprint",
+			}); err != nil {
 				t.Fatal(err)
 			}
 			loaded, err := service.GetDraft(draft.Ref)

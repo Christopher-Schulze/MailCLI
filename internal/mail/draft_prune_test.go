@@ -13,7 +13,7 @@ func TestPruneSweepsOrphanSendClaimAndSpool(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
@@ -84,7 +84,7 @@ func TestPruneKeepsArtifactsWhileDraftExists(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	result, err := service.PruneDrafts(
@@ -105,7 +105,7 @@ func TestPruneDryRunListsOrphanArtifactsWithoutRemoving(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	if err := os.Remove(filepath.Join(root, draft.Ref+".json")); err != nil {
@@ -129,7 +129,7 @@ func TestPruneSkipsOrphanArtifactsWhileLocked(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	if err := os.Remove(filepath.Join(root, draft.Ref+".json")); err != nil {

@@ -47,45 +47,24 @@ func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservati
 	return &clone
 }
 
-func beginSendAttempt(root string, ref string, messageID, envelopeFingerprint string, storage ...*draftStorage) (SendAttempt, error) {
-	return beginSendAttemptWithMIMEFingerprint(root, ref, nil, messageID, envelopeFingerprint, "", storage...)
+// sendAttemptOptions carries every field a send claim can record at creation.
+// Root and Ref are required; Storage is optional and defaults to storage rooted
+// at Root. DraftRevision, Baseline, MessageID, EnvelopeFingerprint,
+// MIMEFingerprint, and RecoverySpool are optional evidence fields retained
+// verbatim in the claim.
+type sendAttemptOptions struct {
+	Root                string
+	Ref                 string
+	Storage             *draftStorage
+	DraftRevision       string
+	Baseline            *SendObservationBaseline
+	MessageID           string
+	EnvelopeFingerprint string
+	MIMEFingerprint     string
+	RecoverySpool       *AcceptedMessageSpool
 }
 
-func beginSendAttemptWithBaseline(
-	root string,
-	ref string,
-	baseline *SendObservationBaseline,
-	messageID string,
-	envelopeFingerprint string,
-	storage ...*draftStorage,
-) (SendAttempt, error) {
-	return beginSendAttemptWithMIMEFingerprint(root, ref, baseline, messageID, envelopeFingerprint, "", storage...)
-}
-
-func beginSendAttemptWithMIMEFingerprint(
-	root string,
-	ref string,
-	baseline *SendObservationBaseline,
-	messageID string,
-	envelopeFingerprint string,
-	mimeFingerprint string,
-	storage ...*draftStorage,
-) (SendAttempt, error) {
-	return beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
-		root, ref, baseline, messageID, envelopeFingerprint, mimeFingerprint, nil, storage...,
-	)
-}
-
-func beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
-	root string,
-	ref string,
-	baseline *SendObservationBaseline,
-	messageID string,
-	envelopeFingerprint string,
-	mimeFingerprint string,
-	recoverySpool *AcceptedMessageSpool,
-	storage ...*draftStorage,
-) (SendAttempt, error) {
+func beginSendAttempt(options sendAttemptOptions) (SendAttempt, error) {
 	id, err := newSendAttemptID()
 	if err != nil {
 		return SendAttempt{}, err
@@ -93,14 +72,19 @@ func beginSendAttemptWithMIMEFingerprintAndRecoverySpool(
 	now := time.Now().UTC()
 	attempt := SendAttempt{
 		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
-		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint,
-		MIMEFingerprint:     mimeFingerprint,
-		RecoverySpool:       cloneAcceptedMessageSpool(recoverySpool),
-		ObservationBaseline: cloneSendObservationBaseline(baseline),
+		DraftRevision:       options.DraftRevision,
+		MessageID:           options.MessageID,
+		EnvelopeFingerprint: options.EnvelopeFingerprint,
+		MIMEFingerprint:     options.MIMEFingerprint,
+		RecoverySpool:       cloneAcceptedMessageSpool(options.RecoverySpool),
+		ObservationBaseline: cloneSendObservationBaseline(options.Baseline),
 	}
-	state := draftStorageFor(root, storage...)
-	name := ref + ".send-claim"
-	payload, err := encodeSendAttempt(ref, attempt)
+	state := options.Storage
+	if state == nil {
+		state = draftStorageFor(options.Root)
+	}
+	name := options.Ref + ".send-claim"
+	payload, err := encodeSendAttempt(options.Ref, attempt)
 	if err != nil {
 		return SendAttempt{}, err
 	}

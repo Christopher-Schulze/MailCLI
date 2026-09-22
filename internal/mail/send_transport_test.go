@@ -727,7 +727,11 @@ func TestSendDraftRecoversReceiptPersistedBeforeDraftCleanup(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	attempt, err := beginSendAttempt(root, draft.Ref, "<recovered@example.com>", envelopeFingerprint(draft, "<recovered@example.com>"))
+	attempt, err := beginSendAttempt(sendAttemptOptions{
+		Root: root, Ref: draft.Ref,
+		MessageID:           "<recovered@example.com>",
+		EnvelopeFingerprint: envelopeFingerprint(draft, "<recovered@example.com>"),
+	})
 	if err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
@@ -1331,9 +1335,9 @@ func TestReconcileDraftObservesGatewaySentStoreWithoutSendingAgain(t *testing.T)
 	baseline := SendObservationBaseline{
 		StoreUUID: "test-store", MaximumRowID: 10, CapturedUnix: 1, SentMailboxIDs: []int64{20},
 	}
-	attempt, err := beginSendAttemptWithBaseline(root, draft.Ref, &baseline, "", "")
+	attempt, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref, Baseline: &baseline})
 	if err != nil {
-		t.Fatalf("beginSendAttemptWithBaseline() error = %v", err)
+		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	attempt.InvocationStarted = true
 	attempt.AcceptedByMail = true
@@ -1360,7 +1364,7 @@ func TestOrphanedSendClaimReplaysWithoutSubmitting(t *testing.T) {
 	submitter, mirror := sendTransportStubs()
 	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	attempt, err := beginSendAttempt(root, draft.Ref, "", "")
+	attempt, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref})
 	if err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
@@ -1445,7 +1449,12 @@ func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) 
 	if err != nil {
 		t.Fatalf("draftMIMEFingerprint() error = %v", err)
 	}
-	if _, err := beginSendAttemptWithMIMEFingerprint(root, draft.Ref, nil, "<claim@example.com>", fingerprint, mimeFingerprint); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{
+		Root: root, Ref: draft.Ref,
+		MessageID:           "<claim@example.com>",
+		EnvelopeFingerprint: fingerprint,
+		MIMEFingerprint:     mimeFingerprint,
+	}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	return "<claim@example.com>", fingerprint
@@ -1580,7 +1589,11 @@ func TestReconcileUnknownClaimRejectsFingerprintMismatch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "<claim@example.com>", "stale-fingerprint"); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{
+		Root: root, Ref: draft.Ref,
+		MessageID:           "<claim@example.com>",
+		EnvelopeFingerprint: "stale-fingerprint",
+	}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	service.send.Imap = &reconcileImapStub{}
@@ -1595,7 +1608,7 @@ func TestReconcileLegacyUnknownClaimStaysBlocked(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := newTransportService(root, nil, nil, &stubCredentials{password: "secret"})
 	draft := createTransportDraft(t, service)
-	if _, err := beginSendAttempt(root, draft.Ref, "", ""); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{Root: root, Ref: draft.Ref}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 

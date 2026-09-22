@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -163,30 +162,16 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 			Message: fmt.Sprintf("the composed message could not be retained before SMTP submission; SMTP was not contacted: %v", err),
 		}
 	}
-	id, err := newSendAttemptID()
-	if err != nil {
-		cleanupErr := removeAcceptedMessageSpool(ref, &SendAttempt{RecoverySpool: recoverySpool}, storage)
-		return SendResult{}, errors.Join(err, cleanupErr)
-	}
-	now := time.Now().UTC()
-	attempt := SendAttempt{
-		ID: id, StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown,
-		DraftRevision: draft.Revision,
-		MessageID:     messageID, EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
-		MIMEFingerprint: mimeFingerprint, RecoverySpool: cloneAcceptedMessageSpool(recoverySpool),
-	}
-	payload, err := encodeSendAttempt(ref, attempt)
-	if err == nil {
-		_, err = writePrivateDraftFile(storage, ref+".send-claim", payload)
-		if errors.Is(err, os.ErrExist) {
-			err = &OperationError{
-				Code:    "send_retry_blocked",
-				Message: "draft already has a send attempt; inspect it and discard explicitly instead of retrying",
-			}
-		} else if err != nil {
-			err = fmt.Errorf("create send claim: %w", err)
-		}
-	}
+	attempt, err := beginSendAttempt(sendAttemptOptions{
+		Root:                root,
+		Ref:                 ref,
+		Storage:             storage,
+		DraftRevision:       draft.Revision,
+		MessageID:           messageID,
+		EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
+		MIMEFingerprint:     mimeFingerprint,
+		RecoverySpool:       recoverySpool,
+	})
 	if err != nil {
 		cleanupErr := removeAcceptedMessageSpool(ref, &SendAttempt{RecoverySpool: recoverySpool}, storage)
 		return SendResult{}, errors.Join(err, cleanupErr)

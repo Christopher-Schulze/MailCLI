@@ -127,7 +127,7 @@ func TestDraftListCursorRejectsCollectionChanges(t *testing.T) {
 			case "discard":
 				err = service.DiscardDraft(draft.Ref)
 			case "claim":
-				_, err = beginSendAttempt(service.draftRoot, draft.Ref, "", "")
+				_, err = beginSendAttempt(sendAttemptOptions{Root: service.draftRoot, Ref: draft.Ref})
 			case "root replacement":
 				var original os.FileInfo
 				original, err = os.Stat(service.draftRoot)

@@ -113,7 +113,11 @@ func TestDraftLeasePinsReadsWritesClaimsAndCleanupAfterRootReplacement(t *testin
 		t.Fatalf("replacement draft changed to %q", replacementPayload)
 	}
 
-	if _, err := beginSendAttempt(root, draft.Ref, "<message@example.com>", envelopeFingerprint(updated, "<message@example.com>"), lease.storage); err != nil {
+	if _, err := beginSendAttempt(sendAttemptOptions{
+		Root: root, Ref: draft.Ref, Storage: lease.storage,
+		MessageID:           "<message@example.com>",
+		EnvelopeFingerprint: envelopeFingerprint(updated, "<message@example.com>"),
+	}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
 	claimPath, err := sendClaimPath(moved, draft.Ref)
