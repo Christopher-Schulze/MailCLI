@@ -110,7 +110,8 @@ if [[ ! -x "${GOVULNCHECK_BIN}" ]]; then
 fi
 "${GOVULNCHECK_BIN}" ./...
 
-go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
+MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \
+  go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
   -parallel "${MAILCLI_TEST_CPUS}" ./...
 "${SCRIPT_BASE}/scripts/tests/test-task-history-export.sh"
 "${SCRIPT_BASE}/scripts/tests/test-write-coordination.sh"
@@ -126,3 +127,27 @@ if [[ "${RELEASE_REFS_AFTER}" != "${RELEASE_REFS_BEFORE}" ]]; then
   exit 1
 fi
 printf 'Local release verification preserved branch, remote-tracking, and tag refs\n'
+
+# Opt-in live gates. Each stage prints an explicit skip line when its flag is
+# unset so the default suite stays free of live prompts and live coverage is
+# never silently absent from the output. The main go test run above clears
+# both flags so live tests execute exactly once, inside their named stage.
+if [[ "${MAILCLI_LIVE_TESTS:-}" == "1" ]]; then
+  printf 'MAILCLI_LIVE_TESTS=1: running the live Mail-store gate\n'
+  go test -count=1 -race -run '^TestLive' -v ./internal/mailstore
+else
+  printf 'Skipping live Mail-store gate (set MAILCLI_LIVE_TESTS=1 to enable)\n'
+fi
+if [[ "${MAILCLI_KEYCHAIN_LIVE:-}" == "1" ]]; then
+  printf 'MAILCLI_KEYCHAIN_LIVE=1: running the live Keychain gate\n'
+  go test -count=1 -race -run '^TestLiveKeychain$' -v ./internal/keychain
+else
+  printf 'Skipping live Keychain gate (set MAILCLI_KEYCHAIN_LIVE=1 to enable)\n'
+fi
+if [[ "${MAILCLI_LIVE_RESPONSIVENESS:-}" == "1" ]]; then
+  printf 'MAILCLI_LIVE_RESPONSIVENESS=1: building bin/mailcli for the Mail responsiveness gate\n'
+  go build -o "${MAILCLI_ROOT}/bin/mailcli" ./cmd/mailcli
+  "${SCRIPT_BASE}/scripts/tests/test-live-responsiveness.sh"
+else
+  printf 'Skipping live Mail responsiveness gate (set MAILCLI_LIVE_RESPONSIVENESS=1 to enable)\n'
+fi
