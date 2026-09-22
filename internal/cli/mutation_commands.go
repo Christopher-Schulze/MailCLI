@@ -49,6 +49,37 @@ func runMessageMark(
 	return 0
 }
 
+func runMessageState(
+	ctx context.Context,
+	service *mail.Service,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	flags := newFlagSet("messages state", stderr)
+	ref := flags.String("ref", "", "message ref")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	state, err := service.MessageState(operationCtx, *ref)
+	if err != nil {
+		return failCommand("messages.state", *jsonOutput, err, stdout, stderr)
+	}
+	if *jsonOutput {
+		return writeSuccess(stdout, "messages.state", responseData{State: &state})
+	}
+	writeFormat(stdout, "%s\tserver=%s\tflags=%s\tagree=%t\n",
+		state.Ref, state.ServerState, strings.Join(state.ServerFlags, ","), state.FlagsAgree)
+	writeFormat(stdout, "local\tread=%t\tflagged=%t\tjunk=%t\tdeleted=%t\n",
+		state.LocalIndexFlags.Read, state.LocalIndexFlags.Flagged,
+		state.LocalIndexFlags.Junk, state.LocalIndexFlags.Deleted)
+	writeFormat(stdout, "%s\n", state.StalenessNote)
+	return 0
+}
+
 func runMessageTransfer(
 	ctx context.Context,
 	service *mail.Service,

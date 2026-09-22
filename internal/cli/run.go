@@ -41,6 +41,7 @@ type responseData struct {
 	Page                     *json.RawMessage             `json:"page,omitempty"`
 	Message                  *mail.Message                `json:"message,omitempty"`
 	MessageState             *mail.MessageSummary         `json:"message_state,omitempty"`
+	State                    *mail.MessageState           `json:"state,omitempty"`
 	RawSource                *string                      `json:"raw_source,omitempty"`
 	Attachments              *[]mail.Attachment           `json:"attachments,omitempty"`
 	Projection               *projectionInfo              `json:"projection,omitempty"`

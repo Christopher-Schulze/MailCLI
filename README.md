@@ -37,7 +37,7 @@ Detail JSON responses support bounded projections. Use `--view metadata|plain|fu
 |---|---|---|
 | Accounts | `accounts list` | Lists configured accounts and bounded sender identities with explicit coverage evidence plus `direct_ops_supported`/`direct_ops_reason` endpoint annotation |
 | Mailboxes | `mailboxes list`, `mailboxes resolve` | Handles Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested labels |
-| Messages | `messages list`, `filter`, `search`, `get`, `raw` | Pages metadata, applies typed filters, scans bodies, and returns normalized or RFC 5322 content |
+| Messages | `messages list`, `filter`, `search`, `get`, `raw`, `state` | Pages metadata, applies typed filters, scans bodies, returns normalized or RFC 5322 content, and reads server flags over IMAP |
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |
 | Responses | `messages reply`, `messages forward` | Creates local reply, reply-all, and forward review drafts without opening a compose object |
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `handoff-reconcile`, `open`, `discard`, `prune`, `reconcile` | Manages plain, Markdown, or safe HTML drafts, prunes stale never-sent drafts, reconciles retained send and handoff claims, and opens a reviewed new draft visibly; scripted `save` remains blocked |

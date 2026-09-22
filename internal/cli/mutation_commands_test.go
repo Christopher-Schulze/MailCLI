@@ -33,6 +33,34 @@ func TestMutationCommandsJSONTable(t *testing.T) {
 	}
 }
 
+func TestMessageStateSeparatesServerAndLocalFlags(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(),
+		[]string{"messages", "state", "--ref", "msg_ref", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, `"command":"messages.state"`) || !strings.Contains(output, `"server_flags":["\\Seen"]`) ||
+		!strings.Contains(output, `"local_index_flags":{"read":true`) || !strings.Contains(output, `"flags_agree":true`) {
+		t.Fatalf("state output lacks separated flag projections: %q", output)
+	}
+}
+
+func TestMessageStateHumanOutput(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(),
+		[]string{"messages", "state", "--ref", "msg_ref"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "server=observed") || !strings.Contains(stdout.String(), "local\tread=true") {
+		t.Fatalf("human state output = %q", stdout.String())
+	}
+}
+
 func TestMessageDeleteReturnsServerTruth(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

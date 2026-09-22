@@ -181,6 +181,23 @@ type ImapConcurrencyProvider interface {
 	MaxConnectionsPerAccount() int
 }
 
+// FlagState is the verified server-side flag snapshot for one message UID,
+// read via UID FETCH ... FLAGS. Missing reports the target UID was absent or
+// expunged on the server; Flags carries the observed list otherwise.
+type FlagState struct {
+	Flags       []string
+	UIDValidity uint32
+	Missing     bool
+}
+
+// FlagStateReader is an optional IMAP extension that reads verified
+// server-side flags for one message UID without mutating anything. Keeping it
+// separate from ImapOperator preserves existing transport stubs; callers must
+// fail closed when the configured operator does not implement it.
+type FlagStateReader interface {
+	FetchFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32) (FlagState, error)
+}
+
 // MessageIdentityHint contains local metadata used for bounded server-side
 // identity discovery when a store-bound reference has no Message-ID or UID.
 type MessageIdentityHint struct {

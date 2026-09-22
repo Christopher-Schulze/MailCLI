@@ -93,6 +93,55 @@ func TestSetFlagsObservesServerResult(t *testing.T) {
 	}
 }
 
+func TestFetchFlagsReadsServerState(t *testing.T) {
+	tests := []struct {
+		name        string
+		fetch       string
+		wantFlags   []string
+		wantMissing bool
+		wantCode    string
+	}{
+		{name: "observed flags", fetch: "* 7 FETCH (UID 42 FLAGS (\\Seen \\Flagged))\r\n<tag> OK FETCH done\r\n", wantFlags: []string{"\\Seen", "\\Flagged"}},
+		{name: "empty flag set", fetch: "* 7 FETCH (UID 42 FLAGS ())\r\n<tag> OK FETCH done\r\n", wantFlags: []string{}},
+		{name: "vanished target", fetch: "<tag> OK FETCH done\r\n", wantMissing: true},
+		{name: "target without flags proof", fetch: "* 7 FETCH (UID 42)\r\n<tag> OK FETCH done\r\n", wantCode: transport.CodeIMAPResponseMalformed},
+		{name: "unrelated UID is missing", fetch: "* 42 FETCH (UID 99 FLAGS (\\Seen))\r\n<tag> OK FETCH done\r\n", wantMissing: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newFakeServer(t, fakeServerConfig{authOK: true, fetchResponse: []byte(test.fetch)})
+			client, cfg := flagTestClient(t, server)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			state, err := client.FetchFlags(ctx, cfg, "INBOX", 42, 12345)
+			if got := transport.ErrorCode(err); got != test.wantCode {
+				t.Fatalf("error = %v (code %q), want %q", err, got, test.wantCode)
+			}
+			if test.wantCode != "" {
+				return
+			}
+			if state.Missing != test.wantMissing || !reflect.DeepEqual(state.Flags, test.wantFlags) {
+				t.Fatalf("state = %+v, want flags %#v missing %t", state, test.wantFlags, test.wantMissing)
+			}
+			if state.UIDValidity != 12345 {
+				t.Fatalf("uidvalidity = %d, want 12345", state.UIDValidity)
+			}
+			fetches, stores := 0, 0
+			for _, command := range server.Commands() {
+				if command == "UID FETCH" {
+					fetches++
+				}
+				if command == "UID STORE" {
+					stores++
+				}
+			}
+			if fetches != 1 || stores != 0 {
+				t.Fatalf("commands = %v, want one UID FETCH and no STORE", server.Commands())
+			}
+		})
+	}
+}
+
 func flagTestClient(t *testing.T, server *fakeServer) (*Client, transport.ImapConfig) {
 	t.Helper()
 	host, portValue, err := net.SplitHostPort(server.Addr())

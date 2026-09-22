@@ -140,6 +140,13 @@ type stubImapOperator struct {
 	// lastFetchMax records the bound the last FetchMessage carried.
 	lastFetchMax int64
 	listCalls    int
+	// flagState scripts the server flag snapshot for FetchFlags; flagStateErr
+	// overrides it. fetchFlagsCalls counts invocations.
+	flagState        transport.FlagState
+	flagStateErr     error
+	fetchFlagsCalls  int
+	fetchFlagsUID    uint32
+	fetchFlagsConfig transport.ImapConfig
 }
 
 func (s *stubImapOperator) nextMutationErr() error {
@@ -334,6 +341,23 @@ func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapCo
 		return status, nil
 	}
 	return s.status, nil
+}
+
+func (s *stubImapOperator) FetchFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32) (transport.FlagState, error) {
+	s.fetchFlagsCalls++
+	s.fetchFlagsUID = uid
+	s.fetchFlagsConfig = cfg
+	if s.err != nil {
+		return transport.FlagState{}, s.err
+	}
+	if s.flagStateErr != nil {
+		return transport.FlagState{}, s.flagStateErr
+	}
+	state := s.flagState
+	if state.UIDValidity == 0 {
+		state.UIDValidity = s.stubValidity()
+	}
+	return state, nil
 }
 
 type stubCredentials map[string]string

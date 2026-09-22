@@ -638,6 +638,35 @@ type MarkMessageRequest struct {
 	AllowDraftMutation bool
 }
 
+// MessageServerState identifies how the server-side flag snapshot resolved.
+const (
+	MessageServerStateObserved = "observed"
+	MessageServerStateMissing  = "missing"
+)
+
+// LocalIndexFlags mirrors the Envelope Index flag projection the local
+// catalog reports. It reflects the last Mail.app synchronization and may lag
+// the server.
+type LocalIndexFlags struct {
+	Read    bool `json:"read"`
+	Flagged bool `json:"flagged"`
+	Junk    bool `json:"junk"`
+	Deleted bool `json:"deleted"`
+}
+
+// MessageState separates the verified server-side flag snapshot from the
+// local index projection so callers can detect divergence after mutations.
+type MessageState struct {
+	Ref               string          `json:"ref"`
+	ServerFlags       []string        `json:"server_flags"`
+	ServerState       string          `json:"server_state"`
+	ServerUID         uint32          `json:"server_uid"`
+	ServerUIDValidity uint32          `json:"server_uidvalidity"`
+	LocalIndexFlags   LocalIndexFlags `json:"local_index_flags"`
+	FlagsAgree        bool            `json:"flags_agree"`
+	StalenessNote     string          `json:"staleness_note"`
+}
+
 type TransferMessageRequest struct {
 	Ref                string
 	DestinationMailbox string
@@ -768,6 +797,7 @@ type Gateway interface {
 	SaveAttachmentTo(ctx context.Context, messageRef string, attachmentID string, outputPath string) error
 	SaveDraft(ctx context.Context, draft Draft) (MessageSummary, error)
 	MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error)
+	MessageState(ctx context.Context, ref string) (MessageState, error)
 	TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error)
 	DeleteMessage(ctx context.Context, request DeleteMessageRequest) (DeleteResult, error)
 	Sync(ctx context.Context, accountRef string) error

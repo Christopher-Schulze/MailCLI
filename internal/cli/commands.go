@@ -256,12 +256,12 @@ func runMessages(
 	stderr io.Writer,
 ) int {
 	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [options]")
+		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|reply|forward|mark|move|copy|delete> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|reply|forward|mark|move|copy|delete> [options]")
+		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|reply|forward|mark|move|copy|delete> [options]")
 		return 0
 	case "list":
 		return runMessagesList(ctx, mailService, args[1:], stdout, stderr)
@@ -273,6 +273,8 @@ func runMessages(
 		return runMessagesGet(ctx, mailService, args[1:], stdout, stderr)
 	case "raw":
 		return runMessagesRaw(ctx, mailService, args[1:], stdout, stderr)
+	case "state":
+		return runMessageState(ctx, mailService, args[1:], stdout, stderr)
 	case "reply":
 		return runMessageReply(ctx, mailService, args[1:], stdout, stderr)
 	case "forward":

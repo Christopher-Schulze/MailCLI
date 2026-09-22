@@ -287,6 +287,15 @@ func (s *Service) MarkMessage(ctx context.Context, request MarkMessageRequest) (
 	return s.gateway.MarkMessage(ctx, request)
 }
 
+// MessageState reads the verified server-side flag snapshot for one message
+// and pairs it with the local index projection. It performs no mutation.
+func (s *Service) MessageState(ctx context.Context, ref string) (MessageState, error) {
+	if ref == "" {
+		return MessageState{}, validationError("message ref is required")
+	}
+	return s.gateway.MessageState(ctx, ref)
+}
+
 func (s *Service) TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error) {
 	if request.Ref == "" || request.DestinationMailbox == "" {
 		return MessageSummary{}, validationError("message ref and destination mailbox ref are required")

@@ -77,6 +77,10 @@ func (g *gatewayStub) MarkMessage(context.Context, MarkMessageRequest) (MessageS
 	return MessageSummary{}, nil
 }
 
+func (g *gatewayStub) MessageState(context.Context, string) (MessageState, error) {
+	return MessageState{}, nil
+}
+
 func (g *gatewayStub) TransferMessage(context.Context, TransferMessageRequest) (MessageSummary, error) {
 	return MessageSummary{}, nil
 }

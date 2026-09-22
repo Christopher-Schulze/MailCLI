@@ -141,6 +141,19 @@ func (testGateway) MarkMessage(_ context.Context, request mail.MarkMessageReques
 		ServerTruth: &mail.ServerMutationEvidence{Command: "STORE", ServerResponse: "OK STORE completed", UID: 1}}, nil
 }
 
+func (testGateway) MessageState(_ context.Context, ref string) (mail.MessageState, error) {
+	return mail.MessageState{
+		Ref:               ref,
+		ServerFlags:       []string{"\\Seen"},
+		ServerState:       mail.MessageServerStateObserved,
+		ServerUID:         101,
+		ServerUIDValidity: 12345,
+		LocalIndexFlags:   mail.LocalIndexFlags{Read: true},
+		FlagsAgree:        true,
+		StalenessNote:     "local index may lag the server",
+	}, nil
+}
+
 func (testGateway) TransferMessage(_ context.Context, request mail.TransferMessageRequest) (mail.MessageSummary, error) {
 	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox,
 		ServerTruth: &mail.ServerMutationEvidence{Command: "MOVE", ServerResponse: "OK MOVE completed", UID: 1}}, nil

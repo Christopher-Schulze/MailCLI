@@ -309,6 +309,46 @@ func missingFlagResult(ev transport.MutationEvidence) (transport.MutationEvidenc
 	}
 }
 
+// FetchFlags reads the verified server-side flag snapshot for one message UID
+// via UID FETCH ... FLAGS. It mutates nothing; the caller receives the same
+// UID-and-UIDVALIDITY proof discipline as post-mutation verification.
+func (c *Client) FetchFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32) (transport.FlagState, error) {
+	if err := validateMessageUID(uid); err != nil {
+		return transport.FlagState{}, err
+	}
+	ps, release, err := c.acquire(ctx, cfg)
+	if err != nil {
+		return transport.FlagState{}, err
+	}
+	defer release()
+
+	info, err := c.ensureSelectedFresh(ctx, ps, mailbox)
+	if err != nil {
+		return transport.FlagState{}, err
+	}
+	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
+		return transport.FlagState{}, err
+	}
+	result, err := c.fetchFlagResult(ctx, ps.sess, uid, info.uidvalidity, &info.permissions)
+	if err != nil {
+		return transport.FlagState{}, err
+	}
+	state := transport.FlagState{UIDValidity: info.uidvalidity}
+	observation := result.observation
+	switch {
+	case observation.missing || !observation.seenUID:
+		state.Missing = true
+	case !observation.observed:
+		return transport.FlagState{}, &transport.TransportError{
+			Code:    transport.CodeIMAPResponseMalformed,
+			Message: "IMAP flag read returned the target UID without FLAGS proof",
+		}
+	default:
+		state.Flags = append([]string{}, observation.flags...)
+	}
+	return state, nil
+}
+
 // UID command responses contain sequence numbers, not UIDs, in their prefix.
 // Accept proof only after parsing the UID attribute, and consume subsequent
 // updates through tagged completion so an expunged or superseded observation
