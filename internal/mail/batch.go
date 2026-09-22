@@ -24,6 +24,9 @@ const (
 	BatchOperationRead           = "read"
 	BatchOperationAttachmentSave = "attachment_save"
 	BatchOperationMark           = "mark"
+	BatchOperationMove           = "move"
+	BatchOperationCopy           = "copy"
+	BatchOperationDelete         = "delete"
 )
 
 type BatchItemState = string
@@ -44,8 +47,8 @@ type BatchRequest struct {
 }
 
 // BatchItem identifies one request. Ref is a store-bound message reference for
-// every operation; attachment fields are used only by attachment_save and
-// state fields only by mark.
+// every operation; attachment fields are used only by attachment_save, state
+// fields only by mark, and Mailbox only by move and copy.
 type BatchItem struct {
 	ID                 string `json:"id"`
 	Ref                string `json:"ref"`
@@ -54,6 +57,7 @@ type BatchItem struct {
 	Read               *bool  `json:"read"`
 	Flagged            *bool  `json:"flagged"`
 	Junk               *bool  `json:"junk"`
+	Mailbox            string `json:"mailbox"`
 	AllowDraftMutation bool   `json:"allow_draft_mutation,omitempty"`
 }
 
@@ -70,6 +74,7 @@ type BatchItemResult struct {
 	Message         *Message         `json:"message,omitempty"`
 	MessageState    *MessageSummary  `json:"message_state,omitempty"`
 	SavedAttachment *SavedAttachment `json:"saved_attachment,omitempty"`
+	DeleteResult    *DeleteResult    `json:"delete_result,omitempty"`
 	Error           *BatchItemError  `json:"error,omitempty"`
 }
 
@@ -174,7 +179,8 @@ func (run *batchExecution) worker() {
 
 func validateBatchRequest(request BatchRequest) (int, error) {
 	switch request.Operation {
-	case BatchOperationRead, BatchOperationAttachmentSave, BatchOperationMark:
+	case BatchOperationRead, BatchOperationAttachmentSave, BatchOperationMark,
+		BatchOperationMove, BatchOperationCopy, BatchOperationDelete:
 	default:
 		return 0, validationError(fmt.Sprintf("unsupported batch operation %q", request.Operation))
 	}
@@ -206,14 +212,15 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 		}
 		switch request.Operation {
 		case BatchOperationRead:
-			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil || item.AllowDraftMutation {
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
+				item.Mailbox != "" || item.AllowDraftMutation {
 				return 0, validationError(fmt.Sprintf("batch read item %q contains unsupported fields", item.ID))
 			}
 		case BatchOperationAttachmentSave:
 			if item.AttachmentID == "" || item.OutputPath == "" {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q requires attachment_id and output_path", item.ID))
 			}
-			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.AllowDraftMutation {
+			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.Mailbox != "" || item.AllowDraftMutation {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q contains unsupported fields", item.ID))
 			}
 			if err := validateAttachmentRequest(SaveAttachmentRequest{
@@ -227,8 +234,29 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			}
 			destinations[strings.ToLower(path)] = item.ID
 		case BatchOperationMark:
-			if item.AttachmentID != "" || item.OutputPath != "" || (item.Read == nil && item.Flagged == nil && item.Junk == nil) {
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Mailbox != "" ||
+				(item.Read == nil && item.Flagged == nil && item.Junk == nil) {
 				return 0, validationError(fmt.Sprintf("batch mark item %q requires state fields only", item.ID))
+			}
+		case BatchOperationMove:
+			if item.Mailbox == "" {
+				return 0, validationError(fmt.Sprintf("batch move item %q requires mailbox", item.ID))
+			}
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil {
+				return 0, validationError(fmt.Sprintf("batch move item %q contains unsupported fields", item.ID))
+			}
+		case BatchOperationCopy:
+			if item.Mailbox == "" {
+				return 0, validationError(fmt.Sprintf("batch copy item %q requires mailbox", item.ID))
+			}
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
+				item.AllowDraftMutation {
+				return 0, validationError(fmt.Sprintf("batch copy item %q contains unsupported fields", item.ID))
+			}
+		case BatchOperationDelete:
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
+				item.Mailbox != "" {
+				return 0, validationError(fmt.Sprintf("batch delete item %q contains unsupported fields", item.ID))
 			}
 		}
 	}
@@ -282,6 +310,48 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 		}
 		result.State = BatchItemCompleted
 		result.MessageState = &state
+	case BatchOperationMove, BatchOperationCopy:
+		state, err := run.service.TransferMessage(run.ctx, TransferMessageRequest{
+			Ref: item.Ref, DestinationMailbox: item.Mailbox,
+			Copy:               run.request.Operation == BatchOperationCopy,
+			AllowDraftMutation: item.AllowDraftMutation,
+		})
+		if err != nil {
+			result.State = BatchItemFailed
+			if state.Ref != "" || state.ServerTruth != nil {
+				result.MessageState = &state
+			}
+			result.Error = run.itemError(err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+				(run.ctx.Err() != nil && transport.IsTimeout(err)) ||
+				state.ServerTruth.OutcomeUnknown() ||
+				transport.IsMutationOutcomeUnknown(err) {
+				result.State = BatchItemUncertain
+			}
+			return result
+		}
+		result.State = BatchItemCompleted
+		result.MessageState = &state
+	case BatchOperationDelete:
+		deleted, err := run.service.DeleteMessage(run.ctx, DeleteMessageRequest{
+			Ref: item.Ref, AllowDraftMutation: item.AllowDraftMutation,
+		})
+		if err != nil {
+			result.State = BatchItemFailed
+			if deleted.MessageRef != "" || deleted.ServerTruth != nil {
+				result.DeleteResult = &deleted
+			}
+			result.Error = run.itemError(err)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+				(run.ctx.Err() != nil && transport.IsTimeout(err)) ||
+				deleted.ServerTruth.OutcomeUnknown() ||
+				transport.IsMutationOutcomeUnknown(err) {
+				result.State = BatchItemUncertain
+			}
+			return result
+		}
+		result.State = BatchItemCompleted
+		result.DeleteResult = &deleted
 	}
 	return result
 }
@@ -302,7 +372,7 @@ func (run *batchExecution) itemError(err error) *BatchItemError {
 			code = "operation_failed"
 		}
 	}
-	retryable := run.request.Operation != BatchOperationMark
+	retryable := run.request.Operation == BatchOperationRead || run.request.Operation == BatchOperationAttachmentSave
 	if retryable {
 		switch {
 		case transport.IsTransientReadFailure(err):

@@ -53,7 +53,8 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 			{"id", inputJSONString, false}, {"ref", inputJSONString, false},
 			{"attachment_id", inputJSONString, false}, {"output_path", inputJSONString, false},
 			{"read", inputJSONBoolean, false}, {"flagged", inputJSONBoolean, false},
-			{"junk", inputJSONBoolean, false}, {"allow_draft_mutation", inputJSONBoolean, false},
+			{"junk", inputJSONBoolean, false}, {"mailbox", inputJSONString, false},
+			{"allow_draft_mutation", inputJSONBoolean, false},
 		}
 	default:
 		return nil

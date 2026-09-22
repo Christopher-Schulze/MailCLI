@@ -47,6 +47,7 @@ const (
 	textFallbackAutomation
 	textSystemComposeService
 	textOptional
+	textOperationDependent
 )
 
 func contractTextString(text uint8) string {
@@ -95,6 +96,8 @@ func contractTextString(text uint8) string {
 		return "system-compose-service"
 	case textOptional:
 		return "optional"
+	case textOperationDependent:
+		return "operation-dependent"
 	default:
 		return "none"
 	}
@@ -247,7 +250,7 @@ var commandContracts = []commandContract{
 	newCommandContract("version", textRead, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultAvailable),
 	newCommandContract("update", textLocalWrite, textNone, textNone, textNone, mailServiceNotRequired, true, false, resultUpdated),
 	newCommandContract("doctor", textRead, textNone, textMailStore, textOptionalAutomation, mailServiceAlwaysRequired, false, false, resultHealthy),
-	newCommandContract("batch", textBatch, textNone, textMailStore, textNone, mailServiceForArguments, false, false, resultCompletePartial),
+	newCommandContract("batch", textBatch, textOperationDependent, textMailStore, textNone, mailServiceForArguments, false, false, resultCompletePartial),
 	newCommandContract("accounts.list", textRead, textNone, textMailStore, textFallbackAutomation, mailServiceAlwaysRequired, false, false, resultAccounts),
 	newCommandContract("mailboxes.list", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultComplete),
 	newCommandContract("mailboxes.resolve", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultResolved),

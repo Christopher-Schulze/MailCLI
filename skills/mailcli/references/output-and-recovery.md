@@ -6,7 +6,7 @@ Keep bodies, addresses, credentials, and attachment bytes out of logs and summar
 
 ## Batch input
 
-Use `mailcli batch --input - --json` with explicit refs and unique item IDs. Read the published `batch` schema for allowed operations, item fields, limits, and concurrency. Input is exactly one object up to 16 MiB; duplicate keys, case aliases, unknown fields, and trailing documents fail before dispatch. Results retain input order and per-item evidence. There is no automatic retry; never replay successful or uncertain items.
+Use `mailcli batch --input - --json` with explicit refs and unique item IDs. Read the published `batch` schema for allowed operations, item fields, limits, and concurrency. Input is exactly one object up to 16 MiB; duplicate keys, case aliases, unknown fields, and trailing documents fail before dispatch. `move`/`copy` items take a `mailbox` destination ref; `move`/`delete` items may set `allow_draft_mutation`. A `delete` batch needs the `--confirm` flag and is refused without it; `--confirm` on any other operation is rejected. Results retain input order and per-item evidence, including `message_state` or `delete_result` on mutation items. There is no automatic retry; never replay successful or uncertain items.
 
 ## Recovery details
 

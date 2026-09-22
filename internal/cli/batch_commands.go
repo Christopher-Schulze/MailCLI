@@ -26,6 +26,7 @@ func runBatch(
 	input := &trackedStringFlag{}
 	flags.Var(input, "input", "JSON batch request file or - for standard input")
 	concurrency := flags.Int("concurrency", 0, "maximum concurrent items (1-8)")
+	confirm := flags.Bool("confirm", false, "confirm the delete operation")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -36,6 +37,16 @@ func runBatch(
 	request, err := readBatchInput(input.value)
 	if err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
+	}
+	if request.Operation == mail.BatchOperationDelete && !*confirm {
+		return failCommand("batch", *jsonOutput, confirmationRequired("batch delete"), stdout, stderr)
+	}
+	if request.Operation != mail.BatchOperationDelete && *confirm {
+		return failCommand(
+			"batch", *jsonOutput,
+			&commandError{code: "invalid_argument", message: "--confirm applies only to the delete operation"},
+			stdout, stderr,
+		)
 	}
 	if *concurrency != 0 {
 		request.Concurrency = *concurrency

@@ -154,7 +154,7 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 		concurrency.Maximum == nil || *concurrency.Maximum != int64(mail.MaximumBatchConcurrency) {
 		t.Fatalf("batch items field = %+v, constraints = %+v", items, batch.Constraints)
 	}
-	if countJSONConstraints(batch.JSONInput, "conditional") != 3 {
+	if countJSONConstraints(batch.JSONInput, "conditional") != 7 {
 		t.Fatalf("batch operation constraints = %+v", batch.JSONInput.Constraints)
 	}
 }
