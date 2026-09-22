@@ -30,6 +30,30 @@ type osStore struct{}
 
 func newOSStore() store { return osStore{} }
 
+// scopedQueryKeychain and scopedQuerySearchList pin SecItem queries to an
+// isolated keychain. They stay nil in production; darwin tests point them at
+// a dedicated temporary keychain so real SecItem calls never touch the login
+// keychain or mutate session-wide keychain defaults. They hold a
+// C.SecKeychainRef and a C.CFArrayRef respectively.
+var scopedQueryKeychain unsafe.Pointer
+var scopedQuerySearchList unsafe.Pointer
+
+// scopeQueryTarget pins the keychain an add writes to, when a test scope is
+// active. It is a no-op in production.
+func scopeQueryTarget(query C.CFMutableDictionaryRef) {
+	if scopedQueryKeychain != nil {
+		C.keychainDictSet(query, C.kSecUseKeychain, C.CFTypeRef(scopedQueryKeychain))
+	}
+}
+
+// scopeQuerySearch pins the search list of a query, when a test scope is
+// active. It is a no-op in production.
+func scopeQuerySearch(query C.CFMutableDictionaryRef) {
+	if scopedQuerySearchList != nil {
+		C.keychainDictSet(query, C.kSecMatchSearchList, C.CFTypeRef(scopedQuerySearchList))
+	}
+}
+
 func (osStore) add(account, password string) error {
 	if err := validateIdentifier(account); err != nil {
 		return err
@@ -62,6 +86,7 @@ func (osStore) add(account, password string) error {
 	C.keychainDictSet(query, C.kSecAttrService, C.CFTypeRef(serviceCF))
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
 	C.keychainDictSet(query, C.kSecValueData, C.CFTypeRef(passwordData))
+	scopeQueryTarget(query)
 
 	return mapAddStatus(int(C.SecItemAdd(C.CFDictionaryRef(query), nil)))
 }
@@ -97,6 +122,7 @@ func (osStore) update(account, password string) error {
 	C.keychainDictSet(query, C.kSecClass, C.CFTypeRef(C.kSecClassGenericPassword))
 	C.keychainDictSet(query, C.kSecAttrService, C.CFTypeRef(serviceCF))
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
+	scopeQuerySearch(query)
 
 	attrsToUpdate := C.CFDictionaryCreateMutable(C.kCFAllocatorDefault, 0, &C.kCFTypeDictionaryKeyCallBacks, &C.kCFTypeDictionaryValueCallBacks)
 	if attrsToUpdate == 0 {
@@ -136,6 +162,7 @@ func (osStore) find(account string) (string, error) {
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
 	C.keychainDictSet(query, C.kSecMatchLimit, C.CFTypeRef(C.kSecMatchLimitOne))
 	C.keychainDictSet(query, C.kSecReturnData, C.CFTypeRef(C.kCFBooleanTrue))
+	scopeQuerySearch(query)
 
 	var result C.CFTypeRef
 	if err := mapFindStatus(int(C.SecItemCopyMatching(C.CFDictionaryRef(query), &result))); err != nil {
@@ -184,6 +211,7 @@ func (osStore) remove(account string) error {
 	C.keychainDictSet(query, C.kSecClass, C.CFTypeRef(C.kSecClassGenericPassword))
 	C.keychainDictSet(query, C.kSecAttrService, C.CFTypeRef(serviceCF))
 	C.keychainDictSet(query, C.kSecAttrAccount, C.CFTypeRef(accountCF))
+	scopeQuerySearch(query)
 
 	return mapDeleteStatus(int(C.SecItemDelete(C.CFDictionaryRef(query))))
 }
