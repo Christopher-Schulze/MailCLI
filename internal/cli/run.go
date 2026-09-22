@@ -27,6 +27,11 @@ type envelope struct {
 	Error         *errorData   `json:"error"`
 }
 
+// responseData is the flat per-command payload union. The field set is
+// deliberately one struct: MarshalJSON shadows message/draft/attachments with
+// projected views, and the envelope layer injects cross-cutting fields.
+// commandDataFields in response_fields.go documents which command owns each
+// JSON field; keep that table updated when adding or reassigning fields.
 type responseData struct {
 	Name                     string                       `json:"name,omitempty"`
 	Version                  string                       `json:"version,omitempty"`
