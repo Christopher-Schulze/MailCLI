@@ -128,6 +128,7 @@ const (
 	CodeIMAPAppendFailed         = "imap_append_failed"
 	CodeIMAPAppendOutcomeUnknown = "imap_append_outcome_unknown"
 	CodeIMAPTimeout              = "imap_timeout"
+	CodeIMAPAccountBusy          = "imap_account_busy"
 	CodeIMAPMailboxNotFound      = "imap_mailbox_not_found"
 	CodeIMAPMessageNotFound      = "imap_message_not_found"
 	CodeIMAPAmbiguousMailbox     = "imap_ambiguous_mailbox"

@@ -23,8 +23,13 @@ const (
 
 // ClientOptions configures immutable IMAP client resource limits. A zero
 // MaxConnectionsPerAccount selects DefaultMaxConnectionsPerAccount.
+// MutationLockDir, when non-empty, serializes exclusive account mutations
+// (STORE, COPY, EXPUNGE, APPEND) per account across processes through lock
+// files inside that directory; reads and hydration never take it. Empty keeps
+// politeness inside the process boundary only.
 type ClientOptions struct {
 	MaxConnectionsPerAccount int
+	MutationLockDir          string
 }
 
 // PoolStats is a point-in-time, credential-free view of pooled IMAP resources.
@@ -55,6 +60,7 @@ type Client struct {
 
 	credentialGenerations    map[sessionIdentity]uint64
 	maxConnectionsPerAccount int
+	mutationLockDir          string
 }
 
 type sessionIdentity struct {
@@ -106,7 +112,7 @@ func NewWithOptions(options ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{maxConnectionsPerAccount: limit}, nil
+	return &Client{maxConnectionsPerAccount: limit, mutationLockDir: options.MutationLockDir}, nil
 }
 
 func normalizeConnectionLimit(limit int) (int, error) {
@@ -231,6 +237,22 @@ func (c *Client) acquireOperation(
 	pool.operations++
 	c.mu.Unlock()
 
+	var unlockMutation func()
+	if class == mutation && c.mutationLockDir != "" {
+		unlock, err := acquireMutationLock(ctx, c.mutationLockDir, key)
+		if err != nil {
+			c.releaseOperationState(key, pool, 0)
+			return nil, nil, err
+		}
+		unlockMutation = unlock
+	}
+	releaseOperation := func(weight int64) {
+		c.releaseOperationState(key, pool, weight)
+		if unlockMutation != nil {
+			unlockMutation()
+		}
+	}
+
 	weight := int64(0)
 	switch class {
 	case independentRead, selectedStateRead:
@@ -240,19 +262,19 @@ func (c *Client) acquireOperation(
 	}
 	if weight > 0 {
 		if err := pool.stateGate.Acquire(ctx, weight); err != nil {
-			c.releaseOperationState(key, pool, 0)
+			releaseOperation(0)
 			return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP selected-state acquisition")
 		}
 	}
 	c.lifecycle.RLock()
 	if err := ctx.Err(); err != nil {
 		c.lifecycle.RUnlock()
-		c.releaseOperationState(key, pool, weight)
+		releaseOperation(weight)
 		return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP operation acquisition")
 	}
 	if lifecycleGeneration != c.lifecycleGeneration {
 		c.lifecycle.RUnlock()
-		c.releaseOperationState(key, pool, weight)
+		releaseOperation(weight)
 		return nil, nil, &transport.TransportError{
 			Code:    transport.CodeIMAPTimeout,
 			Message: "IMAP operation acquisition interrupted by client Close",
@@ -261,7 +283,7 @@ func (c *Client) acquireOperation(
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			c.releaseOperationState(key, pool, weight)
+			releaseOperation(weight)
 			c.lifecycle.RUnlock()
 		})
 	}

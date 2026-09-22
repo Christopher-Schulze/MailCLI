@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -145,7 +147,7 @@ func (t *invocationTransport) Close() error {
 // keychain credentials and owns its IMAP pool for one invocation. It performs
 // no I/O until a send actually runs.
 func newInvocationTransport() *invocationTransport {
-	imap := imapclient.New()
+	imap := newInvocationImapClient()
 	return &invocationTransport{
 		SendTransport: mail.SendTransport{
 			Submitter:       smtpclient.New(),
@@ -156,4 +158,33 @@ func newInvocationTransport() *invocationTransport {
 		},
 		closeResource: imap.Close,
 	}
+}
+
+// newInvocationImapClient wires the CLI-safe IMAP client: the default pool
+// plus a per-account mutation lock that serializes exclusive operations
+// across MailCLI processes. MAILCLI_IMAP_MUTATION_LOCK=off (or 0, false, no)
+// opts out; a missing config directory keeps the process-local gate only.
+func newInvocationImapClient() *imapclient.Client {
+	if mutationLockDisabled() {
+		return imapclient.New()
+	}
+	root, err := os.UserConfigDir()
+	if err != nil {
+		return imapclient.New()
+	}
+	client, err := imapclient.NewWithOptions(imapclient.ClientOptions{
+		MutationLockDir: filepath.Join(root, "MailCLI"),
+	})
+	if err != nil {
+		return imapclient.New()
+	}
+	return client
+}
+
+func mutationLockDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MAILCLI_IMAP_MUTATION_LOCK"))) {
+	case "0", "off", "false", "no":
+		return true
+	}
+	return false
 }

@@ -28,3 +28,20 @@ func TestSendTransportWiring(t *testing.T) {
 		t.Error("SendTransport.Imap and Mirror do not share the invocation client")
 	}
 }
+
+// TestMutationLockOptOut pins the MAILCLI_IMAP_MUTATION_LOCK kill switch:
+// only explicit falsy values disable the cross-process account lock.
+func TestMutationLockOptOut(t *testing.T) {
+	for _, value := range []string{"0", "off", "OFF", "false", " no "} {
+		t.Setenv("MAILCLI_IMAP_MUTATION_LOCK", value)
+		if !mutationLockDisabled() {
+			t.Errorf("mutationLockDisabled() = false for %q", value)
+		}
+	}
+	for _, value := range []string{"", "1", "on", "true", "yes", "anything"} {
+		t.Setenv("MAILCLI_IMAP_MUTATION_LOCK", value)
+		if mutationLockDisabled() {
+			t.Errorf("mutationLockDisabled() = true for %q", value)
+		}
+	}
+}
