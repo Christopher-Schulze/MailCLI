@@ -114,6 +114,13 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		!slices.Contains(manifest.Limits.SenderIdentityCoverageStates, string(mail.SenderIdentityCoverageStateBounded)) {
 		t.Fatalf("sender identity coverage capability = %+v", manifest.Limits)
 	}
+	wantReasons := make([]string, 0, len(mail.DirectOpsSupportReasons))
+	for _, reason := range mail.DirectOpsSupportReasons {
+		wantReasons = append(wantReasons, string(reason))
+	}
+	if !slices.Equal(manifest.Limits.DirectOpsSupportReasons, wantReasons) {
+		t.Fatalf("direct ops support reasons = %+v, want %+v", manifest.Limits.DirectOpsSupportReasons, wantReasons)
+	}
 	if manifest.Limits.SearchPaginationConsistency != mail.SearchConsistencyBestEffort ||
 		!manifest.Limits.SearchCursorDetectsIndexDrift ||
 		manifest.Limits.SearchCandidateCountDefault != "observed_lower_bound" ||

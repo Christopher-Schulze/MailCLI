@@ -51,6 +51,24 @@ type SenderIdentityCoverage struct {
 	MoreAvailable    bool                         `json:"more_available"`
 }
 
+// DirectOpsReason is the machine-readable explanation for
+// Account.DirectOpsSupported. The values are part of the accounts.list
+// contract and must stay in sync with DirectOpsSupportReasons.
+type DirectOpsReason string
+
+const (
+	DirectOpsReasonProviderSupported   DirectOpsReason = "provider_supported"
+	DirectOpsReasonBindingHosts        DirectOpsReason = "binding_hosts"
+	DirectOpsReasonUnsupportedProvider DirectOpsReason = "unsupported_provider"
+)
+
+// DirectOpsSupportReasons enumerates every published DirectOpsReason value.
+var DirectOpsSupportReasons = []DirectOpsReason{
+	DirectOpsReasonProviderSupported,
+	DirectOpsReasonBindingHosts,
+	DirectOpsReasonUnsupportedProvider,
+}
+
 type AccountType string
 
 const (
@@ -84,6 +102,12 @@ type Account struct {
 	DiscoveredSenderIdentities []string               `json:"discovered_sender_identities"`
 	ConfiguredSenderAliases    []string               `json:"configured_sender_aliases"`
 	IdentityCoverage           SenderIdentityCoverage `json:"identity_coverage"`
+	// DirectOpsSupported reports whether at least one permitted sender
+	// identity resolves direct SMTP/IMAP endpoints through the same
+	// provider/binding resolution the mutation and send paths use.
+	// DirectOpsReason explains the outcome machine-readably.
+	DirectOpsSupported bool            `json:"direct_ops_supported"`
+	DirectOpsReason    DirectOpsReason `json:"direct_ops_reason"`
 	// State is "ok" or "degraded"; degraded accounts carry a reason and
 	// keep empty identities rather than breaking the whole listing. The
 	// remediation tells callers how to restore a usable account state.

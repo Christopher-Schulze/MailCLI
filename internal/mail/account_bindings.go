@@ -262,6 +262,32 @@ func normalizeBindingHost(host string) (string, error) {
 	return host, nil
 }
 
+// AccountDirectOpsSupport reports whether at least one permitted sender
+// identity resolves direct SMTP/IMAP endpoints. It reuses
+// ResolveTransportHosts so the annotation mirrors the resolution the
+// mutation and send paths perform; a nil binding covers the unbound
+// provider-table case. Bound accounts evaluate their binding sender
+// aliases; unbound accounts evaluate the union of their sender fields.
+func AccountDirectOpsSupport(account Account, binding *AccountBinding) (bool, DirectOpsReason) {
+	var candidates []string
+	if binding != nil {
+		candidates = binding.SenderAliases
+	} else {
+		candidates = append(candidates, account.EmailAddresses...)
+		candidates = append(candidates, account.DiscoveredSenderIdentities...)
+		candidates = append(candidates, account.ConfiguredSenderAliases...)
+	}
+	for _, sender := range candidates {
+		if _, _, _, _, err := ResolveTransportHosts(sender, binding); err == nil {
+			if binding != nil && (binding.SMTPHost != "" || binding.IMAPHost != "") {
+				return true, DirectOpsReasonBindingHosts
+			}
+			return true, DirectOpsReasonProviderSupported
+		}
+	}
+	return false, DirectOpsReasonUnsupportedProvider
+}
+
 // ResolveTransportHosts resolves the SMTP and IMAP endpoints for a sender,
 // preferring explicit binding hosts per leg and falling back to the provider
 // domain table. Explicit hosts arrive pre-validated by binding normalization;

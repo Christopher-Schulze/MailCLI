@@ -57,18 +57,18 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 		if account.State == "degraded" {
 			emailList = "degraded: " + account.DegradedReason
 		}
-		rows = append(rows, []string{account.Ref, account.Name, emailList, identityCoverageSummary(account.IdentityCoverage)})
+		rows = append(rows, []string{account.Ref, account.Name, emailList, identityCoverageSummary(account.IdentityCoverage), directOpsSummary(account)})
 	}
-	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES", "IDENTITY COVERAGE"}, rows) {
+	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES", "IDENTITY COVERAGE", "DIRECT OPS"}, rows) {
 		writeAccountCatalogStatus(stdout, complete, identityCoverageComplete)
 		writeAccountCatalogWarnings(stdout, accounts)
 		return 0
 	}
 	for _, account := range accounts {
 		line := fmt.Sprintf(
-			"%s\t%s\t%s\t%s",
+			"%s\t%s\t%s\t%s\t%s",
 			account.Ref, oneLine(account.Name), strings.Join(account.EmailAddresses, ","),
-			identityCoverageSummary(account.IdentityCoverage),
+			identityCoverageSummary(account.IdentityCoverage), directOpsSummary(account),
 		)
 		if account.State == "degraded" {
 			line += "\tdegraded: " + account.DegradedReason
@@ -122,6 +122,17 @@ func identityCoverageSummary(coverage mail.SenderIdentityCoverage) string {
 		more = "+"
 	}
 	return fmt.Sprintf("%s:%d/%d%s", state, coverage.ObservedMessages, coverage.Limit, more)
+}
+
+func directOpsSummary(account mail.Account) string {
+	if !account.DirectOpsSupported {
+		return "no:" + string(mail.DirectOpsReasonUnsupportedProvider)
+	}
+	reason := string(account.DirectOpsReason)
+	if reason == "" {
+		reason = string(mail.DirectOpsReasonProviderSupported)
+	}
+	return "yes:" + reason
 }
 
 func writeAccountCatalogStatus(writer io.Writer, complete bool, identityCoverageComplete bool) {

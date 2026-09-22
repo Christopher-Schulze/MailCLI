@@ -210,6 +210,88 @@ func TestResolveTransportHosts(t *testing.T) {
 	})
 }
 
+func TestAccountDirectOpsSupport(t *testing.T) {
+	hosts := &AccountBinding{
+		SenderAliases:     []string{"user@corp.example"},
+		CredentialAccount: "user@corp.example",
+		SMTPHost:          "smtp.corp.example", SMTPPort: 587,
+		IMAPHost: "imap.corp.example", IMAPPort: 993,
+	}
+	for _, tc := range []struct {
+		name       string
+		account    Account
+		binding    *AccountBinding
+		supported  bool
+		wantReason DirectOpsReason
+	}{
+		{
+			name:       "unbound provider domain",
+			account:    Account{EmailAddresses: []string{"user@gmail.com"}},
+			supported:  true,
+			wantReason: DirectOpsReasonProviderSupported,
+		},
+		{
+			name:       "unbound discovered identity",
+			account:    Account{DiscoveredSenderIdentities: []string{"user@icloud.com"}},
+			supported:  true,
+			wantReason: DirectOpsReasonProviderSupported,
+		},
+		{
+			name:       "unbound unsupported domain",
+			account:    Account{EmailAddresses: []string{"user@corp.example"}},
+			supported:  false,
+			wantReason: DirectOpsReasonUnsupportedProvider,
+		},
+		{
+			name:       "unbound no senders",
+			account:    Account{},
+			supported:  false,
+			wantReason: DirectOpsReasonUnsupportedProvider,
+		},
+		{
+			name:      "bound explicit hosts unsupported domain",
+			account:   Account{EmailAddresses: []string{"user@corp.example"}},
+			binding:   hosts,
+			supported: true, wantReason: DirectOpsReasonBindingHosts,
+		},
+		{
+			name:    "bound provider domain without hosts",
+			account: Account{EmailAddresses: []string{"alias@gmail.com"}},
+			binding: &AccountBinding{
+				SenderAliases:     []string{"alias@gmail.com"},
+				CredentialAccount: "login@gmail.com",
+			},
+			supported: true, wantReason: DirectOpsReasonProviderSupported,
+		},
+		{
+			name:    "bound partial hosts unsupported domain",
+			account: Account{EmailAddresses: []string{"user@corp.example"}},
+			binding: &AccountBinding{
+				SenderAliases:     []string{"user@corp.example"},
+				CredentialAccount: "user@corp.example",
+				IMAPHost:          "imap.corp.example", IMAPPort: 993,
+			},
+			supported: false, wantReason: DirectOpsReasonUnsupportedProvider,
+		},
+		{
+			name:    "bound alias set drives candidates",
+			account: Account{EmailAddresses: []string{"user@corp.example"}},
+			binding: &AccountBinding{
+				SenderAliases:     []string{"alias@gmail.com"},
+				CredentialAccount: "login@gmail.com",
+			},
+			supported: true, wantReason: DirectOpsReasonProviderSupported,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			supported, reason := AccountDirectOpsSupport(tc.account, tc.binding)
+			if supported != tc.supported || reason != tc.wantReason {
+				t.Fatalf("AccountDirectOpsSupport() = %t,%s want %t,%s", supported, reason, tc.supported, tc.wantReason)
+			}
+		})
+	}
+}
+
 func errorCodeForBindingTest(err error) string {
 	var typed interface{ ErrorCode() string }
 	if errors.As(err, &typed) {

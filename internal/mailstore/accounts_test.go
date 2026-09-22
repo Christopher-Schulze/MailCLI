@@ -117,7 +117,8 @@ func TestListAccountCatalogResolvesExplicitBindingWithoutSentHistory(t *testing.
 		t.Fatalf("UpsertAccountBinding() error = %v", err)
 	}
 	store.accountBindings = bindingStore
-	catalog, err := store.ListAccountCatalog(context.Background())
+	client := &Client{store: store, send: mail.SendTransport{AccountBindings: bindingStore}}
+	catalog, err := client.ListAccountCatalog(context.Background())
 	if err != nil {
 		t.Fatalf("ListAccountCatalog() error = %v", err)
 	}
@@ -132,6 +133,56 @@ func TestListAccountCatalogResolvesExplicitBindingWithoutSentHistory(t *testing.
 		account.IdentityCoverage.Source != mail.SenderIdentityCoverageSourceAccountBinding ||
 		account.IdentityCoverage.State != mail.SenderIdentityCoverageStateConfigured {
 		t.Fatalf("account = %+v", account)
+	}
+	service := mail.NewServiceWithTransport(client, "", mail.SendTransport{AccountBindings: bindingStore})
+	catalog, err = service.ListAccountCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("service ListAccountCatalog() error = %v", err)
+	}
+	account = catalog.Accounts[0]
+	if !account.DirectOpsSupported || account.DirectOpsReason != mail.DirectOpsReasonProviderSupported {
+		t.Fatalf("direct ops annotation = %t,%s want true,provider_supported",
+			account.DirectOpsSupported, account.DirectOpsReason)
+	}
+}
+
+func TestListAccountCatalogAnnotatesExplicitHostBinding(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	accountRoot := filepath.Join(store.versionRoot, testAccountID)
+	if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+		t.Fatalf("MkdirAll(account root) error = %v", err)
+	}
+	cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>INBOX</key><dict>
+<key>MailboxPathComponent</key><string>INBOX</string>
+<key>IMAPMailboxChildren</key><dict/>
+</dict></dict></dict></plist>`)
+	if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), cache, 0o600); err != nil {
+		t.Fatalf("WriteFile(mailbox cache) error = %v", err)
+	}
+	bindingStore := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	if err := bindingStore.UpsertAccountBinding(mail.AccountBinding{
+		AccountID: testAccountID, SenderAliases: []string{"user@corp.example"}, CredentialAccount: "user@corp.example",
+		SMTPHost: "smtp.corp.example", SMTPPort: 587,
+		IMAPHost: "imap.corp.example", IMAPPort: 993,
+	}); err != nil {
+		t.Fatalf("UpsertAccountBinding() error = %v", err)
+	}
+	store.accountBindings = bindingStore
+	client := &Client{store: store, send: mail.SendTransport{AccountBindings: bindingStore}}
+	service := mail.NewServiceWithTransport(client, "", mail.SendTransport{AccountBindings: bindingStore})
+	catalog, err := service.ListAccountCatalog(context.Background())
+	if err != nil {
+		t.Fatalf("ListAccountCatalog() error = %v", err)
+	}
+	if len(catalog.Accounts) != 1 {
+		t.Fatalf("catalog = %+v", catalog)
+	}
+	account := catalog.Accounts[0]
+	if !account.DirectOpsSupported || account.DirectOpsReason != mail.DirectOpsReasonBindingHosts {
+		t.Fatalf("direct ops annotation = %t,%s want true,binding_hosts",
+			account.DirectOpsSupported, account.DirectOpsReason)
 	}
 }
 

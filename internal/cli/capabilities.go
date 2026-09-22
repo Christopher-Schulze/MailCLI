@@ -80,6 +80,7 @@ type capabilityLimits struct {
 	SenderIdentityScanLimit          int                            `json:"sender_identity_scan_limit"`
 	MaximumSenderIdentityScanLimit   int                            `json:"maximum_sender_identity_scan_limit"`
 	SenderIdentityCoverageStates     []string                       `json:"sender_identity_coverage_states"`
+	DirectOpsSupportReasons          []string                       `json:"direct_ops_support_reasons"`
 	SearchPaginationConsistency      string                         `json:"search_pagination_consistency"`
 	SearchCursorDetectsIndexDrift    bool                           `json:"search_cursor_detects_index_drift"`
 	SearchCandidateCountDefault      string                         `json:"search_candidate_count_default"`
@@ -210,6 +211,11 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 				string(mail.SenderIdentityCoverageStateConfigured),
 				string(mail.SenderIdentityCoverageStateUnavailable),
 				string(mail.SenderIdentityCoverageStateNotApplicable),
+			},
+			DirectOpsSupportReasons: []string{
+				string(mail.DirectOpsReasonProviderSupported),
+				string(mail.DirectOpsReasonBindingHosts),
+				string(mail.DirectOpsReasonUnsupportedProvider),
 			},
 		},
 		SyncCheckPolicy: syncCheckPolicy{

@@ -35,7 +35,7 @@ Detail JSON responses support bounded projections. Use `--view metadata|plain|fu
 
 | Area | Commands | Behavior |
 |---|---|---|
-| Accounts | `accounts list` | Lists configured accounts and bounded sender identities with explicit coverage evidence |
+| Accounts | `accounts list` | Lists configured accounts and bounded sender identities with explicit coverage evidence plus `direct_ops_supported`/`direct_ops_reason` endpoint annotation |
 | Mailboxes | `mailboxes list`, `mailboxes resolve` | Handles Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested labels |
 | Messages | `messages list`, `filter`, `search`, `get`, `raw` | Pages metadata, applies typed filters, scans bodies, and returns normalized or RFC 5322 content |
 | Attachments | `attachments list`, `attachments save` | Inspects and exports received files without overwriting a destination |

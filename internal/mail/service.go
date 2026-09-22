@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -144,23 +145,64 @@ func (s *Service) ListAccounts(ctx context.Context) ([]Account, error) {
 }
 
 func (s *Service) ListAccountCatalog(ctx context.Context) (AccountCatalog, error) {
+	var catalog AccountCatalog
 	if reader, ok := s.gateway.(AccountCatalogReader); ok {
-		return reader.ListAccountCatalog(ctx)
+		var err error
+		catalog, err = reader.ListAccountCatalog(ctx)
+		if err != nil {
+			return catalog, err
+		}
+	} else {
+		accounts, err := s.gateway.ListAccounts(ctx)
+		if err != nil {
+			return AccountCatalog{}, err
+		}
+		for index := range accounts {
+			if accounts[index].IdentityCoverage.State != "" {
+				continue
+			}
+			accounts[index].IdentityCoverage = SenderIdentityCoverage{
+				Source: SenderIdentityCoverageSourceUnknown,
+				State:  SenderIdentityCoverageStateUnavailable,
+			}
+		}
+		catalog = AccountCatalog{Accounts: accounts, Complete: true}
 	}
-	accounts, err := s.gateway.ListAccounts(ctx)
-	if err != nil {
-		return AccountCatalog{}, err
+	s.annotateDirectOpsSupport(catalog.Accounts)
+	return catalog, nil
+}
+
+// annotateDirectOpsSupport fills DirectOpsSupported/DirectOpsReason per
+// account using the same binding document and ResolveTransportHosts the
+// mutation and send paths use. Bindings apply to IMAP accounts only,
+// mirroring catalog assembly. A binding-load failure means every direct
+// operation fails the same lookup, so all accounts report
+// unsupported_provider in that case.
+func (s *Service) annotateDirectOpsSupport(accounts []Account) {
+	var document AccountBindingFile
+	if s.send.AccountBindings != nil {
+		loaded, err := s.send.AccountBindings.LoadAccountBindings()
+		if err != nil {
+			for index := range accounts {
+				accounts[index].DirectOpsSupported = false
+				accounts[index].DirectOpsReason = DirectOpsReasonUnsupportedProvider
+			}
+			return
+		}
+		document = loaded
 	}
 	for index := range accounts {
-		if accounts[index].IdentityCoverage.State != "" {
-			continue
+		var binding *AccountBinding
+		if accounts[index].Type == AccountTypeIMAP {
+			if ref, err := mailref.DecodeAccount(accounts[index].Ref); err == nil {
+				if resolved, found, err := FindAccountBinding(document, ref.AccountID); err == nil && found {
+					binding = &resolved
+				}
+			}
 		}
-		accounts[index].IdentityCoverage = SenderIdentityCoverage{
-			Source: SenderIdentityCoverageSourceUnknown,
-			State:  SenderIdentityCoverageStateUnavailable,
-		}
+		accounts[index].DirectOpsSupported, accounts[index].DirectOpsReason =
+			AccountDirectOpsSupport(accounts[index], binding)
 	}
-	return AccountCatalog{Accounts: accounts, Complete: true}, nil
 }
 
 func (s *Service) ListMailboxes(ctx context.Context, request ListMailboxesRequest) ([]Mailbox, error) {
