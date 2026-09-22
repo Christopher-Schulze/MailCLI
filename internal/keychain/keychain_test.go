@@ -242,6 +242,15 @@ func TestNewReturnsCredentialStore(t *testing.T) {
 	if kc == nil {
 		t.Fatal("New() = nil, want non-nil CredentialStore")
 	}
+	if err := kc.Store("\x00invalid", "secret"); transport.ErrorCode(err) != CodeInvalidIdentifier {
+		t.Fatalf("New().Store(NUL identifier) error = %v, want %s", err, CodeInvalidIdentifier)
+	}
+	if _, err := kc.Load("\x00invalid"); transport.ErrorCode(err) != CodeInvalidIdentifier {
+		t.Fatalf("New().Load(NUL identifier) error = %v, want %s", err, CodeInvalidIdentifier)
+	}
+	if err := kc.Delete("\x00invalid"); transport.ErrorCode(err) != CodeInvalidIdentifier {
+		t.Fatalf("New().Delete(NUL identifier) error = %v, want %s", err, CodeInvalidIdentifier)
+	}
 }
 
 func TestCredentialStoreRejectsNULIdentifiers(t *testing.T) {

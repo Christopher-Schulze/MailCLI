@@ -27,13 +27,21 @@ MANIFEST_COUNT="$(wc -l <"${SNAPSHOT_DIRECTORY}/MANIFEST.sha256" | tr -d ' ')"
   printf 'Snapshot file count = %s, source count = %s\n' "${MANIFEST_COUNT}" "${SOURCE_COUNT}" >&2
   exit 1
 }
-for TASK_ID in 134 135 172 174 175 176 177 178; do
-  if ! cut -f 2- "${SNAPSHOT_DIRECTORY}/MANIFEST.sha256" |
-    grep -Eq "^docs/tasks/(done/)?${TASK_ID}-[a-z0-9-]+\\.md$"; then
-    printf 'Snapshot manifest is missing TASK %s\n' "${TASK_ID}" >&2
-    exit 1
+MANIFEST_PATHS="${TEST_ROOT}/manifest-paths.txt"
+cut -f 2- "${SNAPSHOT_DIRECTORY}/MANIFEST.sha256" >"${MANIFEST_PATHS}"
+MANIFEST_MISSING=0
+if ! grep -Fxq -- "docs/tasks.md" "${MANIFEST_PATHS}"; then
+  printf 'Snapshot manifest is missing docs/tasks.md\n' >&2
+  MANIFEST_MISSING=1
+fi
+while IFS= read -r -d '' SOURCE_FILE; do
+  RELATIVE_PATH="${SOURCE_FILE#"${MAILCLI_ROOT}/"}"
+  if ! grep -Fxq -- "${RELATIVE_PATH}" "${MANIFEST_PATHS}"; then
+    printf 'Snapshot manifest is missing %s\n' "${RELATIVE_PATH}" >&2
+    MANIFEST_MISSING=1
   fi
-done
+done < <(find "${MAILCLI_ROOT}/docs/tasks" -type f -name '*.md' -print0)
+[[ "${MANIFEST_MISSING}" -eq 0 ]] || exit 1
 if find "${SNAPSHOT_DIRECTORY}" -type f -name 'README.md' -print -quit | grep -q .; then
   printf 'Snapshot copied a non-task repository file\n' >&2
   exit 1
