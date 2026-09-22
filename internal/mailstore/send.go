@@ -291,7 +291,8 @@ func mailboxCandidateQuery(
 				WHERE sm.message = m.ROWID AND sm.junk_level > 0
 			),
 			m.size,
-			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
+			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
+			COALESCE(m.conversation_id, 0)
 		FROM membership membership
 		JOIN messages m ON m.ROWID = membership.id
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox

@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-const schemaSpecCount = 38
+const schemaSpecCount = 39
 
 // schemaPayloadGZIP contains one compact JSON schema per command contract,
 // separated by newlines in commandContracts order. Keeping the immutable
@@ -59,7 +59,8 @@ const schemaPayloadGZIP = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xed\x1d\x6b\
 
 // schemaExtraPayload holds compact JSON schemas for command contracts added
 // after the base payload was sealed, one schema per line in the same format.
-const schemaExtraPayload = `{"id":"messages.state@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}` + "\n"
+const schemaExtraPayload = `{"id":"messages.state@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}
+{"id":"messages.thread@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--limit","value_type":"integer","takes_value":true,"value_required":true,"default":"10","minimum":1,"maximum":25,"description":"page size"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}` + "\n"
 
 var (
 	schemaPayloadOnce  sync.Once

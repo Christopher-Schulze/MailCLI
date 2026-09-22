@@ -254,6 +254,7 @@ var commandContracts = []commandContract{
 	newCommandContract("messages.get", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
 	newCommandContract("messages.raw", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultComplete),
 	newCommandContract("messages.state", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultResolved),
+	newCommandContract("messages.thread", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
 	newCommandContract("attachments.list", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
 	newCommandContract("attachments.save", textFilesystemWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultSaved),
 	newCommandContract("drafts.create", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultCreated),

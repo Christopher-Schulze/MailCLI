@@ -296,6 +296,15 @@ func (s *Service) MessageState(ctx context.Context, ref string) (MessageState, e
 	return s.gateway.MessageState(ctx, ref)
 }
 
+// MessageThread returns the bounded chronological member list of the
+// Envelope Index conversation containing the referenced message.
+func (s *Service) MessageThread(ctx context.Context, request MessageThreadRequest) (MessageThread, error) {
+	if strings.TrimSpace(request.Ref) == "" {
+		return MessageThread{}, validationError("message ref is required")
+	}
+	return s.gateway.MessageThread(ctx, request)
+}
+
 func (s *Service) TransferMessage(ctx context.Context, request TransferMessageRequest) (MessageSummary, error) {
 	if request.Ref == "" || request.DestinationMailbox == "" {
 		return MessageSummary{}, validationError("message ref and destination mailbox ref are required")

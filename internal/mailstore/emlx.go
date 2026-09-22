@@ -97,7 +97,8 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 				WHERE sm.message = m.ROWID AND sm.junk_level > 0
 			),
 			m.size,
-			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
+			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
+			COALESCE(m.conversation_id, 0)
 		FROM messages m
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
 		JOIN subjects subject ON subject.ROWID = m.subject

@@ -614,21 +614,24 @@ func (e *ServerMutationEvidence) OutcomeUnknown() bool {
 }
 
 type MessageSummary struct {
-	Ref             string                  `json:"ref"`
-	MailboxRef      string                  `json:"mailbox_ref"`
-	MessageID       string                  `json:"message_id"`
-	Subject         string                  `json:"subject"`
-	Sender          string                  `json:"sender"`
-	DateReceived    string                  `json:"date_received,omitempty"`
-	DateSent        string                  `json:"date_sent,omitempty"`
-	Read            bool                    `json:"read"`
-	Flagged         bool                    `json:"flagged"`
-	Junk            bool                    `json:"junk"`
-	Deleted         bool                    `json:"deleted"`
-	Size            int64                   `json:"size"`
-	AttachmentCount int                     `json:"attachment_count"`
-	ServerTruth     *ServerMutationEvidence `json:"server_truth,omitempty"`
-	StalenessNote   string                  `json:"staleness_note,omitempty"`
+	Ref             string `json:"ref"`
+	MailboxRef      string `json:"mailbox_ref"`
+	MessageID       string `json:"message_id"`
+	Subject         string `json:"subject"`
+	Sender          string `json:"sender"`
+	DateReceived    string `json:"date_received,omitempty"`
+	DateSent        string `json:"date_sent,omitempty"`
+	Read            bool   `json:"read"`
+	Flagged         bool   `json:"flagged"`
+	Junk            bool   `json:"junk"`
+	Deleted         bool   `json:"deleted"`
+	Size            int64  `json:"size"`
+	AttachmentCount int    `json:"attachment_count"`
+	// ConversationID is Mail's opaque store-local conversation-grouping key.
+	// It is not RFC threading and has no cross-store stability.
+	ConversationID int64                   `json:"conversation_id,omitempty"`
+	ServerTruth    *ServerMutationEvidence `json:"server_truth,omitempty"`
+	StalenessNote  string                  `json:"staleness_note,omitempty"`
 }
 type MarkMessageRequest struct {
 	Ref                string
@@ -776,6 +779,22 @@ type MessagePage struct {
 	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
+type MessageThreadRequest struct {
+	Ref   string
+	Limit int
+}
+
+// MessageThread is the bounded chronological member list of one Envelope
+// Index conversation. ConversationID is Mail's opaque store-local grouping
+// key (zero when the seed message is ungrouped), not RFC threading.
+// Truncated reports that more members exist beyond the requested Limit.
+type MessageThread struct {
+	Ref            string           `json:"ref"`
+	ConversationID int64            `json:"conversation_id"`
+	Messages       []MessageSummary `json:"messages"`
+	Truncated      bool             `json:"truncated"`
+}
+
 type ListMailboxesRequest struct {
 	AccountRef string
 }
@@ -791,6 +810,7 @@ type Gateway interface {
 	ListAccounts(ctx context.Context) ([]Account, error)
 	ListMailboxes(ctx context.Context, request ListMailboxesRequest) ([]Mailbox, error)
 	ListMessages(ctx context.Context, request ListMessagesRequest) (MessagePage, error)
+	MessageThread(ctx context.Context, request MessageThreadRequest) (MessageThread, error)
 	GetMessage(ctx context.Context, ref string) (Message, error)
 	OpenDraft(ctx context.Context, ref string) (Message, error)
 	GetRawSource(ctx context.Context, ref string) (string, error)

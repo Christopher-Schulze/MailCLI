@@ -154,6 +154,17 @@ func (testGateway) MessageState(_ context.Context, ref string) (mail.MessageStat
 	}, nil
 }
 
+func (testGateway) MessageThread(_ context.Context, request mail.MessageThreadRequest) (mail.MessageThread, error) {
+	return mail.MessageThread{
+		Ref:            request.Ref,
+		ConversationID: 777,
+		Messages: []mail.MessageSummary{
+			{Ref: "msg_ref_1", Subject: "Subject", DateReceived: "2024-01-01T00:00:00Z", ConversationID: 777},
+			{Ref: request.Ref, Subject: "Subject reply", DateReceived: "2024-01-02T00:00:00Z", ConversationID: 777},
+		},
+	}, nil
+}
+
 func (testGateway) TransferMessage(_ context.Context, request mail.TransferMessageRequest) (mail.MessageSummary, error) {
 	return mail.MessageSummary{Ref: request.Ref, MailboxRef: request.DestinationMailbox,
 		ServerTruth: &mail.ServerMutationEvidence{Command: "MOVE", ServerResponse: "OK MOVE completed", UID: 1}}, nil
@@ -538,6 +549,7 @@ func TestReadCommandsJSONTable(t *testing.T) {
 		{name: "message list", args: []string{"messages", "list", "--mailbox", "mbx_ref", "--json"}, command: "messages.list", dataKey: `"page":{"messages"`},
 		{name: "message get", args: []string{"messages", "get", "--ref", "msg_ref", "--json"}, command: "messages.get", dataKey: `"message"`},
 		{name: "message raw", args: []string{"messages", "raw", "--ref", "msg_ref", "--json"}, command: "messages.raw", dataKey: `"raw_source"`},
+		{name: "message thread", args: []string{"messages", "thread", "--ref", "msg_ref", "--json"}, command: "messages.thread", dataKey: `"thread":{"ref"`},
 	}
 
 	for _, test := range tests {
@@ -552,6 +564,32 @@ func TestReadCommandsJSONTable(t *testing.T) {
 				t.Fatalf("stdout = %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestMessageThreadCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(),
+		[]string{"messages", "thread", "--ref", "msg_ref", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, `"command":"messages.thread"`) || !strings.Contains(output, `"conversation_id":777`) ||
+		!strings.Contains(output, `"truncated":false`) || !strings.Contains(output, `"msg_ref_1"`) {
+		t.Fatalf("thread output lacks conversation projection: %q", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run(context.Background(), newTestService(),
+		[]string{"messages", "thread", "--ref", "msg_ref"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("human code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "conversation_id\t777") || !strings.Contains(stdout.String(), "Subject reply") {
+		t.Fatalf("human thread output = %q", stdout.String())
 	}
 }
 

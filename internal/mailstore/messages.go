@@ -45,6 +45,7 @@ type messageRecord struct {
 	Junk             bool
 	Size             int64
 	AttachmentCount  int
+	ConversationID   int64
 }
 
 type listCursor struct {
@@ -168,7 +169,8 @@ func mailboxMessagesSQL(cursorClause string) string {
 				WHERE sm.message = m.ROWID AND sm.junk_level > 0
 			),
 			m.size,
-			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID)
+			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
+			COALESCE(m.conversation_id, 0)
 		FROM membership membership
 		JOIN messages m ON m.ROWID = membership.id
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
@@ -195,7 +197,7 @@ func scanMessageRecord(row rowScanner) (messageRecord, error) {
 		&item.Subject, &item.SenderAddress, &item.SenderName, &item.SummaryText,
 		&item.DateSent, &item.DateSentNull, &item.DateReceived, &item.DateReceivedNull,
 		&item.Read, &item.Flagged, &item.Deleted,
-		&item.Junk, &item.Size, &item.AttachmentCount,
+		&item.Junk, &item.Size, &item.AttachmentCount, &item.ConversationID,
 	); err != nil {
 		return messageRecord{}, fmt.Errorf("scan Envelope Index message: %w", err)
 	}
@@ -254,7 +256,7 @@ func mapMessageSummary(
 		DateReceived: formatUnixTime(item.DateReceived, item.DateReceivedNull),
 		DateSent:     formatUnixTime(item.DateSent, item.DateSentNull),
 		Read:         item.Read, Flagged: item.Flagged, Junk: item.Junk, Deleted: item.Deleted,
-		Size: item.Size, AttachmentCount: item.AttachmentCount,
+		Size: item.Size, AttachmentCount: item.AttachmentCount, ConversationID: item.ConversationID,
 	}, nil
 }
 

@@ -81,6 +81,10 @@ func (g *gatewayStub) MessageState(context.Context, string) (MessageState, error
 	return MessageState{}, nil
 }
 
+func (g *gatewayStub) MessageThread(context.Context, MessageThreadRequest) (MessageThread, error) {
+	return MessageThread{}, nil
+}
+
 func (g *gatewayStub) TransferMessage(context.Context, TransferMessageRequest) (MessageSummary, error) {
 	return MessageSummary{}, nil
 }

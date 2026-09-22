@@ -256,12 +256,12 @@ func runMessages(
 	stderr io.Writer,
 ) int {
 	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|reply|forward|mark|move|copy|delete> [options]")
+		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|thread|reply|forward|mark|move|copy|delete> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|reply|forward|mark|move|copy|delete> [options]")
+		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|thread|reply|forward|mark|move|copy|delete> [options]")
 		return 0
 	case "list":
 		return runMessagesList(ctx, mailService, args[1:], stdout, stderr)
@@ -275,6 +275,8 @@ func runMessages(
 		return runMessagesRaw(ctx, mailService, args[1:], stdout, stderr)
 	case "state":
 		return runMessageState(ctx, mailService, args[1:], stdout, stderr)
+	case "thread":
+		return runMessageThread(ctx, mailService, args[1:], stdout, stderr)
 	case "reply":
 		return runMessageReply(ctx, mailService, args[1:], stdout, stderr)
 	case "forward":
@@ -312,6 +314,40 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	return writeMessagePage(stdout, "messages.list", page, *jsonOutput)
+}
+
+func runMessageThread(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := newFlagSet("messages thread", stderr)
+	ref := flags.String("ref", "", "message ref")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
+	}
+
+	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	thread, err := service.MessageThread(operationCtx, mail.MessageThreadRequest{
+		Ref: *ref, Limit: *limit,
+	})
+	if err != nil {
+		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
+	}
+	if *jsonOutput {
+		return writeSuccess(stdout, "messages.thread", responseData{Thread: &thread})
+	}
+	writeFormat(stdout, "conversation_id\t%d\ttruncated\t%t\n", thread.ConversationID, thread.Truncated)
+	rows := make([][]string, 0, len(thread.Messages))
+	for _, message := range thread.Messages {
+		rows = append(rows, []string{message.Ref, message.DateReceived, message.Sender, message.Subject})
+	}
+	if writeTerminalTable(stdout, []string{"REF", "RECEIVED", "FROM", "SUBJECT"}, rows) {
+		return 0
+	}
+	for _, message := range thread.Messages {
+		writeFormat(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))
+	}
+	return 0
 }
 
 func runMessagesGet(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

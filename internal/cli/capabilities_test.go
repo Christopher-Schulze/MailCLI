@@ -82,6 +82,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	want := []string{
 		"capabilities", "version", "update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve",
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state",
+		"messages.thread",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
 		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
@@ -213,6 +214,7 @@ func TestCapabilityMailAppDependencies(t *testing.T) {
 		"messages.get":             "none",
 		"messages.raw":             "none",
 		"messages.state":           "none",
+		"messages.thread":          "none",
 		"attachments.list":         "none",
 		"attachments.save":         "none",
 		"drafts.create":            "none",
