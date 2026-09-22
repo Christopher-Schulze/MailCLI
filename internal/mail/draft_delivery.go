@@ -154,7 +154,7 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 		return TransportEvidence{}, err
 	}
 	sender := identity.Sender
-	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	smtpHost, smtpPort, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
 	if err != nil {
 		return TransportEvidence{}, err
 	}

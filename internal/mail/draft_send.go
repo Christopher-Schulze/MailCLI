@@ -126,7 +126,7 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 		return SendResult{}, err
 	}
 	sender := identity.Sender
-	smtpHost, smtpPort, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	smtpHost, smtpPort, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -494,7 +494,7 @@ func (s *Service) reconcileUnknownViaImap(
 		return resultForReconcile(ref, attempt), err
 	}
 	sender := identity.Sender
-	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	_, _, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
@@ -613,7 +613,7 @@ func (s *Service) reconcileMirrorPending(
 		return result, err
 	}
 	sender := identity.Sender
-	_, _, imapHost, imapPort, err := transport.ProviderHosts(sender)
+	_, _, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
 	if err != nil {
 		return result, err
 	}

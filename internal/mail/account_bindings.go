@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	stdmail "net/mail"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,11 +25,17 @@ const (
 
 // AccountBinding connects one stable Mail account identity to the sender
 // aliases that may be used for it and to the Keychain lookup identity. It
-// never contains a password or any other secret.
+// never contains a password or any other secret. The optional explicit
+// endpoint fields pin SMTP submission and IMAP access to validated public
+// hosts; when present they take precedence over the provider domain table.
 type AccountBinding struct {
 	AccountID         string   `json:"account_id"`
 	SenderAliases     []string `json:"sender_aliases"`
 	CredentialAccount string   `json:"credential_account"`
+	SMTPHost          string   `json:"smtp_host,omitempty"`
+	SMTPPort          int      `json:"smtp_port,omitempty"`
+	IMAPHost          string   `json:"imap_host,omitempty"`
+	IMAPPort          int      `json:"imap_port,omitempty"`
 }
 
 // AccountBindingFile is the private, versioned on-disk binding document.
@@ -98,6 +105,11 @@ func NormalizeAccountBinding(binding AccountBinding) (AccountBinding, error) {
 		}
 	}
 	binding.CredentialAccount = credential
+	binding, err = normalizeBindingEndpoints(binding)
+	if err != nil {
+		return AccountBinding{}, err
+	}
+	explicitHosts := binding.SMTPHost != "" || binding.IMAPHost != ""
 	seen := make(map[string]struct{}, len(binding.SenderAliases))
 	aliases := make([]string, 0, len(binding.SenderAliases))
 	var providerHost string
@@ -119,28 +131,32 @@ func NormalizeAccountBinding(binding AccountBinding) (AccountBinding, error) {
 			}
 		}
 		seen[key] = struct{}{}
-		_, _, imapHost, imapPort, providerErr := transport.ProviderHosts(alias)
-		if providerErr != nil {
-			return AccountBinding{}, providerBindingError("sender alias", alias, providerErr)
-		}
-		if providerHost == "" {
-			providerHost, providerPort = imapHost, imapPort
-		} else if providerHost != imapHost || providerPort != imapPort {
-			return AccountBinding{}, &AccountBindingError{
-				Code:    "account_binding_provider_mismatch",
-				Message: "sender aliases must use one supported provider",
+		if !explicitHosts {
+			_, _, imapHost, imapPort, providerErr := transport.ProviderHosts(alias)
+			if providerErr != nil {
+				return AccountBinding{}, providerBindingError("sender alias", alias, providerErr)
+			}
+			if providerHost == "" {
+				providerHost, providerPort = imapHost, imapPort
+			} else if providerHost != imapHost || providerPort != imapPort {
+				return AccountBinding{}, &AccountBindingError{
+					Code:    "account_binding_provider_mismatch",
+					Message: "sender aliases must use one supported provider",
+				}
 			}
 		}
 		aliases = append(aliases, alias)
 	}
-	_, _, credentialHost, credentialPort, providerErr := transport.ProviderHosts(credential)
-	if providerErr != nil {
-		return AccountBinding{}, providerBindingError("credential account", credential, providerErr)
-	}
-	if providerHost != credentialHost || providerPort != credentialPort {
-		return AccountBinding{}, &AccountBindingError{
-			Code:    "account_binding_provider_mismatch",
-			Message: "credential account must use the same supported provider as its sender aliases",
+	if !explicitHosts {
+		_, _, credentialHost, credentialPort, providerErr := transport.ProviderHosts(credential)
+		if providerErr != nil {
+			return AccountBinding{}, providerBindingError("credential account", credential, providerErr)
+		}
+		if providerHost != credentialHost || providerPort != credentialPort {
+			return AccountBinding{}, &AccountBindingError{
+				Code:    "account_binding_provider_mismatch",
+				Message: "credential account must use the same supported provider as its sender aliases",
+			}
 		}
 	}
 	sort.Slice(aliases, func(left, right int) bool {
@@ -148,6 +164,122 @@ func NormalizeAccountBinding(binding AccountBinding) (AccountBinding, error) {
 	})
 	binding.SenderAliases = aliases
 	return binding, nil
+}
+
+// ValidateBindingHosts checks one explicit endpoint set without touching a
+// binding. CLI validation runs it before credentials are prompted or stored.
+func ValidateBindingHosts(smtpHost string, smtpPort int, imapHost string, imapPort int) error {
+	_, err := normalizeBindingEndpoints(AccountBinding{
+		SMTPHost: smtpHost, SMTPPort: smtpPort,
+		IMAPHost: imapHost, IMAPPort: imapPort,
+	})
+	return err
+}
+
+// normalizeBindingEndpoints validates the optional explicit host/port pairs.
+// Each leg is independent: a host requires a usable port and a port requires
+// a host. Hosts must be public DNS names or public IP literals; loopback,
+// private, link-local, multicast, and unspecified targets are rejected.
+func normalizeBindingEndpoints(binding AccountBinding) (AccountBinding, error) {
+	var err error
+	if binding.SMTPHost, binding.SMTPPort, err = normalizeBindingEndpoint("smtp", binding.SMTPHost, binding.SMTPPort); err != nil {
+		return AccountBinding{}, err
+	}
+	if binding.IMAPHost, binding.IMAPPort, err = normalizeBindingEndpoint("imap", binding.IMAPHost, binding.IMAPPort); err != nil {
+		return AccountBinding{}, err
+	}
+	return binding, nil
+}
+
+func normalizeBindingEndpoint(protocol, host string, port int) (string, int, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		if port != 0 {
+			return "", 0, &AccountBindingError{
+				Code:    "account_binding_host_invalid",
+				Message: protocol + " port requires an explicit host",
+			}
+		}
+		return "", 0, nil
+	}
+	if port < 1 || port > 65535 {
+		return "", 0, &AccountBindingError{
+			Code:    "account_binding_host_invalid",
+			Message: protocol + " port must be between 1 and 65535",
+		}
+	}
+	normalized, err := normalizeBindingHost(host)
+	if err != nil {
+		return "", 0, &AccountBindingError{
+			Code:    "account_binding_host_invalid",
+			Message: protocol + " host is invalid",
+			Err:     err,
+		}
+	}
+	return normalized, port, nil
+}
+
+func normalizeBindingHost(host string) (string, error) {
+	if len(host) > 253 || strings.ContainsAny(host, " \t\r\n\x00/@") {
+		return "", errors.New("host contains invalid characters")
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+			addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
+			return "", errors.New("host must not be a private, loopback, link-local, multicast, or unspecified address")
+		}
+		return addr.String(), nil
+	}
+	if strings.ContainsAny(host, ":") {
+		return "", errors.New("host is not a valid DNS name or IP literal")
+	}
+	if host == "localhost" {
+		return "", errors.New("host must not be a private or reserved name")
+	}
+	for _, suffix := range []string{".localhost", ".local", ".internal", ".home.arpa", ".lan", ".corp"} {
+		if strings.HasSuffix(host, suffix) {
+			return "", errors.New("host must not be a private or reserved name")
+		}
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", errors.New("host must be a fully qualified DNS name or a public IP literal")
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return "", errors.New("host label is empty or too long")
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("host label must not start or end with a hyphen")
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return "", errors.New("host contains invalid characters")
+			}
+		}
+	}
+	return host, nil
+}
+
+// ResolveTransportHosts resolves the SMTP and IMAP endpoints for a sender,
+// preferring explicit binding hosts per leg and falling back to the provider
+// domain table. Explicit hosts arrive pre-validated by binding normalization;
+// when the provider lookup fails, both legs must be explicit to proceed.
+func ResolveTransportHosts(email string, binding *AccountBinding) (smtpHost string, smtpPort int, imapHost string, imapPort int, err error) {
+	smtpHost, smtpPort, imapHost, imapPort, err = transport.ProviderHosts(email)
+	if binding != nil {
+		if binding.SMTPHost != "" {
+			smtpHost, smtpPort = binding.SMTPHost, binding.SMTPPort
+		}
+		if binding.IMAPHost != "" {
+			imapHost, imapPort = binding.IMAPHost, binding.IMAPPort
+		}
+	}
+	if err != nil && (smtpHost == "" || imapHost == "") {
+		return "", 0, "", 0, err
+	}
+	return smtpHost, smtpPort, imapHost, imapPort, nil
 }
 
 func normalizeBindingAddress(value string) (string, error) {

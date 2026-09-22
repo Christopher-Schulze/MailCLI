@@ -312,6 +312,131 @@ func TestSendSetupInvalidatesImapCredentialsAfterSuccessfulChange(t *testing.T) 
 	}
 }
 
+func TestSendSetupPersistsExplicitBindingHosts(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	previousCredentials := sendSetupCredentials
+	previousStdin := sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("secret\n")
+	t.Cleanup(func() {
+		sendSetupCredentials = previousCredentials
+		sendSetupStdin = previousStdin
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSendWithBindings([]string{
+		"setup", "--from", "user@corp.example", "--account", accountRef,
+		"--smtp-host", "smtp.corp.example", "--smtp-port", "587",
+		"--imap-host", "imap.corp.example", "--imap-port", "993", "--json",
+	}, &stdout, &stderr, nil, bindings)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stderr = %q, stdout = %q", code, stderr.String(), stdout.String())
+	}
+	document, err := bindings.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
+	if err != nil || !found {
+		t.Fatalf("FindAccountBinding() = %+v, found=%t, error=%v", binding, found, err)
+	}
+	if binding.SMTPHost != "smtp.corp.example" || binding.SMTPPort != 587 ||
+		binding.IMAPHost != "imap.corp.example" || binding.IMAPPort != 993 {
+		t.Fatalf("binding hosts = %+v", binding)
+	}
+}
+
+func TestSendSetupRejectsHostFlagsWithoutAccount(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	previousCredentials := sendSetupCredentials
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	t.Cleanup(func() { sendSetupCredentials = previousCredentials })
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSend([]string{
+		"setup", "--from", "user@corp.example", "--imap-host", "imap.corp.example", "--json",
+	}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stdout.String(), "require --account") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestSendSetupRejectsInvalidExplicitHost(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	previousCredentials := sendSetupCredentials
+	previousStdin := sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("secret\n")
+	t.Cleanup(func() {
+		sendSetupCredentials = previousCredentials
+		sendSetupStdin = previousStdin
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSendWithBindings([]string{
+		"setup", "--from", "user@corp.example", "--account", accountRef,
+		"--imap-host", "localhost", "--imap-port", "993", "--json",
+	}, &stdout, &stderr, nil, bindings)
+	if code != 1 || !strings.Contains(stdout.String(), "account_binding_host_invalid") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if len(credentials.stored) != 0 {
+		t.Fatalf("credentials stored on rejected host: %+v", credentials.stored)
+	}
+}
+
+func TestSendSetupPreservesBindingHostsWithoutFlags(t *testing.T) {
+	credentials := newStubSetupCredentials()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	if err := bindings.UpsertAccountBinding(mail.AccountBinding{
+		AccountID:         "ACCOUNT-1",
+		SenderAliases:     []string{"user@corp.example"},
+		CredentialAccount: "user@corp.example",
+		SMTPHost:          "smtp.corp.example", SMTPPort: 587,
+		IMAPHost: "imap.corp.example", IMAPPort: 993,
+	}); err != nil {
+		t.Fatalf("UpsertAccountBinding() error = %v", err)
+	}
+	previousCredentials := sendSetupCredentials
+	previousStdin := sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("secret\n")
+	t.Cleanup(func() {
+		sendSetupCredentials = previousCredentials
+		sendSetupStdin = previousStdin
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runSendWithBindings([]string{
+		"setup", "--from", "user@corp.example", "--account", accountRef, "--json",
+	}, &stdout, &stderr, nil, bindings)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q, stdout = %q", code, stderr.String(), stdout.String())
+	}
+	document, err := bindings.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
+	if err != nil || !found || binding.SMTPHost != "smtp.corp.example" || binding.IMAPHost != "imap.corp.example" {
+		t.Fatalf("binding = %+v, found=%t, error=%v", binding, found, err)
+	}
+}
+
 func TestSendUnknownSubcommandFails(t *testing.T) {
 	credentials := newStubSetupCredentials()
 	var stdout bytes.Buffer

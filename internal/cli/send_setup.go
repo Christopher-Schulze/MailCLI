@@ -57,7 +57,7 @@ func runSendWithBindings(
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeFormat(stdout, "Usage:\n  mailcli send setup --from <email> [--account <ref>] [--credential-account <email>] [--remove] [--json]\n\n%s\n", transport.ProviderSupportDescription())
+		writeFormat(stdout, "Usage:\n  mailcli send setup --from <email> [--account <ref>] [--credential-account <email>] [--smtp-host <host> --smtp-port <port>] [--imap-host <host> --imap-port <port>] [--remove] [--json]\n\n%s\n", transport.ProviderSupportDescription())
 		return 0
 	case "setup":
 		if bindings == nil {
@@ -81,11 +81,16 @@ func runSendSetup(
 	from := flags.String("from", "", "sender email address")
 	accountRef := flags.String("account", "", "account ref to bind to the sender")
 	credentialAccount := flags.String("credential-account", "", "keychain account used for this sender")
+	smtpHost := flags.String("smtp-host", "", "explicit SMTP submission host for the account binding")
+	smtpPort := flags.Int("smtp-port", 0, "explicit SMTP submission port for the account binding")
+	imapHost := flags.String("imap-host", "", "explicit IMAP host for the account binding")
+	imapPort := flags.Int("imap-port", 0, "explicit IMAP port for the account binding")
 	remove := flags.Bool("remove", false, "remove the stored app-specific password")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	hostFlags := *smtpHost != "" || *smtpPort != 0 || *imapHost != "" || *imapPort != 0
 	parsed, err := stdmail.ParseAddress(strings.TrimSpace(*from))
 	if err != nil || parsed.Address == "" {
 		return failCommand(
@@ -95,9 +100,6 @@ func runSendSetup(
 		)
 	}
 	account := mail.MailboxAddrSpec(parsed.Address)
-	if _, _, _, _, err := transport.ProviderHosts(account); err != nil {
-		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
-	}
 	stableAccountID := ""
 	if strings.TrimSpace(*accountRef) != "" {
 		ref, err := mailref.DecodeAccount(strings.TrimSpace(*accountRef))
@@ -106,15 +108,36 @@ func runSendSetup(
 		}
 		stableAccountID = ref.AccountID
 	}
-	credential := account
-	if stableAccountID != "" && strings.TrimSpace(*credentialAccount) == "" {
-		binding, found, err := loadSendBinding(bindings, stableAccountID)
+	if hostFlags && stableAccountID == "" {
+		return failCommand(
+			"send.setup", *jsonOutput,
+			&commandError{code: "invalid_argument", message: "explicit binding hosts require --account so the binding carries them"},
+			stdout, stderr,
+		)
+	}
+	if hostFlags {
+		if err := mail.ValidateBindingHosts(*smtpHost, *smtpPort, *imapHost, *imapPort); err != nil {
+			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+		}
+	}
+	var existingBinding mail.AccountBinding
+	bindingFound := false
+	if stableAccountID != "" {
+		var err error
+		existingBinding, bindingFound, err = loadSendBinding(bindings, stableAccountID)
 		if err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
-		if found {
-			credential = binding.CredentialAccount
+	}
+	explicitHosts := hostFlags || (bindingFound && (existingBinding.SMTPHost != "" || existingBinding.IMAPHost != ""))
+	if !explicitHosts {
+		if _, _, _, _, err := transport.ProviderHosts(account); err != nil {
+			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
+	}
+	credential := account
+	if bindingFound && strings.TrimSpace(*credentialAccount) == "" {
+		credential = existingBinding.CredentialAccount
 	}
 	if strings.TrimSpace(*credentialAccount) != "" {
 		credentialParsed, err := stdmail.ParseAddress(strings.TrimSpace(*credentialAccount))
@@ -122,8 +145,10 @@ func runSendSetup(
 			return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "send setup requires a valid --credential-account <email>"}, stdout, stderr)
 		}
 		credential = mail.MailboxAddrSpec(credentialParsed.Address)
-		if _, _, _, _, err := transport.ProviderHosts(credential); err != nil {
-			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+		if !explicitHosts {
+			if _, _, _, _, err := transport.ProviderHosts(credential); err != nil {
+				return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+			}
 		}
 	}
 	if stableAccountID == "" && !strings.EqualFold(account, credential) {
@@ -156,7 +181,14 @@ func runSendSetup(
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}
 	if stableAccountID != "" {
-		if err := upsertSendBinding(bindings, stableAccountID, account, credential); err != nil {
+		var hosts *bindingHosts
+		if hostFlags {
+			hosts = &bindingHosts{
+				smtpHost: *smtpHost, smtpPort: *smtpPort,
+				imapHost: *imapHost, imapPort: *imapPort,
+			}
+		}
+		if err := upsertSendBinding(bindings, stableAccountID, account, credential, hosts); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
 	}
@@ -168,7 +200,17 @@ func runSendSetup(
 	})
 }
 
-func upsertSendBinding(store mail.AccountBindingStore, accountID, alias, credential string) error {
+// bindingHosts carries the optional explicit endpoint flags. A nil value
+// preserves an existing binding's host fields; a non-nil value replaces all
+// four fields as one coherent endpoint set.
+type bindingHosts struct {
+	smtpHost string
+	smtpPort int
+	imapHost string
+	imapPort int
+}
+
+func upsertSendBinding(store mail.AccountBindingStore, accountID, alias, credential string, hosts *bindingHosts) error {
 	if store == nil {
 		return &commandError{code: "account_binding_unavailable", message: "account binding store is unavailable"}
 	}
@@ -194,6 +236,12 @@ func upsertSendBinding(store mail.AccountBindingStore, accountID, alias, credent
 		if !known {
 			binding.SenderAliases = append(binding.SenderAliases, alias)
 		}
+	}
+	if hosts != nil {
+		binding.SMTPHost = hosts.smtpHost
+		binding.SMTPPort = hosts.smtpPort
+		binding.IMAPHost = hosts.imapHost
+		binding.IMAPPort = hosts.imapPort
 	}
 	return store.UpsertAccountBinding(binding)
 }

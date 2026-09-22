@@ -83,6 +83,133 @@ func TestNormalizeAccountBindingRejectsProviderMismatch(t *testing.T) {
 	}
 }
 
+func TestNormalizeAccountBindingAcceptsExplicitHostsForUnsupportedDomain(t *testing.T) {
+	binding, err := NormalizeAccountBinding(AccountBinding{
+		AccountID:         "ACCOUNT-1",
+		SenderAliases:     []string{"user@corp.example"},
+		CredentialAccount: "user@corp.example",
+		SMTPHost:          "smtp.corp.example", SMTPPort: 587,
+		IMAPHost: "imap.corp.example", IMAPPort: 993,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeAccountBinding() error = %v", err)
+	}
+	if binding.SMTPHost != "smtp.corp.example" || binding.SMTPPort != 587 ||
+		binding.IMAPHost != "imap.corp.example" || binding.IMAPPort != 993 {
+		t.Fatalf("binding = %+v", binding)
+	}
+}
+
+func TestNormalizeAccountBindingRejectsInvalidHosts(t *testing.T) {
+	base := AccountBinding{
+		AccountID:         "ACCOUNT-1",
+		SenderAliases:     []string{"user@corp.example"},
+		CredentialAccount: "user@corp.example",
+	}
+	for _, tc := range []struct {
+		name               string
+		smtpHost, imapHost string
+		smtpPort, imapPort int
+	}{
+		{name: "loopback ipv4", imapHost: "127.0.0.1", imapPort: 993},
+		{name: "loopback ipv6", imapHost: "::1", imapPort: 993},
+		{name: "private 10/8", imapHost: "10.0.0.5", imapPort: 993},
+		{name: "private 192.168", imapHost: "192.168.1.1", imapPort: 993},
+		{name: "link local", imapHost: "169.254.0.1", imapPort: 993},
+		{name: "localhost name", imapHost: "localhost", imapPort: 993},
+		{name: "localhost suffix", imapHost: "mx.localhost", imapPort: 993},
+		{name: "local suffix", imapHost: "imap.home.local", imapPort: 993},
+		{name: "internal suffix", imapHost: "mx.corp.internal", imapPort: 993},
+		{name: "single label", imapHost: "mail", imapPort: 993},
+		{name: "host with port", imapHost: "imap.example.com:993", imapPort: 993},
+		{name: "host with path", imapHost: "imap.example.com/x", imapPort: 993},
+		{name: "space in host", imapHost: "imap example.com", imapPort: 993},
+		{name: "port out of range", imapHost: "imap.example.com", imapPort: 70000},
+		{name: "host without port", imapHost: "imap.example.com", imapPort: 0},
+		{name: "port without host", imapHost: "", imapPort: 993},
+		{name: "smtp private", smtpHost: "172.16.0.1", smtpPort: 587},
+		{name: "smtp link-local v6", smtpHost: "fe80::1", smtpPort: 587},
+		{name: "smtp multicast", smtpHost: "224.0.0.1", smtpPort: 587},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := base
+			binding.SMTPHost, binding.SMTPPort = tc.smtpHost, tc.smtpPort
+			binding.IMAPHost, binding.IMAPPort = tc.imapHost, tc.imapPort
+			_, err := NormalizeAccountBinding(binding)
+			if errorCodeForBindingTest(err) != "account_binding_host_invalid" {
+				t.Fatalf("NormalizeAccountBinding(%s) error = %v, want account_binding_host_invalid", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeAccountBindingAcceptsPublicIPLiteral(t *testing.T) {
+	binding, err := NormalizeAccountBinding(AccountBinding{
+		AccountID:         "ACCOUNT-1",
+		SenderAliases:     []string{"user@corp.example"},
+		CredentialAccount: "user@corp.example",
+		IMAPHost:          "8.8.8.8", IMAPPort: 993,
+	})
+	if err != nil || binding.IMAPHost != "8.8.8.8" {
+		t.Fatalf("NormalizeAccountBinding() = %+v, error = %v", binding, err)
+	}
+}
+
+func TestNormalizeAccountBindingSkipsProviderCheckWithExplicitHosts(t *testing.T) {
+	// Mixed alias domains that would mismatch providers are valid once the
+	// binding pins its own endpoints.
+	_, err := NormalizeAccountBinding(AccountBinding{
+		AccountID:         "ACCOUNT-1",
+		SenderAliases:     []string{"a@corp-one.example", "b@corp-two.example"},
+		CredentialAccount: "login@corp-three.example",
+		IMAPHost:          "imap.example.net", IMAPPort: 993,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeAccountBinding() error = %v", err)
+	}
+}
+
+func TestResolveTransportHosts(t *testing.T) {
+	explicit := &AccountBinding{
+		SMTPHost: "smtp.corp.example", SMTPPort: 2525,
+		IMAPHost: "imap.corp.example", IMAPPort: 1993,
+	}
+	t.Run("explicit hosts override provider", func(t *testing.T) {
+		smtpHost, smtpPort, imapHost, imapPort, err := ResolveTransportHosts("user@gmail.com", explicit)
+		if err != nil || smtpHost != "smtp.corp.example" || smtpPort != 2525 || imapHost != "imap.corp.example" || imapPort != 1993 {
+			t.Fatalf("ResolveTransportHosts() = %s:%d %s:%d error=%v", smtpHost, smtpPort, imapHost, imapPort, err)
+		}
+	})
+	t.Run("explicit hosts resolve unsupported domain", func(t *testing.T) {
+		smtpHost, smtpPort, imapHost, imapPort, err := ResolveTransportHosts("user@corp.example", explicit)
+		if err != nil || smtpHost != "smtp.corp.example" || imapHost != "imap.corp.example" {
+			t.Fatalf("ResolveTransportHosts() = %s:%d %s:%d error=%v", smtpHost, smtpPort, imapHost, imapPort, err)
+		}
+	})
+	t.Run("partial override cannot rescue unsupported domain", func(t *testing.T) {
+		_, _, _, _, err := ResolveTransportHosts("user@corp.example", &AccountBinding{
+			IMAPHost: "imap.corp.example", IMAPPort: 1993,
+		})
+		if errorCodeForBindingTest(err) != "transport_unsupported_provider" {
+			t.Fatalf("ResolveTransportHosts() error = %v, want transport_unsupported_provider", err)
+		}
+	})
+	t.Run("partial override mixes provider fallback", func(t *testing.T) {
+		smtpHost, smtpPort, imapHost, imapPort, err := ResolveTransportHosts("user@gmail.com", &AccountBinding{
+			IMAPHost: "imap.corp.example", IMAPPort: 1993,
+		})
+		if err != nil || smtpHost != "smtp.gmail.com" || smtpPort != 587 || imapHost != "imap.corp.example" || imapPort != 1993 {
+			t.Fatalf("ResolveTransportHosts() = %s:%d %s:%d error=%v", smtpHost, smtpPort, imapHost, imapPort, err)
+		}
+	})
+	t.Run("nil binding keeps provider table", func(t *testing.T) {
+		smtpHost, _, imapHost, _, err := ResolveTransportHosts("user@icloud.com", nil)
+		if err != nil || smtpHost != "smtp.mail.me.com" || imapHost != "imap.mail.me.com" {
+			t.Fatalf("ResolveTransportHosts() = %s %s error=%v", smtpHost, imapHost, err)
+		}
+	})
+}
+
 func errorCodeForBindingTest(err error) string {
 	var typed interface{ ErrorCode() string }
 	if errors.As(err, &typed) {

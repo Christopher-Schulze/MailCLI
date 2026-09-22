@@ -284,7 +284,7 @@ func ProviderSupportDescription() string {
 	for index, provider := range providers {
 		parts[index] = provider.Name + " (" + strings.Join(provider.Domains, ", ") + ")"
 	}
-	return "Supported providers: " + strings.Join(parts, "; ") + ". Other domains fail with " + CodeUnsupportedProvider + " before credentials are stored or network connections begin."
+	return "Supported providers: " + strings.Join(parts, "; ") + ". Other domains require an account binding with validated explicit hosts and otherwise fail with " + CodeUnsupportedProvider + " before credentials are stored or network connections begin."
 }
 
 // ProviderHosts resolves the SMTP and IMAP endpoints for a sender address domain.

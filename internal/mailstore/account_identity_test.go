@@ -118,7 +118,7 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 	if err != nil {
 		t.Fatalf("EncodeAccount() error = %v", err)
 	}
-	sender, credential, err := resolveAccountIdentityFromCatalog(
+	sender, credential, binding, err := resolveAccountIdentityFromCatalog(
 		[]mail.Account{{Ref: accountRef, State: "ok", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
 		"TARGET-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},
@@ -130,10 +130,13 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 	if err != nil || sender != "alias@icloud.com" || credential != "login@icloud.com" {
 		t.Fatalf("resolveAccountIdentityFromCatalog() = sender:%q credential:%q error:%v", sender, credential, err)
 	}
+	if binding == nil || binding.CredentialAccount != "login@icloud.com" {
+		t.Fatalf("resolveAccountIdentityFromCatalog() binding = %+v, want credential login@icloud.com", binding)
+	}
 }
 
 func TestResolveAccountIdentityBindingRejectsRemovedAccount(t *testing.T) {
-	_, _, err := resolveAccountIdentityFromCatalog(
+	_, _, _, err := resolveAccountIdentityFromCatalog(
 		nil,
 		"REMOVED-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},
@@ -152,7 +155,7 @@ func TestResolveAccountIdentityBindingPreservesDegradedAccountState(t *testing.T
 	if err != nil {
 		t.Fatalf("EncodeAccount() error = %v", err)
 	}
-	_, _, err = resolveAccountIdentityFromCatalog(
+	_, _, _, err = resolveAccountIdentityFromCatalog(
 		[]mail.Account{{Ref: accountRef, State: "degraded", DegradedReason: "mailbox_cache_unreadable", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
 		"DEGRADED-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},

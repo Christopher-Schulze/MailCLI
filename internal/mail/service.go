@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"mailcli/internal/transport"
@@ -23,19 +24,31 @@ type SendTransport struct {
 }
 
 // InvalidateCredentials advances the IMAP pool generation for account after
-// its credential store has successfully changed it.
+// its credential store has successfully changed it. Pooled sessions may be
+// keyed by a provider-table endpoint or by an explicit binding host, so every
+// resolvable identity is invalidated.
 func (t SendTransport) InvalidateCredentials(account string) {
-	_, _, imapHost, imapPort, err := transport.ProviderHosts(account)
-	if err != nil {
-		return
-	}
 	invalidator, ok := t.ImapClient().(transport.CredentialInvalidator)
 	if !ok {
 		return
 	}
-	invalidator.InvalidateCredentials(transport.ImapConfig{
-		Host: imapHost, Port: imapPort, Username: account,
-	})
+	configs := map[transport.ImapConfig]struct{}{}
+	if _, _, imapHost, imapPort, err := transport.ProviderHosts(account); err == nil {
+		configs[transport.ImapConfig{Host: imapHost, Port: imapPort, Username: account}] = struct{}{}
+	}
+	if t.AccountBindings != nil {
+		if document, err := t.AccountBindings.LoadAccountBindings(); err == nil {
+			for _, binding := range document.Bindings {
+				if binding.IMAPHost == "" || !strings.EqualFold(binding.CredentialAccount, account) {
+					continue
+				}
+				configs[transport.ImapConfig{Host: binding.IMAPHost, Port: binding.IMAPPort, Username: account}] = struct{}{}
+			}
+		}
+	}
+	for config := range configs {
+		invalidator.InvalidateCredentials(config)
+	}
 }
 
 func (t SendTransport) ImapClient() transport.ImapOperator {
