@@ -108,7 +108,7 @@ func ErrorCode(err error) string {
 
 type transportCode string
 
-func (transportCode) Error() string { return "" }
+func (c transportCode) Error() string { return string(c) }
 
 // Typed error codes for the send transport.
 const (

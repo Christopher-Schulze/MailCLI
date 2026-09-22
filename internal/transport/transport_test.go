@@ -336,3 +336,13 @@ func TestSubmissionErrorPreservesUnknownOutcome(t *testing.T) {
 		t.Fatalf("Error() without cause = %q, want concise outcome", got)
 	}
 }
+
+func TestTransportCodeErrorRendersCodeText(t *testing.T) {
+	var err error = transportCode(CodeIMAPAppendOutcomeUnknown)
+	if got := err.Error(); got != CodeIMAPAppendOutcomeUnknown {
+		t.Fatalf("transportCode.Error() = %q, want %q", got, CodeIMAPAppendOutcomeUnknown)
+	}
+	if !errors.Is(&TransportError{Code: CodeIMAPAppendOutcomeUnknown}, transportCode(CodeIMAPAppendOutcomeUnknown)) {
+		t.Fatal("errors.Is sentinel matching regressed")
+	}
+}
