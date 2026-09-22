@@ -141,12 +141,6 @@ func (t *invocationTransport) Close() error {
 	return t.closeErr
 }
 
-func closeInvocationResources(closeTransport, closeStore func() error) error {
-	transportErr := closeTransport()
-	storeErr := closeStore()
-	return errors.Join(transportErr, storeErr)
-}
-
 // newInvocationTransport builds the direct SMTP/IMAP send transport with
 // keychain credentials and owns its IMAP pool for one invocation. It performs
 // no I/O until a send actually runs.

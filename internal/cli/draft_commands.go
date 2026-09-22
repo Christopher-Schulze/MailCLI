@@ -195,10 +195,6 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	return 0
 }
 
-func runDraftCreate(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	return runDraftCreateContext(context.Background(), service, args, stdout, stderr)
-}
-
 func runDraftCreateContext(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts create", stderr)
 	inputFlags := registerDraftInputFlags(flags)

@@ -309,3 +309,9 @@ func TestRunWithFactoriesClosesTransportAfterStoreInitializationFailure(t *testi
 		t.Fatalf("stderr = %q, want cleanup diagnostic", stderr)
 	}
 }
+
+func closeInvocationResources(closeTransport, closeStore func() error) error {
+	transportErr := closeTransport()
+	storeErr := closeStore()
+	return errors.Join(transportErr, storeErr)
+}

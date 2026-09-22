@@ -50,7 +50,7 @@ func TestDraftCreateAcceptsTerminalNativeInput(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runDraftCreate(service, []string{
+	code := runDraftCreateContext(context.Background(), service, []string{
 		"--to", "Ada Lovelace <ada@example.com>",
 		"--subject", "Terminal draft",
 		"--body", "**Hello**",
