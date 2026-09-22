@@ -402,6 +402,13 @@ type CreateDraftRequest struct {
 	SourceMessageID  string
 	SourceReferences string
 	Input            DraftInput
+	// preassignedRef and allowEmptyRecipients are internal-only options used by
+	// store-draft adoption: adopted attachment files live under a ref-derived
+	// name inside the draft root, so the ref must exist before the draft is
+	// prepared, and an unfinished Mail.app draft may legitimately have no
+	// recipients yet. Neither field is reachable through JSON input.
+	preassignedRef       string
+	allowEmptyRecipients bool
 }
 
 type UpdateDraftRequest struct {

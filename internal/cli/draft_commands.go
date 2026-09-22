@@ -40,12 +40,12 @@ func (e *commandError) ErrorCode() string {
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|send|reconcile|discard|prune> [options]")
+		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|adopt|send|reconcile|discard|prune> [options]")
 		return 2
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|send|reconcile|discard|prune> [options]")
+		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|adopt|send|reconcile|discard|prune> [options]")
 		return 0
 	case "create":
 		return runDraftCreateContext(ctx, service, args[1:], stdout, stderr)
@@ -67,6 +67,8 @@ func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout
 		return runDraftSave(ctx, service, args[1:], stdout, stderr)
 	case "open":
 		return runMailDraftOpen(ctx, service, args[1:], stdout, stderr)
+	case "adopt":
+		return runDraftAdopt(ctx, service, args[1:], stdout, stderr)
 	case "send":
 		return runDraftSend(ctx, service, args[1:], stdout, stderr)
 	case "reconcile":
@@ -193,6 +195,27 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 		return 1
 	}
 	return 0
+}
+
+func runDraftAdopt(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := newFlagSet("drafts adopt", stderr)
+	messageRef := flags.String("message", "", "Mail.app draft message ref to adopt")
+	jsonOutput := flags.Bool("json", false, "emit JSON")
+	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
+		return code
+	}
+	output, err := outputFlags.options(projectionTargetDraft)
+	if err != nil {
+		return failCommand("drafts.adopt", *jsonOutput, err, stdout, stderr)
+	}
+	output.stderr = stderr
+	draft, err := service.AdoptStoreDraft(ctx, *messageRef)
+	if err != nil {
+		return failProjectedEmpty("drafts.adopt", *jsonOutput, output, err, stdout, stderr)
+	}
+	output.draftMutationCompleted = true
+	return writeDraftResponse(stdout, "drafts.adopt", draft, *jsonOutput, output)
 }
 
 func runDraftCreateContext(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

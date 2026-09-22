@@ -57,7 +57,8 @@ func prepareDraftWithAttachmentsObserverContext(
 		}
 		request.SourceReferences = canonicalReferences
 	}
-	if request.Kind == DraftKindNew && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
+	if request.Kind == DraftKindNew && !request.allowEmptyRecipients &&
+		len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
 		return Draft{}, validationError("new drafts require at least one recipient")
 	}
 	if request.Kind == DraftKindForward && len(request.Input.To)+len(request.Input.CC)+len(request.Input.BCC) == 0 {
@@ -86,9 +87,15 @@ func prepareDraftWithAttachmentsObserverContext(
 	if err := ctx.Err(); err != nil {
 		return Draft{}, err
 	}
-	ref, err := newDraftReference()
-	if err != nil {
-		return Draft{}, err
+	ref := request.preassignedRef
+	if ref == "" {
+		var err error
+		ref, err = newDraftReference()
+		if err != nil {
+			return Draft{}, err
+		}
+	} else if !validDraftReference(ref) {
+		return Draft{}, validationError("invalid draft ref")
 	}
 	now := time.Now().UTC()
 	return Draft{

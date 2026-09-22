@@ -341,6 +341,8 @@ func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 		switch {
 		case strings.HasSuffix(name, handoffSnapshotSuffix):
 			ref = strings.TrimSuffix(name, handoffSnapshotSuffix)
+		case strings.HasSuffix(name, ".attachments"):
+			ref = strings.TrimSuffix(name, ".attachments")
 		case entry.IsDir():
 			continue
 		case strings.HasSuffix(name, ".send-claim"):
@@ -427,6 +429,9 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 		goto release
 	}
 	resultErr = removeOrphanDraftClaims(ctx, lease.storage, ref)
+	if resultErr == nil {
+		resultErr = removeDraftAttachmentDir(lease.storage, ref)
+	}
 	if resultErr == nil {
 		resultErr = lease.removeLock()
 		swept = resultErr == nil

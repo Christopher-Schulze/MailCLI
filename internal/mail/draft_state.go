@@ -52,8 +52,12 @@ func newDraftReference() (string, error) {
 	return "draft_" + base64.RawURLEncoding.EncodeToString(bytes[:]), nil
 }
 
+func validDraftReference(ref string) bool {
+	return strings.HasPrefix(ref, "draft_") && len(ref) == 30 && !strings.ContainsAny(ref, "/\\")
+}
+
 func draftPath(root string, ref string) (string, error) {
-	if !strings.HasPrefix(ref, "draft_") || len(ref) != 30 || strings.ContainsAny(ref, "/\\") {
+	if !validDraftReference(ref) {
 		return "", validationError("invalid draft ref")
 	}
 	return filepath.Join(root, ref+".json"), nil
@@ -286,7 +290,11 @@ func discardDraftFiles(lease *draftLease, root string, ref string) error {
 	if err := state.apply(draftStorageSync, "", "", 0); err != nil {
 		return fmt.Errorf("persist draft removal: %w", err)
 	}
-	return errors.Join(removeDraftClaims(root, ref, state), lease.removeLock())
+	return errors.Join(
+		removeDraftClaims(root, ref, state),
+		removeDraftAttachmentDir(state, ref),
+		lease.removeLock(),
+	)
 }
 
 func nonNilRecipients(recipients []Recipient) []Recipient {

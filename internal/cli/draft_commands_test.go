@@ -356,3 +356,63 @@ func TestDraftSaveReturnsObservedResultWithPostflightError(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 }
+
+type adoptableGateway struct{ testGateway }
+
+func (adoptableGateway) OpenDraft(context.Context, string) (mail.Message, error) {
+	return mail.Message{
+		Summary:         mail.MessageSummary{Ref: "msg_store_draft", Sender: "Author <author@example.com>", Subject: "Store draft"},
+		To:              []mail.Recipient{{Address: "to@example.com"}},
+		Content:         "adopted body\n",
+		ContentComplete: true,
+		Attachments:     []mail.Attachment{{ID: "a1", Name: "file.txt", Size: 16, SizeKnown: true}},
+	}, nil
+}
+
+type adoptFailGateway struct{ testGateway }
+
+func (adoptFailGateway) OpenDraft(context.Context, string) (mail.Message, error) {
+	return mail.Message{}, &mail.OperationError{Code: "not_found", Message: "draft not found"}
+}
+
+func TestDraftsAdoptCopiesStoreDraft(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := mail.NewServiceWithDraftRoot(adoptableGateway{}, root)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDrafts(context.Background(), service, []string{
+		"adopt", "--message", "msg_store_draft", "--json",
+	}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	draft := response.Data.Draft
+	if draft == nil || draft.Subject != "Store draft" || draft.Body != "adopted body\n" ||
+		len(draft.To) != 1 || len(draft.Attachments) != 1 {
+		t.Fatalf("draft = %+v", draft)
+	}
+	directory := filepath.Join(root, draft.Ref+".attachments")
+	if !strings.HasPrefix(draft.Attachments[0].Path, directory+string(filepath.Separator)) {
+		t.Fatalf("adopted attachment path = %q", draft.Attachments[0].Path)
+	}
+	content, err := os.ReadFile(draft.Attachments[0].Path)
+	if err != nil || string(content) != "attachment bytes" {
+		t.Fatalf("adopted attachment content = %q, error = %v", content, err)
+	}
+}
+
+func TestDraftsAdoptMissingStoreDraftFails(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(adoptFailGateway{}, filepath.Join(t.TempDir(), "drafts"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDrafts(context.Background(), service, []string{
+		"adopt", "--message", "msg_missing", "--json",
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stdout.String(), `"code":"not_found"`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}

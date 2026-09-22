@@ -85,7 +85,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"messages.thread",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
-		"drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
+		"drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync", "drafts.handoff-reconcile",
 	}
@@ -175,6 +175,11 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		!slices.Equal(open.ResultStates, []string{"complete", "partial"}) {
 		t.Fatalf("drafts.open capability = %+v", open)
 	}
+	adopt := manifest.Commands[slices.Index(got, "drafts.adopt")]
+	if adopt.EffectClass != "local-write" || adopt.StoreDependency != "draft-store+mail-store" ||
+		adopt.MailAppDependency != "none" || !slices.Equal(adopt.ResultStates, []string{"created"}) {
+		t.Fatalf("drafts.adopt capability = %+v", adopt)
+	}
 	reconcile := manifest.Commands[slices.Index(got, "drafts.reconcile")]
 	if reconcile.EffectClass != "local-write+imap-write" ||
 		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" || reconcile.MailAppDependency != "none" ||
@@ -226,6 +231,7 @@ func TestCapabilityMailAppDependencies(t *testing.T) {
 		"drafts.update":            "none",
 		"drafts.save":              "none",
 		"drafts.open":              "none",
+		"drafts.adopt":             "none",
 		"drafts.send":              "none",
 		"send.setup":               "none",
 		"drafts.reconcile":         "none",

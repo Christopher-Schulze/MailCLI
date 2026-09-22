@@ -42,6 +42,7 @@ const (
 	textMailStore
 	textDraftStore
 	textDraftStoreMailStoreIfBaseline
+	textDraftStoreMailStore
 	textOptionalAutomation
 	textFallbackAutomation
 	textSystemComposeService
@@ -84,6 +85,8 @@ func contractTextString(text uint8) string {
 		return "draft-store"
 	case textDraftStoreMailStoreIfBaseline:
 		return "draft-store+mail-store-if-baseline"
+	case textDraftStoreMailStore:
+		return "draft-store+mail-store"
 	case textOptionalAutomation:
 		return "optional-automation"
 	case textFallbackAutomation:
@@ -266,6 +269,7 @@ var commandContracts = []commandContract{
 	newCommandContract("drafts.update", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultUpdated),
 	newCommandContract("drafts.save", textUnsupported, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultComposeUnsupported),
 	newCommandContract("drafts.open", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
+	newCommandContract("drafts.adopt", textLocalWrite, textNone, textDraftStoreMailStore, textNone, mailServiceAlwaysRequired, true, false, resultCreated),
 	newCommandContract("drafts.send", textSMTPSend, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, true, false, resultSent),
 	newCommandContract("send.setup", textKeychainWrite, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultSetup),
 	newCommandContract("drafts.reconcile", textLocalWriteIMAPWrite, textNone, textDraftStoreMailStoreIfBaseline, textNone, mailServiceForReconcile, true, false, resultReconcile),

@@ -10,7 +10,7 @@ import (
 	"sync"
 )
 
-const schemaSpecCount = 39
+const schemaSpecCount = 40
 
 // schemaPayloadGZIP contains one compact JSON schema per command contract,
 // separated by newlines in commandContracts order. Keeping the immutable
@@ -60,7 +60,8 @@ const schemaPayloadGZIP = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xed\x1d\x6b\
 // schemaExtraPayload holds compact JSON schemas for command contracts added
 // after the base payload was sealed, one schema per line in the same format.
 const schemaExtraPayload = `{"id":"messages.state@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}
-{"id":"messages.thread@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--limit","value_type":"integer","takes_value":true,"value_required":true,"default":"10","minimum":1,"maximum":25,"description":"page size"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}` + "\n"
+{"id":"messages.thread@v1","version":1,"flags":[{"name":"--ref","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"resource reference"},{"name":"--limit","value_type":"integer","takes_value":true,"value_required":true,"default":"10","minimum":1,"maximum":25,"description":"page size"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"}],"positional_arguments":[],"constraints":[]}
+{"id":"drafts.adopt@v1","version":1,"flags":[{"name":"--message","value_type":"ref","takes_value":true,"value_required":true,"required":true,"description":"Mail.app draft message ref"},{"name":"--json","value_type":"boolean","takes_value":false,"description":"emit JSON"},{"name":"--view","value_type":"enum","takes_value":true,"value_required":true,"default":"plain","values":["metadata","plain","full"],"description":"output view"},{"name":"--fields","value_type":"field_list","takes_value":true,"value_required":true,"description":"comma-separated JSON fields"},{"name":"--max-bytes","value_type":"bytes","takes_value":true,"value_required":true,"default":"1048576","minimum":1,"maximum":67108864,"description":"maximum bounded bytes"}],"positional_arguments":[],"constraints":[]}` + "\n"
 
 var (
 	schemaPayloadOnce  sync.Once
