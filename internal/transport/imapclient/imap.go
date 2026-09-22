@@ -432,12 +432,19 @@ func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg tra
 	if err != nil {
 		return err
 	}
-	password, err := safeQuoteIMAP(cfg.Password)
+	password, err := safeQuoteIMAPBytes(cfg.Password)
 	if err != nil {
 		return err
 	}
-	cmd := tag + " LOGIN " + username + " " + password
-	if err := c.writeLine(sess, cmd); err != nil {
+	defer wipeBytes(password)
+	cmd := make([]byte, 0, len(tag)+7+len(username)+1+len(password))
+	cmd = append(cmd, tag...)
+	cmd = append(cmd, " LOGIN "...)
+	cmd = append(cmd, username...)
+	cmd = append(cmd, ' ')
+	cmd = append(cmd, password...)
+	defer wipeBytes(cmd)
+	if err := c.writeLineBytes(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAuthFailed, "IMAP LOGIN write")
 	}
 	status, _, err := c.readFinal(ctx, sess, tag)
@@ -656,6 +663,29 @@ func (c *Client) writeLine(sess *session, line string) error {
 		}
 	}
 	if _, err := sess.bw.WriteString(line + "\r\n"); err != nil {
+		sess.dirty = true
+		return err
+	}
+	if err := sess.bw.Flush(); err != nil {
+		sess.dirty = true
+		return err
+	}
+	return nil
+}
+
+func (c *Client) writeLineBytes(sess *session, line []byte) error {
+	if bytes.ContainsAny(line, "\r\n\x00") {
+		sess.dirty = true
+		return &transport.TransportError{
+			Code:    transport.CodeIMAPInvalidValue,
+			Message: "IMAP command contains a forbidden control character",
+		}
+	}
+	if _, err := sess.bw.Write(line); err != nil {
+		sess.dirty = true
+		return err
+	}
+	if _, err := sess.bw.WriteString("\r\n"); err != nil {
 		sess.dirty = true
 		return err
 	}
@@ -978,6 +1008,35 @@ func safeQuoteIMAP(s string) (string, error) {
 		}
 	}
 	return quoteIMAP(s), nil
+}
+
+func safeQuoteIMAPBytes(s string) ([]byte, error) {
+	for index := 0; index < len(s); index++ {
+		if s[index] < 0x20 || s[index] == 0x7f {
+			return nil, &transport.TransportError{
+				Code:    transport.CodeIMAPInvalidValue,
+				Message: fmt.Sprintf("IMAP value contains control character at byte %d", index),
+			}
+		}
+	}
+	var b bytes.Buffer
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for index := 0; index < len(s); index++ {
+		c := s[index]
+		if c == '\\' || c == '"' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	b.WriteByte('"')
+	return b.Bytes(), nil
+}
+
+func wipeBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func parseListLine(line string, literals ...[]byte) (string, []string, error) {

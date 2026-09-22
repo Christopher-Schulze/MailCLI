@@ -66,8 +66,12 @@ func runKeygen(args []string, stdout io.Writer, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("generate Ed25519 key: %w", err)
 	}
-	encoded := base64.StdEncoding.EncodeToString(privateKey) + "\n"
-	if err := writeExclusive(*privatePath, []byte(encoded), 0o600); err != nil {
+	defer clearPrivateKey(privateKey)
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(privateKey))+1)
+	base64.StdEncoding.Encode(encoded, privateKey)
+	encoded[len(encoded)-1] = '\n'
+	defer clearBytes(encoded)
+	if err := writeExclusive(*privatePath, encoded, 0o600); err != nil {
 		return fmt.Errorf("write private key: %w", err)
 	}
 	_, err = fmt.Fprintln(stdout, base64.StdEncoding.EncodeToString(publicKey))

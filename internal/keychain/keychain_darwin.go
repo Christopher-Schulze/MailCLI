@@ -5,11 +5,19 @@ package keychain
 /*
 #cgo LDFLAGS: -framework Security -framework CoreFoundation
 #include <stdlib.h>
+#include <string.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
 
 static void keychainDictSet(CFMutableDictionaryRef dict, CFStringRef key, CFTypeRef value) {
 	CFDictionarySetValue(dict, key, value);
+}
+
+static void wipeFree(void *ptr, size_t length) {
+	if (ptr != NULL) {
+		memset(ptr, 0, length);
+		free(ptr);
+	}
 }
 */
 import "C"
@@ -185,7 +193,7 @@ func cfString(s string) (C.CFStringRef, error) {
 		return 0, err
 	}
 	cstr := C.CString(s)
-	defer C.free(unsafe.Pointer(cstr))
+	defer C.wipeFree(unsafe.Pointer(cstr), C.size_t(len(s)+1))
 
 	cf := C.CFStringCreateWithCString(C.kCFAllocatorDefault, cstr, C.kCFStringEncodingUTF8)
 	if cf == 0 {
@@ -199,7 +207,7 @@ func cfData(s string) (C.CFDataRef, error) {
 	if b == nil {
 		return 0, &KeychainError{Code: CodeStoreFailed, Message: "failed to allocate data buffer"}
 	}
-	defer C.free(b)
+	defer C.wipeFree(b, C.size_t(len(s)))
 
 	data := C.CFDataCreate(C.kCFAllocatorDefault, (*C.UInt8)(b), C.CFIndex(len(s)))
 	if data == 0 {

@@ -585,6 +585,35 @@ func TestSafeQuoteIMAPRejectsControlCharacters(t *testing.T) {
 		if _, err := safeQuoteIMAP(value); transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
 			t.Fatalf("safeQuoteIMAP(%q) error = %v, want invalid_imap_value", value, err)
 		}
+		if _, err := safeQuoteIMAPBytes(value); transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
+			t.Fatalf("safeQuoteIMAPBytes(%q) error = %v, want invalid_imap_value", value, err)
+		}
+	}
+}
+
+func TestSafeQuoteIMAPBytesMatchesStringVariant(t *testing.T) {
+	for _, value := range []string{"Sent", `a"b`, `a\b`, "p@ss word", ""} {
+		quoted, err := safeQuoteIMAP(value)
+		if err != nil {
+			t.Fatalf("safeQuoteIMAP(%q): %v", value, err)
+		}
+		quotedBytes, err := safeQuoteIMAPBytes(value)
+		if err != nil {
+			t.Fatalf("safeQuoteIMAPBytes(%q): %v", value, err)
+		}
+		if string(quotedBytes) != quoted {
+			t.Fatalf("safeQuoteIMAPBytes(%q) = %q, want %q", value, quotedBytes, quoted)
+		}
+	}
+}
+
+func TestWipeBytesZeroesBuffer(t *testing.T) {
+	buffer := []byte("secret material")
+	wipeBytes(buffer)
+	for index, b := range buffer {
+		if b != 0 {
+			t.Fatalf("wipeBytes left byte %d = %d", index, b)
+		}
 	}
 }
 
