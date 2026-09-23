@@ -315,7 +315,17 @@ func TestExecuteBatchDeleteMixedOutcomes(t *testing.T) {
 	if result.Items[1].Error == nil || result.Items[1].Error.Retryable {
 		t.Fatalf("uncertain error must not be retryable: %+v", result.Items[1].Error)
 	}
-	if len(gateway.deletes) != 2 || !gateway.deletes[1].AllowDraftMutation {
+	if len(gateway.deletes) != 2 {
+		t.Fatalf("delete request count = %d, want 2: %+v", len(gateway.deletes), gateway.deletes)
+	}
+	requestsByRef := make(map[string]DeleteMessageRequest, len(gateway.deletes))
+	for _, request := range gateway.deletes {
+		requestsByRef[request.Ref] = request
+	}
+	okRequest, hasOK := requestsByRef["ok"]
+	unknownRequest, hasUnknown := requestsByRef["unknown"]
+	if len(requestsByRef) != 2 || !hasOK || okRequest.AllowDraftMutation ||
+		!hasUnknown || !unknownRequest.AllowDraftMutation {
 		t.Fatalf("delete requests = %+v", gateway.deletes)
 	}
 }
