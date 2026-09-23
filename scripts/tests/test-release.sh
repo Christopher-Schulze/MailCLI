@@ -38,6 +38,8 @@ if ! (cd "${MAILCLI_ROOT}" && go build -mod=readonly ./...); then
 fi
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-release-test.XXXXXX")"
+BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${TEST_ROOT}/build/mailcli}"
+export MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}"
 cleanup_test_root() {
   if [[ "${TEST_ROOT}" == *"/mailcli-release-test."* && -d "${TEST_ROOT}" ]]; then
     rm -rf "${TEST_ROOT}"
@@ -53,7 +55,7 @@ if "${MAILCLI_ROOT}/scripts/release/build-release.sh" >/dev/null 2>&1; then
   exit 1
 fi
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
-TEST_VERSION="$("${MAILCLI_ROOT}/bin/mailcli" version)"
+TEST_VERSION="$("${BUILD_OUTPUT}" version)"
 TEST_VERSION="${TEST_VERSION#mailcli }"
 if [[ ! "${TEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Built binary reports a malformed version: %s\n' "${TEST_VERSION}" >&2
@@ -106,7 +108,7 @@ PACKAGE_ROOT="${TEST_ROOT}/mailcli_${TEST_VERSION}_darwin_arm64"
 SOURCE_BINARY_COPY="${TEST_ROOT}/release-source-binary"
 cp "${PACKAGE_ROOT}/bin/mailcli" "${SOURCE_BINARY_COPY}"
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
-cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${MAILCLI_ROOT}/bin/mailcli"
+cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${BUILD_OUTPUT}"
 TEST_HOME="${TEST_ROOT}/home"
 mkdir -p "${TEST_HOME}"
 HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh"

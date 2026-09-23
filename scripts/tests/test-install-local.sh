@@ -6,6 +6,7 @@ GOMODCACHE_ROOT="$(go env GOMODCACHE)"
 GOCACHE_ROOT="$(go env GOCACHE)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-local-install-test.XXXXXX")"
 TEST_HOME="${TEST_ROOT}/home"
+BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${TEST_ROOT}/build/mailcli}"
 BINARY_DESTINATION="${TEST_ROOT}/install/.local/bin/mailcli"
 SKILL_DESTINATION="${TEST_ROOT}/install/.agents/skills/mailcli"
 TRANSACTION_ROOT="${TEST_HOME}/Library/Application Support/MailCLI/install-transactions"
@@ -28,26 +29,46 @@ install_local() {
   local skill_destination="$2"
   HOME="${TEST_HOME}" GOMODCACHE="${GOMODCACHE_ROOT}" GOCACHE="${GOCACHE_ROOT}" \
     MAILCLI_SKILL_DESTINATION="${skill_destination}" \
+    MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}" \
     "${MAILCLI_ROOT}/scripts/build/install-local.sh" "${binary_destination}" >/dev/null
 }
 
 verify_install() {
   local binary_destination="$1"
   local skill_destination="$2"
-  cmp -s "${MAILCLI_ROOT}/bin/mailcli" "${binary_destination}"
+  cmp -s "${BUILD_OUTPUT}" "${binary_destination}"
   diff -qr "${MAILCLI_ROOT}/skills/mailcli" "${skill_destination}" >/dev/null
   (
     cd "${MAILCLI_ROOT}"
     MAILCLI_TEST_SKILL_DIRECTORY="${skill_destination}" \
       go test ./internal/cli -run '^TestSkillDocumentationSelfContained$' -count=1
   )
-  [[ "$(${binary_destination} version)" == "$("${MAILCLI_ROOT}/bin/mailcli" version)" ]]
+  [[ "$(${binary_destination} version)" == "$("${BUILD_OUTPUT}" version)" ]]
   [[ ! -e "${binary_destination}.mailcli-backup" ]]
   [[ ! -e "${skill_destination}.mailcli-backup" ]]
 }
 
+# Regression: a pre-existing ignored production binary must keep its digest
+# while the installer path builds and installs the redirected candidate.
+PREEXISTING_BINARY="${MAILCLI_ROOT}/bin/mailcli"
+PREEXISTING_CREATED=0
+if [[ ! -e "${PREEXISTING_BINARY}" ]]; then
+  mkdir -p "${MAILCLI_ROOT}/bin"
+  printf 'pre-existing binary sentinel\n' >"${PREEXISTING_BINARY}"
+  PREEXISTING_CREATED=1
+fi
+PREEXISTING_DIGEST="$(shasum -a 256 "${PREEXISTING_BINARY}" | awk '{print $1}')"
+
 install_local "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
 verify_install "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
+
+[[ "$(shasum -a 256 "${PREEXISTING_BINARY}" | awk '{print $1}')" == "${PREEXISTING_DIGEST}" ]] || {
+  printf 'Installer build changed the pre-existing bin/mailcli digest\n' >&2
+  exit 1
+}
+if ((PREEXISTING_CREATED)); then
+  rm -f "${PREEXISTING_BINARY}"
+fi
 
 printf 'old binary\n' >"${BINARY_DESTINATION}"
 chmod 0755 "${BINARY_DESTINATION}"
@@ -130,6 +151,7 @@ set +e
 MAILCLI_TEST_INTERRUPT_PATH="${BINARY_DESTINATION}" BASH_ENV="${INTERRUPT_ENV}" \
   HOME="${TEST_HOME}" GOMODCACHE="${GOMODCACHE_ROOT}" GOCACHE="${GOCACHE_ROOT}" \
   MAILCLI_SKILL_DESTINATION="${SKILL_DESTINATION}" \
+  MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}" \
   "${MAILCLI_ROOT}/scripts/build/install-local.sh" "${BINARY_DESTINATION}" >/dev/null 2>&1
 INTERRUPTION_STATUS=$?
 set -e
@@ -145,6 +167,7 @@ set +e
 MAILCLI_TEST_INTERRUPT_PATH="${SKILL_DESTINATION}" BASH_ENV="${INTERRUPT_ENV}" \
   HOME="${TEST_HOME}" GOMODCACHE="${GOMODCACHE_ROOT}" GOCACHE="${GOCACHE_ROOT}" \
   MAILCLI_SKILL_DESTINATION="${SKILL_DESTINATION}" \
+  MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}" \
   "${MAILCLI_ROOT}/scripts/build/install-local.sh" "${BINARY_DESTINATION}" >/dev/null 2>&1
 INTERRUPTION_STATUS=$?
 set -e

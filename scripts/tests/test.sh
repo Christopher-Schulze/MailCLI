@@ -9,6 +9,13 @@ unset MAILCLI_BINARY_DESTINATION MAILCLI_SKILL_DESTINATION
 
 MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
 MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-2}"
+
+# Gate builds must not rewrite the ignored production binary: installer and
+# release tests compile into private output so the lease's ignored-asset
+# fingerprint stays stable even when the staged patch changes Go sources.
+MAILCLI_GATE_BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-gate-build.XXXXXX")"
+trap 'rm -rf -- "${MAILCLI_GATE_BUILD_ROOT}"' EXIT
+export MAILCLI_BUILD_OUTPUT="${MAILCLI_GATE_BUILD_ROOT}/mailcli"
 for CONCURRENCY_VALUE in "${MAILCLI_TEST_CPUS}" "${MAILCLI_TEST_PACKAGES}"; do
   if [[ ! "${CONCURRENCY_VALUE}" =~ ^[1-9][0-9]*$ ]]; then
     printf 'Verification concurrency must be a positive integer: %s\n' "${CONCURRENCY_VALUE}" >&2

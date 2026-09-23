@@ -28,7 +28,7 @@ if [[ -e "${ARCHIVE_PATH}" || -e "${CHECKSUM_PATH}" || -e "${SIGNATURE_PATH}" ]]
 fi
 
 "${MAILCLI_ROOT}/scripts/build/build.sh"
-BINARY="${MAILCLI_ROOT}/bin/mailcli"
+BINARY="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
 if [[ "$("${BINARY}" version)" != "mailcli ${VERSION}" ]]; then
   printf 'Binary version does not match requested release %s\n' "${VERSION}" >&2
   exit 1
