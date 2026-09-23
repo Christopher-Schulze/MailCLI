@@ -115,6 +115,7 @@ MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \
   -parallel "${MAILCLI_TEST_CPUS}" ./...
 "${SCRIPT_BASE}/scripts/tests/test-task-history-export.sh"
 "${SCRIPT_BASE}/scripts/tests/test-write-coordination.sh"
+"${SCRIPT_BASE}/scripts/tests/test-private-closure.sh"
 "${SCRIPT_BASE}/scripts/tests/test-task-ci-report.sh"
 "${SCRIPT_BASE}/scripts/tests/test-commit-authority.sh"
 "${SCRIPT_BASE}/scripts/tests/test-release-authority.sh"
