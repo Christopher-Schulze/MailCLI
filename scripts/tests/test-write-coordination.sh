@@ -25,6 +25,10 @@ printf '%s\n' \
   'printf "baseline-harness\\n"' \
   "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'printf "standalone-reporter\\n"' >"${TEST_REPOSITORY}/scripts/tests/report-task-ci.sh"
+chmod 755 "${TEST_REPOSITORY}/scripts/tests/report-task-ci.sh"
 cp "${LEASE_TOOL}" "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 
@@ -40,6 +44,7 @@ stage_fixture_path() {
 stage_fixture_path tracked.txt 100644
 stage_fixture_path other.txt 100644
 stage_fixture_path scripts/tests/test.sh 100755
+stage_fixture_path scripts/tests/report-task-ci.sh 100755
 stage_fixture_path scripts/utils/manage-write-lease.sh 100755
 INITIAL_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 INITIAL_COMMIT="$(printf 'initial\n' | git -C "${TEST_REPOSITORY}" commit-tree "${INITIAL_TREE}")"
@@ -241,6 +246,10 @@ GATE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" gate "${HARNESS_TOKEN}" 2>&1)"
 printf '%s\n' "${GATE_OUTPUT}" | grep -Fq 'baseline-harness' || {
   printf 'Gate did not run the baseline harness\n' >&2
+  exit 1
+}
+printf '%s\n' "${GATE_OUTPUT}" | grep -Fq 'gate_harness=baseline' || {
+  printf 'Gate did not report baseline harness selection\n' >&2
   exit 1
 }
 if printf '%s\n' "${GATE_OUTPUT}" | grep -Fq 'patched-harness'; then

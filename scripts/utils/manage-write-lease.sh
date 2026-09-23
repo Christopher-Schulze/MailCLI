@@ -460,7 +460,7 @@ gate_lease() {
       HARNESS_CAPABLE=false
       break
     fi
-  done < <(find "${HARNESS_DIR}/scripts/tests" -type f -name '*.sh' -print0)
+  done < <(find "${HARNESS_DIR}/scripts/tests" -type f -name 'test*.sh' -print0)
   if [[ "${HARNESS_CAPABLE}" == true &&
     -x "${HARNESS_DIR}/scripts/tests/test.sh" ]]; then
     MAILCLI_ROOT="${MAILCLI_ROOT}" \
