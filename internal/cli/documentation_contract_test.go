@@ -27,6 +27,35 @@ func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 	assertQualifiedMailAppClaim(t, artifacts)
 }
 
+func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
+	paths := []string{
+		"README.md", "docs/documentation.md", "skills/mailcli/SKILL.md",
+		"skills/mailcli/references/output-and-recovery.md",
+	}
+	for _, path := range paths {
+		content := strings.ToLower(readRepositoryFile(t, path))
+		for _, stale := range []string{
+			"batch read currently returns full messages",
+			"batch read currently emits full messages",
+			"batch has no output projection or byte gate",
+		} {
+			if strings.Contains(content, stale) {
+				t.Errorf("%s contains stale batch output contract %q", path, stale)
+			}
+		}
+	}
+	guide := readRepositoryFile(t, "skills/mailcli/references/output-and-recovery.md")
+	for _, claim := range []string{"view:\"metadata\"", "--max-bytes", "replay_allowed:false", "item IDs and states"} {
+		if !strings.Contains(guide, claim) {
+			t.Errorf("batch output guide omits %q", claim)
+		}
+	}
+	skill := readRepositoryFile(t, "skills/mailcli/SKILL.md")
+	if !strings.Contains(skill, `"view":"metadata"`) {
+		t.Error("skill batch-read guidance omits the metadata-default example")
+	}
+}
+
 func assertCapabilitySemantics(t *testing.T, manifest capabilityManifest) {
 	t.Helper()
 	send := findCapability(t, manifest, "drafts.send")

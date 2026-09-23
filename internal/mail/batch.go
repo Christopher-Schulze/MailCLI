@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"mailcli/internal/transport"
 )
@@ -41,24 +42,29 @@ const (
 // BatchRequest is an explicit, bounded set of independent operations. Items
 // are never discovered implicitly and retain their input order in the result.
 type BatchRequest struct {
-	Operation   BatchOperation `json:"operation"`
-	Items       []BatchItem    `json:"items"`
-	Concurrency int            `json:"concurrency,omitempty"`
+	Operation              BatchOperation `json:"operation"`
+	Items                  []BatchItem    `json:"items"`
+	Concurrency            int            `json:"concurrency,omitempty"`
+	ReadContentBudgetBytes int64          `json:"-"`
 }
 
 // BatchItem identifies one request. Ref is a store-bound message reference for
 // every operation; attachment fields are used only by attachment_save, state
-// fields only by mark, and Mailbox only by move and copy.
+// fields only by mark, Mailbox by move/copy, and view/fields by read.
 type BatchItem struct {
-	ID                 string `json:"id"`
-	Ref                string `json:"ref"`
-	AttachmentID       string `json:"attachment_id"`
-	OutputPath         string `json:"output_path"`
-	Read               *bool  `json:"read"`
-	Flagged            *bool  `json:"flagged"`
-	Junk               *bool  `json:"junk"`
-	Mailbox            string `json:"mailbox"`
-	AllowDraftMutation bool   `json:"allow_draft_mutation,omitempty"`
+	ID                 string    `json:"id"`
+	Ref                string    `json:"ref"`
+	AttachmentID       string    `json:"attachment_id"`
+	OutputPath         string    `json:"output_path"`
+	Read               *bool     `json:"read"`
+	Flagged            *bool     `json:"flagged"`
+	Junk               *bool     `json:"junk"`
+	Mailbox            string    `json:"mailbox"`
+	AllowDraftMutation bool      `json:"allow_draft_mutation,omitempty"`
+	View               *string   `json:"view,omitempty"`
+	Fields             *[]string `json:"fields,omitempty"`
+	RetainReadContent  bool      `json:"-"`
+	RetainReadHeaders  bool      `json:"-"`
 }
 
 type BatchItemError struct {
@@ -79,24 +85,34 @@ type BatchItemResult struct {
 }
 
 type BatchResult struct {
-	Operation   BatchOperation    `json:"operation"`
-	Concurrency int               `json:"concurrency"`
-	Total       int               `json:"total"`
-	Completed   int               `json:"completed"`
-	Failed      int               `json:"failed"`
-	Skipped     int               `json:"skipped"`
-	Uncertain   int               `json:"uncertain"`
-	Items       []BatchItemResult `json:"items"`
+	Operation                BatchOperation    `json:"operation"`
+	Concurrency              int               `json:"concurrency"`
+	Total                    int               `json:"total"`
+	Completed                int               `json:"completed"`
+	Failed                   int               `json:"failed"`
+	Skipped                  int               `json:"skipped"`
+	Uncertain                int               `json:"uncertain"`
+	Items                    []BatchItemResult `json:"items"`
+	ReadContentExceeded      bool              `json:"-"`
+	ReadContentRequiredBytes int64             `json:"-"`
 }
 
 type batchExecution struct {
-	ctx     context.Context
-	service *Service
-	request BatchRequest
-	result  *BatchResult
-	jobs    chan int
-	wait    sync.WaitGroup
-	next    int
+	ctx        context.Context
+	service    *Service
+	request    BatchRequest
+	result     *BatchResult
+	jobs       chan int
+	wait       sync.WaitGroup
+	next       int
+	readBudget *batchReadBudget
+}
+
+type batchReadBudget struct {
+	mu            sync.Mutex
+	remaining     int64
+	requiredBytes int64
+	exceeded      bool
 }
 
 func (r BatchResult) Complete() bool {
@@ -127,7 +143,14 @@ func (s *Service) ExecuteBatch(ctx context.Context, request BatchRequest) (Batch
 		}
 	}
 	execution := batchExecution{ctx: ctx, service: s, request: request, result: &result}
+	if request.Operation == BatchOperationRead && request.ReadContentBudgetBytes > 0 {
+		execution.readBudget = &batchReadBudget{remaining: request.ReadContentBudgetBytes}
+	}
 	execution.run()
+	if execution.readBudget != nil {
+		result.ReadContentExceeded = execution.readBudget.exceeded
+		result.ReadContentRequiredBytes = execution.readBudget.requiredBytes
+	}
 	return result, nil
 }
 
@@ -197,6 +220,9 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 	if concurrency < 1 || concurrency > MaximumBatchConcurrency {
 		return 0, validationError(fmt.Sprintf("batch concurrency must be between 1 and %d", MaximumBatchConcurrency))
 	}
+	if request.ReadContentBudgetBytes < 0 || request.ReadContentBudgetBytes > MaximumRawSourceBytes {
+		return 0, validationError(fmt.Sprintf("batch read content budget must be between 0 and %d bytes", MaximumRawSourceBytes))
+	}
 	ids := make(map[string]struct{}, len(request.Items))
 	destinations := make(map[string]string)
 	for _, item := range request.Items {
@@ -216,11 +242,14 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 				item.Mailbox != "" || item.AllowDraftMutation {
 				return 0, validationError(fmt.Sprintf("batch read item %q contains unsupported fields", item.ID))
 			}
+			if item.View != nil && item.Fields != nil {
+				return 0, validationError(fmt.Sprintf("batch read item %q cannot combine view and fields", item.ID))
+			}
 		case BatchOperationAttachmentSave:
 			if item.AttachmentID == "" || item.OutputPath == "" {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q requires attachment_id and output_path", item.ID))
 			}
-			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.Mailbox != "" || item.AllowDraftMutation {
+			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.Mailbox != "" || item.AllowDraftMutation || item.View != nil || item.Fields != nil {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q contains unsupported fields", item.ID))
 			}
 			if err := validateAttachmentRequest(SaveAttachmentRequest{
@@ -234,7 +263,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			}
 			destinations[strings.ToLower(path)] = item.ID
 		case BatchOperationMark:
-			if item.AttachmentID != "" || item.OutputPath != "" || item.Mailbox != "" ||
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Mailbox != "" || item.View != nil || item.Fields != nil ||
 				(item.Read == nil && item.Flagged == nil && item.Junk == nil) {
 				return 0, validationError(fmt.Sprintf("batch mark item %q requires state fields only", item.ID))
 			}
@@ -242,7 +271,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			if item.Mailbox == "" {
 				return 0, validationError(fmt.Sprintf("batch move item %q requires mailbox", item.ID))
 			}
-			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil {
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil || item.View != nil || item.Fields != nil {
 				return 0, validationError(fmt.Sprintf("batch move item %q contains unsupported fields", item.ID))
 			}
 		case BatchOperationCopy:
@@ -250,12 +279,12 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 				return 0, validationError(fmt.Sprintf("batch copy item %q requires mailbox", item.ID))
 			}
 			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
-				item.AllowDraftMutation {
+				item.AllowDraftMutation || item.View != nil || item.Fields != nil {
 				return 0, validationError(fmt.Sprintf("batch copy item %q contains unsupported fields", item.ID))
 			}
 		case BatchOperationDelete:
 			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
-				item.Mailbox != "" {
+				item.Mailbox != "" || item.View != nil || item.Fields != nil {
 				return 0, validationError(fmt.Sprintf("batch delete item %q contains unsupported fields", item.ID))
 			}
 		}
@@ -271,12 +300,14 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 		if err != nil {
 			result.State = BatchItemFailed
 			if hasBatchMessageEvidence(message) {
+				run.retainReadMessage(&message, item)
 				result.Message = &message
 			}
 			result.Error = run.itemError(err)
 			return result
 		}
 		result.State = BatchItemCompleted
+		run.retainReadMessage(&message, item)
 		result.Message = &message
 	case BatchOperationAttachmentSave:
 		saved, err := run.service.SaveAttachment(run.ctx, SaveAttachmentRequest{
@@ -354,6 +385,74 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 		result.DeleteResult = &deleted
 	}
 	return result
+}
+
+func (run *batchExecution) retainReadMessage(message *Message, item BatchItem) {
+	if run.readBudget == nil {
+		return
+	}
+	if !item.RetainReadContent {
+		message.Content = ""
+	}
+	if !item.RetainReadHeaders {
+		message.Headers = ""
+	}
+	requiredBytes := int64(0)
+	if item.RetainReadContent {
+		requiredBytes += jsonStringOutputBytes(message.Content)
+	}
+	if item.RetainReadHeaders {
+		requiredBytes += jsonStringOutputBytes(message.Headers)
+	}
+	run.readBudget.mu.Lock()
+	defer run.readBudget.mu.Unlock()
+	run.readBudget.requiredBytes += requiredBytes
+	if requiredBytes > run.readBudget.remaining {
+		if item.RetainReadContent {
+			message.Content = ""
+		}
+		if item.RetainReadHeaders {
+			message.Headers = ""
+		}
+		run.readBudget.exceeded = true
+		return
+	}
+	run.readBudget.remaining -= requiredBytes
+}
+
+func jsonStringOutputBytes(value string) int64 {
+	encodedBytes := int64(2)
+	for index := 0; index < len(value); {
+		current := value[index]
+		if current < utf8.RuneSelf {
+			switch current {
+			case '"', '\\':
+				encodedBytes += 2
+			case '<', '>', '&':
+				encodedBytes += 6
+			case '\b', '\f', '\n', '\r', '\t':
+				encodedBytes += 2
+			case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0e, 0x0f,
+				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+				0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f:
+				encodedBytes += 6
+			default:
+				encodedBytes++
+			}
+			index++
+			continue
+		}
+		rune, width := utf8.DecodeRuneInString(value[index:])
+		if rune == utf8.RuneError && width == 1 {
+			encodedBytes += 3
+		} else if rune == 0x2028 || rune == 0x2029 {
+			encodedBytes += 6
+		} else {
+			encodedBytes += int64(width)
+		}
+		index += width
+	}
+	return encodedBytes
 }
 
 func (run *batchExecution) itemError(err error) *BatchItemError {

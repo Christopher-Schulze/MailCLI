@@ -33,7 +33,7 @@ Before automation, request the needed contract with `mailcli capabilities --comm
 
 Detail JSON responses support bounded projections. Use `--view metadata|plain|full` for named views or `--fields field1,field2` for an explicit selection; the supported fields, defaults, and byte limits are published under `data.capabilities.limits.output_projection`. `messages get` and `drafts inspect` default to metadata, while draft creation and update responses default to the canonical plain body. `--max-bytes` defaults to 1 MiB and rejects oversized JSON with `output_too_large` instead of truncating it. `messages get`, `messages raw`, and `drafts inspect` accept `--export /absolute/new/path`; the complete body or raw source is written to a mode-0600 exclusive file and JSON returns verified `data.content_export` size and SHA-256 metadata without embedding the exported bytes.
 
-`batch read` currently returns full messages without `--view`, `--fields`, or an output byte limit. Keep read batches small when their content size is known, or use projected `messages get` calls for bounded JSON output.
+`batch --json` applies its byte limit to the complete response; `--max-bytes` defaults to 1 MiB and accepts up to 64 MiB. Each read item accepts `view` (`metadata`, `plain`, or `full`) or a `fields` array. Omitting `view` keeps the legacy full-message response. The companion skill uses `metadata` in its batch-read examples.
 
 | Area | Commands | Behavior |
 |---|---|---|

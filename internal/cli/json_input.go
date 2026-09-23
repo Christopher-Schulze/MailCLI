@@ -20,6 +20,7 @@ const (
 	inputJSONRecipients
 	inputJSONAttachments
 	inputJSONBatchItems
+	inputJSONStringList
 )
 
 type inputJSONField struct {
@@ -28,8 +29,8 @@ type inputJSONField struct {
 	nonnull bool
 }
 
-// These are the only user-supplied CLI JSON schemas. Their acyclic shapes
-// bound descent to root -> array -> object -> scalar, even for hostile input.
+// These are the only user-supplied CLI JSON schemas. Their fixed shapes
+// bound descent even when input is hostile.
 // Tests bind the field sets to the actual model tags and published schemas.
 func inputJSONFields(shape inputJSONShape) []inputJSONField {
 	switch shape {
@@ -55,6 +56,7 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 			{"read", inputJSONBoolean, false}, {"flagged", inputJSONBoolean, false},
 			{"junk", inputJSONBoolean, false}, {"mailbox", inputJSONString, false},
 			{"allow_draft_mutation", inputJSONBoolean, false},
+			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true},
 		}
 	default:
 		return nil
@@ -154,7 +156,7 @@ func readInputJSONValue(decoder *json.Decoder, field inputJSONField, path string
 			_, err := readInputJSONObject(decoder, field.shape, path)
 			return err
 		}
-	case inputJSONRecipients, inputJSONAttachments, inputJSONBatchItems:
+	case inputJSONRecipients, inputJSONAttachments, inputJSONBatchItems, inputJSONStringList:
 		if token == json.Delim('[') {
 			return readInputJSONArray(decoder, field.shape, path)
 		}

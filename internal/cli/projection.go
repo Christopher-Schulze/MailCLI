@@ -69,6 +69,7 @@ type serializedProjection struct {
 	message     *messageProjection
 	draft       *draftProjection
 	attachments *[]attachmentProjection
+	batch       *batchResultProjection
 	hideRaw     bool
 }
 
@@ -85,6 +86,28 @@ type messageProjection struct {
 	MissingParts    *[]string                 `json:"missing_parts"`
 	Hydration       *mail.HydrationDiagnostic `json:"hydration,omitempty"`
 	Attachments     *[]mail.Attachment        `json:"attachments,omitempty"`
+}
+
+type batchResultProjection struct {
+	Operation   mail.BatchOperation         `json:"operation"`
+	Concurrency int                         `json:"concurrency"`
+	Total       int                         `json:"total"`
+	Completed   int                         `json:"completed"`
+	Failed      int                         `json:"failed"`
+	Skipped     int                         `json:"skipped"`
+	Uncertain   int                         `json:"uncertain"`
+	Items       []batchItemResultProjection `json:"items"`
+}
+
+type batchItemResultProjection struct {
+	ID              string                `json:"id"`
+	State           mail.BatchItemState   `json:"state"`
+	Message         *messageProjection    `json:"message,omitempty"`
+	Projection      *projectionInfo       `json:"projection,omitempty"`
+	MessageState    *mail.MessageSummary  `json:"message_state,omitempty"`
+	SavedAttachment *mail.SavedAttachment `json:"saved_attachment,omitempty"`
+	DeleteResult    *mail.DeleteResult    `json:"delete_result,omitempty"`
+	Error           *mail.BatchItemError  `json:"error,omitempty"`
 }
 
 type draftProjection struct {
@@ -183,10 +206,8 @@ func (s outputFlagState) options(target projectionTarget) (outputOptions, error)
 		}
 	})
 	options.fieldsProvided = fieldsProvided
-	if options.maxBytes <= 0 || options.maxBytes > maximumJSONOutputBytes {
-		return outputOptions{}, &commandError{code: "invalid_argument", message: fmt.Sprintf(
-			"--max-bytes must be between 1 and %d", maximumJSONOutputBytes,
-		)}
+	if err := validateOutputByteLimit(options.maxBytes); err != nil {
+		return outputOptions{}, err
 	}
 	if viewProvided && fieldsProvided {
 		return outputOptions{}, &commandError{code: "invalid_argument", message: "--view and --fields cannot be combined"}
@@ -219,6 +240,15 @@ func (s outputFlagState) options(target projectionTarget) (outputOptions, error)
 		}
 	}
 	return options, nil
+}
+
+func validateOutputByteLimit(maxBytes int64) error {
+	if maxBytes <= 0 || maxBytes > maximumJSONOutputBytes {
+		return &commandError{code: "invalid_argument", message: fmt.Sprintf(
+			"--max-bytes must be between 1 and %d", maximumJSONOutputBytes,
+		)}
+	}
+	return nil
 }
 
 func validateContentExportPath(path string) error {
@@ -286,6 +316,101 @@ func parseProjectionFields(target projectionTarget, value string) (map[string]st
 		fields[field] = struct{}{}
 	}
 	return fields, nil
+}
+
+func batchReadOutputOptions(item mail.BatchItem, maxBytes int64) (outputOptions, error) {
+	options := outputOptions{target: projectionTargetMessage, view: outputViewFull, maxBytes: maxBytes}
+	if item.View != nil {
+		options.view = strings.ToLower(strings.TrimSpace(*item.View))
+	}
+	if item.Fields != nil {
+		if item.View != nil {
+			return outputOptions{}, &commandError{code: "invalid_argument", message: "batch read item cannot combine view and fields"}
+		}
+		for _, field := range *item.Fields {
+			if strings.Contains(field, ",") {
+				return outputOptions{}, &commandError{code: "invalid_argument", message: "batch read fields must contain one field name per array item"}
+			}
+		}
+		fields, err := parseProjectionFields(projectionTargetMessage, strings.Join(*item.Fields, ","))
+		if err != nil {
+			return outputOptions{}, err
+		}
+		options.fields, options.fieldsProvided, options.view = fields, true, "custom"
+		return options, nil
+	}
+	if !validProjectionView(projectionTargetMessage, options.view) {
+		return outputOptions{}, &commandError{code: "invalid_argument", message: projectionViewError(projectionTargetMessage, options.view)}
+	}
+	return options, nil
+}
+
+func projectBatchResult(
+	result mail.BatchResult,
+	items []mail.BatchItem,
+	maxBytes int64,
+	includeReadMessages bool,
+	includeProjection bool,
+	includeMutationEvidence bool,
+	includeItemErrors bool,
+) (*batchResultProjection, error) {
+	if result.Operation == mail.BatchOperationRead && (includeReadMessages || includeProjection) && len(items) != len(result.Items) {
+		return nil, fmt.Errorf("batch read result has %d items for %d requests", len(result.Items), len(items))
+	}
+	projection := &batchResultProjection{
+		Operation: result.Operation, Concurrency: result.Concurrency, Total: result.Total,
+		Completed: result.Completed, Failed: result.Failed, Skipped: result.Skipped,
+		Uncertain: result.Uncertain, Items: make([]batchItemResultProjection, len(result.Items)),
+	}
+	for index, item := range result.Items {
+		projected, err := projectBatchItem(
+			item, index, result.Operation, items, maxBytes, includeReadMessages,
+			includeProjection, includeMutationEvidence, includeItemErrors,
+		)
+		if err != nil {
+			return nil, err
+		}
+		projection.Items[index] = projected
+	}
+	return projection, nil
+}
+
+func projectBatchItem(
+	item mail.BatchItemResult,
+	index int,
+	operation mail.BatchOperation,
+	items []mail.BatchItem,
+	maxBytes int64,
+	includeReadMessages bool,
+	includeProjection bool,
+	includeMutationEvidence bool,
+	includeItemErrors bool,
+) (batchItemResultProjection, error) {
+	projected := batchItemResultProjection{ID: item.ID, State: item.State}
+	if includeMutationEvidence {
+		projected.MessageState = item.MessageState
+		projected.SavedAttachment = item.SavedAttachment
+		projected.DeleteResult = item.DeleteResult
+	}
+	if includeItemErrors {
+		projected.Error = item.Error
+	}
+	if operation != mail.BatchOperationRead || (!includeReadMessages && !includeProjection) {
+		return projected, nil
+	}
+	options, err := batchReadOutputOptions(items[index], maxBytes)
+	if err != nil {
+		return batchItemResultProjection{}, fmt.Errorf("batch read item %q: %w", item.ID, err)
+	}
+	if includeProjection {
+		projected.Projection = &projectionInfo{
+			View: options.view, Fields: projectionFields(projectionTargetMessage, options, false),
+		}
+	}
+	if includeReadMessages && item.Message != nil {
+		projected.Message = messageProjectionFor(*item.Message, options, false)
+	}
+	return projected, nil
 }
 
 func projectionFieldNames(target projectionTarget) []string {
@@ -734,6 +859,11 @@ func (data responseData) MarshalJSON() ([]byte, error) {
 			*responseDataAlias
 			Attachments *[]attachmentProjection `json:"attachments,omitempty"`
 		}{&copy, projection.attachments})
+	case data.BatchResult != nil && projection.batch != nil:
+		return json.Marshal(struct {
+			*responseDataAlias
+			BatchResult *batchResultProjection `json:"batch_result,omitempty"`
+		}{&copy, projection.batch})
 	default:
 		return json.Marshal(copy)
 	}

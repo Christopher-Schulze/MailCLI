@@ -31,14 +31,27 @@ func TestInputJSONFieldSetsMatchModelsAndRejectEveryAmbiguousKey(t *testing.T) {
 				}
 				count++
 				declared, err := findInputJSONField(fields, name, "$", 0)
-				if err != nil || declared.shape != jsonInputShapeForType(t, field.Type) {
+				if err != nil || declared.shape != jsonInputShapeForField(t, field) {
 					t.Fatalf("field %s schema=%+v model=%s error=%v", name, declared, field.Type, err)
 				}
-				value, err := json.Marshal(reflect.Zero(field.Type).Interface())
+				modelValue := reflect.Zero(field.Type)
+				if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.String {
+					modelValue = reflect.New(field.Type.Elem())
+					modelValue.Elem().SetString("metadata")
+				}
+				if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Slice {
+					modelValue = reflect.New(field.Type.Elem())
+					modelValue.Elem().Set(reflect.MakeSlice(field.Type.Elem(), 0, 0))
+				}
+				value, err := json.Marshal(modelValue.Interface())
 				if err != nil {
 					t.Fatal(err)
 				}
-				if field.Type.Kind() == reflect.Slice {
+				fieldType := field.Type
+				for fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+				}
+				if fieldType.Kind() == reflect.Slice {
 					value = []byte("[]")
 				}
 				if _, err := validateInputJSON([]byte(fmt.Sprintf("{%q:%s}", name, value)), test.shape); err != nil {
@@ -62,8 +75,15 @@ func TestInputJSONFieldSetsMatchModelsAndRejectEveryAmbiguousKey(t *testing.T) {
 	}
 }
 
-func jsonInputShapeForType(t *testing.T, value reflect.Type) inputJSONShape {
+func jsonInputShapeForField(t *testing.T, field reflect.StructField) inputJSONShape {
 	t.Helper()
+	value := field.Type
+	for value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if field.Name == "Fields" {
+		return inputJSONStringList
+	}
 	switch value {
 	case reflect.TypeFor[[]mail.Recipient]():
 		return inputJSONRecipients
@@ -71,9 +91,6 @@ func jsonInputShapeForType(t *testing.T, value reflect.Type) inputJSONShape {
 		return inputJSONBatchItems
 	case reflect.TypeFor[[]string]():
 		return inputJSONAttachments
-	}
-	if value.Kind() == reflect.Pointer {
-		value = value.Elem()
 	}
 	switch value.Kind() {
 	case reflect.String:

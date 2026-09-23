@@ -149,10 +149,20 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 	}
 	items := jsonFieldByName(batch.JSONInput.Fields, "items")
 	concurrency := jsonFieldByName(batch.JSONInput.Fields, "concurrency")
+	maxBytes := schemaFlagsByName(batch)["--max-bytes"]
 	if items == nil || !items.Required || !schemaHasConstraint(batch, "non_empty") ||
 		concurrency == nil || concurrency.Minimum == nil || *concurrency.Minimum != 0 ||
-		concurrency.Maximum == nil || *concurrency.Maximum != int64(mail.MaximumBatchConcurrency) {
+		concurrency.Maximum == nil || *concurrency.Maximum != int64(mail.MaximumBatchConcurrency) ||
+		maxBytes.Name != "--max-bytes" || maxBytes.Default != "1048576" ||
+		maxBytes.Minimum == nil || *maxBytes.Minimum != 1 ||
+		maxBytes.Maximum == nil || *maxBytes.Maximum != maximumJSONOutputBytes {
 		t.Fatalf("batch items field = %+v, constraints = %+v", items, batch.Constraints)
+	}
+	view := jsonFieldByName(batch.JSONInput.ItemFields, "view")
+	fields := jsonFieldByName(batch.JSONInput.ItemFields, "fields")
+	if view == nil || !reflect.DeepEqual(view.Values, []string{outputViewMetadata, outputViewPlain, outputViewFull}) ||
+		fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) {
+		t.Fatalf("batch read projection fields = view:%+v fields:%+v", view, fields)
 	}
 	if countJSONConstraints(batch.JSONInput, "conditional") != 7 {
 		t.Fatalf("batch operation constraints = %+v", batch.JSONInput.Constraints)

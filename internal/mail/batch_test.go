@@ -2,8 +2,11 @@ package mail
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -110,6 +113,65 @@ func TestExecuteBatchReadPreservesOrderAndPerItemErrors(t *testing.T) {
 	}
 	if len(gateway.reads) != 3 {
 		t.Fatalf("gateway reads = %d, want 3", len(gateway.reads))
+	}
+}
+
+func TestExecuteBatchReadBudgetsConcurrentContentBeforeRetention(t *testing.T) {
+	const itemCount = 100
+	const budget = int64(32 * 1024)
+	body := strings.Repeat("<&\n", 2048)
+	header := strings.Repeat("X", 256)
+	messages := make(map[string]Message, itemCount)
+	items := make([]BatchItem, itemCount)
+	for index := range items {
+		ref := "ref-" + strconv.Itoa(index)
+		messages[ref] = Message{
+			Summary: MessageSummary{Ref: ref}, Content: body, Headers: header,
+		}
+		items[index] = BatchItem{ID: "item-" + strconv.Itoa(index), Ref: ref, RetainReadContent: true, RetainReadHeaders: true}
+	}
+	result, err := NewService(&batchGateway{gatewayStub: &gatewayStub{}, messages: messages}).ExecuteBatch(
+		context.Background(), BatchRequest{
+			Operation: BatchOperationRead, Concurrency: MaximumBatchConcurrency,
+			Items: items, ReadContentBudgetBytes: budget,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteBatch() error = %v", err)
+	}
+	if !result.ReadContentExceeded || result.ReadContentRequiredBytes <= budget {
+		t.Fatalf("content budget result = exceeded:%t required:%d", result.ReadContentExceeded, result.ReadContentRequiredBytes)
+	}
+	if len(result.Items) != itemCount || result.Completed != itemCount {
+		t.Fatalf("batch result counts = %+v", result)
+	}
+	retainedBytes := int64(0)
+	retainedMessages := 0
+	for index, item := range result.Items {
+		if item.ID != "item-"+strconv.Itoa(index) || item.State != BatchItemCompleted || item.Message == nil {
+			t.Fatalf("item %d order/state = %+v", index, item)
+		}
+		if item.Message.Content != "" || item.Message.Headers != "" {
+			retainedMessages++
+			retainedBytes += jsonStringOutputBytes(item.Message.Content) + jsonStringOutputBytes(item.Message.Headers)
+		}
+	}
+	if retainedMessages == 0 || retainedBytes > budget {
+		t.Fatalf("retained messages/encoded bytes = %d/%d, budget %d", retainedMessages, retainedBytes, budget)
+	}
+}
+
+func TestJSONStringOutputBytesMatchesJSONEncoding(t *testing.T) {
+	for _, value := range []string{
+		"plain text", `quote"slash\\`, "<>&", "\x00\x08\n\r\t", "\u2028\u2029", "\xff",
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := jsonStringOutputBytes(value); got != int64(len(encoded)) {
+			t.Errorf("jsonStringOutputBytes(%q) = %d, encoded size = %d (%s)", value, got, len(encoded), encoded)
+		}
 	}
 }
 

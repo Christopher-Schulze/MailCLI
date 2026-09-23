@@ -10,7 +10,15 @@ Keep bodies, addresses, credentials, and attachment bytes out of logs and summar
 
 Use `mailcli batch --input - --json` with explicit refs and unique item IDs. Read the published `batch` schema for allowed operations, item fields, limits, and concurrency. Input is exactly one object up to 16 MiB; duplicate keys, case aliases, unknown fields, and trailing documents fail before dispatch. `move`/`copy` items take a `mailbox` destination ref; `move`/`delete` items may set `allow_draft_mutation`. A `delete` batch needs the `--confirm` flag and is refused without it; `--confirm` on any other operation is rejected. Results retain input order and per-item evidence, including `message_state` or `delete_result` on mutation items. There is no automatic retry; never replay successful or uncertain items.
 
-`batch read` currently emits full messages and has no `--view`, `--fields`, or output byte gate. Use it only for small, known payloads; use projected `messages get` calls for bounded JSON output. A partial JSON batch reports `ok:false` and `batch_partial` and exits 1. Check the envelope and every item's state regardless of exit status.
+Batch JSON output is limited to 1 MiB by default; `--max-bytes` accepts values through 64 MiB for the complete envelope. Each read item accepts `view:"metadata"`, `view:"plain"`, or `view:"full"`, or a `fields` array from the published message field list. An omitted view preserves the CLI's legacy full-message behavior. The producer accounts for requested bodies and headers across concurrent reads; overflow returns one bounded `output_too_large` envelope with item IDs and states, with `replay_allowed:false` and no partial JSON.
+
+For agent batch reads, use metadata by default and request body fields only when needed:
+
+```bash
+printf '%s' '{"operation":"read","items":[{"id":"metadata","ref":"MESSAGE_REF","view":"metadata"},{"id":"body","ref":"MESSAGE_REF","view":"plain"},{"id":"selected","ref":"MESSAGE_REF","fields":["summary","content","content_complete"]}]}' | mailcli batch --input - --max-bytes 1048576 --json
+```
+
+Mutation results retain their `message_state`, `delete_result`, and `saved_attachment` evidence. A partial JSON batch reports `ok:false`, `batch_partial`, and exit code 1; check the envelope and every item's state regardless of exit status.
 
 ## Recovery details
 
