@@ -2,7 +2,6 @@ package mailref
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -448,52 +447,6 @@ type compactPayload struct {
 	RowID                   int64    `json:"i,omitempty"`
 }
 
-func encodeCompactArray(version byte, fields []any) ([]byte, error) {
-	payload, err := json.Marshal(fields)
-	if err != nil {
-		return nil, err
-	}
-	if len(payload) > MaxCompactPayloadBytes-2 {
-		return nil, fmt.Errorf("compact payload exceeds %d bytes", MaxCompactPayloadBytes)
-	}
-	framed := make([]byte, 2, len(payload)+2)
-	framed[0], framed[1] = compactPayloadMarker, version
-	return append(framed, payload...), nil
-}
-
-func decodeCompactArray(payload []byte, version byte, count int) ([]json.RawMessage, error) {
-	if len(payload) > MaxCompactPayloadBytes {
-		return nil, fmt.Errorf("compact payload exceeds %d bytes", MaxCompactPayloadBytes)
-	}
-	if len(payload) < 3 || payload[0] != compactPayloadMarker {
-		return nil, fmt.Errorf("invalid compact payload framing")
-	}
-	if payload[1] != version {
-		return nil, fmt.Errorf("unsupported compact payload version %d", payload[1])
-	}
-	if payload[len(payload)-1] != ']' {
-		return nil, fmt.Errorf("compact payload has trailing bytes")
-	}
-	var fields []json.RawMessage
-	if err := json.Unmarshal(payload[2:], &fields); err != nil {
-		return nil, err
-	}
-	if len(fields) != count {
-		return nil, fmt.Errorf("compact payload has %d fields, expected %d", len(fields), count)
-	}
-	return fields, nil
-}
-
-// EncodeCompactArray frames a bounded compact array payload.
-func EncodeCompactArray(version byte, fields []any) ([]byte, error) {
-	return encodeCompactArray(version, fields)
-}
-
-// DecodeCompactArray validates and decodes a compact array payload.
-func DecodeCompactArray(payload []byte, version byte, count int) ([]json.RawMessage, error) {
-	return decodeCompactArray(payload, version, count)
-}
-
 // CompactPayload is the bounded compact wire shape shared by cursor callers.
 type CompactPayload = compactPayload
 
@@ -568,178 +521,12 @@ func validateCompactPath(path []string) error {
 	return nil
 }
 
-// CompactEncoder writes a bounded versioned payload using length-prefixed
-// strings and unsigned or signed varints.
-type CompactEncoder struct {
-	data []byte
-	err  error
-}
-
-// NewCompactEncoder starts a payload with its explicit format version.
-func NewCompactEncoder(version byte, capacity int) *CompactEncoder {
-	if capacity < 0 || capacity > MaxCompactPayloadBytes-2 {
-		capacity = 0
-	}
-	data := make([]byte, 0, capacity+2)
-	data = append(data, compactPayloadMarker, version)
-	return &CompactEncoder{data: data}
-}
-
-// PutString appends one bounded string.
-func (e *CompactEncoder) PutString(value string) {
-	if e.err != nil {
-		return
-	}
-	if len(value) > MaxCompactStringBytes {
-		e.err = fmt.Errorf("compact string exceeds %d bytes", MaxCompactStringBytes)
-		return
-	}
-	e.PutUvarint(uint64(len(value)))
-	e.data = append(e.data, value...)
-}
-
-// PutUvarint appends an unsigned varint.
-func (e *CompactEncoder) PutUvarint(value uint64) {
-	if e.err != nil {
-		return
-	}
-	e.data = binary.AppendUvarint(e.data, value)
-}
-
-// PutCount appends a collection length after checking its bound.
-func (e *CompactEncoder) PutCount(value int, max int) {
-	if e.err != nil {
-		return
-	}
-	if value < 0 || value > max {
-		e.err = fmt.Errorf("compact collection length %d exceeds bound %d", value, max)
-		return
-	}
-	e.PutUvarint(uint64(value))
-}
-
-// PutVarint appends a signed varint.
-func (e *CompactEncoder) PutVarint(value int64) {
-	if e.err != nil {
-		return
-	}
-	e.data = binary.AppendVarint(e.data, value)
-}
-
-// Bytes returns the complete payload or its first encoding error.
-func (e *CompactEncoder) Bytes() ([]byte, error) {
-	if e.err != nil {
-		return nil, e.err
-	}
-	if len(e.data) > MaxCompactPayloadBytes {
-		return nil, fmt.Errorf("compact payload exceeds %d bytes", MaxCompactPayloadBytes)
-	}
-	return e.data, nil
-}
-
-// CompactDecoder reads a bounded payload after checking its explicit version.
-type CompactDecoder struct {
-	data  []byte
-	index int
-}
-
-// NewCompactDecoder validates the payload version and creates a reader.
-func NewCompactDecoder(payload []byte, expectedVersion byte) (*CompactDecoder, error) {
-	if len(payload) > MaxCompactPayloadBytes {
-		return nil, fmt.Errorf("compact payload exceeds %d bytes", MaxCompactPayloadBytes)
-	}
-	if len(payload) < 2 {
-		return nil, fmt.Errorf("compact payload header is truncated")
-	}
-	if payload[0] != compactPayloadMarker {
-		return nil, fmt.Errorf("invalid compact payload marker")
-	}
-	if payload[1] != expectedVersion {
-		return nil, fmt.Errorf("unsupported compact payload version %d", payload[1])
-	}
-	return &CompactDecoder{data: payload[2:]}, nil
-}
-
-// CompactPayloadVersion returns the version when payload framing is present.
-func CompactPayloadVersion(payload []byte) (byte, bool) {
-	if len(payload) < 2 || payload[0] != compactPayloadMarker {
-		return 0, false
-	}
-	return payload[1], true
-}
-
-// Count reads a bounded collection length.
-func (d *CompactDecoder) Count(max int) (int, error) {
-	value, err := d.Uvarint()
-	if err != nil {
-		return 0, err
-	}
-	if max < 0 || value > uint64(max) || value > uint64(len(d.data)-d.index) {
-		return 0, fmt.Errorf("compact collection length %d exceeds bound %d", value, max)
-	}
-	return int(value), nil
-}
-
-// String reads one bounded length-prefixed string.
-func (d *CompactDecoder) String() (string, error) {
-	length, err := d.Uvarint()
-	if err != nil {
-		return "", err
-	}
-	if length > MaxCompactStringBytes || length > uint64(len(d.data)-d.index) {
-		return "", fmt.Errorf("compact string length %d exceeds bound", length)
-	}
-	end := d.index + int(length)
-	value := string(d.data[d.index:end])
-	d.index = end
-	return value, nil
-}
-
-// Uvarint reads one unsigned varint.
-func (d *CompactDecoder) Uvarint() (uint64, error) {
-	value, count := binary.Uvarint(d.data[d.index:])
-	if count == 0 {
-		return 0, fmt.Errorf("truncated compact unsigned varint")
-	}
-	if count < 0 {
-		return 0, fmt.Errorf("overflowed compact unsigned varint")
-	}
-	d.index += count
-	return value, nil
-}
-
-// Varint reads one signed varint.
-func (d *CompactDecoder) Varint() (int64, error) {
-	value, count := binary.Varint(d.data[d.index:])
-	if count == 0 {
-		return 0, fmt.Errorf("truncated compact signed varint")
-	}
-	if count < 0 {
-		return 0, fmt.Errorf("overflowed compact signed varint")
-	}
-	d.index += count
-	return value, nil
-}
-
-// Done rejects trailing bytes after the expected fields.
-func (d *CompactDecoder) Done() error {
-	if d.index != len(d.data) {
-		return fmt.Errorf("compact payload has %d trailing bytes", len(d.data)-d.index)
-	}
-	return nil
-}
-
 // EncodeToken wraps a bounded payload in the existing opaque token prefix.
 func EncodeToken(prefix string, payload []byte) (string, error) {
 	if len(payload) > MaxCompactPayloadBytes {
 		return "", fmt.Errorf("token payload exceeds %d bytes", MaxCompactPayloadBytes)
 	}
 	return prefix + base64.RawURLEncoding.EncodeToString(payload), nil
-}
-
-// EncodeCompactToken wraps a payload already bounded by a compact encoder.
-func EncodeCompactToken(prefix string, payload []byte) string {
-	return prefix + base64.RawURLEncoding.EncodeToString(payload)
 }
 
 // EncodeCompactTokenPayload encodes and frames a compact token in one step.
