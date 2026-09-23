@@ -69,7 +69,13 @@ func runBatch(
 				code: "batch_partial", message: "one or more batch items did not complete",
 			})
 		}
-		return writeJSON(stdout, response)
+		if code := writeJSON(stdout, response); code != 0 {
+			return code
+		}
+		if result.Complete() {
+			return 0
+		}
+		return 1
 	}
 	for _, item := range result.Items {
 		writeBatchHumanItem(stdout, item)

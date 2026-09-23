@@ -39,6 +39,71 @@ func TestBatchCommandJSONPreservesOrderedResults(t *testing.T) {
 	}
 }
 
+// A partial JSON batch must report its per-item evidence and exit nonzero so
+// shell and agent callers cannot mistake a failed batch for success.
+func TestBatchCommandJSONPartialExitsNonzero(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "batch.json")
+	payload := []byte(`{"operation":"read","items":[{"id":"good","ref":"msg_ref"},{"id":"bad","ref":"bogus"}]}`)
+	if err := os.WriteFile(inputPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(failingRefGateway{}),
+		[]string{"batch", "--input", inputPath, "--json"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("Run() code = %d, want 1, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; stdout = %q", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "batch_partial" {
+		t.Fatalf("response = %+v", response)
+	}
+	result := response.Data.BatchResult
+	if result == nil || result.Completed != 1 || result.Failed != 1 || len(result.Items) != 2 {
+		t.Fatalf("batch result = %+v", result)
+	}
+	if result.Items[0].ID != "good" || result.Items[0].State != mail.BatchItemCompleted ||
+		result.Items[1].ID != "bad" || result.Items[1].State != mail.BatchItemFailed ||
+		result.Items[1].Error == nil || result.Items[1].Error.Code != "not_found" {
+		t.Fatalf("batch items = %+v", result.Items)
+	}
+}
+
+// The human path already exits nonzero for partial batches; keep both modes in
+// agreement on a mixed result.
+func TestBatchCommandHumanPartialExitsNonzero(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "batch.json")
+	payload := []byte(`{"operation":"read","items":[{"id":"good","ref":"msg_ref"},{"id":"bad","ref":"bogus"}]}`)
+	if err := os.WriteFile(inputPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(failingRefGateway{}),
+		[]string{"batch", "--input", inputPath}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("Run() code = %d, want 1, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("completed=1")) ||
+		!bytes.Contains(stdout.Bytes(), []byte("failed=1")) {
+		t.Fatalf("human output = %q", stdout.String())
+	}
+}
+
+type failingRefGateway struct {
+	testGateway
+}
+
+func (failingRefGateway) GetMessage(ctx context.Context, ref string) (mail.Message, error) {
+	if ref == "bogus" {
+		return mail.Message{}, &mail.OperationError{Code: "not_found", Message: "message ref is unavailable"}
+	}
+	return testGateway{}.GetMessage(ctx, ref)
+}
+
 func TestBatchCommandAttachmentConflictFailsBeforeWriting(t *testing.T) {
 	inputPath := filepath.Join(t.TempDir(), "batch.json")
 	destination := filepath.Join(t.TempDir(), "same.bin")

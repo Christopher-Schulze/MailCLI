@@ -10,7 +10,7 @@ Keep bodies, addresses, credentials, and attachment bytes out of logs and summar
 
 Use `mailcli batch --input - --json` with explicit refs and unique item IDs. Read the published `batch` schema for allowed operations, item fields, limits, and concurrency. Input is exactly one object up to 16 MiB; duplicate keys, case aliases, unknown fields, and trailing documents fail before dispatch. `move`/`copy` items take a `mailbox` destination ref; `move`/`delete` items may set `allow_draft_mutation`. A `delete` batch needs the `--confirm` flag and is refused without it; `--confirm` on any other operation is rejected. Results retain input order and per-item evidence, including `message_state` or `delete_result` on mutation items. There is no automatic retry; never replay successful or uncertain items.
 
-`batch read` currently emits full messages and has no `--view`, `--fields`, or output byte gate. Use it only for small, known payloads; use projected `messages get` calls for bounded JSON output. A partial JSON batch reports `ok:false` and `batch_partial` but can currently exit 0. Check the envelope and every item's state regardless of exit status.
+`batch read` currently emits full messages and has no `--view`, `--fields`, or output byte gate. Use it only for small, known payloads; use projected `messages get` calls for bounded JSON output. A partial JSON batch reports `ok:false` and `batch_partial` and exits 1. Check the envelope and every item's state regardless of exit status.
 
 ## Recovery details
 
