@@ -13,7 +13,7 @@ cleanup_test_root() {
 }
 trap cleanup_test_root EXIT
 
-mkdir -p "${TEST_REPOSITORY}/scripts/tests"
+mkdir -p "${TEST_REPOSITORY}/scripts/tests" "${TEST_REPOSITORY}/scripts/utils"
 git -C "${TEST_REPOSITORY}" init -q -b main
 git -C "${TEST_REPOSITORY}" config user.name "MailCLI Test"
 git -C "${TEST_REPOSITORY}" config user.email "mailcli-test@example.invalid"
@@ -25,6 +25,8 @@ printf '%s\n' \
   'printf "baseline-harness\\n"' \
   "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
+cp "${LEASE_TOOL}" "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
+chmod 755 "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 
 stage_fixture_path() {
   local RELATIVE_PATH="$1"
@@ -38,13 +40,17 @@ stage_fixture_path() {
 stage_fixture_path tracked.txt 100644
 stage_fixture_path other.txt 100644
 stage_fixture_path scripts/tests/test.sh 100755
+stage_fixture_path scripts/utils/manage-write-lease.sh 100755
 INITIAL_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 INITIAL_COMMIT="$(printf 'initial\n' | git -C "${TEST_REPOSITORY}" commit-tree "${INITIAL_TREE}")"
 git -C "${TEST_REPOSITORY}" checkout -q --detach "${INITIAL_COMMIT}"
 mkdir -p "${TEST_REPOSITORY}/docs/tasks"
 printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-printf '/docs/tasks.md\n/docs/tasks/\n' >"${TEST_REPOSITORY}/.git/info/exclude"
+printf '/docs/tasks.md\n/docs/tasks/\n/ignored/\n' >"${TEST_REPOSITORY}/.git/info/exclude"
+mkdir -p "${TEST_REPOSITORY}/ignored/nested" "${TEST_REPOSITORY}/ignored/empty"
+printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+printf 'nested\n' >"${TEST_REPOSITORY}/ignored/nested/keep.txt"
 
 expect_private_scope_failure() {
   local COMMAND="$1"
@@ -52,6 +58,21 @@ expect_private_scope_failure() {
   if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
     "${LEASE_TOOL}" "${COMMAND}" "${OWNER_TOKEN}" >/dev/null 2>&1; then
     printf '%s accepted an out-of-scope ignored task change\n' "${COMMAND}" >&2
+    exit 1
+  fi
+}
+
+expect_ignored_scope_failure() {
+  local COMMAND="$1"
+  local OWNER_TOKEN="$2"
+  local OUTPUT
+  if OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+    "${LEASE_TOOL}" "${COMMAND}" "${OWNER_TOKEN}" 2>&1)"; then
+    printf '%s accepted an out-of-scope ignored asset change\n' "${COMMAND}" >&2
+    exit 1
+  fi
+  if [[ "${OUTPUT}" != *'Ignored asset changed outside the lease allowlist'* ]]; then
+    printf '%s failed for the wrong reason: %s\n' "${COMMAND}" "${OUTPUT}" >&2
     exit 1
   fi
 }
@@ -93,9 +114,29 @@ mv "${TEST_REPOSITORY}/docs/tasks/174-detail.md" \
 expect_private_scope_failure review "${TOKEN}"
 mv "${TEST_REPOSITORY}/docs/tasks/174-moved.md" \
   "${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+expect_ignored_scope_failure review "${TOKEN}"
+printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+printf 'added\n' >"${TEST_REPOSITORY}/ignored/added.txt"
+expect_ignored_scope_failure review "${TOKEN}"
+rm "${TEST_REPOSITORY}/ignored/added.txt"
+mv "${TEST_REPOSITORY}/ignored/nested/keep.txt" \
+  "${TEST_REPOSITORY}/ignored/nested/moved.txt"
+expect_ignored_scope_failure review "${TOKEN}"
+mv "${TEST_REPOSITORY}/ignored/nested/moved.txt" \
+  "${TEST_REPOSITORY}/ignored/nested/keep.txt"
+rm "${TEST_REPOSITORY}/ignored/nested/keep.txt"
+expect_ignored_scope_failure review "${TOKEN}"
+printf 'nested\n' >"${TEST_REPOSITORY}/ignored/nested/keep.txt"
+mkdir "${TEST_REPOSITORY}/ignored/empty/new"
+expect_ignored_scope_failure review "${TOKEN}"
+rmdir "${TEST_REPOSITORY}/ignored/empty/new"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" review "${TOKEN}" >/dev/null
 
+printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+expect_ignored_scope_failure gate "${TOKEN}"
+printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 expect_private_scope_failure gate "${TOKEN}"
 printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
@@ -118,6 +159,9 @@ TASK_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 TASK_COMMIT="$(printf 'TASK 174: coordination fixture\n' |
   git -C "${TEST_REPOSITORY}" commit-tree "${TASK_TREE}" -p "${INITIAL_COMMIT}")"
 git -C "${TEST_REPOSITORY}" checkout -q --detach "${TASK_COMMIT}"
+printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+expect_ignored_scope_failure release "${TOKEN}"
+printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 expect_private_scope_failure release "${TOKEN}"
 printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
@@ -128,13 +172,44 @@ MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
 ABORT_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" acquire 175 abort-owner other.txt)"
 ABORT_TOKEN="$(printf '%s\n' "${ABORT_OUTPUT}" | sed -n 's/^write_lease_token=//p')"
+IGNORED_BASELINE="${TEST_REPOSITORY}/.git/mailcli-write-lease/ignored_asset_fingerprints"
+cp "${IGNORED_BASELINE}" "${TEST_ROOT}/ignored-asset-baseline"
+rm "${IGNORED_BASELINE}"
+MISSING_BASELINE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" abort "${ABORT_TOKEN}" 2>&1)" && {
+  printf 'Abort accepted a missing ignored-asset baseline\n' >&2
+  exit 1
+}
+[[ "${MISSING_BASELINE_OUTPUT}" == *'Ignored asset baseline is missing'* ]]
+mv "${TEST_ROOT}/ignored-asset-baseline" "${IGNORED_BASELINE}"
 if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" abort wrong-token >/dev/null 2>&1; then
   printf 'Wrong owner token aborted the active write lease\n' >&2
   exit 1
 fi
+printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+expect_ignored_scope_failure abort "${ABORT_TOKEN}"
+printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" abort "${ABORT_TOKEN}" >/dev/null
+
+CLEANUP_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" acquire 175 cleanup-owner \
+  ignored/one.txt ignored/nested ignored/nested/keep.txt)"
+CLEANUP_TOKEN="$(printf '%s\n' "${CLEANUP_ACQUIRE_OUTPUT}" |
+  sed -n 's/^write_lease_token=//p')"
+printf 'updated\n' >"${TEST_REPOSITORY}/ignored/one.txt"
+printf 'surprise\n' >"${TEST_REPOSITORY}/ignored/nested/surprise.txt"
+expect_ignored_scope_failure abort "${CLEANUP_TOKEN}"
+rm "${TEST_REPOSITORY}/ignored/nested/surprise.txt"
+rm "${TEST_REPOSITORY}/ignored/nested/keep.txt"
+rmdir "${TEST_REPOSITORY}/ignored/nested"
+CLEANUP_ABORT_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" abort "${CLEANUP_TOKEN}")"
+printf '%s\n' "${CLEANUP_ABORT_OUTPUT}" |
+  grep -Fq $'allowed_path_change\tignored/nested\tdirectory\tabsent'
+printf '%s\n' "${CLEANUP_ABORT_OUTPUT}" |
+  grep -Eq $'allowed_path_change\tignored/nested/keep.txt\tfile:[0-9a-f]{64}\tabsent'
 
 PRIVATE_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" acquire 175 private-owner docs/tasks.md)"
@@ -184,4 +259,4 @@ MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" release "${HARNESS_TOKEN}" >/dev/null
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
 
-printf 'Write coordination passed: one writer, tracked and ignored task path scope, failure-preserving gate, baseline-bound harness, and tested commit identity\n'
+printf 'Write coordination passed: one writer, tracked and ignored asset scope, bounded directory cleanup, failure-preserving gate, baseline-bound harness, and tested commit identity\n'

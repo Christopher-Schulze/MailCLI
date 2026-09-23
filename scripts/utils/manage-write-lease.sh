@@ -38,6 +38,7 @@ remove_lease_files() {
   local NAME
   for NAME in task owner pid token acquired_at baseline_head baseline_status \
     allowed_paths allowed_fingerprints private_task_fingerprints \
+    ignored_asset_fingerprints \
     reviewed_digest reviewed_patch_sha256 \
     reviewed_at gate_patch_sha256 gate_head gate_at changed_paths; do
     rm -f "${LEASE_DIRECTORY}/${NAME}"
@@ -62,10 +63,19 @@ require_token() {
 fingerprint_path() {
   local RELATIVE_PATH="$1"
   local ABSOLUTE_PATH="${MAILCLI_ROOT}/${RELATIVE_PATH}"
+  local DIGEST
   if [[ -L "${ABSOLUTE_PATH}" ]]; then
-    printf 'symlink:%s' "$(readlink "${ABSOLUTE_PATH}")"
+    DIGEST="$(readlink "${ABSOLUTE_PATH}")" ||
+      fail "Could not read symlink: ${RELATIVE_PATH}"
+    printf 'symlink:%s' "${DIGEST}"
   elif [[ -f "${ABSOLUTE_PATH}" ]]; then
-    printf 'file:%s' "$(shasum -a 256 "${ABSOLUTE_PATH}" | awk '{print $1}')"
+    DIGEST="$(shasum -a 256 "${ABSOLUTE_PATH}" | awk '{print $1}')" ||
+      fail "Could not fingerprint path: ${RELATIVE_PATH}"
+    [[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] ||
+      fail "Invalid fingerprint for path: ${RELATIVE_PATH}"
+    printf 'file:%s' "${DIGEST}"
+  elif [[ -d "${ABSOLUTE_PATH}" ]]; then
+    printf 'directory'
   elif [[ -e "${ABSOLUTE_PATH}" ]]; then
     printf 'unsupported'
   else
@@ -80,15 +90,62 @@ path_is_allowed() {
 private_task_snapshot() {
   local ABSOLUTE_PATH
   local RELATIVE_PATH
-  printf 'docs/tasks.md\t%s\n' "$(fingerprint_path docs/tasks.md)"
-  printf 'docs/tasks\t%s\n' "$(fingerprint_path docs/tasks)"
+  local FINGERPRINT
+  FINGERPRINT="$(fingerprint_path docs/tasks.md)" || fail "Could not fingerprint task board"
+  printf 'docs/tasks.md\t%s\n' "${FINGERPRINT}"
+  FINGERPRINT="$(fingerprint_path docs/tasks)" || fail "Could not fingerprint task directory"
+  if [[ "${FINGERPRINT}" == directory ]]; then
+    FINGERPRINT=unsupported
+  fi
+  printf 'docs/tasks\t%s\n' "${FINGERPRINT}"
   [[ -d "${MAILCLI_ROOT}/docs/tasks" ]] || return 0
   while IFS= read -r -d '' ABSOLUTE_PATH; do
     RELATIVE_PATH="${ABSOLUTE_PATH#"${MAILCLI_ROOT}/"}"
     [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
       fail "Private task path contains tabs or newlines"
-    printf '%s\t%s\n' "${RELATIVE_PATH}" "$(fingerprint_path "${RELATIVE_PATH}")"
+    FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+      fail "Could not fingerprint private task path"
+    printf '%s\t%s\n' "${RELATIVE_PATH}" "${FINGERPRINT}"
   done < <(find "${MAILCLI_ROOT}/docs/tasks" -mindepth 1 ! -type d -print0)
+}
+
+require_snapshot_path() {
+  local RELATIVE_PATH="$1"
+  [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
+    fail "Ignored asset path contains tabs or newlines"
+}
+
+ignored_asset_snapshot() {
+  local RELATIVE_PATH
+  local ABSOLUTE_PATH
+  local FINGERPRINT
+  git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard -z |
+    while IFS= read -r -d '' RELATIVE_PATH; do
+      case "${RELATIVE_PATH}" in
+        docs/tasks.md | docs/tasks/*) continue ;;
+      esac
+      require_snapshot_path "${RELATIVE_PATH}"
+      FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+        fail "Could not fingerprint ignored file"
+      [[ "${FINGERPRINT}" != unsupported ]] ||
+        fail "Ignored asset has an unsupported file type: ${RELATIVE_PATH}"
+      printf '%s\t%s\n' "${RELATIVE_PATH}" "${FINGERPRINT}"
+    done || fail "Could not inventory ignored files"
+
+  git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard --directory -z |
+    while IFS= read -r -d '' RELATIVE_PATH; do
+      RELATIVE_PATH="${RELATIVE_PATH%/}"
+      [[ -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" &&
+        ! -L "${MAILCLI_ROOT}/${RELATIVE_PATH}" ]] || continue
+      find "${MAILCLI_ROOT}/${RELATIVE_PATH}" -type d -print0 |
+        while IFS= read -r -d '' ABSOLUTE_PATH; do
+          RELATIVE_PATH="${ABSOLUTE_PATH#"${MAILCLI_ROOT}/"}"
+          require_snapshot_path "${RELATIVE_PATH}"
+          FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+            fail "Could not fingerprint ignored directory"
+          printf '%s\t%s\n' "${RELATIVE_PATH}" "${FINGERPRINT}"
+        done || fail "Could not inventory ignored directories"
+    done || fail "Could not inventory ignored directory roots"
 }
 
 verify_private_task_scope() {
@@ -115,14 +172,68 @@ verify_private_task_scope() {
   return 1
 }
 
+verify_ignored_asset_scope() {
+  local BASELINE
+  local CURRENT
+  local DIFF_STATUS
+  local OUT_OF_SCOPE
+  BASELINE="$(lease_file ignored_asset_fingerprints)"
+  if [[ ! -f "${BASELINE}" ]]; then
+    local BASELINE_HEAD
+    local BASELINE_SCRIPT
+    BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
+    BASELINE_SCRIPT="$(git -C "${MAILCLI_ROOT}" show \
+      "${BASELINE_HEAD}:scripts/utils/manage-write-lease.sh")" ||
+      fail "Could not inspect baseline lease script"
+    if [[ "${BASELINE_SCRIPT}" == *ignored_asset_fingerprints* ]]; then
+      fail "Ignored asset baseline is missing"
+    fi
+    printf 'ignored_asset_scope=legacy_lease\n' >&2
+    return 0
+  fi
+  CURRENT="$(ignored_asset_snapshot | LC_ALL=C sort)" ||
+    fail "Could not inventory ignored assets"
+  if OUT_OF_SCOPE="$(diff -u \
+    <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
+      "$(lease_file allowed_paths)" "${BASELINE}") \
+    <(printf '%s\n' "${CURRENT}" |
+      awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
+        "$(lease_file allowed_paths)" -))"; then
+    return 0
+  else
+    DIFF_STATUS=$?
+  fi
+  [[ "${DIFF_STATUS}" -eq 1 ]] || fail "Could not compare ignored assets"
+  printf 'Ignored asset changed outside the lease allowlist:\n%s\n' \
+    "${OUT_OF_SCOPE}" >&2
+  return 1
+}
+
 allowed_state_digest() {
   local RELATIVE_PATH
+  local FINGERPRINT
   {
     printf 'head=%s\n' "$(<"$(lease_file baseline_head)")"
     while IFS= read -r RELATIVE_PATH; do
-      printf '%s\t%s\n' "${RELATIVE_PATH}" "$(fingerprint_path "${RELATIVE_PATH}")"
+      FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+        fail "Could not fingerprint allowed path"
+      printf '%s\t%s\n' "${RELATIVE_PATH}" "${FINGERPRINT}"
     done <"$(lease_file allowed_paths)"
   } | shasum -a 256 | awk '{print $1}'
+}
+
+report_allowed_path_changes() {
+  local BASELINE_FINGERPRINT
+  local CURRENT_FINGERPRINT
+  local RELATIVE_PATH
+  while IFS=$'\t' read -r BASELINE_FINGERPRINT RELATIVE_PATH; do
+    CURRENT_FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+      fail "Could not fingerprint allowed path"
+    if [[ "${CURRENT_FINGERPRINT}" != "${BASELINE_FINGERPRINT}" ]]; then
+      printf 'allowed_path_change\t%s\t%s\t%s\n' \
+        "${RELATIVE_PATH}" "${BASELINE_FINGERPRINT}" "${CURRENT_FINGERPRINT}"
+    fi
+  done <"$(lease_file allowed_fingerprints)"
 }
 
 staged_patch_digest() {
@@ -143,14 +254,12 @@ validate_allowed_path() {
   local RELATIVE_PATH="$1"
   [[ -n "${RELATIVE_PATH}" ]] || fail "Allowed path must not be empty"
   case "${RELATIVE_PATH}" in
-    /* | . | ./* | */. | */./* | *//* | .. | ../* | */.. | */../*)
+    /* | . | ./* | */. | */./* | *//* | .. | ../* | */.. | */../* | */)
       fail "Allowed path must stay inside the worktree: ${RELATIVE_PATH}"
       ;;
   esac
   [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
     fail "Allowed path must not contain tabs or newlines"
-  [[ ! -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" ]] ||
-    fail "Allowed path must identify a file, not a directory: ${RELATIVE_PATH}"
 }
 
 acquire_lease() {
@@ -191,10 +300,14 @@ acquire_lease() {
   printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$(lease_file acquired_at)"
   git -C "${MAILCLI_ROOT}" rev-parse HEAD >"$(lease_file baseline_head)"
   printf '%s\n' "$@" | LC_ALL=C sort -u >"$(lease_file allowed_paths)"
+  local FINGERPRINT
   while IFS= read -r RELATIVE_PATH; do
-    printf '%s\t%s\n' "$(fingerprint_path "${RELATIVE_PATH}")" "${RELATIVE_PATH}"
+    FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+      fail "Could not fingerprint allowed path"
+    printf '%s\t%s\n' "${FINGERPRINT}" "${RELATIVE_PATH}"
   done <"$(lease_file allowed_paths)" >"$(lease_file allowed_fingerprints)"
   private_task_snapshot | LC_ALL=C sort >"$(lease_file private_task_fingerprints)"
+  ignored_asset_snapshot | LC_ALL=C sort >"$(lease_file ignored_asset_fingerprints)"
 
   local TOKEN
   TOKEN="$(printf '%s:%s:%s:%s' "${TASK_ID}" "${OWNER}" "$$" "${RANDOM}" |
@@ -229,6 +342,7 @@ verify_staged_scope() {
   local UNAUTHORIZED=false
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
   verify_private_task_scope
+  verify_ignored_asset_scope
   : >"$(lease_file changed_paths)"
   git -C "${MAILCLI_ROOT}" diff --cached --name-only "${BASELINE_HEAD}" -- |
     LC_ALL=C sort -u >"$(lease_file changed_paths)"
@@ -263,7 +377,8 @@ review_lease() {
   local BASELINE_FINGERPRINT
   local CURRENT_FINGERPRINT
   while IFS=$'\t' read -r BASELINE_FINGERPRINT RELATIVE_PATH; do
-    CURRENT_FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")"
+    CURRENT_FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+      fail "Could not fingerprint allowed path"
     if [[ "${CURRENT_FINGERPRINT}" != "${BASELINE_FINGERPRINT}" ]] &&
       ! grep -Fxq -- "${RELATIVE_PATH}" "$(lease_file changed_paths)"; then
       printf 'ignored_allowed_path_changed=%s\n' "${RELATIVE_PATH}"
@@ -353,6 +468,7 @@ release_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
   verify_private_task_scope
+  verify_ignored_asset_scope
   [[ -f "$(lease_file gate_patch_sha256)" ]] ||
     fail "No successful full-gate evidence exists for this lease"
   local TASK_ID
@@ -393,12 +509,14 @@ abort_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
   verify_private_task_scope
+  verify_ignored_asset_scope
   local BASELINE_HEAD
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
   [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" ]] ||
     fail "Cannot abort a lease after HEAD changed"
   [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
     fail "Cannot abort a lease while worktree changes remain"
+  report_allowed_path_changes
   remove_lease_files
   printf 'write_lease=aborted\n'
 }
