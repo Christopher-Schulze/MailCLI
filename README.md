@@ -415,7 +415,7 @@ MailCLI stores only local review drafts, historical send/save claims, accepted-m
 
 ## Limitations
 
-- Mail 16 scripted save remains disabled. Direct SMTP/IMAP sending supports only Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`); other domains fail with `transport_unsupported_provider` before credentials are stored or network connections begin. Visible handoff supports new drafts only and requires Mail.app as the default email application.
+- Mail 16 scripted save remains disabled. Direct SMTP/IMAP sending supports Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`) by default. Other domains require a stable account binding with validated explicit SMTP and IMAP endpoints; without one, they fail with `transport_unsupported_provider` before credentials are stored or network connections begin. Visible handoff supports new drafts only and requires Mail.app as the default email application.
 - Apple's Compose Email sharing service has no reliable From, CC, BCC, reply-thread, or forward-thread controls; MailCLI rejects those handoff inputs rather than changing their meaning.
 - Local reply and forward drafts use store-bound source identity and support direct SMTP delivery with the reviewed recipients, body, attachments and RFC threading headers. Native compose handoff does not support reply/forward semantics; server/client conversation grouping is not guaranteed by a successful SMTP submission.
 - `drafts open` inspects a persisted native draft headlessly; Mail 16 has no reliable headless in-place editor for it. The read path uses the local store or targeted IMAP hydration and does not require Mail Automation.

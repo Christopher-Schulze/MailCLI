@@ -6,6 +6,10 @@ Before running a downloaded release installer, follow the README bootstrap path:
 
 2. In a source checkout, check an existing user skill only with `scripts/tests/report-skill-drift.sh`. It is read-only; pass `--repository PATH --installed PATH` for explicit inputs. `status=match` is current, while `missing`, `mismatch`, or `unstable` includes reconciliation guidance and never installs anything.
 
+For Gmail and iCloud, configure the sender with `mailcli send setup --from ALIAS [--account ACCOUNT_REF] --json`. For another domain, first resolve its stable account ref, then use `mailcli send setup --account ACCOUNT_REF --from ALIAS --smtp-host HOST --smtp-port PORT --imap-host HOST --imap-port PORT --json`. An optional `--credential-account LOGIN` selects the credential identity for that binding. MailCLI validates explicit public endpoints before prompting for or storing a credential; do not guess hosts or ask for the password in chat. Reuse the exact account and alias from `accounts list`, and follow the scoped `send.setup` schema.
+
+`mailcli version --json` reads the installed identity. `mailcli update --json` checks the signed release and installs a verified binary and matching skill; use it only when the user requested an update, then refresh the executable identity and capability contract.
+
 All installation entrypoints share `~/Library/Application Support/MailCLI/update.lock` through recovery, verification, and cleanup. Direct installers wait at most 30 seconds; self-update uses its command deadline and passes ownership to the child. Self-update ignores `MAILCLI_INSTALL_PACKAGE_ROOT` and uses its authenticated package; source installation retains its explicit checkout override. Never unlink or steal this lock or infer abandonment from age. If identity checks refuse recovery, retain the transaction and replaced artifacts for inspection. Cancel automated installers through their whole process group.
 
 Respect the published provider set, `raw_mime_send`, `send_transport`, `mutation_transport`, page/batch limits, and IMAP pool limits. LIST/STATUS/SEARCH/FETCH share the account pool; APPEND and mutations are exclusive per account.

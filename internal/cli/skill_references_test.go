@@ -24,6 +24,45 @@ func TestSkillDocumentationSelfContained(t *testing.T) {
 	}
 }
 
+func TestSkillRouterMatchesCapabilityInventory(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "skills", "mailcli", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(content), "## Choose the command\n")
+	end := strings.Index(string(content), "\n## Choose the execution boundary")
+	if start < 0 || end <= start {
+		t.Fatal("skill command router is missing")
+	}
+	idPattern := regexp.MustCompile("`([a-z]+(?:[.-][a-z]+)*)`")
+	routed := make(map[string]int)
+	for _, line := range strings.Split(string(content)[start:end], "\n") {
+		if !strings.HasPrefix(line, "| ") || strings.HasPrefix(line, "| Intent ") ||
+			strings.HasPrefix(line, "| --- ") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) != 5 {
+			t.Fatalf("malformed skill router row: %q", line)
+		}
+		for _, match := range idPattern.FindAllStringSubmatch(cells[2], -1) {
+			routed[match[1]]++
+		}
+	}
+	for _, command := range capabilities().Commands {
+		if command.ID == "capabilities" { // This is the router's preflight, not a routed action.
+			continue
+		}
+		if routed[command.ID] != 1 {
+			t.Errorf("skill router contains command %q %d times; want once", command.ID, routed[command.ID])
+		}
+		delete(routed, command.ID)
+	}
+	for id := range routed {
+		t.Errorf("skill router names unpublished command %q", id)
+	}
+}
+
 // Skill guides use inline relative Markdown file links without fragments.
 // Reject unsupported link forms instead of silently passing unverified targets.
 func validateSkillReferences(root string) error {
