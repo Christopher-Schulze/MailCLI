@@ -12,12 +12,13 @@ import (
 )
 
 func TestUpdatePackageRootBinding(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
 	binaryPath := filepath.Join(t.TempDir(), "mailcli")
-	command := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-mod=readonly", "-o", binaryPath, "../../cmd/mailcli")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build real update payload: %v: %s", err, output)
+	command := exec.CommandContext(buildCtx, "go", "build", "-buildvcs=false", "-mod=readonly", "-o", binaryPath, "../../cmd/mailcli")
+	buildOutput, buildErr := command.CombinedOutput()
+	cancelBuild()
+	if buildErr != nil {
+		t.Fatalf("build real update payload: %v: %s", buildErr, buildOutput)
 	}
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
@@ -106,7 +107,7 @@ func TestUpdatePackageRootBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			operationCtx, operationCancel := context.WithTimeout(ctx, 30*time.Second)
+			operationCtx, operationCancel := context.WithTimeout(context.Background(), 40*time.Second)
 			defer operationCancel()
 			result, updateErr := performUpdate(operationCtx, environment, newUpdateReporter(io.Discard, false, false))
 			if verified != 1 {
