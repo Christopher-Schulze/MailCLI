@@ -630,11 +630,3 @@ func (p *attachmentPublication) close() error {
 func attachmentChangedError(message string) error {
 	return &OperationError{Code: "attachment_changed", Message: message}
 }
-
-func removeIfPresent(path string) error {
-	err := os.Remove(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}

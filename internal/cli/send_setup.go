@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"io"
 	stdmail "net/mail"
 	"strings"
@@ -32,7 +33,7 @@ type sendSetupResult struct {
 }
 
 func runSend(args []string, stdout io.Writer, stderr io.Writer) int {
-	return runSendWithInvalidator(args, stdout, stderr, nil)
+	return runSendWithBindingsContext(context.Background(), args, stdout, stderr, nil, nil)
 }
 
 func runSendWithInvalidator(
@@ -41,10 +42,21 @@ func runSendWithInvalidator(
 	stderr io.Writer,
 	invalidateCredentials func(string),
 ) int {
-	return runSendWithBindings(args, stdout, stderr, invalidateCredentials, nil)
+	return runSendWithBindingsContext(context.Background(), args, stdout, stderr, invalidateCredentials, nil)
 }
 
 func runSendWithBindings(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	invalidateCredentials func(string),
+	bindings mail.AccountBindingStore,
+) int {
+	return runSendWithBindingsContext(context.Background(), args, stdout, stderr, invalidateCredentials, bindings)
+}
+
+func runSendWithBindingsContext(
+	ctx context.Context,
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
@@ -63,7 +75,7 @@ func runSendWithBindings(
 		if bindings == nil {
 			bindings = sendSetupBindings()
 		}
-		return runSendSetup(args[1:], stdout, stderr, invalidateCredentials, bindings)
+		return runSendSetup(ctx, args[1:], stdout, stderr, invalidateCredentials, bindings)
 	default:
 		writeFormat(stderr, "unknown send command %q\n", args[0])
 		return 2
@@ -71,6 +83,7 @@ func runSendWithBindings(
 }
 
 func runSendSetup(
+	ctx context.Context,
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
@@ -188,7 +201,7 @@ func runSendSetup(
 				imapHost: *imapHost, imapPort: *imapPort,
 			}
 		}
-		if err := upsertSendBinding(bindings, stableAccountID, account, credential, hosts); err != nil {
+		if err := upsertSendBinding(ctx, bindings, stableAccountID, account, credential, hosts); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
 	}
@@ -210,17 +223,19 @@ type bindingHosts struct {
 	imapPort int
 }
 
-func upsertSendBinding(store mail.AccountBindingStore, accountID, alias, credential string, hosts *bindingHosts) error {
+func upsertSendBinding(ctx context.Context, store mail.AccountBindingStore, accountID, alias, credential string, hosts *bindingHosts) error {
 	if store == nil {
 		return &commandError{code: "account_binding_unavailable", message: "account binding store is unavailable"}
 	}
-	document, err := store.LoadAccountBindings()
-	if err != nil {
-		return err
-	}
+	return store.UpdateAccountBindings(ctx, func(document mail.AccountBindingFile) (mail.AccountBindingFile, error) {
+		return mergeSendBinding(document, accountID, alias, credential, hosts)
+	})
+}
+
+func mergeSendBinding(document mail.AccountBindingFile, accountID string, alias string, credential string, hosts *bindingHosts) (mail.AccountBindingFile, error) {
 	binding, found, err := mail.FindAccountBinding(document, accountID)
 	if err != nil {
-		return err
+		return mail.AccountBindingFile{}, err
 	}
 	if !found {
 		binding = mail.AccountBinding{AccountID: accountID, SenderAliases: []string{alias}, CredentialAccount: credential}
@@ -243,7 +258,14 @@ func upsertSendBinding(store mail.AccountBindingStore, accountID, alias, credent
 		binding.IMAPHost = hosts.imapHost
 		binding.IMAPPort = hosts.imapPort
 	}
-	return store.UpsertAccountBinding(binding)
+	for index := range document.Bindings {
+		if document.Bindings[index].AccountID == binding.AccountID {
+			document.Bindings[index] = binding
+			return document, nil
+		}
+	}
+	document.Bindings = append(document.Bindings, binding)
+	return document, nil
 }
 
 func loadSendBinding(store mail.AccountBindingStore, accountID string) (mail.AccountBinding, bool, error) {

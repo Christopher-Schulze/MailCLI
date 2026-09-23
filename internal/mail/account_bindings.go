@@ -2,6 +2,10 @@ package mail
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"mailcli/internal/transport"
 )
@@ -21,6 +26,7 @@ const (
 	maximumAccountBindingBytes  = 256 * 1024
 	maximumAccountBindings      = 128
 	maximumSenderAliasesPerBind = 64
+	accountBindingLockWait      = 2 * time.Second
 )
 
 // AccountBinding connects one stable Mail account identity to the sender
@@ -44,9 +50,15 @@ type AccountBindingFile struct {
 	Bindings []AccountBinding `json:"bindings"`
 }
 
+// AccountBindingUpdate transforms one validated account-binding document.
+// The file store invokes it while holding the cross-process update lock.
+type AccountBindingUpdate func(AccountBindingFile) (AccountBindingFile, error)
+
 // AccountBindingStore persists explicit account identity bindings.
 type AccountBindingStore interface {
 	LoadAccountBindings() (AccountBindingFile, error)
+	UpdateAccountBindings(context.Context, AccountBindingUpdate) error
+	// UpsertAccountBinding replaces one account binding through the same serialized update.
 	UpsertAccountBinding(AccountBinding) error
 }
 
@@ -473,9 +485,6 @@ func (s *fileAccountBindingStore) bindingPath(create bool) (string, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", &AccountBindingError{Code: "account_binding_unavailable", Message: "account-binding directory must be a real directory"}
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return "", &AccountBindingError{Code: "account_binding_unavailable", Message: "restrict account-binding directory", Err: err}
-	}
 	return path, nil
 }
 
@@ -484,31 +493,41 @@ func (s *fileAccountBindingStore) LoadAccountBindings() (AccountBindingFile, err
 	if err != nil {
 		return AccountBindingFile{}, err
 	}
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
-		return AccountBindingFile{Version: AccountBindingVersion, Bindings: []AccountBinding{}}, nil
+	storage := &draftStorage{rootName: filepath.Dir(path)}
+	document, _, err := loadAccountBindingsFromStorage(storage, filepath.Base(path))
+	return document, err
+}
+
+func loadAccountBindingsFromStorage(storage *draftStorage, name string) (AccountBindingFile, os.FileInfo, error) {
+	info, err := storage.lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return AccountBindingFile{Version: AccountBindingVersion, Bindings: []AccountBinding{}}, nil, nil
 	}
 	if err != nil {
-		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect account-binding file", Err: err}
+		return AccountBindingFile{}, nil, &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect account-binding file", Err: err}
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maximumAccountBindingBytes {
-		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file must be a bounded regular file"}
+		return AccountBindingFile{}, nil, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file must be a bounded regular file"}
 	}
-	payload, err := readBoundedRegularFile(path, info, maximumAccountBindingBytes)
+	payload, err := readBoundedRegularFile(name, info, maximumAccountBindingBytes, storage)
 	if err != nil {
-		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_unavailable", Message: "read account-binding file", Err: err}
+		return AccountBindingFile{}, nil, &AccountBindingError{Code: "account_binding_unavailable", Message: "read account-binding file", Err: err}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var document AccountBindingFile
 	if err := decoder.Decode(&document); err != nil {
-		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_invalid", Message: "decode account-binding file", Err: err}
+		return AccountBindingFile{}, nil, &AccountBindingError{Code: "account_binding_invalid", Message: "decode account-binding file", Err: err}
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return AccountBindingFile{}, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file must contain exactly one JSON object", Err: err}
+		return AccountBindingFile{}, nil, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file must contain exactly one JSON object", Err: err}
 	}
-	return validateAccountBindingFile(document)
+	document, err = validateAccountBindingFile(document)
+	if err != nil {
+		return AccountBindingFile{}, nil, err
+	}
+	return document, info, nil
 }
 
 func (s *fileAccountBindingStore) UpsertAccountBinding(binding AccountBinding) error {
@@ -516,47 +535,220 @@ func (s *fileAccountBindingStore) UpsertAccountBinding(binding AccountBinding) e
 	if err != nil {
 		return err
 	}
-	document, err := s.LoadAccountBindings()
-	if err != nil {
-		return err
-	}
-	replaced := false
-	for index := range document.Bindings {
-		if document.Bindings[index].AccountID == normalized.AccountID {
-			document.Bindings[index] = normalized
-			replaced = true
-			break
+	return s.UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) {
+		for index := range document.Bindings {
+			if document.Bindings[index].AccountID == normalized.AccountID {
+				document.Bindings[index] = normalized
+				return document, nil
+			}
 		}
-	}
-	if !replaced {
 		document.Bindings = append(document.Bindings, normalized)
+		return document, nil
+	})
+}
+
+func (s *fileAccountBindingStore) UpdateAccountBindings(ctx context.Context, update AccountBindingUpdate) (result error) {
+	if ctx == nil {
+		return &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding update requires a context"}
 	}
-	document, err = validateAccountBindingFile(document)
-	if err != nil {
-		return err
+	if update == nil {
+		return &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding update requires an update function"}
 	}
-	payload, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return &AccountBindingError{Code: "account_binding_invalid", Message: "encode account-binding file", Err: err}
-	}
-	payload = append(payload, '\n')
-	if len(payload) > maximumAccountBindingBytes {
-		return &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file exceeds 256 KiB"}
+	if err := ctx.Err(); err != nil {
+		return accountBindingBusyError(err)
 	}
 	path, err := s.bindingPath(true)
 	if err != nil {
 		return err
 	}
-	temporary, err := attachmentTemporaryPath(path)
+	lease, err := acquireAccountBindingLease(ctx, path)
 	if err != nil {
-		return &AccountBindingError{Code: "account_binding_unavailable", Message: "create account-binding temporary path", Err: err}
+		return err
 	}
-	defer func() { _ = removeIfPresent(temporary) }()
-	if err := writePrivateFile(temporary, payload); err != nil {
+	defer func() {
+		if releaseErr := lease.release(); releaseErr != nil {
+			result = errors.Join(result, &AccountBindingError{
+				Code: "account_binding_unavailable", Message: "release account-binding lock", Err: releaseErr,
+			})
+		}
+	}()
+	return updateAccountBindingsLocked(ctx, lease, filepath.Base(path), update)
+}
+
+func acquireAccountBindingLease(ctx context.Context, path string) (*draftLease, error) {
+	lockReference, err := accountBindingLockReference(path)
+	if err != nil {
+		return nil, &AccountBindingError{Code: "account_binding_unavailable", Message: "resolve account-binding lock identity", Err: err}
+	}
+	lockContext, cancel := context.WithTimeout(ctx, accountBindingLockWait)
+	defer cancel()
+	lease, err := acquireDraftLease(lockContext, filepath.Dir(path), lockReference)
+	if err != nil {
+		return nil, accountBindingLeaseError(err)
+	}
+	return lease, nil
+}
+
+func updateAccountBindingsLocked(
+	ctx context.Context,
+	lease *draftLease,
+	name string,
+	update AccountBindingUpdate,
+) error {
+	directory := lease.storage.rootName
+	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
+		return err
+	}
+	if err := lease.lock.directory.Chmod(0o700); err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "restrict account-binding directory", Err: err}
+	}
+	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
+		return err
+	}
+	document, identity, err := loadAccountBindingsFromStorage(lease.storage, name)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return accountBindingBusyError(err)
+	}
+	document, err = update(document)
+	if err != nil {
+		return err
+	}
+	payload, err := marshalAccountBindingFile(document)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return accountBindingBusyError(err)
+	}
+	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
+		return err
+	}
+	return writeAccountBindings(lease.storage, name, identity, payload, directory, lease.lock.directory)
+}
+
+func marshalAccountBindingFile(document AccountBindingFile) ([]byte, error) {
+	document, err := validateAccountBindingFile(document)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return nil, &AccountBindingError{Code: "account_binding_invalid", Message: "encode account-binding file", Err: err}
+	}
+	payload = append(payload, '\n')
+	if len(payload) > maximumAccountBindingBytes {
+		return nil, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file exceeds 256 KiB"}
+	}
+	return payload, nil
+}
+
+func accountBindingLockReference(path string) (string, error) {
+	// Reuse the descriptor-pinned draft lease with a stable reference per binding file.
+	directory, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	identity := filepath.Join(directory, filepath.Base(path))
+	digest := sha256.Sum256([]byte(identity))
+	return "draft_" + hex.EncodeToString(digest[:12]), nil
+}
+
+func accountBindingBusyError(err error) error {
+	return &AccountBindingError{
+		Code: "account_binding_busy", Message: "account-binding update could not acquire its lock before cancellation or timeout", Err: err,
+	}
+}
+
+func accountBindingLeaseError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return accountBindingBusyError(err)
+	}
+	var operation *OperationError
+	if errors.As(err, &operation) {
+		switch operation.Code {
+		case "draft_busy":
+			return accountBindingBusyError(err)
+		case "draft_lock_unsafe":
+			return &AccountBindingError{Code: "account_binding_unsafe", Message: "account-binding lock path is unsafe", Err: err}
+		case "draft_lock_changed":
+			return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding lock identity changed", Err: err}
+		}
+	}
+	return &AccountBindingError{Code: "account_binding_unavailable", Message: "acquire account-binding lock", Err: err}
+}
+
+func verifyAccountBindingDirectory(path string, pinned *os.File) error {
+	pinnedInfo, err := pinned.Stat()
+	if err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect pinned account-binding directory", Err: err}
+	}
+	currentInfo, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding directory identity changed", Err: err}
+		}
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect account-binding directory identity", Err: err}
+	}
+	if !currentInfo.IsDir() || currentInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pinnedInfo, currentInfo) {
+		return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding directory identity changed", Err: err}
+	}
+	return nil
+}
+
+func writeAccountBindings(
+	storage *draftStorage,
+	name string,
+	expected os.FileInfo,
+	payload []byte,
+	parentPath string,
+	pinnedParent *os.File,
+) error {
+	if err := verifyAccountBindingFileIdentity(storage, name, expected); err != nil {
+		return err
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "create account-binding temporary name", Err: err}
+	}
+	temporary := ".account-bindings-" + hex.EncodeToString(random[:]) + ".tmp"
+	temporaryInfo, err := writePrivateDraftFile(storage, temporary, payload)
+	if err != nil {
 		return &AccountBindingError{Code: "account_binding_unavailable", Message: "write account-binding file", Err: err}
 	}
-	if err := os.Rename(temporary, path); err != nil {
-		return &AccountBindingError{Code: "account_binding_unavailable", Message: "publish account-binding file", Err: err}
+	if err := verifyAccountBindingDirectory(parentPath, pinnedParent); err != nil {
+		return errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, ""))
 	}
-	return syncDirectory(filepath.Dir(path))
+	if err := verifyAccountBindingFileIdentity(storage, name, expected); err != nil {
+		return errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, ""))
+	}
+	if err := storage.apply(draftStorageRename, temporary, name, 0); err != nil {
+		return &AccountBindingError{
+			Code: "account_binding_unavailable", Message: "publish account-binding file",
+			Err: errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, "")),
+		}
+	}
+	if err := storage.apply(draftStorageSync, "", "", 0); err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "sync account-binding directory", Err: err}
+	}
+	return nil
+}
+
+func verifyAccountBindingFileIdentity(storage *draftStorage, name string, expected os.FileInfo) error {
+	current, err := storage.lstat(name)
+	if expected == nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect account-binding file before publication", Err: err}
+		}
+		return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding file appeared during update"}
+	}
+	if err != nil || !current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(expected, current) {
+		return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding file identity changed", Err: err}
+	}
+	return nil
 }

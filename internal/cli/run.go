@@ -519,11 +519,11 @@ var commandRegistry = map[string]commandSpec{
 	"drafts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runDrafts(ctx, service, args, stdout, stderr)
 	}},
-	"send": {run: func(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	"send": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		if service == nil {
-			return runSend(args, stdout, stderr)
+			return runSendWithBindingsContext(ctx, args, stdout, stderr, nil, nil)
 		}
-		return runSendWithBindings(args, stdout, stderr, service.InvalidateCredentials, service.AccountBindingStore())
+		return runSendWithBindingsContext(ctx, args, stdout, stderr, service.InvalidateCredentials, service.AccountBindingStore())
 	}},
 	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
 		return runSync(ctx, service, args, stdout, stderr)

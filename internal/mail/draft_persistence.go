@@ -33,12 +33,6 @@ func writeDraftFile(root string, draft Draft, storage ...*draftStorage) error {
 	return replacePrivateDraftFile(state, name, payload, "write draft", "publish draft")
 }
 
-func writePrivateFile(path string, payload []byte) error {
-	storage := &draftStorage{rootName: filepath.Dir(path)}
-	_, err := writePrivateDraftFile(storage, filepath.Base(path), payload)
-	return err
-}
-
 func readDraftFile(root string, ref string, storage ...*draftStorage) (Draft, error) {
 	return readDraftFileWithObserver(root, ref, nil, storage...)
 }
