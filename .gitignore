@@ -40,4 +40,4 @@ coverage*.out
 *.backup
 *~
 
-/AGENTS.md
+/AGENTS.local.md
