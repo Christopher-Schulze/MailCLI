@@ -26,8 +26,9 @@ MAILCLI_ROOT="$(cd "${MAILCLI_ROOT}" && pwd -P)"
 GIT_ROOT="$(git -C "${MAILCLI_ROOT}" rev-parse --show-toplevel 2>/dev/null)" ||
   fail "Write root is not a Git worktree: ${MAILCLI_ROOT}"
 GIT_ROOT="$(cd "${GIT_ROOT}" && pwd -P)"
-[[ "${GIT_ROOT}" == "${MAILCLI_ROOT}" ]] ||
+[[ "${GIT_ROOT}" -ef "${MAILCLI_ROOT}" ]] ||
   fail "Write root must be the worktree root: ${GIT_ROOT}"
+MAILCLI_ROOT="${GIT_ROOT}"
 GIT_DIRECTORY="$(git -C "${MAILCLI_ROOT}" rev-parse --absolute-git-dir)"
 LEASE_DIRECTORY="${GIT_DIRECTORY}/mailcli-write-lease"
 
