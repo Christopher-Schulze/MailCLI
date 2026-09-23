@@ -37,7 +37,8 @@ lease_file() {
 remove_lease_files() {
   local NAME
   for NAME in task owner pid token acquired_at baseline_head baseline_status \
-    allowed_paths allowed_fingerprints reviewed_digest reviewed_patch_sha256 \
+    allowed_paths allowed_fingerprints private_task_fingerprints \
+    reviewed_digest reviewed_patch_sha256 \
     reviewed_at gate_patch_sha256 gate_head gate_at changed_paths; do
     rm -f "${LEASE_DIRECTORY}/${NAME}"
   done
@@ -74,6 +75,44 @@ fingerprint_path() {
 
 path_is_allowed() {
   grep -Fxq -- "$1" "$(lease_file allowed_paths)"
+}
+
+private_task_snapshot() {
+  local ABSOLUTE_PATH
+  local RELATIVE_PATH
+  printf 'docs/tasks.md\t%s\n' "$(fingerprint_path docs/tasks.md)"
+  printf 'docs/tasks\t%s\n' "$(fingerprint_path docs/tasks)"
+  [[ -d "${MAILCLI_ROOT}/docs/tasks" ]] || return 0
+  while IFS= read -r -d '' ABSOLUTE_PATH; do
+    RELATIVE_PATH="${ABSOLUTE_PATH#"${MAILCLI_ROOT}/"}"
+    [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
+      fail "Private task path contains tabs or newlines"
+    printf '%s\t%s\n' "${RELATIVE_PATH}" "$(fingerprint_path "${RELATIVE_PATH}")"
+  done < <(find "${MAILCLI_ROOT}/docs/tasks" -mindepth 1 ! -type d -print0)
+}
+
+verify_private_task_scope() {
+  local BASELINE
+  local CURRENT
+  local DIFF_STATUS
+  local OUT_OF_SCOPE
+  BASELINE="$(lease_file private_task_fingerprints)"
+  [[ -f "${BASELINE}" ]] || fail "Private task baseline is missing"
+  CURRENT="$(private_task_snapshot | LC_ALL=C sort)"
+  if OUT_OF_SCOPE="$(diff -u \
+    <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
+      "$(lease_file allowed_paths)" "${BASELINE}") \
+    <(printf '%s\n' "${CURRENT}" |
+      awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
+        "$(lease_file allowed_paths)" -))"; then
+    return 0
+  else
+    DIFF_STATUS=$?
+  fi
+  [[ "${DIFF_STATUS}" -eq 1 ]] || fail "Could not compare private task files"
+  printf 'Private task path changed outside the lease allowlist:\n%s\n' \
+    "${OUT_OF_SCOPE}" >&2
+  return 1
 }
 
 allowed_state_digest() {
@@ -155,6 +194,7 @@ acquire_lease() {
   while IFS= read -r RELATIVE_PATH; do
     printf '%s\t%s\n' "$(fingerprint_path "${RELATIVE_PATH}")" "${RELATIVE_PATH}"
   done <"$(lease_file allowed_paths)" >"$(lease_file allowed_fingerprints)"
+  private_task_snapshot | LC_ALL=C sort >"$(lease_file private_task_fingerprints)"
 
   local TOKEN
   TOKEN="$(printf '%s:%s:%s:%s' "${TASK_ID}" "${OWNER}" "$$" "${RANDOM}" |
@@ -188,6 +228,7 @@ verify_staged_scope() {
   local RELATIVE_PATH
   local UNAUTHORIZED=false
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
+  verify_private_task_scope
   : >"$(lease_file changed_paths)"
   git -C "${MAILCLI_ROOT}" diff --cached --name-only "${BASELINE_HEAD}" -- |
     LC_ALL=C sort -u >"$(lease_file changed_paths)"
@@ -311,6 +352,7 @@ gate_lease() {
 release_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
+  verify_private_task_scope
   [[ -f "$(lease_file gate_patch_sha256)" ]] ||
     fail "No successful full-gate evidence exists for this lease"
   local TASK_ID
@@ -350,6 +392,7 @@ release_lease() {
 abort_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
+  verify_private_task_scope
   local BASELINE_HEAD
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
   [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" ]] ||

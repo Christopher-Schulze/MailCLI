@@ -41,6 +41,20 @@ stage_fixture_path scripts/tests/test.sh 100755
 INITIAL_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 INITIAL_COMMIT="$(printf 'initial\n' | git -C "${TEST_REPOSITORY}" commit-tree "${INITIAL_TREE}")"
 git -C "${TEST_REPOSITORY}" checkout -q --detach "${INITIAL_COMMIT}"
+mkdir -p "${TEST_REPOSITORY}/docs/tasks"
+printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+printf '/docs/tasks.md\n/docs/tasks/\n' >"${TEST_REPOSITORY}/.git/info/exclude"
+
+expect_private_scope_failure() {
+  local COMMAND="$1"
+  local OWNER_TOKEN="$2"
+  if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+    "${LEASE_TOOL}" "${COMMAND}" "${OWNER_TOKEN}" >/dev/null 2>&1; then
+    printf '%s accepted an out-of-scope ignored task change\n' "${COMMAND}" >&2
+    exit 1
+  fi
+}
 
 ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" acquire 174 test-writer tracked.txt)"
@@ -65,8 +79,26 @@ printf 'other\n' >"${TEST_REPOSITORY}/other.txt"
 stage_fixture_path other.txt 100644
 printf 'changed\n' >"${TEST_REPOSITORY}/tracked.txt"
 stage_fixture_path tracked.txt 100644
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure review "${TOKEN}"
+printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+printf 'added\n' >"${TEST_REPOSITORY}/docs/tasks/175-added.md"
+expect_private_scope_failure review "${TOKEN}"
+rm "${TEST_REPOSITORY}/docs/tasks/175-added.md"
+rm "${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+expect_private_scope_failure review "${TOKEN}"
+printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+mv "${TEST_REPOSITORY}/docs/tasks/174-detail.md" \
+  "${TEST_REPOSITORY}/docs/tasks/174-moved.md"
+expect_private_scope_failure review "${TOKEN}"
+mv "${TEST_REPOSITORY}/docs/tasks/174-moved.md" \
+  "${TEST_REPOSITORY}/docs/tasks/174-detail.md"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" review "${TOKEN}" >/dev/null
+
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure gate "${TOKEN}"
+printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 
 GATE_STATUS=0
 MAILCLI_TEST_GATE_STATUS=23 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
@@ -86,6 +118,9 @@ TASK_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 TASK_COMMIT="$(printf 'TASK 174: coordination fixture\n' |
   git -C "${TEST_REPOSITORY}" commit-tree "${TASK_TREE}" -p "${INITIAL_COMMIT}")"
 git -C "${TEST_REPOSITORY}" checkout -q --detach "${TASK_COMMIT}"
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure release "${TOKEN}"
+printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" release "${TOKEN}" >/dev/null
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
@@ -100,6 +135,17 @@ if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
 fi
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" abort "${ABORT_TOKEN}" >/dev/null
+
+PRIVATE_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" acquire 175 private-owner docs/tasks.md)"
+PRIVATE_TOKEN="$(printf '%s\n' "${PRIVATE_ACQUIRE_OUTPUT}" |
+  sed -n 's/^write_lease_token=//p')"
+printf 'detail changed\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+expect_private_scope_failure abort "${PRIVATE_TOKEN}"
+printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+printf 'board allowed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" abort "${PRIVATE_TOKEN}" >/dev/null
 
 HARNESS_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" acquire 176 harness-writer scripts/tests/test.sh)"
@@ -138,4 +184,4 @@ MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
   "${LEASE_TOOL}" release "${HARNESS_TOKEN}" >/dev/null
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
 
-printf 'Write coordination passed: one writer, exact path scope, failure-preserving gate, baseline-bound harness, and tested commit identity\n'
+printf 'Write coordination passed: one writer, tracked and ignored task path scope, failure-preserving gate, baseline-bound harness, and tested commit identity\n'
