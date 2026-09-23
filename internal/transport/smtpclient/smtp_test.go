@@ -374,26 +374,32 @@ func bigTestMessageLines(n int) []byte {
 	return []byte(b.String())
 }
 
-// deadlineRecorder observes every SetDeadline on the SMTP connection.
+type deadlineSetting struct {
+	setAt    time.Time
+	deadline time.Time
+}
+
+// deadlineRecorder observes when each deadline is set on the SMTP connection.
 type deadlineRecorder struct {
 	net.Conn
 	mu        sync.Mutex
-	deadlines []time.Time
+	deadlines []deadlineSetting
 }
 
 func (d *deadlineRecorder) SetDeadline(t time.Time) error {
 	d.mu.Lock()
-	d.deadlines = append(d.deadlines, t)
+	d.deadlines = append(d.deadlines, deadlineSetting{setAt: time.Now(), deadline: t})
 	d.mu.Unlock()
 	return d.Conn.SetDeadline(t)
 }
 
 // A 10 MB payload earns a ~40 s transfer budget against the flat 30 s
 // command budget. The recorder proves the payload phase ran under the
-// transfer deadline and the final reply under a restored command budget:
-// deterministic, no wall-clock dependence. (Loopback kernel buffers make
-// timing-based proofs vacuous: macOS autotune absorbs megabytes, so a
-// throttled server only delays the final reply, never the client write.)
+// transfer deadline and the final reply under a restored command budget,
+// relative to each phase rather than to the entire DATA call. (Loopback
+// kernel buffers make timing-based proofs vacuous: macOS autotune absorbs
+// megabytes, so a throttled server only delays the final reply, never
+// the client write.)
 func TestSendDataSetsTransferDeadline(t *testing.T) {
 	srv := newFakeSMTPServer(t)
 	raw, err := net.Dial("tcp", net.JoinHostPort(srv.host(), strconv.Itoa(srv.port())))
@@ -430,32 +436,35 @@ func TestSendDataSetsTransferDeadline(t *testing.T) {
 	if wantTransfer <= commandBudget+5*time.Second {
 		t.Fatalf("test setup: transfer budget %v not clearly above command budget %v", wantTransfer, commandBudget)
 	}
-	start := time.Now()
+	rec.mu.Lock()
+	beforeData := len(rec.deadlines)
+	rec.mu.Unlock()
 	resp, err := sendData(rec, ctx, client, bytes.NewReader(msg), int64(len(msg)))
 	if err != nil {
 		t.Fatalf("sendData: %v", err)
 	}
 	rec.mu.Lock()
-	got := append([]time.Time(nil), rec.deadlines...)
+	got := append([]deadlineSetting(nil), rec.deadlines[beforeData:]...)
 	rec.mu.Unlock()
 	if !strings.HasPrefix(resp, "250") {
 		t.Fatalf("response = %q, want 250", resp)
 	}
-	transferIdx := -1
-	for i, dl := range got {
-		if dl.Sub(start) >= 35*time.Second && transferIdx < 0 {
-			transferIdx = i
+	if len(got) != 3 {
+		t.Fatalf("DATA deadlines = %v, want command, transfer, restored final reply", got)
+	}
+	for _, phase := range []struct {
+		name    string
+		setting deadlineSetting
+		budget  time.Duration
+	}{
+		{name: "DATA command", setting: got[0], budget: commandBudget},
+		{name: "payload transfer", setting: got[1], budget: wantTransfer},
+		{name: "final reply", setting: got[2], budget: commandBudget},
+	} {
+		remaining := phase.setting.deadline.Sub(phase.setting.setAt)
+		if remaining < phase.budget-5*time.Second || remaining > phase.budget {
+			t.Fatalf("%s deadline = %v from its SetDeadline call, want budget %v", phase.name, remaining, phase.budget)
 		}
-	}
-	if transferIdx < 0 {
-		t.Fatalf("no transfer-size deadline in %v", got)
-	}
-	last := got[len(got)-1].Sub(start)
-	if last < commandBudget-5*time.Second || last > commandBudget+5*time.Second {
-		t.Fatalf("final deadline = %v after start, want restored command budget %v", last, commandBudget)
-	}
-	if transferIdx == len(got)-1 {
-		t.Fatalf("transfer deadline is last; final reply has no restored command budget in %v", got)
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
