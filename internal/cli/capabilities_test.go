@@ -200,6 +200,31 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 }
 
+func TestCommandCapabilityResultStatesAreIndependent(t *testing.T) {
+	want := []string{"updated", "up_to_date"}
+	for _, id := range []string{"update", "drafts.edit", "drafts.update", "messages.mark"} {
+		var contract *commandContract
+		for index := range commandContracts {
+			if commandContracts[index].ID == id {
+				contract = &commandContracts[index]
+				break
+			}
+		}
+		if contract == nil {
+			t.Fatalf("command contract %q not found", id)
+		}
+		first := commandCapabilityFor(*contract)
+		if !slices.Equal(first.ResultStates, want) {
+			t.Fatalf("%s result states = %+v, want %+v", id, first.ResultStates, want)
+		}
+		first.ResultStates[0] = "mutated"
+		second := commandCapabilityFor(*contract)
+		if !slices.Equal(second.ResultStates, want) {
+			t.Fatalf("%s later result states = %+v, want %+v", id, second.ResultStates, want)
+		}
+	}
+}
+
 // TestCapabilityMailAppDependencies pins every declared Mail.app dependency to an
 // audited value so label drift cannot reintroduce undeclared automation surfaces.
 // Evidence for each value lives in docs/tasks/done/027-correct-stale-mail-app-capability-labels.md.
@@ -297,8 +322,8 @@ func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
 		if contract == nil {
 			t.Fatalf("commandContractForArgs(%q) = nil", test.args)
 		}
-		if contractTextString(contract.metadata[metadataEffectClass]) != test.want {
-			t.Fatalf("%s effect_class = %q, want %q", contract.ID, contractTextString(contract.metadata[metadataEffectClass]), test.want)
+		if contract.effectClass != test.want {
+			t.Fatalf("%s effect_class = %q, want %q", contract.ID, contract.effectClass, test.want)
 		}
 	}
 }

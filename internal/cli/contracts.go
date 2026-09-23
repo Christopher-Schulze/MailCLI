@@ -1,212 +1,38 @@
 package cli
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // commandContract is the single source of truth for the public command
 // manifest and the process dependencies selected before dispatch. The
 // runner registry below owns execution only; it does not repeat capability
 // metadata or dependency decisions.
 type commandContract struct {
-	ID string
-	// metadata stores capability values and dispatch flags as compact IDs; the
-	// public strings are materialized only when the manifest is published.
-	metadata [7]uint8
+	ID                 string
+	effectClass        string
+	confirmation       string
+	storeDependency    string
+	mailAppDependency  string
+	resultStates       []string
+	mailService        mailServiceRequirement
+	published          bool
+	requiresSignal     bool
+	requiresMainThread bool
 }
 
-const (
-	metadataEffectClass = iota
-	metadataConfirmation
-	metadataStoreDependency
-	metadataMailAppDependency
-	metadataResultStates
-	metadataMailService
-	metadataFlags
-)
+type mailServiceRequirement uint8
 
 const (
-	textNone uint8 = iota
-	textRead
-	textLocalWrite
-	textLocalWriteIMAPWrite
-	textFilesystemWrite
-	textVisibleCompose
-	textUnsupported
-	textSMTPSend
-	textKeychainWrite
-	textIMAPWrite
-	textMailWrite
-	textBatch
-	textRequiredFlag
-	textDraftFlag
-	textRequiredAndDraftFlags
-	textMailStore
-	textDraftStore
-	textDraftStoreMailStoreIfBaseline
-	textDraftStoreMailStore
-	textOptionalAutomation
-	textFallbackAutomation
-	textSystemComposeService
-	textOptional
-	textOperationDependent
-)
-
-func contractTextString(text uint8) string {
-	switch text {
-	case textRead:
-		return "read"
-	case textLocalWrite:
-		return "local-write"
-	case textLocalWriteIMAPWrite:
-		return "local-write+imap-write"
-	case textFilesystemWrite:
-		return "filesystem-write"
-	case textVisibleCompose:
-		return "visible-compose"
-	case textUnsupported:
-		return "unsupported"
-	case textSMTPSend:
-		return "smtp-send"
-	case textKeychainWrite:
-		return "keychain-write"
-	case textIMAPWrite:
-		return "imap-write"
-	case textMailWrite:
-		return "mail-write"
-	case textBatch:
-		return "batch"
-	case textRequiredFlag:
-		return "required-flag"
-	case textDraftFlag:
-		return "draft-flag"
-	case textRequiredAndDraftFlags:
-		return "required-and-draft-flags"
-	case textMailStore:
-		return "mail-store"
-	case textDraftStore:
-		return "draft-store"
-	case textDraftStoreMailStoreIfBaseline:
-		return "draft-store+mail-store-if-baseline"
-	case textDraftStoreMailStore:
-		return "draft-store+mail-store"
-	case textOptionalAutomation:
-		return "optional-automation"
-	case textFallbackAutomation:
-		return "fallback-automation"
-	case textSystemComposeService:
-		return "system-compose-service"
-	case textOptional:
-		return "optional"
-	case textOperationDependent:
-		return "operation-dependent"
-	default:
-		return "none"
-	}
-}
-
-const (
-	resultAvailable uint8 = iota
-	resultUpdated
-	resultHealthy
-	resultAccounts
-	resultComplete
-	resultResolved
-	resultSearch
-	resultCompletePartial
-	resultSaved
-	resultCreated
-	resultOpened
-	resultComposeUnsupported
-	resultSent
-	resultSetup
-	resultReconcile
-	resultDiscarded
-	resultPruned
-	resultMoved
-	resultCopied
-	resultSync
-	resultDeleted
-	resultHandoff
-	resultHandoffReconcile
-)
-
-// NUL-delimited state sets avoid one slice header per command in the release
-// image while preserving the manifest's ordered result-state contract.
-var resultStateTable = []string{
-	"available",
-	"updated\x00up_to_date",
-	"healthy\x00unhealthy",
-	"complete\x00partial\x00bounded_identity_coverage",
-	"complete",
-	"resolved",
-	"complete\x00partial\x00search_cursor_stale\x00search_index_changed\x00search_count_limit_exceeded",
-	"complete\x00partial",
-	"saved",
-	"created",
-	"opened",
-	"compose_automation_unsupported",
-	"sent\x00sent_mirror_pending",
-	"stored\x00removed",
-	"sent_store_observed\x00accepted_by_mail\x00sent\x00sent_mirror_pending\x00outcome_unknown",
-	"discarded",
-	"listed\x00pruned",
-	"moved",
-	"copied",
-	"triggered\x00checked_complete\x00checked_incomplete",
-	"deleted",
-	"confirmed_opened\x00confirmed_failed\x00outcome_unknown\x00canceled_before_dispatch",
-	"confirmed_opened\x00confirmed_failed",
-}
-
-func resultStateValues(states uint8) []string {
-	if states < uint8(len(resultStateTable)) {
-		return strings.Split(resultStateTable[states], "\x00")
-	}
-	return strings.Split(resultStateTable[resultComplete], "\x00")
-}
-
-const (
-	mailServiceNotRequired uint8 = iota
+	mailServiceNotRequired mailServiceRequirement = iota
 	mailServiceAlwaysRequired
 	mailServiceForArguments
 	mailServiceForReconcile
 )
 
-const (
-	commandPublished uint8 = 1 << iota
-	commandNeedsSignal
-	commandNeedsMainThread
-)
-
-func newCommandContract(
-	id string,
-	effectClass uint8,
-	confirmation uint8,
-	storeDependency uint8,
-	mailAppDependency uint8,
-	mailService uint8,
-	requiresSignal bool,
-	requiresMainThread bool,
-	resultStates uint8,
-) commandContract {
-	return commandContract{
-		ID: id,
-		metadata: [7]uint8{
-			effectClass, confirmation, storeDependency, mailAppDependency,
-			resultStates, mailService,
-			commandPublished | boolFlag(commandNeedsSignal, requiresSignal) | boolFlag(commandNeedsMainThread, requiresMainThread),
-		},
-	}
-}
-
-func boolFlag(flag uint8, enabled bool) uint8 {
-	if enabled {
-		return flag
-	}
-	return 0
-}
-
 func commandRequiresMailService(contract commandContract, args []string) bool {
-	switch contract.metadata[metadataMailService] {
+	switch contract.mailService {
 	case mailServiceAlwaysRequired:
 		return true
 	case mailServiceForArguments:
@@ -219,26 +45,26 @@ func commandRequiresMailService(contract commandContract, args []string) bool {
 }
 
 func commandIsPublished(contract commandContract) bool {
-	return contract.metadata[metadataFlags]&commandPublished != 0
+	return contract.published
 }
 
 func commandNeedsSignalFor(contract commandContract) bool {
-	return contract.metadata[metadataFlags]&commandNeedsSignal != 0
+	return contract.requiresSignal
 }
 
 func commandNeedsMainThreadFor(contract commandContract) bool {
-	return contract.metadata[metadataFlags]&commandNeedsMainThread != 0
+	return contract.requiresMainThread
 }
 
 func commandCapabilityFor(contract commandContract) commandCapability {
 	return commandCapability{
 		ID:                contract.ID,
 		Schema:            schemaForCommand(contract.ID),
-		EffectClass:       contractTextString(contract.metadata[metadataEffectClass]),
-		Confirmation:      contractTextString(contract.metadata[metadataConfirmation]),
-		StoreDependency:   contractTextString(contract.metadata[metadataStoreDependency]),
-		MailAppDependency: contractTextString(contract.metadata[metadataMailAppDependency]),
-		ResultStates:      resultStateValues(contract.metadata[metadataResultStates]),
+		EffectClass:       contract.effectClass,
+		Confirmation:      contract.confirmation,
+		StoreDependency:   contract.storeDependency,
+		MailAppDependency: contract.mailAppDependency,
+		ResultStates:      slices.Clone(contract.resultStates),
 	}
 }
 
@@ -246,46 +72,298 @@ func commandCapabilityFor(contract commandContract) commandCapability {
 // deterministic. Every command ID is also resolved here for pre-dispatch
 // dependency checks.
 var commandContracts = []commandContract{
-	newCommandContract("capabilities", textRead, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultAvailable),
-	newCommandContract("version", textRead, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultAvailable),
-	newCommandContract("update", textLocalWrite, textNone, textNone, textNone, mailServiceNotRequired, true, false, resultUpdated),
-	newCommandContract("doctor", textRead, textNone, textMailStore, textOptionalAutomation, mailServiceAlwaysRequired, false, false, resultHealthy),
-	newCommandContract("batch", textBatch, textOperationDependent, textMailStore, textNone, mailServiceForArguments, false, false, resultCompletePartial),
-	newCommandContract("accounts.list", textRead, textNone, textMailStore, textFallbackAutomation, mailServiceAlwaysRequired, false, false, resultAccounts),
-	newCommandContract("mailboxes.list", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultComplete),
-	newCommandContract("mailboxes.resolve", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultResolved),
-	newCommandContract("messages.list", textRead, textNone, textMailStore, textFallbackAutomation, mailServiceAlwaysRequired, false, false, resultComplete),
-	newCommandContract("messages.filter", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultSearch),
-	newCommandContract("messages.search", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultSearch),
-	newCommandContract("messages.get", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
-	newCommandContract("messages.raw", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultComplete),
-	newCommandContract("messages.state", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultResolved),
-	newCommandContract("messages.thread", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
-	newCommandContract("attachments.list", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
-	newCommandContract("attachments.save", textFilesystemWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultSaved),
-	newCommandContract("drafts.create", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultCreated),
-	newCommandContract("drafts.list", textRead, textNone, textDraftStore, textNone, mailServiceNotRequired, false, false, resultComplete),
-	newCommandContract("drafts.inspect", textRead, textNone, textDraftStore, textNone, mailServiceNotRequired, false, false, resultComplete),
-	newCommandContract("drafts.preview", textRead, textNone, textDraftStore, textNone, mailServiceNotRequired, false, false, resultComplete),
-	newCommandContract("drafts.edit", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultUpdated),
-	newCommandContract("drafts.handoff", textVisibleCompose, textNone, textDraftStore, textSystemComposeService, mailServiceNotRequired, true, true, resultHandoff),
-	newCommandContract("drafts.update", textLocalWrite, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultUpdated),
-	newCommandContract("drafts.save", textUnsupported, textNone, textDraftStore, textNone, mailServiceNotRequired, true, false, resultComposeUnsupported),
-	newCommandContract("drafts.open", textRead, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCompletePartial),
-	newCommandContract("drafts.adopt", textLocalWrite, textNone, textDraftStoreMailStore, textNone, mailServiceAlwaysRequired, true, false, resultCreated),
-	newCommandContract("drafts.send", textSMTPSend, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, true, false, resultSent),
-	newCommandContract("send.setup", textKeychainWrite, textNone, textNone, textNone, mailServiceNotRequired, false, false, resultSetup),
-	newCommandContract("drafts.reconcile", textLocalWriteIMAPWrite, textNone, textDraftStoreMailStoreIfBaseline, textNone, mailServiceForReconcile, true, false, resultReconcile),
-	newCommandContract("drafts.discard", textLocalWrite, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, false, false, resultDiscarded),
-	newCommandContract("drafts.prune", textLocalWrite, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, false, false, resultPruned),
-	newCommandContract("messages.reply", textLocalWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCreated),
-	newCommandContract("messages.forward", textLocalWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCreated),
-	newCommandContract("messages.mark", textIMAPWrite, textDraftFlag, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultUpdated),
-	newCommandContract("messages.move", textIMAPWrite, textDraftFlag, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultMoved),
-	newCommandContract("messages.copy", textIMAPWrite, textNone, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultCopied),
-	newCommandContract("messages.delete", textIMAPWrite, textRequiredAndDraftFlags, textMailStore, textNone, mailServiceAlwaysRequired, false, false, resultDeleted),
-	newCommandContract("sync", textMailWrite, textNone, textMailStore, textOptional, mailServiceAlwaysRequired, true, false, resultSync),
-	newCommandContract("drafts.handoff-reconcile", textLocalWrite, textRequiredFlag, textDraftStore, textNone, mailServiceNotRequired, true, false, resultHandoffReconcile),
+	{
+		ID: "capabilities", effectClass: "read", confirmation: "none",
+		storeDependency: "none", mailAppDependency: "none",
+		resultStates: []string{"available"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "version", effectClass: "read", confirmation: "none",
+		storeDependency: "none", mailAppDependency: "none",
+		resultStates: []string{"available"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "update", effectClass: "local-write", confirmation: "none",
+		storeDependency: "none", mailAppDependency: "none",
+		resultStates:   []string{"updated", "up_to_date"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "doctor", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "optional-automation",
+		resultStates: []string{"healthy", "unhealthy"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "batch", effectClass: "batch", confirmation: "operation-dependent",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial"},
+		mailService:  mailServiceForArguments,
+		published:    true,
+	},
+	{
+		ID: "accounts.list", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "fallback-automation",
+		resultStates: []string{"complete", "partial", "bounded_identity_coverage"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "mailboxes.list", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "mailboxes.resolve", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"resolved"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.list", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "fallback-automation",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.filter", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.search", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.get", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.raw", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.state", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"resolved"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.thread", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "attachments.list", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "attachments.save", effectClass: "filesystem-write", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"saved"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.create", effectClass: "local-write", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"created"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.list", effectClass: "read", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.inspect", effectClass: "read", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.preview", effectClass: "read", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates: []string{"complete"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.edit", effectClass: "local-write", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"updated", "up_to_date"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.handoff", effectClass: "visible-compose", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "system-compose-service",
+		resultStates:       []string{"confirmed_opened", "confirmed_failed", "outcome_unknown", "canceled_before_dispatch"},
+		mailService:        mailServiceNotRequired,
+		published:          true,
+		requiresSignal:     true,
+		requiresMainThread: true,
+	},
+	{
+		ID: "drafts.update", effectClass: "local-write", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"updated", "up_to_date"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.save", effectClass: "unsupported", confirmation: "none",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"compose_automation_unsupported"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.open", effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"complete", "partial"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.adopt", effectClass: "local-write", confirmation: "none",
+		storeDependency: "draft-store+mail-store", mailAppDependency: "none",
+		resultStates:   []string{"created"},
+		mailService:    mailServiceAlwaysRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.send", effectClass: "smtp-send", confirmation: "required-flag",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"sent", "sent_mirror_pending"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "send.setup", effectClass: "keychain-write", confirmation: "none",
+		storeDependency: "none", mailAppDependency: "none",
+		resultStates: []string{"stored", "removed"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.reconcile", effectClass: "local-write+imap-write", confirmation: "none",
+		storeDependency: "draft-store+mail-store-if-baseline", mailAppDependency: "none",
+		resultStates:   []string{"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown"},
+		mailService:    mailServiceForReconcile,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.discard", effectClass: "local-write", confirmation: "required-flag",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates: []string{"discarded"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "drafts.prune", effectClass: "local-write", confirmation: "required-flag",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates: []string{"listed", "pruned"},
+		mailService:  mailServiceNotRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.reply", effectClass: "local-write", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"created"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.forward", effectClass: "local-write", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"created"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.mark", effectClass: "imap-write", confirmation: "draft-flag",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"updated", "up_to_date"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.move", effectClass: "imap-write", confirmation: "draft-flag",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"moved"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.copy", effectClass: "imap-write", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"copied"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "messages.delete", effectClass: "imap-write", confirmation: "required-and-draft-flags",
+		storeDependency: "mail-store", mailAppDependency: "none",
+		resultStates: []string{"deleted"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
+	},
+	{
+		ID: "sync", effectClass: "mail-write", confirmation: "none",
+		storeDependency: "mail-store", mailAppDependency: "optional",
+		resultStates:   []string{"triggered", "checked_complete", "checked_incomplete"},
+		mailService:    mailServiceAlwaysRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
+		ID: "drafts.handoff-reconcile", effectClass: "local-write", confirmation: "required-flag",
+		storeDependency: "draft-store", mailAppDependency: "none",
+		resultStates:   []string{"confirmed_opened", "confirmed_failed"},
+		mailService:    mailServiceNotRequired,
+		published:      true,
+		requiresSignal: true,
+	},
 }
 
 func commandContractForArgs(args []string) (*commandContract, []string) {
