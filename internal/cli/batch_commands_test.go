@@ -420,6 +420,57 @@ func TestBatchCommandAttachmentSavePreservesEvidence(t *testing.T) {
 	}
 }
 
+func TestBatchJSONAttachmentSaveErrorPreservesVerifiedEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "attachment.bin")
+	saved := &mail.SavedAttachment{
+		AttachmentID: "1", Path: path, Size: 8,
+		SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	guidance := mail.OperationGuidance{
+		Phase: mail.OperationPhaseCleanup, EffectCertainty: mail.EffectComplete,
+		Retryability: mail.RetryObserveRequired, ReplayAllowed: false,
+		Recovery: mail.RecoveryGuidance{Action: mail.RecoveryInspect},
+	}
+	request := mail.BatchRequest{
+		Operation: mail.BatchOperationAttachmentSave,
+		Items:     []mail.BatchItem{{ID: "save", Ref: "msg_ref", AttachmentID: "1", OutputPath: path}},
+	}
+	result := mail.BatchResult{
+		Operation: mail.BatchOperationAttachmentSave, Total: 1, Failed: 1,
+		Items: []mail.BatchItemResult{{
+			ID: "save", State: mail.BatchItemFailed, SavedAttachment: saved,
+			Error: &mail.BatchItemError{
+				Code: "operation_failed", Message: "close failed", Retryable: false, Guidance: &guidance,
+			},
+		}},
+	}
+	var stdout bytes.Buffer
+	if code := writeBatchJSON(&stdout, result, request, maximumJSONOutputBytes); code != 1 {
+		t.Fatalf("writeBatchJSON() code = %d, want partial-batch exit 1", code)
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; output = %q", err, stdout.String())
+	}
+	assertBatchAttachmentSaveFailureResponse(t, response, saved)
+}
+
+func assertBatchAttachmentSaveFailureResponse(t *testing.T, response envelope, saved *mail.SavedAttachment) {
+	t.Helper()
+	if response.OK || response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != 1 {
+		t.Fatalf("response = %+v, want failed batch item", response)
+	}
+	item := response.Data.BatchResult.Items[0]
+	if item.SavedAttachment == nil || item.SavedAttachment.Path != saved.Path || item.SavedAttachment.Size != saved.Size ||
+		item.SavedAttachment.SHA256 != saved.SHA256 || item.Error == nil || item.Error.Guidance == nil {
+		t.Fatalf("batch item = %+v, want retained save evidence and item guidance", item)
+	}
+	if item.Error.Retryable || item.Error.Guidance.ReplayAllowed ||
+		item.Error.Guidance.EffectCertainty != mail.EffectComplete {
+		t.Fatalf("batch item error = %+v, want complete effect with replay disabled", item.Error)
+	}
+}
+
 func TestBatchCommandDeleteRequiresConfirm(t *testing.T) {
 	inputPath := filepath.Join(t.TempDir(), "batch.json")
 	payload := []byte(`{"operation":"delete","items":[{"id":"one","ref":"msg_ref"}]}`)

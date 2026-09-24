@@ -80,6 +80,10 @@ type OperationGuidance struct {
 // command and operation identity after this base classification.
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
+	var attachmentOutcome *AttachmentSaveOutcomeError
+	if errors.As(err, &attachmentOutcome) {
+		return guidanceForAttachmentSaveOutcome(attachmentOutcome, code)
+	}
 	var mutation *transport.MutationOutcomeError
 	if errors.As(err, &mutation) && mutation.Evidence.IsStore() {
 		return guidanceForMutationUnknown(err)
@@ -147,6 +151,32 @@ func GuidanceForError(command string, err error) OperationGuidance {
 	return guidanceForRead()
 }
 
+func guidanceForAttachmentSaveOutcome(outcome *AttachmentSaveOutcomeError, code string) OperationGuidance {
+	phase := outcome.Phase
+	if phase == "" {
+		phase = OperationPhaseExecution
+	}
+	if outcome.EffectCertainty == EffectNone {
+		if isInputErrorCode(code) || transport.IsConfigurationFailure(outcome.Cause) {
+			guidance := guidanceForInput()
+			guidance.EffectCertainty = EffectNone
+			return guidance
+		}
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone, Retryability: RetrySafe,
+			ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry},
+		}
+	}
+	certainty := outcome.EffectCertainty
+	if certainty != EffectComplete && certainty != EffectUnknown {
+		certainty = EffectUnknown
+	}
+	return OperationGuidance{
+		Phase: phase, EffectCertainty: certainty, Retryability: RetryObserveRequired,
+		ReplayAllowed: false, Recovery: RecoveryGuidance{Action: RecoveryInspect},
+	}
+}
+
 func guidanceErrorCode(err error) string {
 	if err == nil {
 		return ""
@@ -169,7 +199,7 @@ func isInputErrorCode(code string) bool {
 
 func effectfulCommand(command string) bool {
 	switch command {
-	case "batch", "update", "attachments.save", "send.setup", "sync",
+	case "batch", "update", "attachments.save", "attachment_save", "send.setup", "sync",
 		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save",
 		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move",

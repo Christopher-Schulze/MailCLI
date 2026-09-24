@@ -14,6 +14,7 @@ import (
 type attachmentGateway struct {
 	gatewayStub
 	content       []byte
+	saveErr       error
 	afterEvidence func(string) error
 }
 
@@ -36,6 +37,9 @@ func (g *attachmentGateway) SaveAttachmentToWithEvidence(
 	_ string,
 	path string,
 ) (AttachmentEvidence, error) {
+	if g.saveErr != nil {
+		return AttachmentEvidence{}, g.saveErr
+	}
 	if err := os.WriteFile(path, g.content, 0o644); err != nil {
 		return AttachmentEvidence{}, err
 	}
@@ -86,6 +90,30 @@ func TestSaveAttachmentPublishesExactPrivateFile(t *testing.T) {
 	}
 }
 
+func TestSaveAttachmentReportsNoEffectBeforePublish(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "report.pdf")
+	saveErr := context.DeadlineExceeded
+	saved, err := NewService(&attachmentGateway{saveErr: saveErr}).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	)
+	if !errors.Is(err, saveErr) || saved != (SavedAttachment{}) {
+		t.Fatalf("SaveAttachment() = (%+v, %v), want no evidence and the pre-publish error", saved, err)
+	}
+	var outcome *AttachmentSaveOutcomeError
+	if !errors.As(err, &outcome) || outcome.EffectCertainty != EffectNone {
+		t.Fatalf("outcome = %+v, want effect none", outcome)
+	}
+	guidance := GuidanceForError("attachments.save", err)
+	if guidance.EffectCertainty != EffectNone || !guidance.ReplayAllowed || guidance.Retryability != RetrySafe {
+		t.Fatalf("guidance = %+v, want safe replay with no effect", guidance)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("pre-publish output exists: %v", statErr)
+	}
+}
+
 func TestSaveAttachmentNeverOverwrites(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "existing.txt")
 	if err := os.WriteFile(output, []byte("keep"), 0o600); err != nil {
@@ -119,7 +147,7 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeInspection(t *testing.T) 
 		return os.WriteFile(path, replacement, 0o644)
 	})
 
-	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
 		context.Background(), SaveAttachmentRequest{
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
@@ -127,6 +155,7 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeInspection(t *testing.T) 
 	if errorCode(err) != "attachment_changed" {
 		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
 	}
+	assertUnknownAttachmentSaveOutcome(t, saved, err)
 	assertAttachmentFile(t, output, replacement, 0o644)
 }
 
@@ -179,7 +208,7 @@ func TestSaveAttachmentPreservesReplacementDuringCleanup(t *testing.T) {
 		}
 	})
 
-	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
 		context.Background(), SaveAttachmentRequest{
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
@@ -187,6 +216,7 @@ func TestSaveAttachmentPreservesReplacementDuringCleanup(t *testing.T) {
 	if !errors.Is(err, inspectErr) || errorCode(err) != "attachment_changed" {
 		t.Fatalf("SaveAttachment() error = %v, want inspect and attachment_changed errors", err)
 	}
+	assertUnknownAttachmentSaveOutcome(t, saved, err)
 	assertAttachmentFile(t, output, replacement, 0o644)
 }
 
@@ -204,7 +234,7 @@ func TestSaveAttachmentRechecksRetainedOutputDuringCleanup(t *testing.T) {
 		return os.WriteFile(path, replacement, 0o644)
 	})
 
-	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
 		context.Background(), SaveAttachmentRequest{
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
@@ -212,7 +242,23 @@ func TestSaveAttachmentRechecksRetainedOutputDuringCleanup(t *testing.T) {
 	if errorCode(err) != "attachment_changed" {
 		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
 	}
+	assertUnknownAttachmentSaveOutcome(t, saved, err)
 	assertAttachmentFile(t, output, replacement, 0o644)
+}
+
+func assertUnknownAttachmentSaveOutcome(t *testing.T, saved SavedAttachment, err error) {
+	t.Helper()
+	if saved != (SavedAttachment{}) {
+		t.Fatalf("SaveAttachment() evidence = %+v, want no proof for the replacement", saved)
+	}
+	var outcome *AttachmentSaveOutcomeError
+	if !errors.As(err, &outcome) || outcome.EffectCertainty != EffectUnknown {
+		t.Fatalf("outcome = %+v, want unknown effect", outcome)
+	}
+	guidance := GuidanceForError("attachments.save", err)
+	if guidance.EffectCertainty != EffectUnknown || guidance.ReplayAllowed || guidance.Retryability != RetryObserveRequired {
+		t.Fatalf("guidance = %+v, want observation before replay", guidance)
+	}
 }
 
 func TestSaveAttachmentUsesVerifiedCopyWhenLinkCrossesFilesystem(t *testing.T) {
@@ -352,13 +398,18 @@ func TestSaveAttachmentReportsCleanupFailure(t *testing.T) {
 	})
 
 	output := filepath.Join(t.TempDir(), "report.pdf")
-	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
 		context.Background(), SaveAttachmentRequest{
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
 	)
 	if !errors.Is(err, inspectErr) || !errors.Is(err, cleanupErr) {
 		t.Fatalf("SaveAttachment() error = %v, want inspect and cleanup errors", err)
+	}
+	assertSavedAttachmentEvidence(t, saved, output, []byte("original"))
+	guidance := GuidanceForError("attachments.save", err)
+	if guidance.EffectCertainty != EffectComplete || guidance.ReplayAllowed || guidance.Retryability != RetryObserveRequired {
+		t.Fatalf("guidance = %+v, want complete effect requiring observation", guidance)
 	}
 	assertAttachmentFile(t, output, []byte("original"), 0o600)
 }
@@ -372,13 +423,22 @@ func TestSaveAttachmentReportsCloseFailureAfterVerifiedSave(t *testing.T) {
 	t.Cleanup(func() { attachmentClose = previous })
 
 	output := filepath.Join(t.TempDir(), "report.pdf")
-	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
 		context.Background(), SaveAttachmentRequest{
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
 	)
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("SaveAttachment() error = %v, want close failure", err)
+	}
+	assertSavedAttachmentEvidence(t, saved, output, []byte("original"))
+	var outcome *AttachmentSaveOutcomeError
+	if !errors.As(err, &outcome) || outcome.EffectCertainty != EffectComplete {
+		t.Fatalf("outcome = %+v, want complete effect", outcome)
+	}
+	guidance := GuidanceForError("attachments.save", err)
+	if guidance.EffectCertainty != EffectComplete || guidance.ReplayAllowed || guidance.Recovery.Action != RecoveryInspect {
+		t.Fatalf("guidance = %+v, want inspect-only recovery", guidance)
 	}
 	assertAttachmentFile(t, output, []byte("original"), 0o600)
 }
@@ -449,5 +509,13 @@ func assertAttachmentFile(t *testing.T, path string, want []byte, mode os.FileMo
 	}
 	if info.Mode().Perm() != mode.Perm() {
 		t.Fatalf("mode at %q = %o, want %o", path, info.Mode().Perm(), mode.Perm())
+	}
+}
+
+func assertSavedAttachmentEvidence(t *testing.T, saved SavedAttachment, path string, content []byte) {
+	t.Helper()
+	digest := sha256.Sum256(content)
+	if saved.Path != path || saved.Size != int64(len(content)) || saved.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("saved attachment = %+v, want path %q, size %d and matching SHA-256", saved, path, len(content))
 	}
 }

@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +20,7 @@ type batchGateway struct {
 	reads           []string
 	messages        map[string]Message
 	readErrs        map[string]error
+	attachmentErr   error
 	markErr         error
 	markSummary     MessageSummary
 	transfers       []TransferMessageRequest
@@ -58,6 +60,9 @@ func (g *batchGateway) MarkMessage(ctx context.Context, request MarkMessageReque
 }
 
 func (g *batchGateway) SaveAttachmentTo(_ context.Context, _ string, _ string, path string) error {
+	if g.attachmentErr != nil {
+		return g.attachmentErr
+	}
 	return os.WriteFile(path, []byte("batch attachment"), 0o600)
 }
 
@@ -218,6 +223,104 @@ func TestExecuteBatchAttachmentAndMarkSuccess(t *testing.T) {
 	})
 	if err != nil || !mark.Complete() || mark.Items[0].MessageState == nil || mark.Items[0].MessageState.Ref != "mark-ref" {
 		t.Fatalf("mark result = %+v, error = %v", mark, err)
+	}
+}
+
+type batchAttachmentSaveCase struct {
+	name          string
+	certainty     EffectCertainty
+	replayAllowed bool
+	saved         bool
+}
+
+func TestExecuteBatchAttachmentSaveOutcomeEvidence(t *testing.T) {
+	for _, test := range []batchAttachmentSaveCase{
+		{name: "before publish", certainty: EffectNone, replayAllowed: true},
+		{name: "after publish", certainty: EffectComplete, saved: true},
+		{name: "ambiguous cleanup", certainty: EffectUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) { runBatchAttachmentSaveCase(t, test) })
+	}
+}
+
+func TestBatchAttachmentSaveUnknownErrorDisallowsRetry(t *testing.T) {
+	run := batchExecution{request: BatchRequest{Operation: BatchOperationAttachmentSave}}
+	itemError := run.itemError(errors.New("attachment publication setup failed"))
+	if itemError.Retryable || itemError.Guidance == nil || itemError.Guidance.ReplayAllowed ||
+		itemError.Guidance.EffectCertainty != EffectUnknown {
+		t.Fatalf("attachment item error = %+v, want conservative non-retryable guidance", itemError)
+	}
+}
+
+func runBatchAttachmentSaveCase(t *testing.T, test batchAttachmentSaveCase) {
+	t.Helper()
+	output := filepath.Join(t.TempDir(), "attachment.bin")
+	gateway := &batchGateway{gatewayStub: &gatewayStub{}}
+	configureBatchAttachmentSaveCase(t, test.name, gateway, output)
+	result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
+		Operation: BatchOperationAttachmentSave,
+		Items:     []BatchItem{{ID: "save", Ref: "message", AttachmentID: "1", OutputPath: output}},
+	})
+	if err != nil || result.Complete() || len(result.Items) != 1 {
+		t.Fatalf("ExecuteBatch() = (%+v, %v), want one failed item", result, err)
+	}
+	assertBatchAttachmentSaveOutcome(t, test, result.Items[0], output)
+}
+
+func configureBatchAttachmentSaveCase(t *testing.T, name string, gateway *batchGateway, output string) {
+	t.Helper()
+	switch name {
+	case "before publish":
+		gateway.attachmentErr = context.DeadlineExceeded
+	case "after publish":
+		closeErr := errors.New("close failed")
+		previous := attachmentClose
+		attachmentClose = func(file *os.File) error { return errors.Join(file.Close(), closeErr) }
+		t.Cleanup(func() { attachmentClose = previous })
+	case "ambiguous cleanup":
+		setAttachmentPublicationHook(t, func(stage string, path string) error {
+			if stage != "before-cleanup" || path != output {
+				return nil
+			}
+			if err := os.Rename(path, path+".original"); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte("replacement"), 0o600)
+		})
+	}
+}
+
+func assertBatchAttachmentSaveOutcome(t *testing.T, test batchAttachmentSaveCase, item BatchItemResult, output string) {
+	t.Helper()
+	if item.State != BatchItemFailed || item.Error == nil || item.Error.Guidance == nil {
+		t.Fatalf("item = %+v, want failed item with guidance", item)
+	}
+	guidance := item.Error.Guidance
+	if guidance.EffectCertainty != test.certainty || guidance.ReplayAllowed != test.replayAllowed ||
+		item.Error.Retryable != guidance.ReplayAllowed {
+		t.Fatalf("item error = %+v, want certainty %q and retryable %t", item.Error, test.certainty, test.replayAllowed)
+	}
+	if test.saved {
+		if item.SavedAttachment == nil {
+			t.Fatal("saved attachment = nil, want verified output evidence")
+		}
+		assertSavedAttachmentEvidence(t, *item.SavedAttachment, output, []byte("batch attachment"))
+		assertAttachmentFile(t, output, []byte("batch attachment"), 0o600)
+	} else if item.SavedAttachment != nil {
+		t.Fatalf("saved attachment = %+v, want no verified output evidence", item.SavedAttachment)
+	}
+	assertBatchAttachmentSaveTarget(t, test.certainty, output)
+}
+
+func assertBatchAttachmentSaveTarget(t *testing.T, certainty EffectCertainty, output string) {
+	t.Helper()
+	if certainty == EffectNone {
+		if _, err := os.Lstat(output); !os.IsNotExist(err) {
+			t.Fatalf("pre-publish output exists: %v", err)
+		}
+	}
+	if certainty == EffectUnknown {
+		assertAttachmentFile(t, output, []byte("replacement"), 0o600)
 	}
 }
 

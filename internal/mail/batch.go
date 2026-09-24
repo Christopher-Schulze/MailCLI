@@ -315,6 +315,9 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 		})
 		if err != nil {
 			result.State = BatchItemFailed
+			if saved.Path != "" {
+				result.SavedAttachment = &saved
+			}
 			result.Error = run.itemError(err)
 			return result
 		}
@@ -481,6 +484,9 @@ func (run *batchExecution) itemError(err error) *BatchItemError {
 		}
 	}
 	guidance := GuidanceForError(string(run.request.Operation), err)
+	if run.request.Operation == BatchOperationAttachmentSave {
+		retryable = guidance.ReplayAllowed
+	}
 	return &BatchItemError{Code: code, Message: err.Error(), Retryable: retryable, Guidance: &guidance}
 }
 

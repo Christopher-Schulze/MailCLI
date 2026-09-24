@@ -44,14 +44,37 @@ type attachmentPublication struct {
 	outputIdentity    os.FileInfo
 	output            *os.File
 	publishedEvidence *AttachmentEvidence
+	published         bool
 	outputOwned       bool
 	retainOutput      bool
+}
+
+// AttachmentSaveOutcomeError reports what the output path proves after a
+// failed attachment save.
+type AttachmentSaveOutcomeError struct {
+	Cause           error
+	Phase           OperationPhase
+	EffectCertainty EffectCertainty
+}
+
+func (e *AttachmentSaveOutcomeError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "attachment save failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *AttachmentSaveOutcomeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 func (s *Service) SaveAttachment(
 	ctx context.Context,
 	request SaveAttachmentRequest,
-) (saved SavedAttachment, resultErr error) {
+) (SavedAttachment, error) {
 	if err := validateAttachmentRequest(request); err != nil {
 		return SavedAttachment{}, err
 	}
@@ -63,40 +86,71 @@ func (s *Service) SaveAttachment(
 	if err != nil {
 		return SavedAttachment{}, err
 	}
+	return s.saveAttachment(ctx, request, publication)
+}
+
+func (s *Service) saveAttachment(
+	ctx context.Context,
+	request SaveAttachmentRequest,
+	publication *attachmentPublication,
+) (saved SavedAttachment, resultErr error) {
 	defer func() {
-		resultErr = errors.Join(resultErr, publication.cleanup())
-		resultErr = errors.Join(resultErr, publication.close())
+		saved, resultErr = finishAttachmentSave(publication, request.AttachmentID, resultErr)
 	}()
-	if saver, ok := s.gateway.(AttachmentEvidenceGateway); ok {
-		evidence, err := saver.SaveAttachmentToWithEvidence(
-			ctx, request.MessageRef, request.AttachmentID, temporaryPath,
-		)
-		if err != nil {
-			return SavedAttachment{}, err
-		}
-		evidence, err = normalizeAttachmentEvidence(evidence, temporaryPath)
-		if err != nil {
-			return SavedAttachment{}, err
-		}
-		if err := publication.captureTemporary(&evidence); err != nil {
-			return SavedAttachment{}, err
-		}
-	} else {
-		if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, temporaryPath); err != nil {
-			return SavedAttachment{}, err
-		}
-		if err := publication.captureTemporary(nil); err != nil {
-			return SavedAttachment{}, err
-		}
+	if err := s.saveAttachmentTemporary(ctx, request, publication); err != nil {
+		return SavedAttachment{}, err
 	}
 	if err := publication.publish(); err != nil {
 		return SavedAttachment{}, err
 	}
-	saved, err = publication.inspect(request.AttachmentID)
-	if err != nil {
-		return SavedAttachment{}, err
-	}
 	publication.retainOutput = true
+	return publication.inspect(request.AttachmentID)
+}
+
+func (s *Service) saveAttachmentTemporary(
+	ctx context.Context,
+	request SaveAttachmentRequest,
+	publication *attachmentPublication,
+) error {
+	if saver, ok := s.gateway.(AttachmentEvidenceGateway); ok {
+		evidence, err := saver.SaveAttachmentToWithEvidence(
+			ctx, request.MessageRef, request.AttachmentID, publication.temporaryPath,
+		)
+		if err != nil {
+			return err
+		}
+		evidence, err = normalizeAttachmentEvidence(evidence, publication.temporaryPath)
+		if err != nil {
+			return err
+		}
+		if err := publication.captureTemporary(&evidence); err != nil {
+			return err
+		}
+	} else {
+		if err := s.gateway.SaveAttachmentTo(ctx, request.MessageRef, request.AttachmentID, publication.temporaryPath); err != nil {
+			return err
+		}
+		if err := publication.captureTemporary(nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func finishAttachmentSave(
+	publication *attachmentPublication,
+	attachmentID string,
+	cause error,
+) (SavedAttachment, error) {
+	resultErr := errors.Join(cause, publication.cleanup())
+	saved, certainty, phase := publication.outcome(attachmentID)
+	if resultErr == nil && certainty != EffectComplete {
+		resultErr = attachmentChangedError("published attachment outcome could not be verified")
+	}
+	resultErr = errors.Join(resultErr, publication.close())
+	if resultErr != nil {
+		return saved, &AttachmentSaveOutcomeError{Cause: resultErr, Phase: phase, EffectCertainty: certainty}
+	}
 	return saved, nil
 }
 
@@ -297,6 +351,7 @@ func (p *attachmentPublication) publish() error {
 		}
 		return p.copyAcrossFilesystem()
 	}
+	p.published = true
 	p.outputOwned = true
 	if err := p.openPublished(); err != nil {
 		return err
@@ -382,6 +437,7 @@ func (p *attachmentPublication) createPublishedCopy() error {
 	if err != nil {
 		return fmt.Errorf("create published attachment copy: %w", err)
 	}
+	p.published = true
 	identity, err := file.Stat()
 	if err != nil {
 		return errors.Join(fmt.Errorf("inspect published attachment copy: %w", err), attachmentClose(file))
@@ -519,6 +575,25 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 	if err := attachmentPublicationHook("before-inspect", p.outputPath); err != nil {
 		return SavedAttachment{}, err
 	}
+	saved, err := p.verifiedSaved(attachmentID)
+	if err != nil {
+		return SavedAttachment{}, err
+	}
+	if err := attachmentPublicationHook("after-inspect", p.outputPath); err != nil {
+		return SavedAttachment{}, err
+	}
+	if err := p.verifyPublishedMode(); err != nil {
+		p.disownOutputOnChange(err)
+		return SavedAttachment{}, err
+	}
+	return saved, nil
+}
+
+func (p *attachmentPublication) verifiedSaved(attachmentID string) (SavedAttachment, error) {
+	if err := p.verifyPublishedMode(); err != nil {
+		p.disownOutputOnChange(err)
+		return SavedAttachment{}, err
+	}
 	if p.publishedEvidence == nil {
 		if _, err := p.output.Seek(0, io.SeekStart); err != nil {
 			return SavedAttachment{}, fmt.Errorf("rewind saved attachment: %w", err)
@@ -534,9 +609,6 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
 	}
-	if err := attachmentPublicationHook("after-inspect", p.outputPath); err != nil {
-		return SavedAttachment{}, err
-	}
 	if err := p.verifyPublishedMode(); err != nil {
 		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
@@ -550,6 +622,24 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 		Size:         p.publishedEvidence.Size,
 		SHA256:       p.publishedEvidence.SHA256,
 	}, nil
+}
+
+func (p *attachmentPublication) outcome(attachmentID string) (SavedAttachment, EffectCertainty, OperationPhase) {
+	if p.published {
+		if p.retainOutput && p.outputOwned {
+			if saved, err := p.verifiedSaved(attachmentID); err == nil {
+				return saved, EffectComplete, OperationPhaseCleanup
+			}
+		}
+		return SavedAttachment{}, EffectUnknown, OperationPhaseCleanup
+	}
+	if p.root == nil || p.verifyParent() != nil {
+		return SavedAttachment{}, EffectUnknown, OperationPhaseExecution
+	}
+	if _, err := p.root.Lstat(p.outputName); os.IsNotExist(err) {
+		return SavedAttachment{}, EffectNone, OperationPhaseExecution
+	}
+	return SavedAttachment{}, EffectUnknown, OperationPhaseExecution
 }
 
 func (p *attachmentPublication) disownOutputOnChange(err error) {

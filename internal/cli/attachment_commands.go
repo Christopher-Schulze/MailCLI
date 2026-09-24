@@ -10,6 +10,10 @@ import (
 	"mailcli/internal/mail"
 )
 
+type attachmentSaver interface {
+	SaveAttachment(context.Context, mail.SaveAttachmentRequest) (mail.SavedAttachment, error)
+}
+
 func runAttachments(
 	ctx context.Context,
 	service *mail.Service,
@@ -104,7 +108,7 @@ func runAttachmentsList(
 
 func runAttachmentsSave(
 	ctx context.Context,
-	service *mail.Service,
+	service attachmentSaver,
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
@@ -123,7 +127,11 @@ func runAttachmentsSave(
 		MessageRef: *messageRef, AttachmentID: *attachmentID, OutputPath: *outputPath,
 	})
 	if err != nil {
-		return failCommand("attachments.save", *jsonOutput, err, stdout, stderr)
+		data := responseData{}
+		if saved.Path != "" {
+			data.SavedAttachment = &saved
+		}
+		return failCommandWithData("attachments.save", *jsonOutput, data, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		return writeSuccess(stdout, "attachments.save", responseData{SavedAttachment: &saved})
