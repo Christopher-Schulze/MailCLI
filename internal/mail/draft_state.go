@@ -119,7 +119,7 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 		if err == nil {
 			if ctx.Err() != nil {
 				closeErr := errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
-				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, closeErr)
+				return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation", DraftRef: ref}, closeErr)
 			}
 			storage, storageErr := openPinnedDraftStorage(root, lock, ref)
 			if storageErr != nil {
@@ -132,7 +132,7 @@ func acquireDraftLease(ctx context.Context, root string, ref string) (*draftLeas
 		}
 		select {
 		case <-ctx.Done():
-			return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation"}, lock.close())
+			return nil, errors.Join(&OperationError{Code: "draft_busy", Message: "draft is busy with another operation", DraftRef: ref}, lock.close())
 		case <-ticker.C:
 		}
 	}

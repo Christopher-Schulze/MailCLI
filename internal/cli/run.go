@@ -137,7 +137,7 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		}
 	}
 	var conflict *mail.DraftRevisionConflict
-	if errors.As(err, &conflict) {
+	if errors.As(err, &conflict) && conflict.Ref != "" {
 		guidance.Recovery = mail.RecoveryGuidance{
 			Action: mail.RecoveryInspect, Command: "drafts.inspect",
 			Args: []string{"--ref", conflict.Ref, "--view", "full", "--json"},
@@ -168,12 +168,29 @@ func newErrorData(command string, data responseData, err error) *errorData {
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
-	if data.draftMutationCompleted && data.Draft != nil && data.Draft.Ref != "" && errorCode(err) == "output_too_large" {
+	if data.draftMutationCompleted && errorCode(err) == "output_too_large" {
 		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectComplete
 		guidance.Retryability, guidance.ReplayAllowed = mail.RetryObserveRequired, false
+		guidance.Recovery = mail.RecoveryGuidance{Action: mail.RecoveryObserve}
+		if data.Draft != nil && data.Draft.Ref != "" {
+			guidance.Recovery = mail.RecoveryGuidance{
+				Action: mail.RecoveryInspect, Command: "drafts.inspect",
+				Args: []string{"--ref", data.Draft.Ref, "--view", "full", "--json"},
+			}
+		}
+	}
+	if errorCode(err) == "draft_busy" {
+		var operation *mail.OperationError
+		if errors.As(err, &operation) && operation.DraftRef != "" {
+			guidance.Recovery = mail.RecoveryGuidance{
+				Action: mail.RecoveryObserve, Command: "drafts.inspect",
+				Args: []string{"--ref", operation.DraftRef, "--json"},
+			}
+		}
+	}
+	if errorCode(err) == "account_binding_stale" {
 		guidance.Recovery = mail.RecoveryGuidance{
-			Action: mail.RecoveryInspect, Command: "drafts.inspect",
-			Args: []string{"--ref", data.Draft.Ref, "--view", "full", "--json"},
+			Action: mail.RecoveryObserve, Command: "accounts.list", Args: []string{"--json"},
 		}
 	}
 	if result := data.DraftHandoff; handoffNeedsReconciliation(result, err) {

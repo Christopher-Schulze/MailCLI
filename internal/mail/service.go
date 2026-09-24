@@ -89,8 +89,9 @@ type ValidationError struct {
 }
 
 type OperationError struct {
-	Code    string
-	Message string
+	Code     string
+	Message  string
+	DraftRef string
 }
 
 func NewService(gateway Gateway) *Service {

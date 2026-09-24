@@ -312,6 +312,128 @@ func TestOutputLimitGuidanceRequestsCorrection(t *testing.T) {
 	}
 }
 
+func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
+	draft := mail.Draft{Ref: "draft_abcdefghijklmnopqrstuvwx"}
+	conflict := func(ref string) error {
+		return &mail.DraftRevisionConflict{Ref: ref, ExpectedRevision: "expected", CurrentRevision: "current"}
+	}
+	tests := []struct {
+		name          string
+		command       string
+		code          string
+		data          responseData
+		err           error
+		target        projectionTarget
+		view          string
+		phase         mail.OperationPhase
+		effect        mail.EffectCertainty
+		retryability  mail.Retryability
+		replayAllowed bool
+		action        mail.RecoveryAction
+		recoveryCmd   string
+		recoveryArgs  []string
+	}{
+		{
+			name: "completed draft output with ref", command: "drafts.update", code: "output_too_large",
+			data:   responseData{Draft: &draft, draftMutationCompleted: true},
+			err:    &outputTooLargeError{actual: 512, limit: 128, target: "draft", completedDraftRef: draft.Ref},
+			target: projectionTargetDraft, view: outputViewMetadata,
+			phase: mail.OperationPhaseExecution, effect: mail.EffectComplete,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
+			recoveryCmd: "drafts.inspect", recoveryArgs: []string{"--ref", draft.Ref, "--view", "full", "--json"},
+		},
+		{
+			name: "completed draft output without ref", command: "drafts.update", code: "output_too_large",
+			data:   responseData{draftMutationCompleted: true},
+			err:    &outputTooLargeError{actual: 512, limit: 128, target: "draft"},
+			target: projectionTargetDraft, view: outputViewMetadata,
+			phase: mail.OperationPhaseExecution, effect: mail.EffectComplete,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+		},
+		{
+			name: "read projection without original args", command: "messages.raw", code: "output_too_large",
+			err:    &outputTooLargeError{actual: 512, limit: 128, target: "raw message"},
+			target: projectionTargetRaw, view: outputViewFull,
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+		},
+		{
+			name: "stale search cursor", command: "messages.search", code: "search_cursor_stale",
+			err:   &mail.OperationError{Code: "search_cursor_stale", Message: "stale cursor"},
+			phase: mail.OperationPhaseRead, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+		},
+		{
+			name: "search index changed", command: "messages.filter", code: "search_index_changed",
+			err:   &mail.OperationError{Code: "search_index_changed", Message: "index changed"},
+			phase: mail.OperationPhaseRead, effect: mail.EffectNone,
+			retryability: mail.RetrySafe, replayAllowed: true, action: mail.RecoveryRetry,
+		},
+		{
+			name: "draft revision conflict with ref", command: "drafts.update", code: "draft_revision_conflict", err: conflict(draft.Ref),
+			phase: mail.OperationPhaseValidation, effect: mail.EffectNone,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
+			recoveryCmd: "drafts.inspect", recoveryArgs: []string{"--ref", draft.Ref, "--view", "full", "--json"},
+		},
+		{
+			name: "draft revision conflict without ref", command: "drafts.update", code: "draft_revision_conflict", err: conflict(""),
+			phase: mail.OperationPhaseValidation, effect: mail.EffectNone,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
+		},
+		{
+			name: "draft busy with ref", command: "drafts.send", code: "draft_busy",
+			err:   &mail.OperationError{Code: "draft_busy", Message: "busy", DraftRef: draft.Ref},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+			recoveryCmd: "drafts.inspect", recoveryArgs: []string{"--ref", draft.Ref, "--json"},
+		},
+		{
+			name: "draft busy without ref", command: "drafts.send", code: "draft_busy",
+			err:   &mail.OperationError{Code: "draft_busy", Message: "busy"},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+		},
+		{
+			name: "stale account binding", command: "drafts.send", code: "account_binding_stale",
+			err:   &mail.OperationError{Code: "account_binding_stale", Message: "stale binding"},
+			phase: mail.OperationPhaseSubmission, effect: mail.EffectUnknown,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+			recoveryCmd: "accounts.list", recoveryArgs: []string{"--json"},
+		},
+		{
+			name: "Mail recovery requires user action", command: "drafts.handoff", code: "mail_recovery_required",
+			err:   &mail.OperationError{Code: "mail_recovery_required", Message: "reopen Mail"},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectUnknown,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			code := writeProjectedFailure(&output, test.command, test.data,
+				outputOptions{target: test.target, view: test.view, maxBytes: defaultJSONOutputBytes}, test.err, true)
+			if code != 1 {
+				t.Fatalf("writeProjectedFailure() = %d, want 1; envelope=%s", code, output.String())
+			}
+			var response envelope
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v; envelope=%s", err, output.String())
+			}
+			if response.OK || response.Command != test.command || response.Error == nil ||
+				response.Error.Code != test.code || response.Error.Guidance == nil {
+				t.Fatalf("failure envelope = %+v", response)
+			}
+			guidance := response.Error.Guidance
+			if guidance.Phase != test.phase || guidance.EffectCertainty != test.effect ||
+				guidance.Retryability != test.retryability || guidance.ReplayAllowed != test.replayAllowed ||
+				guidance.Recovery.Action != test.action || guidance.Recovery.Command != test.recoveryCmd ||
+				!equalStrings(guidance.Recovery.Args, test.recoveryArgs) {
+				t.Fatalf("%s envelope guidance = %+v", test.name, guidance)
+			}
+		})
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

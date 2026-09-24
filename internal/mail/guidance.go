@@ -115,6 +115,24 @@ func GuidanceForError(command string, err error) OperationGuidance {
 	switch {
 	case code == "draft_revision_conflict" || code == "draft_revision_unavailable":
 		return OperationGuidance{Phase: OperationPhaseValidation, EffectCertainty: EffectNone, Retryability: RetryObserveRequired, ReplayAllowed: false, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
+	case code == "draft_busy":
+		return OperationGuidance{
+			Phase: OperationPhaseExecution, EffectCertainty: EffectNone,
+			Retryability: RetryObserveRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryObserve},
+		}
+	case code == "search_cursor_stale":
+		return OperationGuidance{
+			Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+			Retryability: RetryUserInputRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryCorrect},
+		}
+	case code == "search_index_changed":
+		return OperationGuidance{
+			Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+			Retryability: RetrySafe, ReplayAllowed: true,
+			Recovery: RecoveryGuidance{Action: RecoveryRetry},
+		}
 	case code == "batch_canceled":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
 	case code == "initialization_failed":
