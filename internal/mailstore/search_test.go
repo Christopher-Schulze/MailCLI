@@ -1742,18 +1742,52 @@ func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 	if len(extraMessages) == 1 {
 		extraCount = extraMessages[0]
 	}
+	fixture := createSearchFixtureData(t, extraCount, false)
+	store, err := Open(context.Background(), Config{
+		MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	return store, fixture.inboxRef
+}
+
+type searchFixtureData struct {
+	mailRoot          string
+	activeAccountURLs []string
+	accountRef        string
+	inboxRef          string
+	messageCount      int
+	indexBytes        int64
+	sourceBytes       int64
+}
+
+const generatedStoreFixtureMessageCount = 600
+
+func createSearchFixtureData(t testing.TB, extraCount int, includeSecondAccount bool) searchFixtureData {
+	t.Helper()
+	if extraCount < 0 {
+		t.Fatal("createSearchFixtureData() requires a non-negative extra-message count")
+	}
 	root := t.TempDir()
 	mailRoot := filepath.Join(root, "Mail")
-	mailData := filepath.Join(mailRoot, "V10", "MailData")
+	versionRoot := filepath.Join(mailRoot, "V10")
+	mailData := filepath.Join(versionRoot, "MailData")
 	if err := os.MkdirAll(mailData, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 	databasePath := filepath.Join(mailData, envelopeIndexName)
 	writer := openTestWriter(t, databasePath)
 	createTestSchema(t, writer, "")
+	archiveURL := "imap://" + testAccountID + "/%5BGmail%5D/All"
+	inboxCount := 3
+	if includeSecondAccount {
+		archiveURL = "imap://" + testAccountID + "/Archive"
+		inboxCount = extraCount + 2
+	}
 	statements := []string{
-		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (1,'imap://` + testAccountID + `/INBOX',3,0,0,1)`,
-		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (2,'imap://` + testAccountID + `/%5BGmail%5D/All',1,0,0,1)`,
+		fmt.Sprintf(`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (1,'imap://%s/INBOX',%d,0,0,1)`, testAccountID, inboxCount),
+		fmt.Sprintf(`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (2,'%s',1,0,0,1)`, archiveURL),
 		`INSERT INTO addresses(ROWID,address,comment) VALUES (1,'alice@example.com','Alice')`,
 		`INSERT INTO addresses(ROWID,address,comment) VALUES (2,'christopher@example.com','Christopher')`,
 		`INSERT INTO subjects(ROWID,subject) VALUES (1,'Quarterly Report'),(2,'Status Update'),(3,'Noise')`,
@@ -1764,6 +1798,12 @@ func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 		`INSERT INTO labels(message_id,mailbox_id) VALUES (101,1)`,
 		`INSERT INTO recipients(message,address,type,position) VALUES (101,2,0,0),(102,2,0,0),(103,2,0,0)`,
 		`INSERT INTO attachments(message,attachment_id,name) VALUES (101,'2','invoice.pdf')`,
+	}
+	if includeSecondAccount {
+		statements = append(statements, fmt.Sprintf(
+			`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES (3,'imap://%s/INBOX',0,0,0,1)`,
+			secondaryCatalogAccountID,
+		))
 	}
 	for _, statement := range statements {
 		if _, err := writer.Exec(statement); err != nil {
@@ -1793,14 +1833,41 @@ func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close fixture database: %v", err)
 	}
-	store, err := Open(context.Background(), Config{
-		MailRoot:          mailRoot,
-		ActiveAccountURLs: []string{"imap://" + testAccountID + "/"},
-	})
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+	if includeSecondAccount {
+		accountCaches := []struct {
+			accountID string
+			cache     string
+		}{
+			{
+				accountID: testAccountID,
+				cache: `<?xml version="1.0"?><plist version="1.0"><dict><key>mboxes</key><dict>` +
+					`<key>INBOX</key><dict><key>MailboxPathComponent</key><string>INBOX</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+					`<key>Archive</key><dict><key>MailboxPathComponent</key><string>Archive</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+					`</dict></dict></plist>`,
+			},
+			{
+				accountID: secondaryCatalogAccountID,
+				cache: `<?xml version="1.0"?><plist version="1.0"><dict><key>mboxes</key><dict>` +
+					`<key>INBOX</key><dict><key>MailboxPathComponent</key><string>INBOX</string><key>IMAPMailboxChildren</key><dict/></dict>` +
+					`</dict></dict></plist>`,
+			},
+		}
+		for _, account := range accountCaches {
+			accountRoot := filepath.Join(versionRoot, account.accountID)
+			if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+				t.Fatalf("create mailbox cache directory: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), []byte(account.cache), 0o600); err != nil {
+				t.Fatalf("write mailbox cache: %v", err)
+			}
+		}
 	}
+	pathStore := &Store{versionRoot: versionRoot, storeUUID: testAccountID}
 	locations := map[int64]string{101: "imap://" + testAccountID + "/%5BGmail%5D/All", 102: "imap://" + testAccountID + "/INBOX", 103: "imap://" + testAccountID + "/INBOX"}
+	if includeSecondAccount {
+		locations[101] = archiveURL
+	}
+	var sourceBytes int64
 	bodies := map[int64]string{
 		101: "needle alpha " + strings.Repeat("x", 512),
 		102: "needle beta",
@@ -1814,16 +1881,13 @@ func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 	for rowID, mailboxURL := range locations {
 		location, err := parseMailboxURL(mailboxURL)
 		if err != nil {
-			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("parseMailboxURL() error = %v", err)
 		}
-		base, err := store.messageBasePath(location, rowID)
+		base, err := pathStore.messageBasePath(location, rowID)
 		if err != nil {
-			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("messageBasePath() error = %v", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(base), 0o700); err != nil {
-			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("MkdirAll(message) error = %v", err)
 		}
 		source := []byte(fmt.Sprintf(
@@ -1833,14 +1897,106 @@ func newSearchFixture(t testing.TB, extraMessages ...int) (*Store, string) {
 		framed := append([]byte(fmt.Sprintf("%-10d\n", len(source))), source...)
 		framed = append(framed, validPlistTrailer()...)
 		if err := os.WriteFile(base+".emlx", framed, 0o600); err != nil {
-			closeTestResourceNow(t, store, "test store")
 			t.Fatalf("WriteFile(message) error = %v", err)
 		}
+		sourceBytes += int64(len(framed))
 	}
 	inboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"INBOX"})
 	if err != nil {
-		closeTestResourceNow(t, store, "test store")
 		t.Fatalf("EncodeMailbox() error = %v", err)
 	}
-	return store, inboxRef
+	accountRef, err := mailref.EncodeAccount(testAccountID)
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	indexInfo, err := os.Stat(databasePath)
+	if err != nil {
+		t.Fatalf("stat fixture database: %v", err)
+	}
+	activeAccountURLs := []string{"imap://" + testAccountID + "/"}
+	if includeSecondAccount {
+		activeAccountURLs = append(activeAccountURLs, "imap://"+secondaryCatalogAccountID+"/")
+	}
+	return searchFixtureData{
+		mailRoot: mailRoot, activeAccountURLs: activeAccountURLs,
+		accountRef: accountRef, inboxRef: inboxRef,
+		messageCount: 3 + extraCount, indexBytes: indexInfo.Size(), sourceBytes: sourceBytes,
+	}
+}
+
+func TestGeneratedStoreLifecycleFixture(t *testing.T) {
+	fixture := createSearchFixtureData(t, generatedStoreFixtureMessageCount-3, true)
+	if fixture.messageCount != generatedStoreFixtureMessageCount || fixture.indexBytes == 0 || fixture.sourceBytes == 0 {
+		t.Fatalf("generated fixture metrics = messages:%d index:%d source:%d", fixture.messageCount, fixture.indexBytes, fixture.sourceBytes)
+	}
+	store, err := Open(context.Background(), Config{
+		MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer closeTestResource(t, store, "generated lifecycle fixture store")
+	var indexedMessages int
+	if err := store.database.QueryRowContext(context.Background(), `SELECT count(*) FROM messages`).Scan(&indexedMessages); err != nil {
+		t.Fatalf("count generated messages: %v", err)
+	}
+	if indexedMessages != generatedStoreFixtureMessageCount {
+		t.Fatalf("generated database contains %d messages, want %d", indexedMessages, generatedStoreFixtureMessageCount)
+	}
+
+	accounts, err := store.ListAccounts(context.Background())
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("ListAccounts() returned %d accounts, error = %v; want 2", len(accounts), err)
+	}
+	if accounts[0].Ref != fixture.accountRef {
+		t.Fatalf("first generated account ref = %q, want %q", accounts[0].Ref, fixture.accountRef)
+	}
+	secondAccount, err := mailref.DecodeAccount(accounts[1].Ref)
+	if err != nil || secondAccount.AccountID != secondaryCatalogAccountID {
+		t.Fatalf("second generated account ref = %+v, error = %v; want %s", secondAccount, err, secondaryCatalogAccountID)
+	}
+	mailboxes, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{AccountRef: fixture.accountRef})
+	if err != nil || len(mailboxes) != 2 {
+		t.Fatalf("ListMailboxes() returned %d mailboxes, error = %v; want 2", len(mailboxes), err)
+	}
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: fixture.inboxRef, Limit: 25,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := assertGeneratedStorePage(t, fixture, page)
+	message, err := store.GetMessage(context.Background(), messageRef)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	assertGeneratedFullMessage(t, message)
+}
+
+func assertGeneratedStorePage(t testing.TB, fixture searchFixtureData, page mail.MessagePage) string {
+	t.Helper()
+	if len(page.Messages) != 25 || page.NextCursor == "" {
+		t.Fatalf("generated message page has %d messages and cursor %t, want 25 and more results", len(page.Messages), page.NextCursor != "")
+	}
+	for index, summary := range page.Messages {
+		if summary.MailboxRef != fixture.inboxRef {
+			t.Fatalf("generated page message %d mailbox ref = %q, want %q", index, summary.MailboxRef, fixture.inboxRef)
+		}
+		ref, err := mailref.DecodeMessage(summary.Ref)
+		if err != nil {
+			t.Fatalf("DecodeMessage(page item %d) error = %v", index, err)
+		}
+		if ref.AccountID != testAccountID || ref.LibraryID != fmt.Sprintf("%d", 104+index) ||
+			len(ref.MailboxPath) != 1 || ref.MailboxPath[0] != "INBOX" {
+			t.Fatalf("generated page message %d ref = %+v, want mailbox INBOX row %d", index, ref, 104+index)
+		}
+	}
+	return page.Messages[0].Ref
+}
+
+func assertGeneratedFullMessage(t testing.TB, message mail.Message) {
+	t.Helper()
+	if message.ContentSource != "emlx_full" || !message.ContentComplete || !strings.Contains(message.Content, "needle extra 0") {
+		t.Fatalf("generated full read content source=%q complete=%t body=%q", message.ContentSource, message.ContentComplete, message.Content)
+	}
 }

@@ -376,6 +376,194 @@ func BenchmarkSearchFixture603(b *testing.B) {
 	}
 }
 
+func reportGeneratedStoreFixture(b *testing.B, fixture searchFixtureData) {
+	b.ReportMetric(float64(fixture.messageCount), "messages")
+	b.ReportMetric(float64(fixture.indexBytes), "index_B")
+	b.ReportMetric(float64(fixture.sourceBytes), "source_B")
+}
+
+func openGeneratedStoreFixture(tb testing.TB, fixture searchFixtureData) *Store {
+	tb.Helper()
+	store, err := Open(context.Background(), Config{
+		MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs,
+	})
+	if err != nil {
+		tb.Fatalf("open generated benchmark store: %v", err)
+	}
+	return store
+}
+
+// BenchmarkGeneratedStoreInitialOpen times the first Store open on an
+// unopened generated fixture. Close is excluded from this measurement.
+func BenchmarkGeneratedStoreInitialOpen(b *testing.B) {
+	fixture := newGeneratedStoreFixture(b)
+	config := Config{MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		store, err := Open(ctx, config)
+		if err != nil {
+			b.Fatalf("open generated benchmark store: %v", err)
+		}
+		b.StopTimer()
+		closeErr := store.Close()
+		b.StartTimer()
+		if closeErr != nil {
+			b.Fatalf("close generated benchmark store: %v", closeErr)
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
+// BenchmarkGeneratedStoreLifecycle keeps catalog, page, and full-read paths
+// deterministic when a user Mail store is unavailable.
+func BenchmarkGeneratedStoreLifecycle(b *testing.B) {
+	fixture := newGeneratedStoreFixture(b)
+	b.Run("open_close", func(b *testing.B) { benchmarkGeneratedStoreOpenClose(b, fixture) })
+	b.Run("list_accounts", func(b *testing.B) { benchmarkGeneratedStoreListAccounts(b, fixture) })
+	b.Run("list_mailboxes", func(b *testing.B) { benchmarkGeneratedStoreListMailboxes(b, fixture) })
+	b.Run("list_messages_25", func(b *testing.B) { benchmarkGeneratedStoreListMessages(b, fixture) })
+	b.Run("get_message_full", func(b *testing.B) { benchmarkGeneratedStoreGetMessage(b, fixture) })
+}
+
+func newGeneratedStoreFixture(b testing.TB) searchFixtureData {
+	b.Helper()
+	fixture := createSearchFixtureData(b, generatedStoreFixtureMessageCount-3, true)
+	if fixture.messageCount != generatedStoreFixtureMessageCount {
+		b.Fatalf("generated fixture has %d messages, want %d", fixture.messageCount, generatedStoreFixtureMessageCount)
+	}
+	return fixture
+}
+
+func benchmarkGeneratedStoreOpenClose(b *testing.B, fixture searchFixtureData) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		store := openGeneratedStoreFixture(b, fixture)
+		if err := store.Close(); err != nil {
+			b.Fatalf("close generated benchmark store: %v", err)
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
+func benchmarkGeneratedStoreListAccounts(b *testing.B, fixture searchFixtureData) {
+	store := openGeneratedStoreFixture(b, fixture)
+	b.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close generated benchmark store: %v", err)
+		}
+	})
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		accounts, err := store.ListAccounts(ctx)
+		if err != nil {
+			b.Fatalf("list generated accounts: %v", err)
+		}
+		if len(accounts) != 2 {
+			b.Fatalf("generated account count = %d, want 2", len(accounts))
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
+func benchmarkGeneratedStoreListMailboxes(b *testing.B, fixture searchFixtureData) {
+	store := openGeneratedStoreFixture(b, fixture)
+	b.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close generated benchmark store: %v", err)
+		}
+	})
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		mailboxes, err := store.ListMailboxes(
+			ctx, mail.ListMailboxesRequest{AccountRef: fixture.accountRef},
+		)
+		if err != nil {
+			b.Fatalf("list generated mailboxes: %v", err)
+		}
+		if len(mailboxes) != 2 {
+			b.Fatalf("generated mailbox count = %d, want 2", len(mailboxes))
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
+func benchmarkGeneratedStoreListMessages(b *testing.B, fixture searchFixtureData) {
+	ctx := context.Background()
+	setupStore := openGeneratedStoreFixture(b, fixture)
+	page, err := setupStore.ListMessages(ctx, mail.ListMessagesRequest{
+		MailboxRef: fixture.inboxRef, Limit: 25,
+	})
+	if err != nil {
+		b.Fatalf("verify generated message page: %v", err)
+	}
+	assertGeneratedStorePage(b, fixture, page)
+	if err := setupStore.Close(); err != nil {
+		b.Fatalf("close generated page verification store: %v", err)
+	}
+	store := openGeneratedStoreFixture(b, fixture)
+	b.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close generated benchmark store: %v", err)
+		}
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		page, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+			MailboxRef: fixture.inboxRef, Limit: 25,
+		})
+		if err != nil || len(page.Messages) != 25 {
+			b.Fatalf("list generated 25-message page: count=%d error=%v", len(page.Messages), err)
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
+func benchmarkGeneratedStoreGetMessage(b *testing.B, fixture searchFixtureData) {
+	setupStore := openGeneratedStoreFixture(b, fixture)
+	ctx := context.Background()
+	page, err := setupStore.ListMessages(ctx, mail.ListMessagesRequest{
+		MailboxRef: fixture.inboxRef, Limit: 25,
+	})
+	if err != nil {
+		b.Fatalf("list generated messages for full-read reference: %v", err)
+	}
+	messageRef := assertGeneratedStorePage(b, fixture, page)
+	message, err := setupStore.GetMessage(ctx, messageRef)
+	if err != nil {
+		b.Fatalf("verify generated full-message read: %v", err)
+	}
+	assertGeneratedFullMessage(b, message)
+	if err := setupStore.Close(); err != nil {
+		b.Fatalf("close generated full-read verification store: %v", err)
+	}
+	store := openGeneratedStoreFixture(b, fixture)
+	b.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close generated benchmark store: %v", err)
+		}
+	})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		message, err := store.GetMessage(ctx, messageRef)
+		if err != nil {
+			b.Fatalf("get generated full message: %v", err)
+		}
+		if !message.ContentComplete || !strings.Contains(message.Content, "needle extra 0") {
+			b.Fatalf("generated full message is incomplete: %+v", message.Summary)
+		}
+	}
+	reportGeneratedStoreFixture(b, fixture)
+}
+
 // BenchmarkSearchTextRepresentations measures search-text preparation and
 // snippet offset handling without SQLite or MIME parsing noise.
 func BenchmarkSearchTextRepresentations(b *testing.B) {

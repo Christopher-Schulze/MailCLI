@@ -5,7 +5,26 @@ MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BENCHMARK_REPETITIONS=20
 BENCHMARK_CPUS=4
 RESULT_DIRECTORY="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-performance-evidence.XXXXXX")"
+SELECTED_GROUP=""
+SELECTED_GROUP_FOUND=false
 trap 'rm -rf "${RESULT_DIRECTORY}"' EXIT
+
+usage() {
+  printf '%s\n' \
+    'Usage: run-performance-evidence.sh [--group NAME]' \
+    '       run-performance-evidence.sh --help' \
+    'Run the complete matrix by default, or select one named group.'
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  [[ "$#" -eq 1 ]] || { usage >&2; exit 2; }
+  usage
+  exit 0
+fi
+if [[ "$#" -gt 0 ]]; then
+  [[ "$#" -eq 2 && "$1" == "--group" && -n "$2" ]] || { usage >&2; exit 2; }
+  SELECTED_GROUP="$2"
+fi
 
 summarize_results() {
   local RESULT_PATH="$1"
@@ -19,13 +38,20 @@ summarize_results() {
       ns = ""
       bytes = ""
       allocs = ""
+      messages = "-"
+      index_bytes = "-"
+      source_bytes = "-"
       for (field = 2; field < NF; field++) {
         if ($(field + 1) == "ns/op") ns = $field
         if ($(field + 1) == "B/op") bytes = $field
         if ($(field + 1) == "allocs/op") allocs = $field
+        if ($(field + 1) == "messages") messages = $field
+        if ($(field + 1) == "index_B") index_bytes = $field
+        if ($(field + 1) == "source_B") source_bytes = $field
       }
       if (ns != "" && bytes != "" && allocs != "") {
-        printf "%s\t%.3f\t%.3f\t%.3f\n", name, ns, bytes, allocs
+        printf "%s\t%.3f\t%.3f\t%.3f\t%s\t%s\t%s\n",
+          name, ns, bytes, allocs, messages, index_bytes, source_bytes
       }
     }
   ' "${RESULT_PATH}" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n >"${SAMPLE_PATH}"
@@ -46,6 +72,7 @@ summarize_results() {
       }
       return ordered[rank]
     }
+    BEGIN { failed = 0 }
     {
       name = $1
       if (!(name in seen)) {
@@ -57,9 +84,17 @@ summarize_results() {
       ns[name, sample] = $2
       bytes[name, sample] = $3
       allocs[name, sample] = $4
+      if (sample == 1) {
+        fixture_messages[name] = $5
+        fixture_index_bytes[name] = $6
+        fixture_source_bytes[name] = $7
+      } else if (fixture_messages[name] != $5 || fixture_index_bytes[name] != $6 ||
+        fixture_source_bytes[name] != $7) {
+        printf "Benchmark %s changed its fixture metrics between repetitions\n", name > "/dev/stderr"
+        failed = 1
+      }
     }
     END {
-      failed = 0
       for (name_index = 1; name_index <= name_count; name_index++) {
         name = names[name_index]
         samples = count[name]
@@ -70,9 +105,14 @@ summarize_results() {
         }
         p50 = int((samples + 1) / 2)
         p95 = int((95 * samples + 99) / 100)
-        printf "summary benchmark=%s repetitions=%d p50_ns/op=%.0f p95_ns/op=%.0f p50_B/op=%.0f p50_allocs/op=%.0f\n",
+        summary = sprintf("summary benchmark=%s repetitions=%d p50_ns/op=%.0f p95_ns/op=%.0f p50_B/op=%.0f p50_allocs/op=%.0f",
           name, samples, ns[name, p50], ns[name, p95],
-          percentile_metric(bytes, name, samples, p50), percentile_metric(allocs, name, samples, p50)
+          percentile_metric(bytes, name, samples, p50), percentile_metric(allocs, name, samples, p50))
+        if (fixture_messages[name] != "-") {
+          summary = summary sprintf(" fixture_messages=%.0f index_B=%.0f source_B=%.0f",
+            fixture_messages[name], fixture_index_bytes[name], fixture_source_bytes[name])
+        }
+        print summary
       }
       exit failed
     }
@@ -86,6 +126,11 @@ run_group() {
   local REGEX="$4"
   local BENCHTIME="$5"
   local RESULT_PATH="${RESULT_DIRECTORY}/${NAME}.txt"
+
+  if [[ -n "${SELECTED_GROUP}" && "${NAME}" != "${SELECTED_GROUP}" ]]; then
+    return 0
+  fi
+  SELECTED_GROUP_FOUND=true
 
   printf '\ngroup=%s\ninput=%s\npackage=%s\nregex=%s\nbenchtime=%s\nrepetitions=%d\n' \
     "${NAME}" "${INPUT_SHAPE}" "${PACKAGE}" "${REGEX}" "${BENCHTIME}" "${BENCHMARK_REPETITIONS}"
@@ -143,6 +188,18 @@ run_group \
   'generated 603-message store; first 25-result metadata, default body, and explicit exact-count body pages' \
   ./internal/mailstore \
   '^BenchmarkSearchFixture603$' \
+  20x
+run_group \
+  generated-store-open \
+  'first Open of a generated 600-message SQLite/EMLX fixture; new files do not imply a cold OS page cache' \
+  ./internal/mailstore \
+  '^BenchmarkGeneratedStoreInitialOpen$' \
+  1x
+run_group \
+  generated-store-lifecycle \
+  '600 messages, two active accounts and three indexed mailboxes; repeated Open/Close, account/mailbox lists, exact 25-message page and full message read' \
+  ./internal/mailstore \
+  '^BenchmarkGeneratedStoreLifecycle$' \
   20x
 run_group \
   search-fold \
@@ -216,3 +273,8 @@ run_group \
   ./internal/transport/imapclient \
   '^Benchmark(IndependentStatusConcurrency|FetchConcurrency)$' \
   20x
+
+if [[ -n "${SELECTED_GROUP}" && "${SELECTED_GROUP_FOUND}" != true ]]; then
+  printf 'Unknown performance evidence group: %s\n' "${SELECTED_GROUP}" >&2
+  exit 2
+fi
