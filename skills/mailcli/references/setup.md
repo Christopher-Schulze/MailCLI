@@ -12,6 +12,8 @@ If `send.setup` fails after storing the Keychain credential, `data.partial_effec
 
 `mailcli version --json` reads the installed identity. `mailcli update --json` checks the signed release and installs a verified binary and matching skill; use it only when the user requested an update, then refresh the executable identity and capability contract.
 
+If an update error follows an installation attempt, `data.update_result` reports the binary path, target `latest_version`, `updated`, and `failed_phase`; `error.guidance.effect_certainty` is `complete` only when installed-version verification succeeded, otherwise `unknown`. Follow the read-only `mailcli version --json` recovery command and inspect the installed identity before another update decision. Do not rerun the installer automatically or assume that it rolled back.
+
 All installation entrypoints share `~/Library/Application Support/MailCLI/update.lock` through recovery, verification, and cleanup. Direct installers wait at most 30 seconds; self-update uses its command deadline and passes ownership to the child. Self-update ignores `MAILCLI_INSTALL_PACKAGE_ROOT` and uses its authenticated package; source installation retains its explicit checkout override. Never unlink or steal this lock or infer abandonment from age. If identity checks refuse recovery, retain the transaction and replaced artifacts for inspection. Cancel automated installers through their whole process group.
 
 Respect the published provider set, `raw_mime_send`, `send_transport`, `mutation_transport`, page/batch limits, and IMAP pool limits. LIST/STATUS/SEARCH/FETCH share the account pool; APPEND and mutations are exclusive per account.

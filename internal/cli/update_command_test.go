@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -144,6 +145,200 @@ func TestPerformUpdatePreservesInstallationWhenInstallerFails(t *testing.T) {
 	skill, readErr := os.ReadFile(filepath.Join(environment.homeDirectory, ".agents", "skills", "mailcli", "SKILL.md"))
 	if readErr != nil || string(skill) != "old skill\n" {
 		t.Fatalf("previous skill was not restored: %q, %v", skill, readErr)
+	}
+}
+
+func TestUpdateReportsVerificationFailureAfterInstallation(t *testing.T) {
+	for _, jsonOutput := range []bool{true, false} {
+		mode := "human"
+		if jsonOutput {
+			mode = "json"
+		}
+		t.Run(mode, func(t *testing.T) {
+			environment := newIsolatedUpdateEnvironment(t)
+			environment.verifyInstallation = func(context.Context, string, string) error {
+				return errors.New("injected installed-binary verification failure")
+			}
+			assertPostInstallUpdateFailure(t, environment, jsonOutput, updatePhaseVerification, "unknown", false)
+		})
+	}
+}
+
+func TestUpdateReportsInstallerErrorAfterCommitAsUnknown(t *testing.T) {
+	environment := newIsolatedUpdateEnvironment(t)
+	installPackage := environment.installPackage
+	environment.installPackage = func(
+		ctx context.Context,
+		installerPath string,
+		binaryPath string,
+		homeDirectory string,
+		installationLock *os.File,
+	) error {
+		if err := installPackage(ctx, installerPath, binaryPath, homeDirectory, installationLock); err != nil {
+			return err
+		}
+		return errors.New("injected post-commit installer cleanup failure")
+	}
+	assertPostInstallUpdateFailure(t, environment, true, updatePhaseInstaller, "unknown", false)
+}
+
+func TestUpdateReportsPostInstallCleanupAndLockFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase string
+		setup func(*testing.T, *updateEnvironment)
+	}{
+		{
+			name: "package cleanup", phase: updatePhasePackageCleanup,
+			setup: func(t *testing.T, environment *updateEnvironment) {
+				cleanupRoot := ""
+				t.Cleanup(func() {
+					if cleanupRoot != "" {
+						if err := os.RemoveAll(cleanupRoot); err != nil {
+							t.Errorf("remove injected package root: %v", err)
+						}
+					}
+				})
+				environment.removePackageRoot = func(path string) error {
+					cleanupRoot = path
+					return errors.New("injected package cleanup failure")
+				}
+			},
+		},
+		{
+			name: "lock validation", phase: updatePhaseLockValidation,
+			setup: func(_ *testing.T, environment *updateEnvironment) {
+				environment.validateLock = func(*os.File) error {
+					return errors.New("injected update lock validation failure")
+				}
+			},
+		},
+		{
+			name: "lock close", phase: updatePhaseLockClose,
+			setup: func(_ *testing.T, environment *updateEnvironment) {
+				environment.closeLock = func(lock *os.File) error {
+					if err := lock.Close(); err != nil {
+						return err
+					}
+					return errors.New("injected update lock close failure")
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := newIsolatedUpdateEnvironment(t)
+			test.setup(t, &environment)
+			assertPostInstallUpdateFailure(t, environment, true, test.phase, "complete", true)
+		})
+	}
+}
+
+func TestUpdatePreInstallFailureOmitsPostInstallEvidence(t *testing.T) {
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	server := newUpdateTestServer(t, "1.0.5", archive,
+		[]byte(strings.Repeat("0", 64)+"  mailcli_1.0.5_darwin_arm64.tar.gz\n"))
+	defer server.Close()
+	environment := updateTestEnvironment(t, server, "1.0.4")
+	createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
+	var stdout, stderr bytes.Buffer
+	code := runUpdateWithEnvironment(context.Background(), true, environment, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("update exit code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode update error: %v, output=%q", err, stdout.String())
+	}
+	if response.Data.UpdateResult != nil || response.Error == nil ||
+		response.Error.Guidance.EffectCertainty != "none" || response.Error.Guidance.Recovery.Command != "" {
+		t.Fatalf("pre-install error claimed post-install state: %+v", response)
+	}
+	if err := verifyBinaryVersion(context.Background(), environment.executablePath, "1.0.4"); err != nil {
+		t.Fatalf("previous installed binary changed: %v", err)
+	}
+}
+
+func newIsolatedUpdateEnvironment(t *testing.T) updateEnvironment {
+	t.Helper()
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	server := newUpdateTestServer(t, "1.0.5", archive,
+		checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive))
+	t.Cleanup(server.Close)
+	environment := updateTestEnvironment(t, server, "1.0.4")
+	createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
+	return environment
+}
+
+func assertPostInstallUpdateFailure(
+	t *testing.T,
+	environment updateEnvironment,
+	jsonOutput bool,
+	wantPhase string,
+	wantCertainty string,
+	wantUpdated bool,
+) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := runUpdateWithEnvironment(context.Background(), jsonOutput, environment, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("update exit code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if jsonOutput {
+		assertJSONPostInstallUpdateFailure(t, environment, stdout.Bytes(), wantPhase, wantCertainty, wantUpdated)
+	} else if !strings.Contains(stderr.String(), "failed_phase="+wantPhase) ||
+		!strings.Contains(stderr.String(), "binary_path=\""+environment.executablePath+"\"") ||
+		!strings.Contains(stderr.String(), "target_version=1.0.5") ||
+		!strings.Contains(stderr.String(), "effect_certainty="+wantCertainty) ||
+		!strings.Contains(stderr.String(), "mailcli version --json") {
+		t.Fatalf("human post-install evidence = %q", stderr.String())
+	}
+	assertInstalledUpdatePayload(t, environment)
+}
+
+func assertJSONPostInstallUpdateFailure(
+	t *testing.T,
+	environment updateEnvironment,
+	output []byte,
+	wantPhase string,
+	wantCertainty string,
+	wantUpdated bool,
+) {
+	t.Helper()
+	var response envelope
+	if err := json.Unmarshal(output, &response); err != nil {
+		t.Fatalf("decode update error: %v, output=%q", err, output)
+	}
+	result := response.Data.UpdateResult
+	if response.OK || response.Error == nil || result == nil || result.Updated != wantUpdated ||
+		result.FailedPhase != wantPhase || result.BinaryPath != environment.executablePath || result.LatestVersion != "1.0.5" {
+		t.Fatalf("post-install error result = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if string(guidance.EffectCertainty) != wantCertainty || guidance.Retryability != "observe_required" ||
+		guidance.ReplayAllowed || guidance.Recovery.Action != "observe" || guidance.Recovery.Command != "version" ||
+		len(guidance.Recovery.Args) != 1 || guidance.Recovery.Args[0] != "--json" {
+		t.Fatalf("post-install recovery guidance = %+v", guidance)
+	}
+}
+
+func assertInstalledUpdatePayload(t *testing.T, environment updateEnvironment) {
+	t.Helper()
+	if err := verifyBinaryVersion(context.Background(), environment.executablePath, "1.0.5"); err != nil {
+		t.Fatalf("read-only installed version recovery failed: %v", err)
+	}
+	binary, err := os.ReadFile(environment.executablePath)
+	if err != nil || string(binary) != testUpdateBinary("1.0.5") {
+		t.Fatalf("installed binary bytes do not match target: error=%v", err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(environment.homeDirectory, ".agents", "skills", "mailcli", "SKILL.md"):              "new skill\n",
+		filepath.Join(environment.homeDirectory, ".agents", "skills", "mailcli", "agents", "openai.yaml"): "new agent\n",
+	} {
+		contents, readErr := os.ReadFile(path)
+		if readErr != nil || string(contents) != want {
+			t.Errorf("installed update payload at %s = %q, %v; want %q", path, contents, readErr, want)
+		}
 	}
 }
 

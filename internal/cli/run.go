@@ -117,6 +117,24 @@ func newErrorData(command string, data responseData, err error) *errorData {
 			}
 		}
 	}
+	if command == "update" {
+		result := data.UpdateResult
+		if result == nil || result.FailedPhase == "" {
+			guidance.EffectCertainty = mail.EffectNone
+		} else {
+			certainty := mail.EffectUnknown
+			if result.failureCertainty == string(mail.EffectComplete) {
+				certainty = mail.EffectComplete
+			}
+			guidance = mail.OperationGuidance{
+				Phase: mail.OperationPhaseExecution, EffectCertainty: certainty,
+				Retryability: mail.RetryObserveRequired,
+				Recovery: mail.RecoveryGuidance{
+					Action: mail.RecoveryObserve, Command: "version", Args: []string{"--json"},
+				},
+			}
+		}
+	}
 	var conflict *mail.DraftRevisionConflict
 	if errors.As(err, &conflict) {
 		guidance.Recovery = mail.RecoveryGuidance{

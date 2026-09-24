@@ -105,6 +105,12 @@ func validateUpdateLock(file *os.File) error {
 	return nil
 }
 
+type updateInstallOutcome struct {
+	attempted   bool
+	verified    bool
+	failedPhase string
+}
+
 func installVerifiedArchive(
 	ctx context.Context,
 	environment updateEnvironment,
@@ -112,13 +118,16 @@ func installVerifiedArchive(
 	archive []byte,
 	latestVersion string,
 	installationLock *os.File,
-) (resultErr error) {
+) (outcome updateInstallOutcome, resultErr error) {
 	temporaryRoot, err := os.MkdirTemp("", "mailcli-update-*")
 	if err != nil {
-		return updateFailure("update_install_failed", "create private update directory: %v", err)
+		return updateInstallOutcome{}, updateFailure("update_install_failed", "create private update directory: %v", err)
 	}
 	defer func() {
-		if cleanupErr := os.RemoveAll(temporaryRoot); cleanupErr != nil {
+		if cleanupErr := removeUpdatePackageRoot(environment, temporaryRoot); cleanupErr != nil {
+			if outcome.attempted && outcome.failedPhase == "" {
+				outcome.failedPhase = updatePhasePackageCleanup
+			}
 			resultErr = errors.Join(
 				resultErr,
 				updateFailure("update_install_failed", "remove private update directory: %v", cleanupErr),
@@ -127,22 +136,51 @@ func installVerifiedArchive(
 	}()
 	packageRoot := filepath.Join(temporaryRoot, fmt.Sprintf("mailcli_%s_darwin_arm64", latestVersion))
 	if err := extractReleaseArchive(archive, temporaryRoot, filepath.Base(packageRoot)); err != nil {
-		return err
+		return updateInstallOutcome{}, err
 	}
 	packageBinary := filepath.Join(packageRoot, "bin", "mailcli")
 	if err := environment.verifyPackage(ctx, packageBinary, latestVersion); err != nil {
-		return updateFailure("update_package_invalid", "verify release binary: %v", err)
+		return updateInstallOutcome{}, updateFailure("update_package_invalid", "verify release binary: %v", err)
 	}
 	installerPath := filepath.Join(packageRoot, "install.sh")
 	if err := reporter.step("Installing mailcli "+latestVersion, func() error {
+		outcome.attempted = true
 		return environment.installPackage(ctx, installerPath, environment.executablePath, environment.homeDirectory, installationLock)
 	}); err != nil {
-		return updateFailure("update_install_failed", "install release: %v", err)
+		if !outcome.attempted {
+			return updateInstallOutcome{}, updateFailure("update_install_failed", "start release install: %v", err)
+		}
+		outcome.failedPhase = updatePhaseInstaller
+		return outcome, updateFailure("update_install_failed", "install release: %v", err)
 	}
+	outcome.failedPhase = updatePhaseVerification
 	if err := environment.verifyInstallation(ctx, environment.executablePath, latestVersion); err != nil {
-		return updateFailure("update_install_failed", "verify installed release: %v", err)
+		return outcome, updateFailure("update_install_failed", "verify installed release: %v", err)
 	}
-	return nil
+	outcome.failedPhase = ""
+	outcome.verified = true
+	return outcome, nil
+}
+
+func removeUpdatePackageRoot(environment updateEnvironment, path string) error {
+	if environment.removePackageRoot != nil {
+		return environment.removePackageRoot(path)
+	}
+	return os.RemoveAll(path)
+}
+
+func validateUpdateLockForEnvironment(environment updateEnvironment, lock *os.File) error {
+	if environment.validateLock != nil {
+		return environment.validateLock(lock)
+	}
+	return validateUpdateLock(lock)
+}
+
+func closeUpdateLockForEnvironment(environment updateEnvironment, lock *os.File) error {
+	if environment.closeLock != nil {
+		return environment.closeLock(lock)
+	}
+	return lock.Close()
 }
 
 func extractReleaseArchive(archive []byte, destination string, expectedRoot string) (resultErr error) {

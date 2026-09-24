@@ -27,14 +27,21 @@ const (
 	maximumExtractedFileCount = 256
 	maximumUpdateRedirects    = 10
 	updateTimeout             = 5 * time.Minute
+	updatePhaseInstaller      = "installer"
+	updatePhaseVerification   = "installed_binary_verification"
+	updatePhasePackageCleanup = "package_cleanup"
+	updatePhaseLockValidation = "update_lock_validation"
+	updatePhaseLockClose      = "update_lock_close"
 )
 
 type updateResult struct {
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version"`
-	Updated        bool   `json:"updated"`
-	ReleaseURL     string `json:"release_url"`
-	BinaryPath     string `json:"binary_path"`
+	CurrentVersion   string `json:"current_version"`
+	LatestVersion    string `json:"latest_version"`
+	Updated          bool   `json:"updated"`
+	ReleaseURL       string `json:"release_url"`
+	BinaryPath       string `json:"binary_path"`
+	FailedPhase      string `json:"failed_phase,omitempty"`
+	failureCertainty string `json:"-"`
 }
 
 type updateAsset struct {
@@ -100,6 +107,9 @@ type updateEnvironment struct {
 	verifyPackage      func(context.Context, string, string) error
 	installPackage     func(context.Context, string, string, string, *os.File) error
 	verifyInstallation func(context.Context, string, string) error
+	removePackageRoot  func(string) error
+	validateLock       func(*os.File) error
+	closeLock          func(*os.File) error
 	urlPolicy          updateURLPolicy
 	releasePublicKey   ed25519.PublicKey
 }
@@ -127,14 +137,30 @@ func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	if err != nil {
 		return failCommand("update", *jsonOutput, err, stdout, stderr)
 	}
+	return runUpdateWithEnvironment(ctx, *jsonOutput, environment, stdout, stderr)
+}
+
+func runUpdateWithEnvironment(
+	ctx context.Context,
+	jsonOutput bool,
+	environment updateEnvironment,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
 	operationCtx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
-	reporter := newUpdateReporter(stdout, !*jsonOutput, !*jsonOutput && writerIsTerminal(stdout))
+	reporter := newUpdateReporter(stdout, !jsonOutput, !jsonOutput && writerIsTerminal(stdout))
 	result, err := performUpdate(operationCtx, environment, reporter)
 	if err != nil {
-		return failCommand("update", *jsonOutput, err, stdout, stderr)
+		if result.FailedPhase != "" {
+			if jsonOutput {
+				return failCommandWithData("update", true, responseData{UpdateResult: &result}, err, stdout, stderr)
+			}
+			return failUpdateWithResult(result, err, stderr)
+		}
+		return failCommand("update", jsonOutput, err, stdout, stderr)
 	}
-	if *jsonOutput {
+	if jsonOutput {
 		return writeSuccess(stdout, "update", responseData{UpdateResult: &result})
 	}
 	if result.Updated {
@@ -143,6 +169,24 @@ func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	}
 	writeFormat(stdout, "Already up to date (mailcli %s).\n", result.CurrentVersion)
 	return 0
+}
+
+func failUpdateWithResult(result updateResult, err error, stderr io.Writer) int {
+	writeLine(stderr, err)
+	certainty := result.failureCertainty
+	if certainty == "" {
+		certainty = "unknown"
+	}
+	writeFormat(stderr,
+		"update result: failed_phase=%s; binary_path=%q; target_version=%s; effect_certainty=%s\n",
+		result.FailedPhase, result.BinaryPath, result.LatestVersion, certainty,
+	)
+	if certainty == "complete" {
+		writeLine(stderr, "installed version was verified; recovery: run `mailcli version --json` to inspect the installed identity before any further update decision.")
+	} else {
+		writeLine(stderr, "installation outcome may be partial; recovery: run `mailcli version --json` to inspect the installed identity before considering another update. No rollback is claimed.")
+	}
+	return commandExitCode(err)
 }
 
 func defaultUpdateEnvironment() (updateEnvironment, error) {
@@ -209,7 +253,20 @@ func performUpdate(
 		return updateResult{}, err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, validateUpdateLock(installationLock), installationLock.Close())
+		validationErr := validateUpdateLockForEnvironment(environment, installationLock)
+		closeErr := closeUpdateLockForEnvironment(environment, installationLock)
+		if result.Updated && result.FailedPhase == "" {
+			switch {
+			case validationErr != nil:
+				result.FailedPhase = updatePhaseLockValidation
+			case closeErr != nil:
+				result.FailedPhase = updatePhaseLockClose
+			}
+			if result.FailedPhase != "" {
+				result.failureCertainty = "complete"
+			}
+		}
+		resultErr = errors.Join(resultErr, validationErr, closeErr)
 	}()
 	var release updateRelease
 	if err := reporter.step("Checking for updates", func() error {
@@ -230,10 +287,20 @@ func performUpdate(
 	if comparison >= 0 {
 		return result, nil
 	}
-	if err := downloadAndInstallUpdate(ctx, environment, reporter, release, latestVersion, installationLock); err != nil {
+	outcome, err := downloadAndInstallUpdate(ctx, environment, reporter, release, latestVersion, installationLock)
+	result.FailedPhase = outcome.failedPhase
+	if outcome.verified {
+		result.Updated = true
+		result.failureCertainty = "complete"
+	} else if outcome.attempted && outcome.failedPhase != "" {
+		result.failureCertainty = "unknown"
+	}
+	if err != nil {
+		if result.FailedPhase != "" {
+			return result, err
+		}
 		return updateResult{}, err
 	}
-	result.Updated = true
 	return result, nil
 }
 
@@ -244,33 +311,33 @@ func downloadAndInstallUpdate(
 	release updateRelease,
 	latestVersion string,
 	installationLock *os.File,
-) error {
+) (updateInstallOutcome, error) {
 	archiveName := fmt.Sprintf("mailcli_%s_darwin_arm64.tar.gz", latestVersion)
 	archiveURL, checksumURL, signatureURL, err := releaseAssetURLs(release.Assets, archiveName)
 	if err != nil {
-		return err
+		return updateInstallOutcome{}, err
 	}
 	if err := environment.urlPolicy.validate(archiveURL); err != nil {
-		return contextualUpdateFailure("update_package_invalid", "invalid release archive URL", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_package_invalid", "invalid release archive URL", err)
 	}
 	if err := environment.urlPolicy.validate(checksumURL); err != nil {
-		return contextualUpdateFailure("update_package_invalid", "invalid release checksum URL", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_package_invalid", "invalid release checksum URL", err)
 	}
 	if err := environment.urlPolicy.validate(signatureURL); err != nil {
-		return contextualUpdateFailure("update_package_invalid", "invalid release signature URL", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_package_invalid", "invalid release signature URL", err)
 	}
 	checksums, err := downloadUpdateResource(ctx, environment.client, checksumURL, maximumChecksumFile)
 	if err != nil {
-		return contextualUpdateFailure("update_download_failed", "download release checksums", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_download_failed", "download release checksums", err)
 	}
 	signature, err := downloadUpdateResource(ctx, environment.client, signatureURL, maximumSignatureFile)
 	if err != nil {
-		return contextualUpdateFailure("update_download_failed", "download release signature", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_download_failed", "download release signature", err)
 	}
 	if err := reporter.step("Verifying release signature", func() error {
 		return verifyReleaseSignature(checksums, signature, environment.releasePublicKey)
 	}); err != nil {
-		return err
+		return updateInstallOutcome{}, err
 	}
 	var archive []byte
 	if err := reporter.step("Downloading mailcli "+latestVersion, func() error {
@@ -280,12 +347,12 @@ func downloadAndInstallUpdate(
 		)
 		return downloadErr
 	}); err != nil {
-		return contextualUpdateFailure("update_download_failed", "download release archive", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_download_failed", "download release archive", err)
 	}
 	if err := reporter.step("Verifying release checksum", func() error {
 		return verifyReleaseChecksum(archiveName, archive, checksums)
 	}); err != nil {
-		return err
+		return updateInstallOutcome{}, err
 	}
 	return installVerifiedArchive(ctx, environment, reporter, archive, latestVersion, installationLock)
 }
