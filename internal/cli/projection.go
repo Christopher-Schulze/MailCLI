@@ -38,6 +38,8 @@ const (
 	projectionTargetDraft      projectionTarget = "draft"
 	projectionTargetAttachment projectionTarget = "attachment"
 	projectionTargetRaw        projectionTarget = "raw"
+	projectionTargetListPage   projectionTarget = "list page"
+	projectionTargetSearchPage projectionTarget = "search page"
 )
 
 type outputFlagState struct {
@@ -145,6 +147,38 @@ type attachmentProjection struct {
 	Size       *int64  `json:"size,omitempty"`
 	SizeKnown  *bool   `json:"size_known,omitempty"`
 	Downloaded *bool   `json:"downloaded,omitempty"`
+}
+
+type messageListPageProjection struct {
+	Messages   []messagePageItemProjection `json:"messages"`
+	NextCursor string                      `json:"next_cursor"`
+}
+
+type searchPageProjection struct {
+	Messages   []searchPageMessageProjection `json:"messages"`
+	NextCursor string                        `json:"next_cursor"`
+	Coverage   mail.SearchCoverage           `json:"coverage"`
+}
+
+type searchPageMessageProjection struct {
+	Summary messagePageItemProjection `json:"summary"`
+	Snippet *string                   `json:"snippet,omitempty"`
+}
+
+type messagePageItemProjection struct {
+	Ref             string  `json:"ref"`
+	MailboxRef      string  `json:"mailbox_ref"`
+	MessageID       *string `json:"message_id,omitempty"`
+	Subject         *string `json:"subject,omitempty"`
+	Sender          *string `json:"sender,omitempty"`
+	DateReceived    *string `json:"date_received,omitempty"`
+	DateSent        *string `json:"date_sent,omitempty"`
+	Read            *bool   `json:"read,omitempty"`
+	Flagged         *bool   `json:"flagged,omitempty"`
+	Junk            *bool   `json:"junk,omitempty"`
+	Deleted         *bool   `json:"deleted,omitempty"`
+	Size            *int64  `json:"size,omitempty"`
+	AttachmentCount *int    `json:"attachment_count,omitempty"`
 }
 
 type outputTooLargeError struct {
@@ -318,6 +352,43 @@ func parseProjectionFields(target projectionTarget, value string) (map[string]st
 	return fields, nil
 }
 
+func parsePageProjectionFields(target projectionTarget, value string) (map[string]struct{}, error) {
+	fields, err := parseProjectionFields(target, value)
+	if err != nil {
+		return nil, err
+	}
+	if _, all := fields["all"]; all && len(fields) > 1 {
+		return nil, &commandError{code: "invalid_argument", message: "all cannot be combined with other page fields"}
+	}
+	return fields, nil
+}
+
+func pageProjectionOptions(
+	flags *flag.FlagSet,
+	target projectionTarget,
+	value string,
+) (map[string]struct{}, *projectionInfo, error) {
+	provided := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "fields" {
+			provided = true
+		}
+	})
+	if !provided {
+		return nil, nil, nil
+	}
+	fields, err := parsePageProjectionFields(target, value)
+	if err != nil {
+		return nil, nil, err
+	}
+	selected := make([]string, 0, len(fields))
+	for field := range fields {
+		selected = append(selected, field)
+	}
+	sort.Strings(selected)
+	return fields, &projectionInfo{View: "custom", Fields: selected}, nil
+}
+
 func batchReadOutputOptions(item mail.BatchItem, maxBytes int64) (outputOptions, error) {
 	options := outputOptions{target: projectionTargetMessage, view: outputViewFull, maxBytes: maxBytes}
 	if item.View != nil {
@@ -423,9 +494,90 @@ func projectionFieldNames(target projectionTarget) []string {
 		return []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}
 	case projectionTargetRaw:
 		return []string{"raw_source"}
+	case projectionTargetListPage:
+		return []string{
+			"all", "attachment_count", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id",
+			"read", "sender", "size", "subject",
+		}
+	case projectionTargetSearchPage:
+		return []string{
+			"all", "attachment_count", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id",
+			"read", "sender", "size", "snippet", "subject",
+		}
 	default:
 		return nil
 	}
+}
+
+func projectMessageListPage(page mail.MessagePage, fields map[string]struct{}) *json.RawMessage {
+	if _, all := fields["all"]; all {
+		return messageResponsePage(&page)
+	}
+	var messages []messagePageItemProjection
+	if page.Messages != nil {
+		messages = make([]messagePageItemProjection, len(page.Messages))
+		for index, message := range page.Messages {
+			messages[index] = projectMessageSummary(message, fields)
+		}
+	}
+	return rawResponsePage(messageListPageProjection{Messages: messages, NextCursor: page.NextCursor})
+}
+
+func projectSearchPage(page mail.SearchPage, fields map[string]struct{}) *json.RawMessage {
+	if _, all := fields["all"]; all {
+		return searchResponsePage(&page)
+	}
+	var messages []searchPageMessageProjection
+	if page.Messages != nil {
+		messages = make([]searchPageMessageProjection, len(page.Messages))
+		for index, message := range page.Messages {
+			projected := searchPageMessageProjection{Summary: projectMessageSummary(message.Summary, fields)}
+			if _, include := fields["snippet"]; include {
+				snippet := message.Snippet
+				projected.Snippet = &snippet
+			}
+			messages[index] = projected
+		}
+	}
+	return rawResponsePage(searchPageProjection{Messages: messages, NextCursor: page.NextCursor, Coverage: page.Coverage})
+}
+
+func projectMessageSummary(message mail.MessageSummary, fields map[string]struct{}) messagePageItemProjection {
+	projected := messagePageItemProjection{Ref: message.Ref, MailboxRef: message.MailboxRef}
+	if _, include := fields["message_id"]; include {
+		projected.MessageID = &message.MessageID
+	}
+	if _, include := fields["subject"]; include {
+		projected.Subject = &message.Subject
+	}
+	if _, include := fields["sender"]; include {
+		projected.Sender = &message.Sender
+	}
+	if _, include := fields["date_received"]; include {
+		projected.DateReceived = &message.DateReceived
+	}
+	if _, include := fields["date_sent"]; include {
+		projected.DateSent = &message.DateSent
+	}
+	if _, include := fields["read"]; include {
+		projected.Read = &message.Read
+	}
+	if _, include := fields["flagged"]; include {
+		projected.Flagged = &message.Flagged
+	}
+	if _, include := fields["junk"]; include {
+		projected.Junk = &message.Junk
+	}
+	if _, include := fields["deleted"]; include {
+		projected.Deleted = &message.Deleted
+	}
+	if _, include := fields["size"]; include {
+		projected.Size = &message.Size
+	}
+	if _, include := fields["attachment_count"]; include {
+		projected.AttachmentCount = &message.AttachmentCount
+	}
+	return projected
 }
 
 //go:noinline

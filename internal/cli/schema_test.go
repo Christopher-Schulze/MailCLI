@@ -410,3 +410,23 @@ func jsonFieldByName(fields []testJSONField, name string) *testJSONField {
 	}
 	return nil
 }
+
+func TestMessagePageSchemasPublishFieldProjections(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		target  projectionTarget
+	}{
+		{command: "messages.list", target: projectionTargetListPage},
+		{command: "messages.filter", target: projectionTargetSearchPage},
+		{command: "messages.search", target: projectionTargetSearchPage},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			schema := decodeTestCommandSchema(t, schemaForCommand(test.command))
+			fields := schemaFlagsByName(schema)["--fields"]
+			if fields.Name != "--fields" || fields.ValueType != "field_list" ||
+				!reflect.DeepEqual(fields.Values, projectionFieldNames(test.target)) {
+				t.Fatalf("page projection schema fields = %+v", fields)
+			}
+		})
+	}
+}

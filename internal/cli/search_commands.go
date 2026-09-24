@@ -43,8 +43,13 @@ func runMessagesQuery(
 	flags := newFlagSet(strings.ReplaceAll(command, ".", " "), stderr)
 	query := mail.Query{}
 	jsonOutput := defineSearchFlags(flags, &query, allowText)
+	fields := flags.String("fields", "", "comma-separated page fields; use all for the complete page")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	pageFields, projection, err := pageProjectionOptions(flags, projectionTargetSearchPage, *fields)
+	if err != nil {
+		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -54,7 +59,11 @@ func runMessagesQuery(
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, command, responseData{Page: searchResponsePage(&page)})
+		pageData := searchResponsePage(&page)
+		if projection != nil {
+			pageData = projectSearchPage(page, pageFields)
+		}
+		return writeSuccess(stdout, command, responseData{Page: pageData, Projection: projection})
 	}
 	writeSearchResults(stdout, page)
 	return 0

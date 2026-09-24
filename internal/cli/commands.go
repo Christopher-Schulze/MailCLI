@@ -301,8 +301,13 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 	cursor := flags.String("cursor", "", "pagination cursor")
 	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	fields := flags.String("fields", "", "comma-separated page fields; use all for the complete page")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	pageFields, projection, err := pageProjectionOptions(flags, projectionTargetListPage, *fields)
+	if err != nil {
+		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -312,6 +317,11 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 	})
 	if err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
+	}
+	if *jsonOutput && projection != nil {
+		return writeSuccess(stdout, "messages.list", responseData{
+			Page: projectMessageListPage(page, pageFields), Projection: projection,
+		})
 	}
 	return writeMessagePage(stdout, "messages.list", page, *jsonOutput)
 }
