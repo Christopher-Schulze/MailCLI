@@ -44,6 +44,15 @@ const (
 	maxIdentitySearchResults = 128
 )
 
+const (
+	// MaxListOperationResponseBytes includes physical lines, literal payloads, and tagged completion.
+	MaxListOperationResponseBytes int64 = 32 << 20
+	// MaxListOperationResponseLines counts untagged logical lines, including ignored lines.
+	MaxListOperationResponseLines = 10_000
+	// MaxListOperationMailboxes caps parsed results for one LIST command.
+	MaxListOperationMailboxes = 10_000
+)
+
 // mailbox carries the parsed server identity and hierarchy for a LIST response.
 type mailbox struct {
 	name        string // historical alias for wireName in package-local tests

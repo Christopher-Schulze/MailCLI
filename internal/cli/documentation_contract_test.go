@@ -212,6 +212,18 @@ var documentedWordNumbers = map[string]int64{
 }
 
 var documentedBounds = []documentedBound{
+	{name: "IMAP LIST cumulative response byte cap", expected: imapclient.MaxListOperationResponseBytes, unit: "bytes",
+		checks: []documentedBoundCheck{
+			boundCheck("docs/documentation.md", `LIST uses a (\d+) MiB cumulative wire-response limit`, 1<<20),
+		}},
+	{name: "IMAP LIST logical response line limit", expected: int64(imapclient.MaxListOperationResponseLines), unit: "lines",
+		checks: []documentedBoundCheck{
+			boundCheck("docs/documentation.md", `(\d[\d,]*) untagged logical response lines`, 1),
+		}},
+	{name: "IMAP LIST mailbox limit", expected: int64(imapclient.MaxListOperationMailboxes), unit: "mailboxes",
+		checks: []documentedBoundCheck{
+			boundCheck("docs/documentation.md", `(\d[\d,]*) mailboxes per LIST operation`, 1),
+		}},
 	{name: "message page limit", expected: mail.MaximumPageLimit, unit: "messages",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `page sizes from 1 through (\d+)`, 1),

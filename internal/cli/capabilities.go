@@ -87,6 +87,9 @@ type capabilityLimits struct {
 	SearchExactCountBounded          bool                           `json:"search_exact_count_bounded"`
 	IMAPConnectionsPerAccount        int                            `json:"imap_connections_per_account"`
 	MaximumIMAPConnectionsPerAccount int                            `json:"maximum_imap_connections_per_account"`
+	MaximumIMAPListResponseBytes     int64                          `json:"maximum_imap_list_response_bytes"`
+	MaximumIMAPListResponseLines     int                            `json:"maximum_imap_list_response_lines"`
+	MaximumIMAPListMailboxes         int                            `json:"maximum_imap_list_mailboxes"`
 	IMAPConcurrentReadOperations     []string                       `json:"imap_concurrent_read_operations"`
 	IMAPExclusiveOperations          []string                       `json:"imap_exclusive_operations"`
 	IMAPOperationContract            []imapclient.OperationContract `json:"imap_operation_contract"`
@@ -198,6 +201,9 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 			SearchExactCountBounded:          true,
 			IMAPConnectionsPerAccount:        imapclient.DefaultMaxConnectionsPerAccount,
 			MaximumIMAPConnectionsPerAccount: imapclient.MaximumConnectionsPerAccount,
+			MaximumIMAPListResponseBytes:     imapclient.MaxListOperationResponseBytes,
+			MaximumIMAPListResponseLines:     imapclient.MaxListOperationResponseLines,
+			MaximumIMAPListMailboxes:         imapclient.MaxListOperationMailboxes,
 			IMAPConcurrentReadOperations: imapOperationsWithConcurrency(
 				imapContract, imapclient.OperationConcurrencySharedAccount,
 			),

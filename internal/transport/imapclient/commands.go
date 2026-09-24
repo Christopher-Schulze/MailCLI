@@ -20,8 +20,10 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 	}
 
 	var mailboxes []mailbox
+	var responseBytes int64
+	responseLines := 0
 	for {
-		line, literals, err := c.readLineWithLiteral(sess)
+		line, literals, wireBytes, err := c.readLineWithLiteralCounted(sess)
 		if err != nil {
 			var malformed *malformedResponseError
 			if errors.As(err, &malformed) {
@@ -30,6 +32,10 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 			}
 			return nil, wrapCommandIOError(ctx, err, "IMAP LIST read")
 		}
+		if wireBytes > MaxListOperationResponseBytes-responseBytes {
+			return nil, listResponseLimitExceeded(sess, "cumulative response bytes", MaxListOperationResponseBytes)
+		}
+		responseBytes += wireBytes
 		if strings.HasPrefix(line, tag+" ") {
 			status, statusErr := parseTaggedCompletionStatus(line, tag)
 			if statusErr != nil {
@@ -43,6 +49,13 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 				Message: "IMAP LIST failed: " + status,
 			}
 		}
+		if strings.HasPrefix(line, "* LIST ") && len(mailboxes) >= MaxListOperationMailboxes {
+			return nil, listResponseLimitExceeded(sess, "parsed mailboxes", int64(MaxListOperationMailboxes))
+		}
+		if responseLines >= MaxListOperationResponseLines {
+			return nil, listResponseLimitExceeded(sess, "untagged logical response lines", int64(MaxListOperationResponseLines))
+		}
+		responseLines++
 		if !strings.HasPrefix(line, "* LIST ") {
 			continue
 		}
@@ -52,6 +65,14 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 			return nil, listResponseMalformed(perr)
 		}
 		mailboxes = append(mailboxes, parsed)
+	}
+}
+
+func listResponseLimitExceeded(sess *session, resource string, limit int64) *transport.TransportError {
+	sess.dirty = true
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPResourceLimitExceeded,
+		Message: fmt.Sprintf("IMAP LIST %s limit exceeded (%d)", resource, limit),
 	}
 }
 

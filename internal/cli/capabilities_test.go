@@ -130,6 +130,9 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 	if manifest.Limits.IMAPConnectionsPerAccount != imapclient.DefaultMaxConnectionsPerAccount ||
 		manifest.Limits.MaximumIMAPConnectionsPerAccount != imapclient.MaximumConnectionsPerAccount ||
+		manifest.Limits.MaximumIMAPListResponseBytes != imapclient.MaxListOperationResponseBytes ||
+		manifest.Limits.MaximumIMAPListResponseLines != imapclient.MaxListOperationResponseLines ||
+		manifest.Limits.MaximumIMAPListMailboxes != imapclient.MaxListOperationMailboxes ||
 		!slices.Equal(manifest.Limits.IMAPConcurrentReadOperations, []string{"LIST", "STATUS", "SEARCH", "FETCH"}) ||
 		!slices.Equal(manifest.Limits.IMAPExclusiveOperations, []string{"APPEND", "STORE", "COPY", "MOVE", "DELETE"}) ||
 		!reflect.DeepEqual(manifest.Limits.IMAPOperationContract, imapclient.OperationContracts()) {

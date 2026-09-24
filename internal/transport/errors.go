@@ -155,3 +155,6 @@ const (
 	CodeLocalOnlyMailbox         = "local_only_mailbox"
 	CodeMessageAlreadyTrashed    = "message_already_trashed"
 )
+
+// CodeIMAPResourceLimitExceeded marks an IMAP response beyond an operation bound.
+const CodeIMAPResourceLimitExceeded = "imap_resource_limit_exceeded"

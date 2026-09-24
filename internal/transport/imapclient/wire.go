@@ -82,24 +82,29 @@ func (c *Client) writeLineBytes(sess *session, line []byte) error {
 }
 
 func (c *Client) readLine(sess *session) (string, error) {
+	line, _, err := c.readLineWithWireByteCount(sess)
+	return line, err
+}
+
+func (c *Client) readLineWithWireByteCount(sess *session) (string, int64, error) {
 	var line []byte
 	for {
 		fragment, err := sess.br.ReadSlice('\n')
 		if len(line)+len(fragment) > maxIMAPResponseLineBytes {
 			sess.dirty = true
-			return "", &malformedResponseError{err: fmt.Errorf(
+			return "", 0, &malformedResponseError{err: fmt.Errorf(
 				"IMAP response line exceeds %d bytes", maxIMAPResponseLineBytes,
 			)}
 		}
 		line = append(line, fragment...)
 		if err == nil {
-			return strings.TrimRight(string(line), "\r\n"), nil
+			return strings.TrimRight(string(line), "\r\n"), int64(len(line)), nil
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
 		sess.dirty = true
-		return "", err
+		return "", 0, err
 	}
 }
 
@@ -126,21 +131,26 @@ func listResponseMalformed(err error) *transport.TransportError {
 // returned text by imapLiteralMarker and kept separately so its bytes remain
 // raw when the value parser consumes it.
 func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
-	line, literals, err := c.readLogicalLineWithLiterals(
+	line, literals, _, err := c.readLineWithLiteralCounted(sess)
+	return line, literals, err
+}
+
+func (c *Client) readLineWithLiteralCounted(sess *session) (string, [][]byte, int64, error) {
+	line, literals, wireBytes, err := c.readLogicalLineWithLiteralsCounted(
 		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount,
 	)
 	var limitErr *literalLimitError
 	if errors.As(err, &limitErr) {
-		return "", nil, &malformedResponseError{err: fmt.Errorf(
+		return "", nil, wireBytes, &malformedResponseError{err: fmt.Errorf(
 			"IMAP LIST literal response exceeds %d bytes or %d bytes per literal",
 			maxListResponseBytes, maxListLiteralBytes,
 		)}
 	}
 	var readErr *literalReadError
 	if errors.As(err, &readErr) {
-		return "", nil, &malformedResponseError{err: readErr}
+		return "", nil, wireBytes, &malformedResponseError{err: readErr}
 	}
-	return line, literals, err
+	return line, literals, wireBytes, err
 }
 
 type literalLimitError struct {
@@ -170,7 +180,19 @@ func (c *Client) readLogicalLineWithLiterals(
 	maxResponseBytes int64,
 	maxLiteralCount int,
 ) (string, [][]byte, error) {
-	return c.readLogicalLineWithLiteralReader(sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, nil)
+	line, literals, _, err := c.readLogicalLineWithLiteralsCounted(
+		sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount,
+	)
+	return line, literals, err
+}
+
+func (c *Client) readLogicalLineWithLiteralsCounted(
+	sess *session,
+	maxLiteralBytes int64,
+	maxResponseBytes int64,
+	maxLiteralCount int,
+) (string, [][]byte, int64, error) {
+	return c.readLogicalLineWithLiteralReaderCounted(sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, nil)
 }
 
 func (c *Client) readLogicalLineWithLiteralReader(
@@ -180,45 +202,60 @@ func (c *Client) readLogicalLineWithLiteralReader(
 	maxLiteralCount int,
 	readLiteral func(int) ([]byte, error),
 ) (string, [][]byte, error) {
+	line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(
+		sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, readLiteral,
+	)
+	return line, literals, err
+}
+
+func (c *Client) readLogicalLineWithLiteralReaderCounted(
+	sess *session,
+	maxLiteralBytes int64,
+	maxResponseBytes int64,
+	maxLiteralCount int,
+	readLiteral func(int) ([]byte, error),
+) (string, [][]byte, int64, error) {
 	var reconstructed strings.Builder
 	var literals [][]byte
 	var literalBytes int64
+	var wireBytes int64
 	for {
-		line, err := c.readLine(sess)
+		line, lineWireBytes, err := c.readLineWithWireByteCount(sess)
+		wireBytes += lineWireBytes
 		if err != nil {
-			return "", nil, err
+			return "", nil, wireBytes, err
 		}
 		prefix, size, hasLiteral, err := parseLiteralSuffix(line)
 		if err != nil {
 			sess.dirty = true
-			return "", nil, &malformedResponseError{err: err}
+			return "", nil, wireBytes, &malformedResponseError{err: err}
 		}
 		if !hasLiteral {
 			if int64(reconstructed.Len()+len(line)) > maxResponseBytes-literalBytes {
 				sess.dirty = true
-				return "", nil, &malformedResponseError{err: fmt.Errorf(
+				return "", nil, wireBytes, &malformedResponseError{err: fmt.Errorf(
 					"IMAP logical response exceeds %d bytes", maxResponseBytes,
 				)}
 			}
 			reconstructed.WriteString(line)
-			return reconstructed.String(), literals, nil
+			return reconstructed.String(), literals, wireBytes, nil
 		}
 		if len(literals) >= maxLiteralCount {
 			sess.dirty = true
-			return "", nil, &malformedResponseError{err: fmt.Errorf(
+			return "", nil, wireBytes, &malformedResponseError{err: fmt.Errorf(
 				"IMAP response literal count exceeds %d", maxLiteralCount,
 			)}
 		}
 		size64 := int64(size)
 		if size64 > maxLiteralBytes || size64 > maxResponseBytes-literalBytes {
 			sess.dirty = true
-			return "", nil, &literalLimitError{
+			return "", nil, wireBytes, &literalLimitError{
 				size: size64, maxLiteral: maxLiteralBytes, maxResponse: maxResponseBytes,
 			}
 		}
 		if int64(reconstructed.Len()+len(prefix)+1) > maxResponseBytes-literalBytes-size64 {
 			sess.dirty = true
-			return "", nil, &malformedResponseError{err: fmt.Errorf(
+			return "", nil, wireBytes, &malformedResponseError{err: fmt.Errorf(
 				"IMAP logical response exceeds %d bytes", maxResponseBytes,
 			)}
 		}
@@ -235,12 +272,13 @@ func (c *Client) readLogicalLineWithLiteralReader(
 		if err != nil {
 			sess.dirty = true
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return "", nil, &literalReadError{err: err}
+				return "", nil, wireBytes, &literalReadError{err: err}
 			}
-			return "", nil, err
+			return "", nil, wireBytes, err
 		}
 		literals = append(literals, literal)
 		literalBytes += size64
+		wireBytes += size64
 	}
 }
 
