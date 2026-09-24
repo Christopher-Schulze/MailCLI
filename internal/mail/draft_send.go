@@ -160,12 +160,18 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 	if err != nil {
 		return SendResult{}, err
 	}
+	if err := recoverUnclaimedAcceptedMessageSpool(root, ref, storage); err != nil {
+		return SendResult{}, err
+	}
 	recoverySpool, err := persistAcceptedMessageSpool(root, ref, message, storage)
 	if err != nil {
 		return SendResult{}, &OperationError{
 			Code:    "send_recovery_spool_persist_failed",
 			Message: fmt.Sprintf("the composed message could not be retained before SMTP submission; SMTP was not contacted: %v", err),
 		}
+	}
+	if s.afterSendRecoverySpoolPublished != nil {
+		s.afterSendRecoverySpoolPublished(message)
 	}
 	attempt, err := beginSendAttempt(sendAttemptOptions{
 		Root:                root,
@@ -178,7 +184,7 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 		RecoverySpool:       recoverySpool,
 	})
 	if err != nil {
-		cleanupErr := removeAcceptedMessageSpool(ref, &SendAttempt{RecoverySpool: recoverySpool}, storage)
+		cleanupErr := recoverUnclaimedAcceptedMessageSpool(root, ref, storage)
 		return SendResult{}, errors.Join(err, cleanupErr)
 	}
 	submitEvidence, submissionAccepted, submissionErr := submitComposedMessage(

@@ -81,6 +81,82 @@ func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessa
 	return &AcceptedMessageSpool{Size: written, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
 }
 
+// recoverUnclaimedAcceptedMessageSpool removes only the canonical private
+// spool for a ref when no send claim exists and the pinned file stays
+// unchanged while it is verified. A claimed or ambiguous spool is retained.
+func recoverUnclaimedAcceptedMessageSpool(root string, ref string, state *draftStorage) error {
+	if _, err := acceptedMessageSpoolPath(root, ref); err != nil {
+		return err
+	}
+	name := ref + ".send-spool"
+	pathInfo, err := state.lstat(name)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return unclaimedAcceptedMessageSpoolChanged(fmt.Errorf("inspect spool: %w", err))
+	}
+	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 ||
+		pathInfo.Size() <= 0 || pathInfo.Size() > maximumAcceptedMessageSpoolBytes {
+		return unclaimedAcceptedMessageSpoolChanged(errors.New("spool is not a bounded regular mode-0600 file"))
+	}
+	if attempt, err := readSendAttempt(root, ref, state); err != nil {
+		return unclaimedAcceptedMessageSpoolChanged(fmt.Errorf("inspect send claim: %w", err))
+	} else if attempt != nil {
+		return &OperationError{
+			Code:    "send_retry_blocked",
+			Message: "a retained send attempt owns the recovery spool; the claim and spool were preserved",
+		}
+	}
+
+	file, identity, err := state.openFile(name, pathInfo, os.O_RDONLY, 0)
+	if err != nil {
+		return unclaimedAcceptedMessageSpoolChanged(fmt.Errorf("open spool: %w", err))
+	}
+	if !identity.Mode().IsRegular() || identity.Mode().Perm() != 0o600 ||
+		identity.Size() != pathInfo.Size() || !os.SameFile(pathInfo, identity) {
+		return errors.Join(
+			unclaimedAcceptedMessageSpoolChanged(errors.New("spool identity changed while opening")),
+			file.Close(),
+		)
+	}
+	openedInfo, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil {
+		return unclaimedAcceptedMessageSpoolChanged(errors.Join(statErr, closeErr))
+	}
+	if !os.SameFile(identity, openedInfo) || openedInfo.Size() != identity.Size() ||
+		openedInfo.Mode().Perm() != 0o600 || !openedInfo.ModTime().Equal(identity.ModTime()) {
+		return unclaimedAcceptedMessageSpoolChanged(errors.New("spool identity changed while verifying"))
+	}
+	currentInfo, err := state.lstat(name)
+	if err != nil || !currentInfo.Mode().IsRegular() || !os.SameFile(identity, currentInfo) ||
+		currentInfo.Size() != identity.Size() || currentInfo.Mode().Perm() != 0o600 ||
+		!currentInfo.ModTime().Equal(identity.ModTime()) {
+		return unclaimedAcceptedMessageSpoolChanged(errors.Join(errors.New("spool path identity changed"), err))
+	}
+	if attempt, err := readSendAttempt(root, ref, state); err != nil {
+		return unclaimedAcceptedMessageSpoolChanged(fmt.Errorf("recheck send claim: %w", err))
+	} else if attempt != nil {
+		return &OperationError{
+			Code:    "send_retry_blocked",
+			Message: "a retained send attempt now owns the recovery spool; the claim and spool were preserved",
+		}
+	}
+	if err := removeDraftStorageFile(state, name, identity, "recovery spool"); err != nil {
+		return fmt.Errorf("remove verified unclaimed recovery spool: %w", err)
+	}
+	return nil
+}
+
+func unclaimedAcceptedMessageSpoolChanged(cause error) error {
+	message := "the unclaimed recovery spool could not be verified and was preserved; SMTP was not contacted"
+	if cause != nil {
+		message += ": " + cause.Error()
+	}
+	return &OperationError{Code: "send_recovery_spool_changed", Message: message}
+}
+
 func openAcceptedMessageSpool(ref string, attempt SendAttempt, state *draftStorage) (*ComposedMessage, error) {
 	spool := attempt.RecoverySpool
 	if !validAcceptedMessageSpool(spool) {

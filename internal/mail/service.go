@@ -79,6 +79,9 @@ type Service struct {
 	// contentObserver is optional per-service render instrumentation; normal
 	// callers leave it nil.
 	contentObserver draftContentObserver
+	// afterSendRecoverySpoolPublished is a crash-window test seam; normal
+	// callers leave it nil.
+	afterSendRecoverySpoolPublished func(*ComposedMessage)
 }
 
 type ValidationError struct {

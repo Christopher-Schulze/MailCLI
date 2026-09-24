@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -684,6 +685,76 @@ func TestSendDraftDeliversViaTransportAndMirrors(t *testing.T) {
 		t.Fatal("sent draft still exists")
 	}
 	assertNoSendClaim(t, root, draft.Ref)
+}
+
+func TestSendDraftRecoversSpoolAfterCrashBeforeClaim(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	marker := filepath.Join(filepath.Dir(root), "smtp-contacted")
+
+	helper := exec.Command(os.Args[0], "-test.run=^TestSendDraftCrashAfterSpoolPublicationHelper$")
+	helper.Env = append(os.Environ(),
+		"MAILCLI_SEND_SPOOL_CRASH_HELPER=1",
+		"MAILCLI_SEND_SPOOL_CRASH_ROOT="+root,
+		"MAILCLI_SEND_SPOOL_CRASH_REF="+draft.Ref,
+		"MAILCLI_SEND_SPOOL_CRASH_REVISION="+draft.Revision,
+		"MAILCLI_SEND_SPOOL_CRASH_MARKER="+marker,
+	)
+	output, err := helper.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 86 {
+		t.Fatalf("crash helper exit = %v, output = %s; want exit 86 after spool publication", err, output)
+	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	spoolInfo, err := os.Lstat(spoolPath)
+	if err != nil || !spoolInfo.Mode().IsRegular() || spoolInfo.Mode().Perm() != 0o600 || spoolInfo.Size() <= 0 {
+		t.Fatalf("crash recovery spool info = %v, error = %v", spoolInfo, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, draft.Ref+".send-claim")); !os.IsNotExist(err) {
+		t.Fatalf("send claim exists after pre-claim crash: %v", err)
+	}
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("SMTP was contacted before claim creation: %v", err)
+	}
+
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if err != nil || result.Outcome != SendOutcomeSent || submitter.calls != 1 || mirror.calls != 1 {
+		t.Fatalf("restart SendDraft() = %+v, error = %v, submitter/mirror = %d/%d", result, err, submitter.calls, mirror.calls)
+	}
+	for _, suffix := range []string{".json", ".send-claim", ".send-spool"} {
+		if _, err := os.Lstat(filepath.Join(root, draft.Ref+suffix)); !os.IsNotExist(err) {
+			t.Fatalf("completed send left %s after recovery: %v", suffix, err)
+		}
+	}
+}
+
+func TestSendDraftCrashAfterSpoolPublicationHelper(t *testing.T) {
+	if os.Getenv("MAILCLI_SEND_SPOOL_CRASH_HELPER") != "1" {
+		return
+	}
+	root := os.Getenv("MAILCLI_SEND_SPOOL_CRASH_ROOT")
+	ref := os.Getenv("MAILCLI_SEND_SPOOL_CRASH_REF")
+	revision := os.Getenv("MAILCLI_SEND_SPOOL_CRASH_REVISION")
+	marker := os.Getenv("MAILCLI_SEND_SPOOL_CRASH_MARKER")
+	submitter, mirror := sendTransportStubs()
+	submitter.submitHook = func(context.Context) {
+		if err := os.WriteFile(marker, []byte("contacted"), 0o600); err != nil {
+			os.Exit(88)
+		}
+	}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	service.afterSendRecoverySpoolPublished = func(message *ComposedMessage) {
+		if err := message.Remove(); err != nil {
+			os.Exit(87)
+		}
+		os.Exit(86)
+	}
+	if _, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: ref, ExpectedRevision: revision}); err != nil {
+		os.Exit(89)
+	}
+	os.Exit(90)
 }
 
 func TestSendDraftReplaysImmutableReceiptWithoutTransport(t *testing.T) {
@@ -1455,6 +1526,103 @@ func TestOrphanedSendClaimReplaysWithoutSubmitting(t *testing.T) {
 	if errorCode(err) != "send_outcome_unknown" || result.Outcome != SendOutcomeUnknown ||
 		!result.Replayed || submitter.calls != 0 {
 		t.Fatalf("SendDraft() = %+v, error = %v, submits = %d", result, err, submitter.calls)
+	}
+}
+
+func TestSendDraftPreservesClaimedRecoverySpool(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	lockContext, cancel := draftLockContext(context.Background())
+	defer cancel()
+	lease, err := acquireDraftLease(lockContext, root, draft.Ref)
+	if err != nil {
+		t.Fatalf("acquireDraftLease() error = %v", err)
+	}
+	defer func() {
+		if err := lease.release(); err != nil {
+			t.Errorf("release draft lease: %v", err)
+		}
+	}()
+	messageID := "<claimed@icloud.com>"
+	message, err := composeDraftSpool(context.Background(), draft, messageID)
+	if err != nil {
+		t.Fatalf("composeDraftSpool() error = %v", err)
+	}
+	defer func() {
+		if err := message.Remove(); err != nil {
+			t.Errorf("remove composed test message: %v", err)
+		}
+	}()
+	spool, err := persistAcceptedMessageSpool(root, draft.Ref, message, lease.storage)
+	if err != nil {
+		t.Fatalf("persistAcceptedMessageSpool() error = %v", err)
+	}
+	mimeFingerprint, err := draftMIMEFingerprint(draft)
+	if err != nil {
+		t.Fatalf("draftMIMEFingerprint() error = %v", err)
+	}
+	if _, err := beginSendAttempt(sendAttemptOptions{
+		Root: root, Ref: draft.Ref, Storage: lease.storage, DraftRevision: draft.Revision,
+		MessageID: messageID, EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
+		MIMEFingerprint: mimeFingerprint, RecoverySpool: spool,
+	}); err != nil {
+		t.Fatalf("beginSendAttempt() error = %v", err)
+	}
+	if err := lease.release(); err != nil {
+		t.Fatalf("release draft lease before retry: %v", err)
+	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	before, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile(spool before retry) error = %v", err)
+	}
+
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if errorCode(err) != "send_outcome_unknown" || !result.Replayed || submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("SendDraft() = %+v, error = %v, submitter/mirror = %d/%d", result, err, submitter.calls, mirror.calls)
+	}
+	after, err := os.ReadFile(spoolPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("claimed spool changed during blocked retry: read error = %v", err)
+	}
+	claim, err := readSendAttempt(root, draft.Ref)
+	if err != nil || claim == nil || claim.RecoverySpool == nil ||
+		claim.RecoverySpool.Size != spool.Size || claim.RecoverySpool.SHA256 != spool.SHA256 {
+		t.Fatalf("send claim lost its recovery spool evidence: claim = %+v, error = %v", claim, err)
+	}
+}
+
+func TestSendDraftPreservesAmbiguousSpoolAndPruneSkipsIt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+	foreignPath := filepath.Join(filepath.Dir(root), "foreign-spool")
+	if err := os.WriteFile(foreignPath, []byte("unverified"), 0o600); err != nil {
+		t.Fatalf("WriteFile(foreign spool) error = %v", err)
+	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	if err := os.Symlink(foreignPath, spoolPath); err != nil {
+		t.Fatalf("Symlink(spool) error = %v", err)
+	}
+
+	_, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if errorCode(err) != "send_recovery_spool_changed" || submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("SendDraft() error = %v, submitter/mirror = %d/%d", err, submitter.calls, mirror.calls)
+	}
+	linkTarget, err := os.Readlink(spoolPath)
+	if err != nil || linkTarget != foreignPath {
+		t.Fatalf("ambiguous spool link = %q, error = %v", linkTarget, err)
+	}
+	pruned, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
+	if err != nil || len(pruned.SweptArtifacts) != 0 {
+		t.Fatalf("PruneDrafts() = %+v, error = %v; want no artifact sweep", pruned, err)
+	}
+	linkTarget, err = os.Readlink(spoolPath)
+	if err != nil || linkTarget != foreignPath {
+		t.Fatalf("prune changed ambiguous spool link = %q, error = %v", linkTarget, err)
 	}
 }
 
