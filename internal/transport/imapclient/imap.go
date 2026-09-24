@@ -279,20 +279,20 @@ type selectInfo struct {
 func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox string) (selectInfo, error) {
 	var info selectInfo
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return info, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SELECT deadline")
+		return info, wrapCommandIOError(ctx, err, "IMAP SELECT deadline")
 	}
 	quotedMailbox, err := safeQuoteIMAP(mbox)
 	if err != nil {
 		return info, err
 	}
 	if err := c.writeLine(sess, tag+" SELECT "+quotedMailbox); err != nil {
-		return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT write")
+		return info, wrapCommandIOError(ctx, err, "IMAP SELECT write")
 	}
 	remaining := int64(maxFlagResponseBytes)
 	for range maxFlagResponseCount {
 		line, literals, err := c.readLogicalLineWithLiterals(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount)
 		if err != nil {
-			return info, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP SELECT read")
+			return info, wrapCommandIOError(ctx, err, "IMAP SELECT read")
 		}
 		remaining -= int64(len(line) + 2)
 		for _, literal := range literals {
@@ -310,8 +310,11 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 			return info, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP SELECT metadata malformed", Err: err}
 		}
 		if strings.HasPrefix(line, tag+" ") {
-			status := parseStatus(line, tag)
-			if strings.EqualFold(status, "OK") {
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return info, malformedTaggedCommandResponse(sess, "SELECT", statusErr)
+			}
+			if status == "OK" {
 				return info, nil
 			}
 			return info, &transport.TransportError{

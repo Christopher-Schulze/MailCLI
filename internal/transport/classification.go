@@ -16,20 +16,20 @@ func IsTimeout(err error) bool {
 }
 
 // IsTransientReadFailure reports an IMAP-side transient failure that is safe
-// to retry unchanged: connect failed, timeout, or fetch failed.
+// to retry unchanged: connect, cancellation, disconnect, timeout, or fetch failure.
 func IsTransientReadFailure(err error) bool {
 	switch ErrorCode(err) {
-	case CodeIMAPConnectFailed, CodeIMAPTimeout, CodeIMAPFetchFailed:
+	case CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed:
 		return true
 	}
 	return false
 }
 
-// IsTransientTransportFailure reports any transport timeout, connect, or
-// fetch failure — the full transient bucket, including SMTP timeouts.
+// IsTransientTransportFailure reports any IMAP connect, cancellation,
+// disconnect, timeout, or fetch failure and SMTP timeout.
 func IsTransientTransportFailure(err error) bool {
 	switch ErrorCode(err) {
-	case CodeIMAPConnectFailed, CodeIMAPTimeout, CodeIMAPFetchFailed,
+	case CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed,
 		CodeSMTPTimeout, CodeSMTPTransferTimeout:
 		return true
 	}

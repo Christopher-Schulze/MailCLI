@@ -150,6 +150,28 @@ func TestReadTimeoutRemainsReplayable(t *testing.T) {
 	}
 }
 
+func TestIMAPWireFailureGuidanceKeepsReadsSafeAndWritesUncertain(t *testing.T) {
+	for _, code := range []string{transport.CodeIMAPCanceled, transport.CodeIMAPDisconnected} {
+		err := &transport.TransportError{Code: code, Message: "injected IMAP wire failure"}
+		read := guidanceForResponse("messages.get", responseData{}, err)
+		if read.Phase != mail.OperationPhaseRead || read.EffectCertainty != mail.EffectNone ||
+			read.Retryability != mail.RetrySafe || !read.ReplayAllowed || read.Recovery.Action != mail.RecoveryRetry {
+			t.Fatalf("read guidance for %s = %+v", code, read)
+		}
+		write := guidanceForResponse("messages.move", responseData{}, err)
+		if write.Phase != mail.OperationPhaseMutation || write.EffectCertainty != mail.EffectUnknown ||
+			write.Retryability != mail.RetryObserveRequired || write.ReplayAllowed || write.Recovery.Action != mail.RecoveryInspect {
+			t.Fatalf("write guidance for %s = %+v", code, write)
+		}
+	}
+	for _, code := range []string{transport.CodeIMAPMutationFailed, transport.CodeIMAPMailboxNotFound} {
+		write := guidanceForResponse("messages.move", responseData{}, &transport.TransportError{Code: code, Message: "rejection without mutation evidence"})
+		if write.EffectCertainty != mail.EffectUnknown || write.Retryability != mail.RetryObserveRequired || write.ReplayAllowed {
+			t.Fatalf("unproven mutation guidance for %s = %+v", code, write)
+		}
+	}
+}
+
 func TestWriteTimeoutRequiresObservation(t *testing.T) {
 	for _, command := range []string{"sync", "drafts.handoff", "drafts.save"} {
 		guidance := mail.GuidanceForError(command, &testCodedError{code: "operation_timeout", message: "timeout"})

@@ -779,8 +779,8 @@ func TestAppendToSentMidCommandCancel(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on cancelled context")
 	}
-	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
-		t.Fatalf("expected code %s, got %s: %v", transport.CodeIMAPTimeout, code, err)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPCanceled {
+		t.Fatalf("expected code %s, got %s: %v", transport.CodeIMAPCanceled, code, err)
 	}
 	if elapsed > 200*time.Millisecond {
 		t.Fatalf("mid-command cancel took too long: %v", elapsed)

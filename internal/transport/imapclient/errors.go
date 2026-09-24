@@ -56,6 +56,31 @@ func wrapIOError(ctx context.Context, err error, code, message string) error {
 	}
 }
 
+func wrapCommandIOError(ctx context.Context, err error, message string) error {
+	if err == nil {
+		return nil
+	}
+	if transport.ErrorCode(err) != "" {
+		return err
+	}
+	var malformed *malformedResponseError
+	if errors.As(err, &malformed) {
+		return &transport.TransportError{
+			Code:    transport.CodeIMAPResponseMalformed,
+			Message: message,
+			Err:     err,
+		}
+	}
+	code := transport.CodeIMAPDisconnected
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
+		code = transport.CodeIMAPCanceled
+	case errors.Is(ctx.Err(), context.DeadlineExceeded) || isTimeout(err):
+		code = transport.CodeIMAPTimeout
+	}
+	return &transport.TransportError{Code: code, Message: message, Err: err}
+}
+
 func isTimeout(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return true

@@ -12,43 +12,48 @@ import (
 
 // CheckStatus queries server message counts, unseen count, and UIDs via IMAP STATUS.
 func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
-	var status transport.MailboxStatus
-	status.Mailbox = mailbox
-
 	ps, release, err := c.acquireIndependent(ctx, cfg)
 	if err != nil {
-		return status, err
+		return transport.MailboxStatus{Mailbox: mailbox}, err
 	}
 	defer release()
+	return c.doStatus(ctx, ps.sess, ps.sess.nextTag(), mailbox)
+}
+
+func (c *Client) doStatus(ctx context.Context, sess *session, tag, mailbox string) (transport.MailboxStatus, error) {
+	var status transport.MailboxStatus
+	status.Mailbox = mailbox
 
 	quotedMailbox, err := safeQuoteIMAP(mailbox)
 	if err != nil {
 		return status, err
 	}
-	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s STATUS %s (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", tag, quotedMailbox)
-	if err := c.setDeadline(ctx, ps.sess); err != nil {
-		return status, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP STATUS deadline")
+	if err := c.setDeadline(ctx, sess); err != nil {
+		return status, wrapCommandIOError(ctx, err, "IMAP STATUS deadline")
 	}
-	if err := c.writeLine(ps.sess, cmd); err != nil {
-		return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS write")
+	if err := c.writeLine(sess, cmd); err != nil {
+		return status, wrapCommandIOError(ctx, err, "IMAP STATUS write")
 	}
 
 	seenStatus := false
 	for {
-		line, literals, err := c.readLineWithLiteral(ps.sess)
+		line, literals, err := c.readLineWithLiteral(sess)
 		if err != nil {
 			var malformed *malformedResponseError
 			if errors.As(err, &malformed) {
-				return status, malformedStatusResponse(ps.sess, malformed)
+				return status, malformedStatusResponse(sess, malformed)
 			}
-			return status, wrapIOError(ctx, err, transport.CodeIMAPMailboxNotFound, "IMAP STATUS read")
+			return status, wrapCommandIOError(ctx, err, "IMAP STATUS read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
-			st := parseStatus(line, tag)
+			st, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return status, malformedStatusResponse(sess, statusErr)
+			}
 			if st == "OK" {
 				if !seenStatus {
-					return status, malformedStatusResponse(ps.sess, errors.New("STATUS completed without a STATUS response"))
+					return status, malformedStatusResponse(sess, errors.New("STATUS completed without a STATUS response"))
 				}
 				return status, nil
 			}
@@ -59,15 +64,15 @@ func (c *Client) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mail
 		}
 		if strings.HasPrefix(line, "* STATUS ") {
 			if seenStatus {
-				return status, malformedStatusResponse(ps.sess, errors.New("multiple STATUS responses"))
+				return status, malformedStatusResponse(sess, errors.New("multiple STATUS responses"))
 			}
 			parsed, parseErr := parseStatusLine(line, literals)
 			if parseErr != nil {
-				return status, malformedStatusResponse(ps.sess, parseErr)
+				return status, malformedStatusResponse(sess, parseErr)
 			}
 			if parsed.Mailbox != mailbox {
 				return status, malformedStatusResponse(
-					ps.sess, fmt.Errorf("STATUS mailbox %q does not match requested mailbox %q", parsed.Mailbox, mailbox),
+					sess, fmt.Errorf("STATUS mailbox %q does not match requested mailbox %q", parsed.Mailbox, mailbox),
 				)
 			}
 			status = parsed

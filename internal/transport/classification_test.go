@@ -21,18 +21,18 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsTimeout",
 			predicate: IsTimeout,
 			positive:  []string{CodeIMAPTimeout},
-			negative:  []string{CodeIMAPConnectFailed, CodeSMTPTimeout, CodeIMAPFlagsOutcomeUnknown},
+			negative:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeSMTPTimeout, CodeIMAPFlagsOutcomeUnknown},
 		},
 		{
 			name:      "IsTransientReadFailure",
 			predicate: IsTransientReadFailure,
-			positive:  []string{CodeIMAPConnectFailed, CodeIMAPTimeout, CodeIMAPFetchFailed},
+			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed},
 			negative:  []string{CodeSMTPTimeout, CodeSMTPTransferTimeout, CodeIMAPFlagsOutcomeUnknown},
 		},
 		{
 			name:      "IsTransientTransportFailure",
 			predicate: IsTransientTransportFailure,
-			positive:  []string{CodeIMAPConnectFailed, CodeIMAPTimeout, CodeIMAPFetchFailed, CodeSMTPTimeout, CodeSMTPTransferTimeout},
+			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed, CodeSMTPTimeout, CodeSMTPTransferTimeout},
 			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeIMAPMessageNotFound},
 		},
 		{

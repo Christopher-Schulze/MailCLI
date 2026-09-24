@@ -123,6 +123,8 @@ const (
 	CodeSMTPSubmissionUnknown    = "smtp_submission_unknown"
 	CodeSMTPDataIncomplete       = "smtp_data_incomplete"
 	CodeIMAPConnectFailed        = "imap_connect_failed"
+	CodeIMAPCanceled             = "imap_canceled"
+	CodeIMAPDisconnected         = "imap_disconnected"
 	CodeSMTPCredentialsMissing   = "smtp_credentials_missing"
 	CodeIMAPAuthFailed           = "imap_auth_failed"
 	CodeIMAPSentMailboxNotFound  = "imap_sent_mailbox_not_found"

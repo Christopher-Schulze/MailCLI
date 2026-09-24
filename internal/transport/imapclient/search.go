@@ -422,10 +422,10 @@ func (c *Client) doUIDSearchCriteriaBounded(
 		}
 	}
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP UID SEARCH deadline")
+		return nil, wrapCommandIOError(ctx, err, "IMAP UID SEARCH deadline")
 	}
 	if err := c.writeLine(sess, tag+" UID SEARCH "+criteria); err != nil {
-		return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH write")
+		return nil, wrapCommandIOError(ctx, err, "IMAP UID SEARCH write")
 	}
 
 	var uids []uint32
@@ -434,10 +434,13 @@ func (c *Client) doUIDSearchCriteriaBounded(
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
-			return nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP UID SEARCH read")
+			return nil, wrapCommandIOError(ctx, err, "IMAP UID SEARCH read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
-			status := parseStatus(line, tag)
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return nil, malformedTaggedCommandResponse(sess, "UID SEARCH", statusErr)
+			}
 			if status == "OK" {
 				if !seenSearch {
 					return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH completed without a SEARCH response")

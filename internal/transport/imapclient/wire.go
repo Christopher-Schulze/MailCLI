@@ -303,6 +303,29 @@ func (c *Client) readFinal(ctx context.Context, sess *session, tag string) (stri
 	}
 }
 
+func parseTaggedCompletionStatus(line, tag string) (string, error) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[0] != tag {
+		return "", errors.New("IMAP tagged completion has no status atom")
+	}
+	status := strings.ToUpper(fields[1])
+	switch status {
+	case "OK", "NO", "BAD":
+		return status, nil
+	default:
+		return "", fmt.Errorf("IMAP tagged completion has invalid status %q", fields[1])
+	}
+}
+
+func malformedTaggedCommandResponse(sess *session, command string, err error) *transport.TransportError {
+	sess.dirty = true
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPResponseMalformed,
+		Message: "IMAP " + command + " tagged response malformed",
+		Err:     err,
+	}
+}
+
 // readFinalWithCodes reads a tagged command completion and retains bracketed
 // response codes from both untagged and tagged lines. COPYUID is commonly sent
 // as an untagged OK response before the tagged completion, so a plain final

@@ -13,10 +13,10 @@ import (
 
 func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailbox, error) {
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP LIST deadline")
+		return nil, wrapCommandIOError(ctx, err, "IMAP LIST deadline")
 	}
 	if err := c.writeLine(sess, tag+` LIST "" "*"`); err != nil {
-		return nil, wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP LIST write")
+		return nil, wrapCommandIOError(ctx, err, "IMAP LIST write")
 	}
 
 	var mailboxes []mailbox
@@ -28,10 +28,13 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 				sess.dirty = true
 				return nil, listResponseMalformed(malformed)
 			}
-			return nil, wrapIOError(ctx, err, transport.CodeIMAPSentMailboxNotFound, "IMAP LIST read")
+			return nil, wrapCommandIOError(ctx, err, "IMAP LIST read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
-			status := parseStatus(line, tag)
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return nil, malformedTaggedCommandResponse(sess, "LIST", statusErr)
+			}
 			if status == "OK" {
 				return mailboxes, nil
 			}
@@ -58,24 +61,27 @@ func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID str
 		return 0, err
 	}
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return 0, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP SEARCH deadline")
+		return 0, wrapCommandIOError(ctx, err, "IMAP SEARCH deadline")
 	}
 	quotedMessageID, err := safeQuoteIMAP(normalizedMessageID)
 	if err != nil {
 		return 0, err
 	}
 	if err := c.writeLine(sess, tag+" SEARCH HEADER Message-ID "+quotedMessageID); err != nil {
-		return 0, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH write")
+		return 0, wrapCommandIOError(ctx, err, "IMAP SEARCH write")
 	}
 
 	matchCount := 0
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
-			return 0, wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP SEARCH read")
+			return 0, wrapCommandIOError(ctx, err, "IMAP SEARCH read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
-			status := parseStatus(line, tag)
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return 0, malformedTaggedCommandResponse(sess, "SEARCH", statusErr)
+			}
 			if status == "OK" {
 				return matchCount, nil
 			}
