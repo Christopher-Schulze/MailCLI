@@ -131,18 +131,9 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 		return ev, err
 	}
 	cmd := fmt.Sprintf("%s UID COPY %d %s", ps.sess.nextTag(), uid, quotedDestination)
-	ev.Outcome = transport.MutationOutcomeAttempted
-	status, text, responseCodes, err := c.doCopyCommandResponse(ctx, ps.sess, cmd)
+	status, text, responseCodes, dispatched, err := c.doCopyCommandResponse(ctx, ps.sess, cmd)
 	if err != nil {
-		if status != "" {
-			ev.ServerResponse = joinIMAPResponse(status, text)
-			if strings.EqualFold(status, "NO") || strings.EqualFold(status, "BAD") {
-				ev.Outcome = transport.MutationOutcomeRejected
-				return ev, err
-			}
-		}
-		ev.Outcome = transport.MutationOutcomeUnknown
-		return ev, copyOutcomeUnknown(ev, err)
+		return copyCommandError(ev, status, text, dispatched, err)
 	}
 	ev.ServerResponse = joinIMAPResponse(status, text)
 	if err := applyCopyUIDEvidence(&ev, responseCodes, uid); err != nil {
@@ -153,34 +144,68 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 	return ev, nil
 }
 
-func (c *Client) doCopyCommandResponse(ctx context.Context, sess *session, cmd string) (string, string, []string, error) {
+func (c *Client) doCopyCommandResponse(ctx context.Context, sess *session, cmd string) (string, string, []string, bool, error) {
 	separator := strings.IndexByte(cmd, ' ')
 	if separator <= 0 {
-		return "", "", nil, &transport.TransportError{
+		return "", "", nil, false, &transport.TransportError{
 			Code:    transport.CodeIMAPInvalidValue,
 			Message: "IMAP COPY command has no tag separator",
 		}
 	}
 	tag := cmd[:separator]
 	if err := c.setDeadline(ctx, sess); err != nil {
-		return "", "", nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP COPY deadline")
+		return "", "", nil, false, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP COPY deadline")
 	}
 	if err := c.writeLine(sess, cmd); err != nil {
-		return "", "", nil, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP COPY write")
+		if transport.ErrorCode(err) == transport.CodeIMAPInvalidValue {
+			return "", "", nil, false, err
+		}
+		return "", "", nil, true, wrapIOError(ctx, err, transport.CodeIMAPMutationFailed, "IMAP COPY write")
 	}
 	status, text, responseCodes, err := c.readFinalWithCodes(
 		ctx, sess, tag, transport.CodeIMAPMutationFailed, "IMAP COPY final response read",
 	)
 	if err != nil {
-		return status, text, responseCodes, err
+		return status, text, responseCodes, true, err
 	}
 	if strings.EqualFold(status, "OK") {
-		return status, text, responseCodes, nil
+		return status, text, responseCodes, true, nil
 	}
-	return status, text, responseCodes, &transport.TransportError{
+	return status, text, responseCodes, true, &transport.TransportError{
 		Code:    transport.CodeIMAPMutationFailed,
 		Message: "IMAP COPY failed: " + status + " " + text,
 	}
+}
+
+func copyCommandError(
+	evidence transport.MutationEvidence,
+	status string,
+	text string,
+	dispatched bool,
+	cause error,
+) (transport.MutationEvidence, error) {
+	if status != "" {
+		evidence.ServerResponse = joinIMAPResponse(status, text)
+		if strings.EqualFold(status, "NO") || strings.EqualFold(status, "BAD") {
+			evidence.Outcome = transport.MutationOutcomeRejected
+			return evidence, cause
+		}
+	}
+	if !dispatched {
+		evidence.Outcome = transport.MutationOutcomeNotStarted
+		code := transport.ErrorCode(cause)
+		if code == "" {
+			code = transport.CodeIMAPMutationFailed
+		}
+		return evidence, &transport.MutationOutcomeError{
+			Code:     code,
+			Message:  "IMAP COPY was not dispatched; no server-side effect occurred",
+			Evidence: evidence,
+			Err:      cause,
+		}
+	}
+	evidence.Outcome = transport.MutationOutcomeUnknown
+	return evidence, copyOutcomeUnknown(evidence, cause)
 }
 
 func parseCopyUIDResponse(responseCode string, sourceUID uint32) (uint32, uint32, error) {
@@ -371,7 +396,7 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	// prefer UID EXPUNGE. If it is unavailable, leave cleanup deferred so an
 	// unscoped EXPUNGE cannot remove another client's deleted message.
 	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quotedDestination)
-	copyStatus, copyText, responseCodes, err := c.doCopyCommandResponse(ctx, sess, copyCmd)
+	copyStatus, copyText, responseCodes, _, err := c.doCopyCommandResponse(ctx, sess, copyCmd)
 	if err != nil {
 		ev.ServerResponse = joinIMAPResponse(copyStatus, copyText)
 		if strings.EqualFold(copyStatus, "NO") || strings.EqualFold(copyStatus, "BAD") {

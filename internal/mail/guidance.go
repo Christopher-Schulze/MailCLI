@@ -85,7 +85,8 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForAttachmentSaveOutcome(attachmentOutcome, code)
 	}
 	var mutation *transport.MutationOutcomeError
-	if errors.As(err, &mutation) && mutation.Evidence.IsStore() {
+	if errors.As(err, &mutation) &&
+		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY") {
 		return guidanceForMutationUnknown(err)
 	}
 	if isInputErrorCode(code) {
@@ -280,7 +281,10 @@ func guidanceForMutationUnknown(err error) OperationGuidance {
 		guidance.Recovery.OperationID = outcome.Evidence.OperationID
 		if outcome.Evidence.HasPartialEffects() {
 			guidance.EffectCertainty = EffectPartial
-		} else if outcome.Evidence.StoreRejectedOrNotStarted() {
+		} else if outcome.Evidence.StoreRejectedOrNotStarted() ||
+			(outcome.Evidence.Command == "COPY" &&
+				(outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted ||
+					outcome.Evidence.Outcome == transport.MutationOutcomeRejected)) {
 			guidance.EffectCertainty = EffectNone
 		}
 	}
