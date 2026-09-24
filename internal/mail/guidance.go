@@ -90,6 +90,13 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY") {
 		return guidanceForMutationUnknown(err)
 	}
+	if command == "messages.get" && code == "not_found" {
+		return OperationGuidance{
+			Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+			Retryability: RetryUserInputRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryCorrect},
+		}
+	}
 	if code == "search_budget_too_small" {
 		guidance := OperationGuidance{
 			Phase: OperationPhaseRead, EffectCertainty: EffectNone,

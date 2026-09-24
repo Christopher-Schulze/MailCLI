@@ -119,3 +119,30 @@ func TestGuidanceForSearchBudgetTooSmallRequiresCorrectedRestart(t *testing.T) {
 		}
 	}
 }
+
+func TestGuidanceForNotFoundIsSpecificToMessagesGet(t *testing.T) {
+	err := &transport.TransportError{Code: "not_found", Message: "missing message"}
+	tests := []struct {
+		name          string
+		command       string
+		retryability  Retryability
+		replayAllowed bool
+		recovery      RecoveryAction
+	}{
+		{name: "messages.get requires a fresh reference", command: "messages.get", retryability: RetryUserInputRequired, recovery: RecoveryCorrect},
+		{name: "messages.raw retains read retry", command: "messages.raw", retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{name: "drafts.inspect retains read retry", command: "drafts.inspect", retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{name: "drafts.open retains read retry", command: "drafts.open", retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{name: "attachments.list retains read retry", command: "attachments.list", retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := GuidanceForError(test.command, err)
+			if got.Phase != OperationPhaseRead || got.EffectCertainty != EffectNone ||
+				got.Retryability != test.retryability || got.ReplayAllowed != test.replayAllowed ||
+				got.Recovery.Action != test.recovery || got.Recovery.Command != "" || len(got.Recovery.Args) != 0 {
+				t.Fatalf("GuidanceForError(%q, not_found) = %+v", test.command, got)
+			}
+		})
+	}
+}

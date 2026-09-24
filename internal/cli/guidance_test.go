@@ -3,10 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	_ "github.com/mattn/go-sqlite3"
+
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
+	"mailcli/internal/mailstore"
 	"mailcli/internal/transport"
 )
 
@@ -147,6 +154,102 @@ func TestReadTimeoutRemainsReplayable(t *testing.T) {
 	if guidance.Phase != mail.OperationPhaseRead || guidance.Retryability != mail.RetrySafe ||
 		!guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryRetry {
 		t.Fatalf("read timeout guidance = %+v", guidance)
+	}
+}
+
+func TestRealMailStoreMissingMessageGetEmitsCorrectRecovery(t *testing.T) {
+	const accountID = "951FB9AB-537B-4E97-8DCC-B241B71AD9DD"
+	const storeUUID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+	config := createNotFoundRecoveryStore(t, storeUUID, accountID)
+	ctx := context.Background()
+	client := mailstore.NewClient(ctx, nil, config, mail.SendTransport{})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close Mail-store client: %v", err)
+		}
+	})
+	if _, opened := client.StoreProfile(); !opened {
+		t.Fatal("fixture Mail store did not open")
+	}
+	ref, err := mailref.EncodeMessage(mailref.Message{
+		AccountID: accountID, MailboxPath: []string{"INBOX"}, LibraryID: "404",
+		ExpectedStoreUUID: storeUUID, ExpectedStoreMailboxID: 1,
+	})
+	if err != nil {
+		t.Fatalf("encode missing-message ref: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, mail.NewService(client), []string{"messages", "get", "--ref", ref, "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 {
+		t.Fatalf("Run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.OK || response.Command != "messages.get" || response.Error == nil ||
+		response.Error.Code != "not_found" || response.Data.Message != nil || response.Error.Guidance == nil {
+		t.Fatalf("missing-message envelope = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseRead || guidance.EffectCertainty != mail.EffectNone ||
+		guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryCorrect || guidance.Recovery.Command != "" || len(guidance.Recovery.Args) != 0 {
+		t.Fatalf("missing-message guidance = %+v", guidance)
+	}
+}
+
+func createNotFoundRecoveryStore(t *testing.T, storeUUID, accountID string) mailstore.Config {
+	t.Helper()
+	mailRoot := t.TempDir()
+	versionRoot := filepath.Join(mailRoot, "V10")
+	mailData := filepath.Join(versionRoot, "MailData")
+	if err := os.MkdirAll(mailData, 0o700); err != nil {
+		t.Fatalf("create fixture MailData: %v", err)
+	}
+	database, err := sql.Open("sqlite3", filepath.Join(mailData, "Envelope Index"))
+	if err != nil {
+		t.Fatalf("open fixture Envelope Index: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("close fixture Envelope Index: %v", err)
+		}
+	})
+	statements := []string{
+		`PRAGMA journal_mode=WAL`,
+		`CREATE TABLE properties (ROWID INTEGER PRIMARY KEY, key, value)`,
+		`CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT NOT NULL, total_count INTEGER, unread_count INTEGER, deleted_count INTEGER, source INTEGER)`,
+		`CREATE TABLE messages (ROWID INTEGER PRIMARY KEY, message_id INTEGER, global_message_id INTEGER, remote_id INTEGER, remote_mailbox INTEGER, sender INTEGER, subject INTEGER, summary INTEGER, date_sent INTEGER, date_received INTEGER, mailbox INTEGER, flags INTEGER, read INTEGER, flagged INTEGER, deleted INTEGER, size INTEGER, conversation_id INTEGER, type INTEGER, display_date INTEGER, flag_color INTEGER)`,
+		`CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT)`,
+		`CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT)`,
+		`CREATE TABLE summaries (ROWID INTEGER PRIMARY KEY, summary TEXT)`,
+		`CREATE TABLE recipients (ROWID INTEGER PRIMARY KEY, message INTEGER, address INTEGER, type INTEGER, position INTEGER)`,
+		`CREATE TABLE attachments (ROWID INTEGER PRIMARY KEY, message INTEGER, attachment_id TEXT, name TEXT)`,
+		`CREATE TABLE labels (message_id INTEGER, mailbox_id INTEGER)`,
+		`CREATE TABLE server_messages (message INTEGER, mailbox INTEGER, junk_level INTEGER, draft INTEGER, replied INTEGER, forwarded INTEGER)`,
+		`CREATE INDEX messages_mailbox_date_received ON messages(mailbox, date_received)`,
+		`CREATE INDEX messages_deleted_date_received ON messages(deleted, date_received)`,
+		`CREATE INDEX labels_mailbox ON labels(mailbox_id)`,
+		`CREATE INDEX recipients_message ON recipients(message, position, type, address)`,
+		`CREATE INDEX attachments_message ON attachments(message, attachment_id)`,
+		`INSERT INTO properties(key, value) VALUES ('version', '4')`,
+		`INSERT INTO properties(key, value) VALUES ('minor_version', '74003')`,
+		`INSERT INTO properties(key, value) VALUES ('last_write_framework_version', '3826.700.81')`,
+		`INSERT INTO properties(key, value) VALUES ('WriteTransactionGeneration', '1')`,
+	}
+	for _, statement := range statements {
+		if _, err := database.Exec(statement); err != nil {
+			t.Fatalf("execute fixture Envelope Index statement %q: %v", statement, err)
+		}
+	}
+	if _, err := database.Exec(`INSERT INTO properties(key, value) VALUES ('UUID', ?)`, storeUUID); err != nil {
+		t.Fatalf("insert fixture Envelope Index UUID: %v", err)
+	}
+	return mailstore.Config{
+		MailRoot: mailRoot, MailStorePath: versionRoot,
+		ActiveAccountURLs: []string{"imap://" + accountID + "/"},
 	}
 }
 
