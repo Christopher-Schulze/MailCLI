@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 
@@ -37,13 +38,15 @@ type draftSavePolicy struct {
 }
 
 type commandCapability struct {
-	ID                string          `json:"id"`
-	Schema            json.RawMessage `json:"schema"`
-	EffectClass       string          `json:"effect_class"`
-	Confirmation      string          `json:"confirmation"`
-	StoreDependency   string          `json:"store_dependency"`
-	MailAppDependency string          `json:"mail_app_dependency"`
-	ResultStates      []string        `json:"result_states"`
+	ID                     string          `json:"id"`
+	Schema                 json.RawMessage `json:"schema"`
+	EffectClass            string          `json:"effect_class"`
+	Confirmation           string          `json:"confirmation"`
+	StoreDependency        string          `json:"store_dependency"`
+	MailAppDependency      string          `json:"mail_app_dependency"`
+	CredentialDependencies []string        `json:"credential_dependencies"`
+	NetworkDependencies    []string        `json:"network_dependencies"`
+	ResultStates           []string        `json:"result_states"`
 }
 
 type capabilityLimits struct {
@@ -247,21 +250,65 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 	return manifest
 }
 
+func capabilitiesForCommands(selected []string) capabilityManifest {
+	manifest := capabilitiesForScope("", "")
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, id := range selected {
+		selectedSet[id] = struct{}{}
+	}
+	commands := make([]commandCapability, 0, len(selectedSet))
+	for _, command := range manifest.Commands {
+		if _, ok := selectedSet[command.ID]; ok {
+			commands = append(commands, command)
+		}
+	}
+	manifest.Commands = commands
+	return manifest
+}
+
 func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("capabilities", stderr)
 	command := flags.String("command", "", "exact command ID to describe")
+	commands := flags.String("commands", "", "comma-separated command IDs to describe")
 	family := flags.String("family", "", "command family to describe")
 	scope := flags.String("scope", "", "exact command ID or command family to describe")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	commandsSelected := false
+	legacySelectorSelected := false
+	flags.Visit(func(selected *flag.Flag) {
+		switch selected.Name {
+		case "commands":
+			commandsSelected = true
+		case "command", "family", "scope":
+			legacySelectorSelected = true
+		}
+	})
+	if commandsSelected {
+		if legacySelectorSelected {
+			return failCommand("capabilities", *jsonOutput, &commandError{
+				code: "invalid_argument", message: "--commands cannot be combined with --command, --family, or --scope",
+			}, stdout, stderr)
+		}
+		selected, err := resolveCapabilityCommands(*commands)
+		if err != nil {
+			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
+		}
+		manifest := capabilitiesForCommands(selected)
+		return writeCapabilities(stdout, *jsonOutput, manifest)
+	}
 	selectionCommand, selectionFamily, err := resolveCapabilityScope(*command, *family, *scope)
 	if err != nil {
 		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 	}
 	manifest := capabilitiesForScope(selectionCommand, selectionFamily)
-	if *jsonOutput {
+	return writeCapabilities(stdout, *jsonOutput, manifest)
+}
+
+func writeCapabilities(stdout io.Writer, jsonOutput bool, manifest capabilityManifest) int {
+	if jsonOutput {
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,
 			OK:            true,

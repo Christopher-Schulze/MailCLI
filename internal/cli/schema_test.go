@@ -103,6 +103,119 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesSelectedCommandsPreserveFullContract(t *testing.T) {
+	full := capabilities()
+	code, output, response := captureCapabilitiesJSON(t,
+		"--commands", "messages.get,messages.search", "--json",
+	)
+	if code != 0 || !response.OK || response.Data.Capabilities == nil {
+		t.Fatalf("selected capabilities exit = %d, response = %+v, output = %s", code, response, output)
+	}
+	selected := response.Data.Capabilities
+	if selected.Scope != "" || len(selected.Commands) != 2 ||
+		selected.Commands[0].ID != "messages.search" || selected.Commands[1].ID != "messages.get" {
+		t.Fatalf("selected command order/scope = %q/%+v", selected.Scope, selected.Commands)
+	}
+	fullCommands := make(map[string]commandCapability, len(full.Commands))
+	for _, command := range full.Commands {
+		fullCommands[command.ID] = command
+	}
+	for _, command := range selected.Commands {
+		if !reflect.DeepEqual(command, fullCommands[command.ID]) {
+			t.Fatalf("selected command %s differs from full contract: %+v vs %+v", command.ID, command, fullCommands[command.ID])
+		}
+	}
+	if !reflect.DeepEqual(selected.Limits, full.Limits) ||
+		!reflect.DeepEqual(selected.SyncCheckPolicy, full.SyncCheckPolicy) ||
+		!reflect.DeepEqual(selected.DraftSavePolicy, full.DraftSavePolicy) {
+		t.Fatal("selected manifest dropped or changed shared limits or policies")
+	}
+	if bytes.Count(output, []byte(`"limits":`)) != 1 {
+		t.Fatalf("selected response should serialize limits exactly once; bytes=%d", len(output))
+	}
+}
+
+func TestCapabilitiesSelectedCommandSelectorsFailClosed(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector string
+		legacy   []string
+	}{
+		{name: "empty"},
+		{name: "empty entry", selector: "messages.search,,messages.get"},
+		{name: "leading empty entry", selector: ",messages.search"},
+		{name: "trailing empty entry", selector: "messages.search,"},
+		{name: "duplicate", selector: "messages.search,messages.search"},
+		{name: "unknown", selector: "messages.search,missing.command"},
+		{name: "mixed singular command", selector: "messages.search", legacy: []string{"--command", "messages.get"}},
+		{name: "mixed family", selector: "messages.search", legacy: []string{"--family", "messages"}},
+		{name: "mixed scope", selector: "messages.search", legacy: []string{"--scope", "messages.search"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"--commands", test.selector}
+			args = append(args, test.legacy...)
+			args = append(args, "--json")
+			code, output, response := captureCapabilitiesJSON(t, args...)
+			if code != 2 || response.OK || response.Error == nil || response.Error.Code != "invalid_argument" {
+				t.Fatalf("invalid selector exit = %d, response = %+v, output = %s", code, response, output)
+			}
+		})
+	}
+}
+
+func TestCapabilitiesSelectedWorkflowByteSavings(t *testing.T) {
+	workflows := []struct {
+		name     string
+		selected string
+		singles  []string
+	}{
+		{
+			name: "search and get", selected: "messages.search,messages.get",
+			singles: []string{"messages.search", "messages.get"},
+		},
+		{
+			name: "draft create inspect send", selected: "drafts.create,drafts.inspect,drafts.send",
+			singles: []string{"drafts.create", "drafts.inspect", "drafts.send"},
+		},
+	}
+	for _, workflow := range workflows {
+		t.Run(workflow.name, func(t *testing.T) {
+			code, selected, response := captureCapabilitiesJSON(t, "--commands", workflow.selected, "--json")
+			if code != 0 || !response.OK || response.Data.Capabilities == nil {
+				t.Fatalf("selected manifest exit = %d, response = %+v", code, response)
+			}
+			selectedBytes := len(selected)
+			separateBytes := 0
+			for _, id := range workflow.singles {
+				code, single, singleResponse := captureCapabilitiesJSON(t, "--command", id, "--json")
+				if code != 0 || !singleResponse.OK || singleResponse.Data.Capabilities == nil {
+					t.Fatalf("singular manifest for %s exit = %d, response = %+v", id, code, singleResponse)
+				}
+				separateBytes += len(single)
+			}
+			if selectedBytes*4 > separateBytes*3 {
+				t.Fatalf("selected workflow is not 25%% smaller: selected=%d separate=%d", selectedBytes, separateBytes)
+			}
+			t.Logf("serialized bytes: selected=%d separate=%d reduction=%d%%",
+				selectedBytes, separateBytes, (separateBytes-selectedBytes)*100/separateBytes)
+		})
+	}
+}
+
+func captureCapabilitiesJSON(t *testing.T, flags ...string) (int, []byte, envelope) {
+	t.Helper()
+	args := append([]string{"capabilities"}, flags...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), nil, args, &stdout, &stderr)
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode capabilities response: %v; stderr=%q; output=%q", err, stderr.String(), stdout.String())
+	}
+	return code, stdout.Bytes(), response
+}
+
 func TestSearchSchemaBoundsAreReachableThroughCLI(t *testing.T) {
 	gateway := &searchQueryCaptureGateway{}
 	maxMessages := 1234

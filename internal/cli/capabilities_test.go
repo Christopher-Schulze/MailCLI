@@ -99,7 +99,8 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		seen[command.ID] = struct{}{}
 		got = append(got, command.ID)
 		if command.EffectClass == "" || command.Confirmation == "" || command.StoreDependency == "" ||
-			command.MailAppDependency == "" || len(command.ResultStates) == 0 {
+			command.MailAppDependency == "" || command.CredentialDependencies == nil ||
+			command.NetworkDependencies == nil || len(command.ResultStates) == 0 {
 			t.Fatalf("incomplete capability = %+v", command)
 		}
 	}
@@ -200,6 +201,61 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		handoffReconcile.StoreDependency != "draft-store" || handoffReconcile.MailAppDependency != "none" ||
 		!slices.Equal(handoffReconcile.ResultStates, []string{"confirmed_opened", "confirmed_failed"}) {
 		t.Fatalf("drafts.handoff-reconcile capability = %+v", handoffReconcile)
+	}
+}
+
+func TestCapabilityCredentialAndNetworkDependenciesAreExplicit(t *testing.T) {
+	type dependencies struct {
+		credentials []string
+		network     []string
+	}
+	want := map[string]dependencies{
+		"update": {network: []string{"release-https"}},
+		"batch": {
+			credentials: []string{"imap-account-credential-if-operation-mutates-mail"},
+			network:     []string{"imap-if-operation-mutates-mail"},
+		},
+		"drafts.send": {
+			credentials: []string{"account-keychain-credential-for-smtp-and-imap"},
+			network:     []string{"smtp-submission", "imap-sent-mirror-after-smtp"},
+		},
+		"send.setup": {credentials: []string{"keychain-write-access"}},
+		"drafts.reconcile": {
+			credentials: []string{"imap-account-credential-if-sent-append-repair-is-needed"},
+			network:     []string{"imap-if-sent-append-repair-is-needed"},
+		},
+		"messages.mark": {
+			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+		},
+		"messages.move": {
+			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+		},
+		"messages.copy": {
+			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+		},
+		"messages.delete": {
+			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+		},
+		"sync": {network: []string{"mail-app-managed-sync"}},
+	}
+	empty := dependencies{credentials: []string{}, network: []string{}}
+	for _, command := range capabilities().Commands {
+		expected := empty
+		if declared, ok := want[command.ID]; ok {
+			expected = declared
+		}
+		if expected.credentials == nil {
+			expected.credentials = empty.credentials
+		}
+		if expected.network == nil {
+			expected.network = empty.network
+		}
+		if !reflect.DeepEqual(command.CredentialDependencies, expected.credentials) ||
+			!reflect.DeepEqual(command.NetworkDependencies, expected.network) {
+			t.Fatalf("%s dependencies = credentials:%q network:%q, want credentials:%q network:%q",
+				command.ID, command.CredentialDependencies, command.NetworkDependencies,
+				expected.credentials, expected.network)
+		}
 	}
 }
 

@@ -10,16 +10,18 @@ import (
 // runner registry below owns execution only; it does not repeat capability
 // metadata or dependency decisions.
 type commandContract struct {
-	ID                 string
-	effectClass        string
-	confirmation       string
-	storeDependency    string
-	mailAppDependency  string
-	resultStates       []string
-	mailService        mailServiceRequirement
-	published          bool
-	requiresSignal     bool
-	requiresMainThread bool
+	ID                     string
+	effectClass            string
+	confirmation           string
+	storeDependency        string
+	mailAppDependency      string
+	credentialDependencies []string
+	networkDependencies    []string
+	resultStates           []string
+	mailService            mailServiceRequirement
+	published              bool
+	requiresSignal         bool
+	requiresMainThread     bool
 }
 
 type mailServiceRequirement uint8
@@ -58,14 +60,23 @@ func commandNeedsMainThreadFor(contract commandContract) bool {
 
 func commandCapabilityFor(contract commandContract) commandCapability {
 	return commandCapability{
-		ID:                contract.ID,
-		Schema:            schemaForCommand(contract.ID),
-		EffectClass:       contract.effectClass,
-		Confirmation:      contract.confirmation,
-		StoreDependency:   contract.storeDependency,
-		MailAppDependency: contract.mailAppDependency,
-		ResultStates:      slices.Clone(contract.resultStates),
+		ID:                     contract.ID,
+		Schema:                 schemaForCommand(contract.ID),
+		EffectClass:            contract.effectClass,
+		Confirmation:           contract.confirmation,
+		StoreDependency:        contract.storeDependency,
+		MailAppDependency:      contract.mailAppDependency,
+		CredentialDependencies: capabilityDependencyList(contract.credentialDependencies),
+		NetworkDependencies:    capabilityDependencyList(contract.networkDependencies),
+		ResultStates:           slices.Clone(contract.resultStates),
 	}
+}
+
+func capabilityDependencyList(dependencies []string) []string {
+	if len(dependencies) == 0 {
+		return []string{}
+	}
+	return slices.Clone(dependencies)
 }
 
 // commandContracts stays ordered so the human and JSON manifests remain
@@ -89,10 +100,11 @@ var commandContracts = []commandContract{
 	{
 		ID: "update", effectClass: "local-write", confirmation: "none",
 		storeDependency: "none", mailAppDependency: "none",
-		resultStates:   []string{"updated", "up_to_date"},
-		mailService:    mailServiceNotRequired,
-		published:      true,
-		requiresSignal: true,
+		networkDependencies: []string{"release-https"},
+		resultStates:        []string{"updated", "up_to_date"},
+		mailService:         mailServiceNotRequired,
+		published:           true,
+		requiresSignal:      true,
 	},
 	{
 		ID: "doctor", effectClass: "read", confirmation: "none",
@@ -104,9 +116,11 @@ var commandContracts = []commandContract{
 	{
 		ID: "batch", effectClass: "batch", confirmation: "operation-dependent",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"complete", "partial"},
-		mailService:  mailServiceForArguments,
-		published:    true,
+		credentialDependencies: []string{"imap-account-credential-if-operation-mutates-mail"},
+		networkDependencies:    []string{"imap-if-operation-mutates-mail"},
+		resultStates:           []string{"complete", "partial"},
+		mailService:            mailServiceForArguments,
+		published:              true,
 	},
 	{
 		ID: "accounts.list", effectClass: "read", confirmation: "none",
@@ -272,25 +286,30 @@ var commandContracts = []commandContract{
 	{
 		ID: "drafts.send", effectClass: "smtp-send", confirmation: "required-flag",
 		storeDependency: "draft-store", mailAppDependency: "none",
-		resultStates:   []string{"sent", "sent_mirror_pending"},
-		mailService:    mailServiceNotRequired,
-		published:      true,
-		requiresSignal: true,
+		credentialDependencies: []string{"account-keychain-credential-for-smtp-and-imap"},
+		networkDependencies:    []string{"smtp-submission", "imap-sent-mirror-after-smtp"},
+		resultStates:           []string{"sent", "sent_mirror_pending"},
+		mailService:            mailServiceNotRequired,
+		published:              true,
+		requiresSignal:         true,
 	},
 	{
 		ID: "send.setup", effectClass: "keychain-write", confirmation: "none",
 		storeDependency: "none", mailAppDependency: "none",
-		resultStates: []string{"stored", "removed"},
-		mailService:  mailServiceNotRequired,
-		published:    true,
+		credentialDependencies: []string{"keychain-write-access"},
+		resultStates:           []string{"stored", "removed"},
+		mailService:            mailServiceNotRequired,
+		published:              true,
 	},
 	{
 		ID: "drafts.reconcile", effectClass: "local-write+imap-write", confirmation: "none",
 		storeDependency: "draft-store+mail-store-if-baseline", mailAppDependency: "none",
-		resultStates:   []string{"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown"},
-		mailService:    mailServiceForReconcile,
-		published:      true,
-		requiresSignal: true,
+		credentialDependencies: []string{"imap-account-credential-if-sent-append-repair-is-needed"},
+		networkDependencies:    []string{"imap-if-sent-append-repair-is-needed"},
+		resultStates:           []string{"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown"},
+		mailService:            mailServiceForReconcile,
+		published:              true,
+		requiresSignal:         true,
 	},
 	{
 		ID: "drafts.discard", effectClass: "local-write", confirmation: "required-flag",
@@ -323,38 +342,47 @@ var commandContracts = []commandContract{
 	{
 		ID: "messages.mark", effectClass: "imap-write", confirmation: "draft-flag",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"updated", "up_to_date"},
-		mailService:  mailServiceAlwaysRequired,
-		published:    true,
+		credentialDependencies: []string{"imap-account-keychain-credential"},
+		networkDependencies:    []string{"imap"},
+		resultStates:           []string{"updated", "up_to_date"},
+		mailService:            mailServiceAlwaysRequired,
+		published:              true,
 	},
 	{
 		ID: "messages.move", effectClass: "imap-write", confirmation: "draft-flag",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"moved"},
-		mailService:  mailServiceAlwaysRequired,
-		published:    true,
+		credentialDependencies: []string{"imap-account-keychain-credential"},
+		networkDependencies:    []string{"imap"},
+		resultStates:           []string{"moved"},
+		mailService:            mailServiceAlwaysRequired,
+		published:              true,
 	},
 	{
 		ID: "messages.copy", effectClass: "imap-write", confirmation: "none",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"copied"},
-		mailService:  mailServiceAlwaysRequired,
-		published:    true,
+		credentialDependencies: []string{"imap-account-keychain-credential"},
+		networkDependencies:    []string{"imap"},
+		resultStates:           []string{"copied"},
+		mailService:            mailServiceAlwaysRequired,
+		published:              true,
 	},
 	{
 		ID: "messages.delete", effectClass: "imap-write", confirmation: "required-and-draft-flags",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"deleted"},
-		mailService:  mailServiceAlwaysRequired,
-		published:    true,
+		credentialDependencies: []string{"imap-account-keychain-credential"},
+		networkDependencies:    []string{"imap"},
+		resultStates:           []string{"deleted"},
+		mailService:            mailServiceAlwaysRequired,
+		published:              true,
 	},
 	{
 		ID: "sync", effectClass: "mail-write", confirmation: "none",
 		storeDependency: "mail-store", mailAppDependency: "optional",
-		resultStates:   []string{"triggered", "checked_complete", "checked_incomplete"},
-		mailService:    mailServiceAlwaysRequired,
-		published:      true,
-		requiresSignal: true,
+		networkDependencies: []string{"mail-app-managed-sync"},
+		resultStates:        []string{"triggered", "checked_complete", "checked_incomplete"},
+		mailService:         mailServiceAlwaysRequired,
+		published:           true,
+		requiresSignal:      true,
 	},
 	{
 		ID: "drafts.handoff-reconcile", effectClass: "local-write", confirmation: "required-flag",

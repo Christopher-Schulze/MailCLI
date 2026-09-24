@@ -148,6 +148,37 @@ func resolveCapabilityScope(command, family, scope string) (string, string, erro
 	return "", "", unknownCapabilityScope(scope)
 }
 
+func resolveCapabilityCommands(selector string) ([]string, error) {
+	values := strings.Split(selector, ",")
+	if strings.TrimSpace(selector) == "" {
+		return nil, &commandError{code: "invalid_argument", message: "--commands requires at least one command ID"}
+	}
+	selected := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		id := strings.TrimSpace(value)
+		if id == "" {
+			return nil, &commandError{code: "invalid_argument", message: "--commands cannot contain an empty command ID"}
+		}
+		if _, exists := selected[id]; exists {
+			return nil, &commandError{code: "invalid_argument", message: fmt.Sprintf("--commands repeats command ID %q", id)}
+		}
+		if !publishedCommandID(id) {
+			return nil, unknownCapabilityScope(id)
+		}
+		selected[id] = struct{}{}
+	}
+	canonical := make([]string, 0, len(selected))
+	for _, contract := range commandContracts {
+		if !commandIsPublished(contract) {
+			continue
+		}
+		if _, ok := selected[contract.ID]; ok {
+			canonical = append(canonical, contract.ID)
+		}
+	}
+	return canonical, nil
+}
+
 func publishedCommandID(id string) bool {
 	for _, contract := range commandContracts {
 		if commandIsPublished(contract) && contract.ID == id {

@@ -33,7 +33,11 @@ case "${1:-}" in
     ;;
   capabilities)
     increment capabilities
-    printf '%s\n' '{"schema_version":1,"ok":true,"command":"capabilities","data":{"capabilities":{"schema_version":1}},"error":null}'
+    if [[ "${2:-}" == "--commands" ]]; then
+      printf '{"schema_version":1,"ok":true,"command":"capabilities","data":{"selection":"%s","capabilities":{"schema_version":1}},"error":null}\n' "${3:-}"
+    else
+      printf '%s\n' '{"schema_version":1,"ok":true,"command":"capabilities","data":{"capabilities":{"schema_version":1}},"error":null}'
+    fi
     ;;
   doctor)
     increment doctor
@@ -80,6 +84,19 @@ expect_count capabilities 1
 preflight capabilities | grep -Fq '"command":"capabilities"'
 expect_count capabilities 1
 
+preflight capabilities --commands 'messages.search,messages.get' | grep -Fq '"selection":"messages.get,messages.search"'
+expect_count capabilities 2
+FAKE_BINARY_HASH="$(shasum -a 256 "${FAKE_BINARY}" | awk '{print $1}')"
+SELECTED_COMMANDS_HASH="$(printf '%s' 'messages.get,messages.search' | shasum -a 256 | awk '{print $1}')"
+[[ -f "${CACHE_ROOT}/capabilities-${FAKE_BINARY_HASH}-schema-1-commands-${SELECTED_COMMANDS_HASH}.json" ]] || {
+  printf 'selected cache key omitted binary, schema, or normalized selector identity\n' >&2
+  exit 1
+}
+preflight capabilities --commands 'messages.get,messages.search' | grep -Fq '"selection":"messages.get,messages.search"'
+expect_count capabilities 2
+preflight capabilities --commands 'messages.get,messages.thread' | grep -Fq '"selection":"messages.get,messages.thread"'
+expect_count capabilities 3
+
 preflight doctor | grep -Fq '"command":"doctor"'
 expect_count doctor 1
 preflight doctor >/dev/null
@@ -95,9 +112,15 @@ expect_count doctor 3
 
 printf '\n# binary identity changed\n' >>"${FAKE_BINARY}"
 preflight capabilities >/dev/null
-expect_count capabilities 2
+expect_count capabilities 4
+preflight capabilities --commands 'messages.search,messages.get' |
+  grep -Fq '"selection":"messages.get,messages.search"'
+expect_count capabilities 5
 
 preflight invalidate
 preflight capabilities >/dev/null
-expect_count capabilities 3
-printf 'Preflight cache passed: binary/schema identity, bounded doctor reuse, refresh, and failure invalidation\n'
+expect_count capabilities 6
+preflight capabilities --commands 'messages.search,messages.get' |
+  grep -Fq '"selection":"messages.get,messages.search"'
+expect_count capabilities 7
+printf 'Preflight cache passed: selector isolation and normalization, binary/schema/selector cache identity, binary-change invalidation, bounded doctor reuse, refresh, and failure invalidation\n'
