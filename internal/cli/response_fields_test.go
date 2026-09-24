@@ -33,7 +33,7 @@ func TestResponseDataFieldOrderPinned(t *testing.T) {
 		"content_source", "content_complete", "missing_parts",
 		"saved_attachment", "draft", "draft_preview", "draft_handoff",
 		"handoff_reconcile", "drafts", "prune", "saved_draft", "send_result",
-		"send_receipt", "send_setup", "delete_result", "sync_result",
+		"send_receipt", "send_setup", "partial_effects", "delete_result", "sync_result",
 		"sync_check", "batch_result", "store_profile", "finalization",
 		"update_result",
 	}

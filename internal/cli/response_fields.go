@@ -53,7 +53,7 @@ var commandDataFields = map[string][]string{
 	"drafts.open":              {"message"},
 	"drafts.adopt":             {"draft"},
 	"drafts.send":              {"send_receipt", "send_result"},
-	"send.setup":               {"send_setup"},
+	"send.setup":               {"send_setup", "partial_effects"},
 	"drafts.reconcile":         {"send_receipt", "send_result"},
 	"drafts.discard":           {},
 	"drafts.prune":             {"prune"},

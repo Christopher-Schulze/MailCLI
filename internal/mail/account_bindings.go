@@ -54,6 +54,15 @@ type AccountBindingFile struct {
 // The file store invokes it while holding the cross-process update lock.
 type AccountBindingUpdate func(AccountBindingFile) (AccountBindingFile, error)
 
+// AccountBindingPublicationStatus describes whether a failed update reached
+// the atomic rename boundary.
+type AccountBindingPublicationStatus string
+
+const (
+	AccountBindingPublicationNone    AccountBindingPublicationStatus = "none"
+	AccountBindingPublicationUnknown AccountBindingPublicationStatus = "unknown"
+)
+
 // AccountBindingStore persists explicit account identity bindings.
 type AccountBindingStore interface {
 	LoadAccountBindings() (AccountBindingFile, error)
@@ -64,9 +73,10 @@ type AccountBindingStore interface {
 
 // AccountBindingError is a typed failure for binding state or validation.
 type AccountBindingError struct {
-	Code    string
-	Message string
-	Err     error
+	Code              string
+	Message           string
+	Err               error
+	publicationStatus AccountBindingPublicationStatus
 }
 
 func (e *AccountBindingError) Error() string {
@@ -79,6 +89,16 @@ func (e *AccountBindingError) Error() string {
 func (e *AccountBindingError) Unwrap() error { return e.Err }
 
 func (e *AccountBindingError) ErrorCode() string { return e.Code }
+
+// BindingPublicationStatus reports the publication boundary reached before
+// this error. Errors before rename have no published binding; errors after
+// rename are conservatively uncertain until the directory sync succeeds.
+func (e *AccountBindingError) BindingPublicationStatus() AccountBindingPublicationStatus {
+	if e.publicationStatus == AccountBindingPublicationUnknown {
+		return AccountBindingPublicationUnknown
+	}
+	return AccountBindingPublicationNone
+}
 
 // NewAccountBindingStore returns a file-backed binding store. An empty path
 // resolves to the user's private MailCLI application-support directory.
@@ -454,8 +474,16 @@ func FindAccountBinding(
 }
 
 type fileAccountBindingStore struct {
-	path string
+	path            string
+	publicationHook func(accountBindingPublicationBoundary) error
 }
+
+type accountBindingPublicationBoundary uint8
+
+const (
+	accountBindingBeforeRename accountBindingPublicationBoundary = iota
+	accountBindingAfterRename
+)
 
 func (s *fileAccountBindingStore) bindingPath(create bool) (string, error) {
 	path := s.path
@@ -567,12 +595,27 @@ func (s *fileAccountBindingStore) UpdateAccountBindings(ctx context.Context, upd
 	}
 	defer func() {
 		if releaseErr := lease.release(); releaseErr != nil {
+			publicationStatus := AccountBindingPublicationUnknown
+			if result != nil {
+				publicationStatus = accountBindingPublicationStatus(result)
+			}
 			result = errors.Join(result, &AccountBindingError{
 				Code: "account_binding_unavailable", Message: "release account-binding lock", Err: releaseErr,
+				publicationStatus: publicationStatus,
 			})
 		}
 	}()
-	return updateAccountBindingsLocked(ctx, lease, filepath.Base(path), update)
+	return updateAccountBindingsLocked(ctx, lease, filepath.Base(path), update, s.publicationHook)
+}
+
+func accountBindingPublicationStatus(err error) AccountBindingPublicationStatus {
+	var status interface {
+		BindingPublicationStatus() AccountBindingPublicationStatus
+	}
+	if errors.As(err, &status) {
+		return status.BindingPublicationStatus()
+	}
+	return AccountBindingPublicationNone
 }
 
 func acquireAccountBindingLease(ctx context.Context, path string) (*draftLease, error) {
@@ -594,6 +637,7 @@ func updateAccountBindingsLocked(
 	lease *draftLease,
 	name string,
 	update AccountBindingUpdate,
+	publicationHook func(accountBindingPublicationBoundary) error,
 ) error {
 	directory := lease.storage.rootName
 	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
@@ -626,7 +670,7 @@ func updateAccountBindingsLocked(
 	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
 		return err
 	}
-	return writeAccountBindings(lease.storage, name, identity, payload, directory, lease.lock.directory)
+	return writeAccountBindings(lease.storage, name, identity, payload, directory, lease.lock.directory, publicationHook)
 }
 
 func marshalAccountBindingFile(document AccountBindingFile) ([]byte, error) {
@@ -705,6 +749,7 @@ func writeAccountBindings(
 	payload []byte,
 	parentPath string,
 	pinnedParent *os.File,
+	publicationHook func(accountBindingPublicationBoundary) error,
 ) error {
 	if err := verifyAccountBindingFileIdentity(storage, name, expected); err != nil {
 		return err
@@ -724,16 +769,41 @@ func writeAccountBindings(
 	if err := verifyAccountBindingFileIdentity(storage, name, expected); err != nil {
 		return errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, ""))
 	}
+	if err := runAccountBindingPublicationHook(publicationHook, accountBindingBeforeRename); err != nil {
+		return &AccountBindingError{
+			Code: "account_binding_unavailable", Message: "publish account-binding file",
+			Err: errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, "")),
+		}
+	}
 	if err := storage.apply(draftStorageRename, temporary, name, 0); err != nil {
 		return &AccountBindingError{
 			Code: "account_binding_unavailable", Message: "publish account-binding file",
 			Err: errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryInfo, "")),
 		}
 	}
+	if err := runAccountBindingPublicationHook(publicationHook, accountBindingAfterRename); err != nil {
+		return &AccountBindingError{
+			Code: "account_binding_unavailable", Message: "sync account-binding directory", Err: err,
+			publicationStatus: AccountBindingPublicationUnknown,
+		}
+	}
 	if err := storage.apply(draftStorageSync, "", "", 0); err != nil {
-		return &AccountBindingError{Code: "account_binding_unavailable", Message: "sync account-binding directory", Err: err}
+		return &AccountBindingError{
+			Code: "account_binding_unavailable", Message: "sync account-binding directory", Err: err,
+			publicationStatus: AccountBindingPublicationUnknown,
+		}
 	}
 	return nil
+}
+
+func runAccountBindingPublicationHook(
+	hook func(accountBindingPublicationBoundary) error,
+	boundary accountBindingPublicationBoundary,
+) error {
+	if hook == nil {
+		return nil
+	}
+	return hook(boundary)
 }
 
 func verifyAccountBindingFileIdentity(storage *draftStorage, name string, expected os.FileInfo) error {

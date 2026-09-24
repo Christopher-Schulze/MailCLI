@@ -57,6 +57,117 @@ func TestAccountBindingStoreRoundTripNormalizesAndProtectsFile(t *testing.T) {
 	}
 }
 
+func TestAccountBindingPublicationFailureReportsRenameBoundary(t *testing.T) {
+	tests := []struct {
+		name      string
+		boundary  accountBindingPublicationBoundary
+		status    AccountBindingPublicationStatus
+		wantAlias string
+	}{
+		{
+			name: "before rename", boundary: accountBindingBeforeRename,
+			status: AccountBindingPublicationNone, wantAlias: "before@icloud.com",
+		},
+		{
+			name: "after rename", boundary: accountBindingAfterRename,
+			status: AccountBindingPublicationUnknown, wantAlias: "after@icloud.com",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertAccountBindingPublicationFailure(t, test.boundary, test.status, test.wantAlias)
+		})
+	}
+}
+
+func assertAccountBindingPublicationFailure(
+	t *testing.T,
+	boundary accountBindingPublicationBoundary,
+	wantStatus AccountBindingPublicationStatus,
+	wantAlias string,
+) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "account-bindings.json")
+	seed := NewAccountBindingStore(path)
+	if err := seed.UpsertAccountBinding(AccountBinding{
+		AccountID: "ACCOUNT-A", SenderAliases: []string{"before@icloud.com"},
+		CredentialAccount: "login@icloud.com",
+	}); err != nil {
+		t.Fatalf("seed UpsertAccountBinding() error = %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookCalled := false
+	store := &fileAccountBindingStore{
+		path: path,
+		publicationHook: func(actual accountBindingPublicationBoundary) error {
+			if actual != boundary {
+				return nil
+			}
+			hookCalled = true
+			return errors.New("injected publication failure")
+		},
+	}
+	err = store.UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) {
+		document.Bindings[0].SenderAliases = []string{"after@icloud.com"}
+		return document, nil
+	})
+	if err == nil || !hookCalled {
+		t.Fatalf("UpdateAccountBindings() error = %v, hook called = %t", err, hookCalled)
+	}
+	assertAccountBindingPublicationStatus(t, err, wantStatus)
+	assertAccountBindingPublicationState(t, seed, path, before, wantStatus, wantAlias)
+}
+
+func assertAccountBindingPublicationStatus(t *testing.T, err error, want AccountBindingPublicationStatus) {
+	t.Helper()
+	var publication interface {
+		BindingPublicationStatus() AccountBindingPublicationStatus
+	}
+	if !errors.As(err, &publication) || publication.BindingPublicationStatus() != want {
+		t.Fatalf("publication status = %v, want %q (error %v)", publication, want, err)
+	}
+}
+
+func assertAccountBindingPublicationState(
+	t *testing.T,
+	store AccountBindingStore,
+	path string,
+	before []byte,
+	wantStatus AccountBindingPublicationStatus,
+	wantAlias string,
+) {
+	t.Helper()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantStatus == AccountBindingPublicationNone && !bytes.Equal(after, before) {
+		t.Fatalf("pre-rename failure changed file: before=%s after=%s", before, after)
+	}
+	if wantStatus == AccountBindingPublicationUnknown && bytes.Equal(after, before) {
+		t.Fatal("post-rename failure did not publish the updated file")
+	}
+	document, err := store.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	if got := document.Bindings[0].SenderAliases[0]; got != wantAlias {
+		t.Fatalf("persisted alias = %q, want %q", got, wantAlias)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".account-bindings-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("publication failure left temporary file %q", entry.Name())
+		}
+	}
+}
+
 func TestAccountBindingReadDoesNotRepairPermissions(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "bindings")
 	if err := os.Mkdir(directory, 0o700); err != nil {

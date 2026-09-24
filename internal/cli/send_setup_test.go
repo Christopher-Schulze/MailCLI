@@ -2,7 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,7 +19,47 @@ import (
 type stubSetupCredentials struct {
 	stored    map[string]string
 	loadErr   error
+	storeErr  error
 	deleteErr error
+}
+
+type setupBindingPublicationError struct {
+	status mail.AccountBindingPublicationStatus
+}
+
+func (e *setupBindingPublicationError) Error() string {
+	return "injected account-binding publication failure"
+}
+
+func (e *setupBindingPublicationError) ErrorCode() string { return "account_binding_unavailable" }
+
+func (e *setupBindingPublicationError) BindingPublicationStatus() mail.AccountBindingPublicationStatus {
+	return e.status
+}
+
+type setupBindingPublicationFaultStore struct {
+	store  mail.AccountBindingStore
+	status mail.AccountBindingPublicationStatus
+}
+
+func (s *setupBindingPublicationFaultStore) LoadAccountBindings() (mail.AccountBindingFile, error) {
+	return s.store.LoadAccountBindings()
+}
+
+func (s *setupBindingPublicationFaultStore) UpdateAccountBindings(
+	ctx context.Context,
+	update mail.AccountBindingUpdate,
+) error {
+	if s.status == mail.AccountBindingPublicationUnknown {
+		if err := s.store.UpdateAccountBindings(ctx, update); err != nil {
+			return err
+		}
+	}
+	return &setupBindingPublicationError{status: s.status}
+}
+
+func (s *setupBindingPublicationFaultStore) UpsertAccountBinding(binding mail.AccountBinding) error {
+	return s.store.UpsertAccountBinding(binding)
 }
 
 type setupCredentialInvalidatingImap struct {
@@ -38,6 +83,9 @@ func (c *stubSetupCredentials) Load(account string) (string, error) {
 }
 
 func (c *stubSetupCredentials) Store(account string, password string) error {
+	if c.storeErr != nil {
+		return c.storeErr
+	}
 	c.stored[account] = password
 	return nil
 }
@@ -129,6 +177,203 @@ func TestSendSetupPersistsExplicitAccountBinding(t *testing.T) {
 	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
 	if err != nil || !found || binding.CredentialAccount != "login@icloud.com" || len(binding.SenderAliases) != 1 || binding.SenderAliases[0] != "alias@icloud.com" {
 		t.Fatalf("binding = %+v, found=%t, error=%v", binding, found, err)
+	}
+}
+
+func TestSendSetupBindingPublicationFailureReportsPartialEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		status mail.AccountBindingPublicationStatus
+	}{
+		{name: "before rename", status: mail.AccountBindingPublicationNone},
+		{name: "after rename", status: mail.AccountBindingPublicationUnknown},
+	}
+	for _, test := range tests {
+		for _, jsonOutput := range []bool{true, false} {
+			mode := "human"
+			if jsonOutput {
+				mode = "json"
+			}
+			t.Run(test.name+"/"+mode, func(t *testing.T) {
+				runSendSetupBindingPublicationFailure(t, test.status, jsonOutput)
+			})
+		}
+	}
+}
+
+func runSendSetupBindingPublicationFailure(t *testing.T, status mail.AccountBindingPublicationStatus, jsonOutput bool) {
+	t.Helper()
+	path, store, before, accountRef := seedSetupBinding(t, []string{"old@icloud.com"})
+	previousBindings := sendSetupBindings
+	sendSetupBindings = func() mail.AccountBindingStore {
+		return &setupBindingPublicationFaultStore{store: store, status: status}
+	}
+	t.Cleanup(func() { sendSetupBindings = previousBindings })
+	credentials := newStubSetupCredentials()
+	args := []string{
+		"setup", "--from", "alice@icloud.com", "--account", accountRef,
+		"--credential-account", "login@icloud.com",
+	}
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	code, stdout, stderr := runSendSetupWithStub(t, credentials, "credential-secret\n", args)
+	if code != 1 || credentials.stored["login@icloud.com"] != "credential-secret" {
+		t.Fatalf("code = %d, credentials = %#v, stdout = %q, stderr = %q", code, credentials.stored, stdout.String(), stderr.String())
+	}
+	assertNoSetupCredentialLeak(t, stdout, stderr)
+	assertSendSetupPublicationOutput(t, status, jsonOutput, stdout, stderr)
+	assertSendSetupBindingState(t, store, path, before, status)
+}
+
+func seedSetupBinding(t *testing.T, aliases []string) (string, mail.AccountBindingStore, []byte, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "account-bindings.json")
+	store := mail.NewAccountBindingStore(path)
+	if err := store.UpsertAccountBinding(mail.AccountBinding{
+		AccountID: "ACCOUNT-1", SenderAliases: aliases, CredentialAccount: "login@icloud.com",
+	}); err != nil {
+		t.Fatalf("seed UpsertAccountBinding() error = %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	return path, store, before, accountRef
+}
+
+func assertNoSetupCredentialLeak(t *testing.T, stdout, stderr *bytes.Buffer) {
+	t.Helper()
+	if strings.Contains(stdout.String(), "credential-secret") || strings.Contains(stderr.String(), "credential-secret") {
+		t.Fatal("the credential leaked into command output")
+	}
+}
+
+func assertSendSetupPublicationOutput(
+	t *testing.T,
+	status mail.AccountBindingPublicationStatus,
+	jsonOutput bool,
+	stdout, stderr *bytes.Buffer,
+) {
+	t.Helper()
+	if !jsonOutput {
+		if stdout.Len() != 0 || !strings.Contains(stderr.String(), "binding_publish: "+string(status)) ||
+			!strings.Contains(stderr.String(), "mailcli accounts list --json") ||
+			!strings.Contains(stderr.String(), "explicit send setup decision") {
+			t.Fatalf("human failure output stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		return
+	}
+	var output struct {
+		Data struct {
+			PartialEffects []sendSetupPartialEffect `json:"partial_effects"`
+		} `json:"data"`
+		Error struct {
+			Guidance mail.OperationGuidance `json:"guidance"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode error response: %v, output=%q", err, stdout.String())
+	}
+	wantEffects := []sendSetupPartialEffect{
+		{Step: "keychain_store", Status: "complete"},
+		{Step: "binding_publish", Status: status},
+	}
+	if !reflect.DeepEqual(output.Data.PartialEffects, wantEffects) {
+		t.Fatalf("partial_effects = %+v, want %+v", output.Data.PartialEffects, wantEffects)
+	}
+	guidance := output.Error.Guidance
+	if guidance.EffectCertainty != mail.EffectPartial || guidance.Retryability != mail.RetryObserveRequired ||
+		guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryObserve ||
+		guidance.Recovery.Command != "accounts.list" || !reflect.DeepEqual(guidance.Recovery.Args, []string{"--json"}) {
+		t.Fatalf("recovery guidance = %+v", guidance)
+	}
+}
+
+func assertSendSetupBindingState(
+	t *testing.T,
+	store mail.AccountBindingStore,
+	path string,
+	before []byte,
+	status mail.AccountBindingPublicationStatus,
+) {
+	t.Helper()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == mail.AccountBindingPublicationNone && !bytes.Equal(after, before) {
+		t.Fatalf("pre-rename failure changed binding file: before=%s after=%s", before, after)
+	}
+	if status == mail.AccountBindingPublicationUnknown && bytes.Equal(after, before) {
+		t.Fatal("post-rename failure did not retain the published binding")
+	}
+	document, err := store.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
+	if err != nil || !found {
+		t.Fatalf("FindAccountBinding() = %+v, found=%t, error=%v", binding, found, err)
+	}
+	wantAliases := []string{"old@icloud.com"}
+	if status == mail.AccountBindingPublicationUnknown {
+		wantAliases = []string{"alice@icloud.com", "old@icloud.com"}
+	}
+	if !reflect.DeepEqual(binding.SenderAliases, wantAliases) {
+		t.Fatalf("retained binding = %+v, want aliases %v", binding, wantAliases)
+	}
+}
+
+func TestSendSetupCredentialStoreFailureReportsNoPartialEffects(t *testing.T) {
+	path, store, before, accountRef := seedSetupBinding(t, []string{"alice@icloud.com"})
+	previousBindings := sendSetupBindings
+	sendSetupBindings = func() mail.AccountBindingStore { return store }
+	t.Cleanup(func() { sendSetupBindings = previousBindings })
+	credentials := newStubSetupCredentials()
+	credentials.storeErr = errors.New("injected Keychain write failure")
+	code, stdout, stderr := runSendSetupWithStub(t, credentials, "credential-secret\n", []string{
+		"setup", "--from", "alice@icloud.com", "--account", accountRef,
+		"--credential-account", "login@icloud.com", "--json",
+	})
+	if code != 1 || len(credentials.stored) != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, credentials = %#v, stdout = %q, stderr = %q", code, credentials.stored, stdout.String(), stderr.String())
+	}
+	assertNoSetupCredentialLeak(t, stdout, stderr)
+	assertSendSetupNoEffectError(t, stdout)
+	assertSetupBindingBytes(t, path, before)
+}
+
+func assertSendSetupNoEffectError(t *testing.T, stdout *bytes.Buffer) {
+	t.Helper()
+	var output struct {
+		Data struct {
+			PartialEffects []sendSetupPartialEffect `json:"partial_effects"`
+		} `json:"data"`
+		Error struct {
+			Guidance mail.OperationGuidance `json:"guidance"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode error response: %v, output=%q", err, stdout.String())
+	}
+	if len(output.Data.PartialEffects) != 0 || output.Error.Guidance.EffectCertainty != mail.EffectNone {
+		t.Fatalf("Keychain failure response partial_effects=%+v guidance=%+v", output.Data.PartialEffects, output.Error.Guidance)
+	}
+}
+
+func assertSetupBindingBytes(t *testing.T, path string, before []byte) {
+	t.Helper()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("Keychain failure changed the binding file")
 	}
 }
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	stdmail "net/mail"
 	"strings"
@@ -30,6 +31,11 @@ type sendSetupResult struct {
 	AccountRef        string `json:"account_ref,omitempty"`
 	CredentialAccount string `json:"credential_account,omitempty"`
 	Action            string `json:"action"`
+}
+
+type sendSetupPartialEffect struct {
+	Step   string                               `json:"step"`
+	Status mail.AccountBindingPublicationStatus `json:"status"`
 }
 
 func runSend(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -202,7 +208,9 @@ func runSendSetup(
 			}
 		}
 		if err := upsertSendBinding(ctx, bindings, stableAccountID, account, credential, hosts); err != nil {
-			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+			return failSendSetupBindingUpdate(
+				*jsonOutput, err, sendSetupBindingPublicationStatus(err), stdout, stderr,
+			)
 		}
 	}
 	if invalidateCredentials != nil {
@@ -266,6 +274,37 @@ func mergeSendBinding(document mail.AccountBindingFile, accountID string, alias 
 	}
 	document.Bindings = append(document.Bindings, binding)
 	return document, nil
+}
+
+func sendSetupBindingPublicationStatus(err error) mail.AccountBindingPublicationStatus {
+	var publication interface {
+		BindingPublicationStatus() mail.AccountBindingPublicationStatus
+	}
+	if errors.As(err, &publication) &&
+		publication.BindingPublicationStatus() == mail.AccountBindingPublicationUnknown {
+		return mail.AccountBindingPublicationUnknown
+	}
+	return mail.AccountBindingPublicationNone
+}
+
+func failSendSetupBindingUpdate(
+	jsonOutput bool,
+	err error,
+	bindingStatus mail.AccountBindingPublicationStatus,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	effects := []sendSetupPartialEffect{
+		{Step: "keychain_store", Status: "complete"},
+		{Step: "binding_publish", Status: bindingStatus},
+	}
+	if jsonOutput {
+		return failCommandWithData("send.setup", true, responseData{PartialEffects: effects}, err, stdout, stderr)
+	}
+	writeLine(stderr, err)
+	writeFormat(stderr, "partial effects: keychain_store: complete; binding_publish: %s\n", bindingStatus)
+	writeLine(stderr, "recovery: run `mailcli accounts list --json` to observe the binding, then make an explicit send setup decision. MailCLI will not retry or roll back the Keychain credential automatically.")
+	return commandExitCode(err)
 }
 
 func loadSendBinding(store mail.AccountBindingStore, accountID string) (mail.AccountBinding, bool, error) {

@@ -66,6 +66,7 @@ type responseData struct {
 	SendResult               *mail.SendResult             `json:"send_result,omitempty"`
 	SendReceipt              *mail.SendReceipt            `json:"send_receipt,omitempty"`
 	SendSetup                *sendSetupResult             `json:"send_setup,omitempty"`
+	PartialEffects           []sendSetupPartialEffect     `json:"partial_effects,omitempty"`
 	DeleteResult             *mail.DeleteResult           `json:"delete_result,omitempty"`
 	SyncResult               *mail.SyncResult             `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult        `json:"sync_check,omitempty"`
@@ -103,6 +104,19 @@ type errorData struct {
 
 func newErrorData(command string, data responseData, err error) *errorData {
 	guidance := guidanceForResponse(command, data, err)
+	if command == "send.setup" {
+		if len(data.PartialEffects) == 0 {
+			guidance.EffectCertainty = mail.EffectNone
+		} else {
+			guidance = mail.OperationGuidance{
+				Phase: mail.OperationPhaseExecution, EffectCertainty: mail.EffectPartial,
+				Retryability: mail.RetryObserveRequired,
+				Recovery: mail.RecoveryGuidance{
+					Action: mail.RecoveryObserve, Command: "accounts.list", Args: []string{"--json"},
+				},
+			}
+		}
+	}
 	var conflict *mail.DraftRevisionConflict
 	if errors.As(err, &conflict) {
 		guidance.Recovery = mail.RecoveryGuidance{
