@@ -164,8 +164,21 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 		fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) {
 		t.Fatalf("batch read projection fields = view:%+v fields:%+v", view, fields)
 	}
-	if countJSONConstraints(batch.JSONInput, "conditional") != 7 {
+	if countJSONConstraints(batch.JSONInput, "conditional") != 9 {
 		t.Fatalf("batch operation constraints = %+v", batch.JSONInput.Constraints)
+	}
+	uniqueSources, uniqueCopyPairs := false, false
+	for _, constraint := range batch.JSONInput.Constraints {
+		if constraint.Kind != "conditional" {
+			continue
+		}
+		uniqueSources = uniqueSources || reflect.DeepEqual(constraint.Fields, []string{"operation", "ref"}) &&
+			constraint.Description == "mark, move, and delete items require unique source refs"
+		uniqueCopyPairs = uniqueCopyPairs || reflect.DeepEqual(constraint.Fields, []string{"operation", "ref", "mailbox"}) &&
+			constraint.Description == "copy items may repeat a source ref only with distinct destination mailbox refs; each source/destination pair is unique"
+	}
+	if !uniqueSources || !uniqueCopyPairs {
+		t.Fatalf("batch reference uniqueness constraints = %+v", batch.JSONInput.Constraints)
 	}
 }
 

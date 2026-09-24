@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ type batchGateway struct {
 	*gatewayStub
 	mu              sync.Mutex
 	reads           []string
+	markRequests    []MarkMessageRequest
 	messages        map[string]Message
 	readErrs        map[string]error
 	attachmentErr   error
@@ -42,6 +44,9 @@ func (g *batchGateway) GetMessage(_ context.Context, ref string) (Message, error
 }
 
 func (g *batchGateway) MarkMessage(ctx context.Context, request MarkMessageRequest) (MessageSummary, error) {
+	g.mu.Lock()
+	g.markRequests = append(g.markRequests, request)
+	g.mu.Unlock()
 	if g.started != nil {
 		select {
 		case <-g.started:
@@ -201,6 +206,163 @@ func TestExecuteBatchRejectsDuplicateMutationIDsAndDestinationsBeforeEffects(t *
 	}
 	if len(gateway.reads) != 0 {
 		t.Fatalf("gateway was called during preflight: %v", gateway.reads)
+	}
+}
+
+func TestExecuteBatchRejectsConflictingMessageRefsBeforeDispatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		request BatchRequest
+		ref     string
+	}{
+		{
+			name: "contradictory marks",
+			request: BatchRequest{Operation: BatchOperationMark, Items: []BatchItem{
+				{ID: "mark-read", Ref: "private-mark-ref", Read: boolPointer(true)},
+				{ID: "mark-unread", Ref: "private-mark-ref", Read: boolPointer(false)},
+			}},
+			ref: "private-mark-ref",
+		},
+		{
+			name: "matching marks",
+			request: BatchRequest{Operation: BatchOperationMark, Items: []BatchItem{
+				{ID: "mark-first", Ref: "private-same-ref", Read: boolPointer(true)},
+				{ID: "mark-second", Ref: "private-same-ref", Read: boolPointer(true)},
+			}},
+			ref: "private-same-ref",
+		},
+		{
+			name: "moves",
+			request: BatchRequest{Operation: BatchOperationMove, Items: []BatchItem{
+				{ID: "move-first", Ref: "private-move-ref", Mailbox: "archive"},
+				{ID: "move-second", Ref: "private-move-ref", Mailbox: "trash"},
+			}},
+			ref: "private-move-ref",
+		},
+		{
+			name: "deletes",
+			request: BatchRequest{Operation: BatchOperationDelete, Items: []BatchItem{
+				{ID: "delete-first", Ref: "private-delete-ref"},
+				{ID: "delete-second", Ref: "private-delete-ref"},
+			}},
+			ref: "private-delete-ref",
+		},
+		{
+			name: "repeated copy pair",
+			request: BatchRequest{Operation: BatchOperationCopy, Items: []BatchItem{
+				{ID: "copy-first", Ref: "private-copy-ref", Mailbox: "archive"},
+				{ID: "copy-second", Ref: "private-copy-ref", Mailbox: "archive"},
+			}},
+			ref: "private-copy-ref",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := &batchGateway{
+				gatewayStub: &gatewayStub{}, markSummary: MessageSummary{Ref: "completed-mark"},
+			}
+			_, err := NewService(gateway).ExecuteBatch(context.Background(), test.request)
+			if err == nil {
+				t.Fatal("conflicting message refs were accepted")
+			}
+			var validationErr *ValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("error = %T %v, want validation error", err, err)
+			}
+			if validationErr.ErrorCode() != "invalid_argument" {
+				t.Fatalf("validation error code = %q, want invalid_argument", validationErr.ErrorCode())
+			}
+			if strings.Contains(err.Error(), test.ref) {
+				t.Fatalf("validation error exposes message ref: %v", err)
+			}
+			if !strings.Contains(err.Error(), test.request.Items[0].ID) ||
+				!strings.Contains(err.Error(), test.request.Items[1].ID) {
+				t.Fatalf("validation error omits conflicting item IDs: %v", err)
+			}
+			if len(gateway.markRequests) != 0 || len(gateway.transfers) != 0 || len(gateway.deletes) != 0 {
+				t.Fatalf("mutation gateway calls occurred before validation: marks=%d transfers=%d deletes=%d",
+					len(gateway.markRequests), len(gateway.transfers), len(gateway.deletes))
+			}
+		})
+	}
+}
+
+func TestExecuteBatchAllowsIndependentMutationRefsInInputOrder(t *testing.T) {
+	const concurrency = 1
+	refs := []string{"ref-z", "ref-a", "ref-middle"}
+	ids := []string{"item-z", "item-a", "item-middle"}
+	for _, operation := range []BatchOperation{BatchOperationMark, BatchOperationMove, BatchOperationDelete} {
+		t.Run(operation, func(t *testing.T) {
+			gateway := &batchGateway{
+				gatewayStub: &gatewayStub{}, markSummary: MessageSummary{Ref: "marked"},
+			}
+			items := make([]BatchItem, len(refs))
+			for index, ref := range refs {
+				items[index] = BatchItem{ID: ids[index], Ref: ref}
+				switch operation {
+				case BatchOperationMark:
+					items[index].Read = boolPointer(index%2 == 0)
+				case BatchOperationMove:
+					items[index].Mailbox = "archive"
+				}
+			}
+			result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
+				Operation: operation, Concurrency: concurrency, Items: items,
+			})
+			if err != nil || !result.Complete() {
+				t.Fatalf("ExecuteBatch() = (%+v, %v), want complete result", result, err)
+			}
+			for index, item := range result.Items {
+				if item.ID != ids[index] {
+					t.Fatalf("result item %d ID = %q, want %q", index, item.ID, ids[index])
+				}
+			}
+			var gotRefs []string
+			switch operation {
+			case BatchOperationMark:
+				for _, request := range gateway.markRequests {
+					gotRefs = append(gotRefs, request.Ref)
+				}
+			case BatchOperationMove:
+				for _, request := range gateway.transfers {
+					gotRefs = append(gotRefs, request.Ref)
+				}
+			case BatchOperationDelete:
+				for _, request := range gateway.deletes {
+					gotRefs = append(gotRefs, request.Ref)
+				}
+			}
+			if !reflect.DeepEqual(gotRefs, refs) {
+				t.Fatalf("mutation refs = %v, want input order %v", gotRefs, refs)
+			}
+		})
+	}
+}
+
+func TestExecuteBatchCopyAllowsDistinctDestinationsInInputOrder(t *testing.T) {
+	items := []BatchItem{
+		{ID: "copy-z", Ref: "shared-ref", Mailbox: "archive"},
+		{ID: "copy-a", Ref: "shared-ref", Mailbox: "sent"},
+		{ID: "copy-middle", Ref: "other-ref", Mailbox: "archive"},
+	}
+	gateway := &batchGateway{gatewayStub: &gatewayStub{}}
+	result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
+		Operation: BatchOperationCopy, Concurrency: 1, Items: items,
+	})
+	if err != nil || !result.Complete() {
+		t.Fatalf("ExecuteBatch() = (%+v, %v), want complete result", result, err)
+	}
+	if len(gateway.transfers) != len(items) {
+		t.Fatalf("copy effects = %+v, want %d", gateway.transfers, len(items))
+	}
+	for index, item := range result.Items {
+		if item.ID != items[index].ID {
+			t.Fatalf("result item %d ID = %q, want %q", index, item.ID, items[index].ID)
+		}
+		request := gateway.transfers[index]
+		if !request.Copy || request.Ref != items[index].Ref || request.DestinationMailbox != items[index].Mailbox {
+			t.Fatalf("copy effect %d = %+v, want request for %+v", index, request, items[index])
+		}
 	}
 }
 

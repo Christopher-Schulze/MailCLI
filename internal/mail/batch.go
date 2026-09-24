@@ -225,6 +225,12 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 	}
 	ids := make(map[string]struct{}, len(request.Items))
 	destinations := make(map[string]string)
+	mutationSources := make(map[string]string)
+	type copyDestination struct {
+		sourceRef string
+		mailbox   string
+	}
+	copyDestinations := make(map[copyDestination]string)
 	for _, item := range request.Items {
 		if item.ID == "" || item.ID != strings.TrimSpace(item.ID) {
 			return 0, validationError("batch item id must be non-empty and trimmed")
@@ -287,6 +293,23 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 				item.Mailbox != "" || item.View != nil || item.Fields != nil {
 				return 0, validationError(fmt.Sprintf("batch delete item %q contains unsupported fields", item.ID))
 			}
+		}
+		switch request.Operation {
+		case BatchOperationMark, BatchOperationMove, BatchOperationDelete:
+			if prior, exists := mutationSources[item.Ref]; exists {
+				return 0, validationError(fmt.Sprintf(
+					"batch items %q and %q use the same source message ref", prior, item.ID,
+				))
+			}
+			mutationSources[item.Ref] = item.ID
+		case BatchOperationCopy:
+			key := copyDestination{sourceRef: item.Ref, mailbox: item.Mailbox}
+			if prior, exists := copyDestinations[key]; exists {
+				return 0, validationError(fmt.Sprintf(
+					"batch copy items %q and %q repeat the same source and destination", prior, item.ID,
+				))
+			}
+			copyDestinations[key] = item.ID
 		}
 	}
 	return concurrency, nil
