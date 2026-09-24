@@ -130,6 +130,11 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 	if err != nil {
 		return SendResult{}, err
 	}
+	if err := s.send.CheckMutationLock(ctx, transport.ImapConfig{
+		Host: imapHost, Port: imapPort, Username: identity.Credential,
+	}); err != nil {
+		return SendResult{}, err
+	}
 	messageID, err := newMessageID(sender)
 	if err != nil {
 		return SendResult{}, err

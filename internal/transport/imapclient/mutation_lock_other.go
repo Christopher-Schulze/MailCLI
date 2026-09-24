@@ -2,10 +2,13 @@
 
 package imapclient
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
-// acquireMutationLock is a no-op on platforms without advisory flock
-// support; cross-process politeness is best-effort and unavailable there.
+// acquireMutationLock fails closed on platforms without advisory flock
+// support; callers can explicitly opt out by leaving MutationLockDir empty.
 func acquireMutationLock(_ context.Context, _ string, _ sessionIdentity) (func(), error) {
-	return func() {}, nil
+	return nil, mutationLockUnavailable(errors.New("advisory file locking is unsupported on this platform"))
 }

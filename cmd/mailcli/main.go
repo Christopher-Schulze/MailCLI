@@ -161,22 +161,27 @@ func newInvocationTransport() *invocationTransport {
 }
 
 // newInvocationImapClient wires the CLI-safe IMAP client: the default pool
-// plus a per-account mutation lock that serializes exclusive operations
-// across MailCLI processes. MAILCLI_IMAP_MUTATION_LOCK=off (or 0, false, no)
-// opts out; a missing config directory keeps the process-local gate only.
+// plus a required per-account mutation lock across MailCLI processes.
 func newInvocationImapClient() *imapclient.Client {
+	return newInvocationImapClientWith(os.UserConfigDir, imapclient.NewWithOptions)
+}
+
+func newInvocationImapClientWith(
+	userConfigDir func() (string, error),
+	newClient func(imapclient.ClientOptions) (*imapclient.Client, error),
+) *imapclient.Client {
 	if mutationLockDisabled() {
 		return imapclient.New()
 	}
-	root, err := os.UserConfigDir()
+	root, err := userConfigDir()
 	if err != nil {
-		return imapclient.New()
+		return imapclient.NewWithMutationLockSetupError(err)
 	}
-	client, err := imapclient.NewWithOptions(imapclient.ClientOptions{
+	client, err := newClient(imapclient.ClientOptions{
 		MutationLockDir: filepath.Join(root, "MailCLI"),
 	})
 	if err != nil {
-		return imapclient.New()
+		return imapclient.NewWithMutationLockSetupError(err)
 	}
 	return client
 }

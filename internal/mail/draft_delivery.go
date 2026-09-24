@@ -158,6 +158,11 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	if err != nil {
 		return TransportEvidence{}, err
 	}
+	if err := send.CheckMutationLock(ctx, transport.ImapConfig{
+		Host: imapHost, Port: imapPort, Username: identity.Credential,
+	}); err != nil {
+		return TransportEvidence{}, err
+	}
 	password, err := send.Credentials.Load(identity.Credential)
 	if err != nil || password == "" {
 		return TransportEvidence{}, missingCredentialsErrorFor(sender, identity.Credential)

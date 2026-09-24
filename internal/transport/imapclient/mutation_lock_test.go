@@ -5,7 +5,10 @@ package imapclient
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +139,72 @@ func TestNewLeavesMutationLockDisabled(t *testing.T) {
 	client, err := NewWithOptions(ClientOptions{MutationLockDir: t.TempDir()})
 	if err != nil || client.mutationLockDir == "" {
 		t.Fatalf("NewWithOptions() = %v, %v", client, err)
+	}
+}
+
+func TestMutationLockSetupFailureBlocksMutationBeforeNetworkAndAllowsReads(t *testing.T) {
+	client := NewWithMutationLockSetupError(errors.New("config directory unavailable"))
+	if got := transport.ErrorCode(client.MutationLockSetupError()); got != transport.CodeIMAPLockUnavailable {
+		t.Fatalf("MutationLockSetupError code = %q, want %q", got, transport.CodeIMAPLockUnavailable)
+	}
+	_, release, err := client.acquireOperation(context.Background(), testLockConfig(), independentRead)
+	if err != nil {
+		t.Fatalf("read operation acquisition = %v, want it to remain available", err)
+	}
+	release()
+	assertMutationLockFailureDoesNotConnect(t, client)
+}
+
+func TestMutationLockFilesystemFailureBlocksMutationBeforeNetwork(t *testing.T) {
+	lockParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(lockParent, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewWithOptions(ClientOptions{MutationLockDir: lockParent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMutationLockFailureDoesNotConnect(t, client)
+}
+
+func assertMutationLockFailureDoesNotConnect(t *testing.T, client *Client) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close mutation-lock test listener: %v", err)
+		}
+	}()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = client.SetFlags(ctx, transport.ImapConfig{
+		Host: host, Port: port, Username: "agent@example.com",
+	}, "INBOX", 42, 7, []string{"\\Seen"}, nil)
+	if got := transport.ErrorCode(err); got != transport.CodeIMAPLockUnavailable {
+		t.Fatalf("SetFlags() error code = %q, error %v; want %q", got, err, transport.CodeIMAPLockUnavailable)
+	}
+	select {
+	case <-accepted:
+		t.Fatal("SetFlags() connected before the mutation lock was available")
+	case <-time.After(100 * time.Millisecond):
 	}
 }

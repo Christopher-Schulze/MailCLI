@@ -62,6 +62,16 @@ func (t SendTransport) ImapClient() transport.ImapOperator {
 	return nil
 }
 
+func (t SendTransport) CheckMutationLock(ctx context.Context, cfg transport.ImapConfig) error {
+	checker, ok := t.ImapClient().(interface {
+		CheckMutationLock(context.Context, transport.ImapConfig) error
+	})
+	if !ok {
+		return nil
+	}
+	return checker.CheckMutationLock(ctx, cfg)
+}
+
 type Service struct {
 	gateway   Gateway
 	draftRoot string

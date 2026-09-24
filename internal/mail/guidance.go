@@ -99,6 +99,12 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
 	case code == "initialization_failed":
 		return guidanceForInput()
+	case code == transport.CodeIMAPLockUnavailable || code == transport.CodeIMAPAccountBusy:
+		return OperationGuidance{
+			Phase: OperationPhaseMutation, EffectCertainty: EffectNone,
+			Retryability: RetrySafe, ReplayAllowed: true,
+			Recovery: RecoveryGuidance{Action: RecoveryRetry},
+		}
 	case code == "finalization_failed":
 		return OperationGuidance{Phase: OperationPhaseCleanup, EffectCertainty: EffectUnknown, Retryability: RetryObserveRequired, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case code == "serialization_failed":

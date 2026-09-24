@@ -61,6 +61,7 @@ type Client struct {
 	credentialGenerations    map[sessionIdentity]uint64
 	maxConnectionsPerAccount int
 	mutationLockDir          string
+	mutationLockSetupErr     error
 }
 
 type sessionIdentity struct {
@@ -106,6 +107,15 @@ func New() *Client {
 	return &Client{maxConnectionsPerAccount: DefaultMaxConnectionsPerAccount}
 }
 
+// NewWithMutationLockSetupError creates a read-capable client that rejects
+// mutations because required cross-process lock setup failed.
+func NewWithMutationLockSetupError(cause error) *Client {
+	return &Client{
+		maxConnectionsPerAccount: DefaultMaxConnectionsPerAccount,
+		mutationLockSetupErr:     mutationLockUnavailable(cause),
+	}
+}
+
 // NewWithOptions returns a Client with validated immutable pool limits.
 func NewWithOptions(options ClientOptions) (*Client, error) {
 	limit, err := normalizeConnectionLimit(options.MaxConnectionsPerAccount)
@@ -113,6 +123,32 @@ func NewWithOptions(options ClientOptions) (*Client, error) {
 		return nil, err
 	}
 	return &Client{maxConnectionsPerAccount: limit, mutationLockDir: options.MutationLockDir}, nil
+}
+
+// MutationLockSetupError reports a required cross-process lock setup failure.
+// Read operations remain available; mutation acquisition returns this error.
+func (c *Client) MutationLockSetupError() error {
+	return c.mutationLockSetupErr
+}
+
+// CheckMutationLock verifies the configured account lock without dispatching
+// an IMAP command. An empty lock directory is the explicit process-only mode.
+func (c *Client) CheckMutationLock(ctx context.Context, cfg transport.ImapConfig) error {
+	if err := ctx.Err(); err != nil {
+		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP mutation lock preflight")
+	}
+	if c.mutationLockSetupErr != nil {
+		return c.mutationLockSetupErr
+	}
+	if c.mutationLockDir == "" {
+		return nil
+	}
+	unlock, err := acquireMutationLock(ctx, c.mutationLockDir, sessionKey(cfg))
+	if err != nil {
+		return err
+	}
+	unlock()
+	return nil
 }
 
 func normalizeConnectionLimit(limit int) (int, error) {
@@ -227,6 +263,9 @@ func (c *Client) acquireOperation(
 ) (*accountSessionPool, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP operation acquisition")
+	}
+	if class == mutation && c.mutationLockSetupErr != nil {
+		return nil, nil, c.mutationLockSetupErr
 	}
 	c.lifecycle.RLock()
 	lifecycleGeneration := c.lifecycleGeneration

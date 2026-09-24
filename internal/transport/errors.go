@@ -131,6 +131,7 @@ const (
 	CodeIMAPAppendIncomplete     = "imap_append_incomplete"
 	CodeIMAPTimeout              = "imap_timeout"
 	CodeIMAPAccountBusy          = "imap_account_busy"
+	CodeIMAPLockUnavailable      = "imap_mutation_lock_unavailable"
 	CodeIMAPMailboxNotFound      = "imap_mailbox_not_found"
 	CodeIMAPMessageNotFound      = "imap_message_not_found"
 	CodeIMAPAmbiguousMailbox     = "imap_ambiguous_mailbox"
