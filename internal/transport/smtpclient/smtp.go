@@ -200,16 +200,16 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg io.Re
 	// The payload (body plus attachments) gets a size-aware budget instead
 	// of the flat command budget: large sends legitimately outlast 30 s.
 	if err := bumpTransferDeadline(conn, ctx, size); err != nil {
-		return "", submissionUnknownError(ctx, "DATA", sessionError(ctx, "DATA", err))
+		return "", submissionDataIncompleteError(sessionError(ctx, "DATA", err))
 	}
 
 	w := client.Text.DotWriter()
 	written, err := io.Copy(w, msg)
 	if err != nil {
-		return "", submissionUnknownError(ctx, "DATA", transferError(ctx, err))
+		return "", submissionDataIncompleteError(transferError(ctx, err))
 	}
 	if size >= 0 && written != size {
-		return "", submissionUnknownError(ctx, "DATA", fmt.Errorf("message source ended after %d of %d bytes", written, size))
+		return "", submissionDataIncompleteError(fmt.Errorf("message source ended after %d of %d bytes", written, size))
 	}
 	if err := w.Close(); err != nil {
 		return "", submissionUnknownError(ctx, "DATA", transferError(ctx, err))
@@ -335,6 +335,16 @@ func submissionUnknownError(ctx context.Context, stage string, err error) error 
 		err = timeoutError(ctx, stage)
 	}
 	return &transport.SubmissionError{Stage: stage, Err: err}
+}
+
+// submissionDataIncompleteError is used only before DotWriter.Close attempts
+// the SMTP end-of-data terminator, so the server cannot have accepted the message.
+func submissionDataIncompleteError(err error) error {
+	return &transport.TransportError{
+		Code:    transport.CodeSMTPDataIncomplete,
+		Message: "SMTP DATA failed before the end-of-data terminator was attempted; the server could not accept the message",
+		Err:     err,
+	}
 }
 
 func classifyFinalReplyError(ctx context.Context, err error) error {

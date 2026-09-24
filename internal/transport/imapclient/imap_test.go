@@ -481,10 +481,37 @@ func TestAppendToSentContextCancel(t *testing.T) {
 	}
 }
 
-func TestAppendToSentCancellationDuringLiteralRetainsUnknown(t *testing.T) {
+type appendCancellationReader struct {
+	sent    bool
+	blocked chan struct{}
+	resume  <-chan struct{}
+}
+
+func (r *appendCancellationReader) Read(buffer []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		for index := range buffer {
+			buffer[index] = 'x'
+		}
+		return len(buffer), nil
+	}
+	close(r.blocked)
+	<-r.resume
+	return 0, errors.New("injected source cancellation")
+}
+
+func TestAppendToSentCancellationDuringLiteralIsIncomplete(t *testing.T) {
 	started := make(chan struct{}, 1)
 	continueReading := make(chan struct{})
+	sourceBlocked := make(chan struct{})
+	continueSource := make(chan struct{}, 1)
 	defer close(continueReading)
+	defer func() {
+		select {
+		case continueSource <- struct{}{}:
+		default:
+		}
+	}()
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:                  true,
 		sentMboxes:              []string{"Sent"},
@@ -505,9 +532,10 @@ func TestAppendToSentCancellationDuringLiteralRetainsUnknown(t *testing.T) {
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	source := &appendCancellationReader{blocked: sourceBlocked, resume: continueSource}
 	result := make(chan error, 1)
 	go func() {
-		_, callErr := client.AppendToSent(ctx, cfg, bytes.Repeat([]byte{'x'}, 1<<20), "<cancel@example.com>")
+		_, callErr := client.AppendToSentReader(ctx, cfg, source, 1<<20, "<cancel@example.com>")
 		result <- callErr
 	}()
 	select {
@@ -515,12 +543,18 @@ func TestAppendToSentCancellationDuringLiteralRetainsUnknown(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("APPEND literal did not start")
 	}
+	select {
+	case <-sourceBlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("APPEND source did not block before the declared literal was complete")
+	}
 	startedAt := time.Now()
 	cancel()
+	continueSource <- struct{}{}
 	select {
 	case err := <-result:
-		if transport.ErrorCode(err) != transport.CodeIMAPAppendOutcomeUnknown {
-			t.Fatalf("canceled APPEND error = %v, want %s", err, transport.CodeIMAPAppendOutcomeUnknown)
+		if transport.ErrorCode(err) != transport.CodeIMAPAppendIncomplete {
+			t.Fatalf("canceled APPEND error = %v, want %s", err, transport.CodeIMAPAppendIncomplete)
 		}
 		if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
 			t.Fatalf("canceled APPEND took %v after cancellation", elapsed)

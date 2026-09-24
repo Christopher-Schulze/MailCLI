@@ -102,6 +102,26 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseCleanup, EffectCertainty: EffectUnknown, Retryability: RetryObserveRequired, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case code == "serialization_failed":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectUnknown, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
+	case transport.IsSMTPDataIncomplete(err):
+		if command == "drafts.send" {
+			return OperationGuidance{
+				Phase: OperationPhaseSubmission, EffectCertainty: EffectNone,
+				Retryability: RetrySafe, ReplayAllowed: true,
+				Recovery: RecoveryGuidance{Action: RecoveryRetry},
+			}
+		}
+	case transport.IsAppendIncomplete(err):
+		if command == "drafts.send" {
+			return guidanceForMirrorUnknown()
+		}
+		if command == "drafts.reconcile" {
+			return OperationGuidance{
+				Phase: OperationPhaseMirror, EffectCertainty: EffectNone,
+				Retryability: RetrySafe, ReplayAllowed: true,
+				Recovery: RecoveryGuidance{Action: RecoveryRetry},
+			}
+		}
+		return guidanceForUnknown(defaultPhase(command))
 	case code == "operation_canceled" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
 		if effectfulCommand(command) {
 			return guidanceForUnknown(defaultPhase(command))

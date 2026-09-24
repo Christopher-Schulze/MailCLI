@@ -47,6 +47,12 @@ func IsSubmissionOutcomeUnknown(err error) bool {
 	return ErrorCode(err) == CodeSMTPSubmissionUnknown
 }
 
+// IsSMTPDataIncomplete reports that DATA failed before the end-of-data
+// terminator was attempted, so the server could not accept the message.
+func IsSMTPDataIncomplete(err error) bool {
+	return ErrorCode(err) == CodeSMTPDataIncomplete
+}
+
 // IsMutationOutcomeUnknown reports that a mailbox mutation's final outcome
 // cannot be proven — the copy, move, or flags outcome-unknown family. A
 // provably divergent final state (imap_flags_mismatch) is intentionally not
@@ -81,6 +87,12 @@ func IsMirrorOutcomeUncertain(err error) bool {
 // IsMirrorOutcomeUncertain.
 func IsAppendOutcomeUnknown(err error) bool {
 	return ErrorCode(err) == CodeIMAPAppendOutcomeUnknown
+}
+
+// IsAppendIncomplete reports that the APPEND literal failed before its
+// terminating CRLF was attempted, so the server could not commit the message.
+func IsAppendIncomplete(err error) bool {
+	return ErrorCode(err) == CodeIMAPAppendIncomplete
 }
 
 // IsAppendFailed reports a definitive APPEND failure: the server rejected the

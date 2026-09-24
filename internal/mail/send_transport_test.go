@@ -913,6 +913,84 @@ func TestSendDraftRejectedSubmissionClearsClaimAndAllowsRetry(t *testing.T) {
 	}
 }
 
+func TestSendDraftIncompleteSMTPDataClearsClaimAndAllowsRetry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	submitter.err = &transport.TransportError{Code: transport.CodeSMTPDataIncomplete, Message: "DATA ended before the terminator was attempted"}
+	service := newTransportService(root, submitter, mirror, &stubCredentials{password: "secret"})
+	draft := createTransportDraft(t, service)
+
+	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if errorCode(err) != transport.CodeSMTPDataIncomplete || result.AttemptID != "" || submitter.calls != 1 {
+		t.Fatalf("SendDraft() = %+v, error = %v, submits = %d", result, err, submitter.calls)
+	}
+	assertNoSendClaim(t, root, draft.Ref)
+
+	submitter.err = nil
+	retry, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if err != nil || retry.Outcome != SendOutcomeSent || submitter.calls != 2 {
+		t.Fatalf("retry SendDraft() = %+v, error = %v, submits = %d", retry, err, submitter.calls)
+	}
+}
+
+func TestSendDraftAppendIncompleteReconcilesWithoutResubmitting(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter, mirror := sendTransportStubs()
+	mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendIncomplete, Message: "APPEND ended before the terminating CRLF was attempted"}
+	imap := &reconcileImapStub{
+		mailboxes:     []transport.MailboxInfo{{Name: "Sent", Flags: []string{"\\Sent"}}},
+		searchResults: []int{0, 0, 1},
+	}
+	service := NewServiceWithTransport(nil, root, SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: &stubCredentials{password: "secret"}, Imap: imap,
+	})
+	draft := createTransportDraft(t, service)
+
+	result, sendErr := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	if errorCode(sendErr) != transport.CodeIMAPAppendIncomplete || result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained {
+		t.Fatalf("SendDraft() = %+v, error = %v", result, sendErr)
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.SendAttempt == nil || retained.SendAttempt.Transport == nil ||
+		retained.SendAttempt.Transport.MirrorOutcomeUnknown {
+		t.Fatalf("retained attempt = %+v, error = %v, want known incomplete APPEND", retained.SendAttempt, err)
+	}
+	imap.uid = 42
+	imap.fetchRaw = []byte("From: sender@icloud.com\r\n" +
+		"To: recipient@example.com\r\n" +
+		"Message-ID: " + retained.SendAttempt.MessageID + "\r\n" +
+		"Subject: Send test\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n")
+	if guidance := GuidanceForError("drafts.send", sendErr); guidance.EffectCertainty != EffectPartial || guidance.ReplayAllowed || guidance.Recovery.Action != RecoveryReconcile {
+		t.Fatalf("send guidance = %+v, want partial mirror and reconcile", guidance)
+	}
+	if submitter.calls != 1 || mirror.calls != 1 {
+		t.Fatalf("initial calls = submitter:%d mirror:%d", submitter.calls, mirror.calls)
+	}
+
+	result, err = service.ReconcileDraft(context.Background(), draft.Ref)
+	if errorCode(err) != transport.CodeIMAPAppendIncomplete || result.Outcome != SendOutcomeMirrorPending || imap.searchCalls != 1 {
+		t.Fatalf("first ReconcileDraft() = %+v, error = %v, searches = %d", result, err, imap.searchCalls)
+	}
+	if guidance := GuidanceForError("drafts.reconcile", err); guidance.Phase != OperationPhaseMirror ||
+		guidance.EffectCertainty != EffectNone || guidance.Retryability != RetrySafe ||
+		!guidance.ReplayAllowed || guidance.Recovery.Action != RecoveryRetry {
+		t.Fatalf("reconcile guidance = %+v, want safe mirror retry", guidance)
+	}
+	if submitter.calls != 1 || mirror.calls != 2 {
+		t.Fatalf("calls after incomplete reconcile = submitter:%d mirror:%d", submitter.calls, mirror.calls)
+	}
+
+	mirror.err = nil
+	result, err = service.ReconcileDraft(context.Background(), draft.Ref)
+	if err != nil || result.Outcome != SendOutcomeSent || result.DraftRetained || imap.searchCalls != 3 {
+		t.Fatalf("retry ReconcileDraft() = %+v, error = %v, searches = %d", result, err, imap.searchCalls)
+	}
+	if submitter.calls != 1 || mirror.calls != 3 {
+		t.Fatalf("final calls = submitter:%d mirror:%d", submitter.calls, mirror.calls)
+	}
+}
+
 func TestSendDraftUnsupportedProviderIsRejected(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	submitter, mirror := sendTransportStubs()

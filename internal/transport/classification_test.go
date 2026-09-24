@@ -33,7 +33,7 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsTransientTransportFailure",
 			predicate: IsTransientTransportFailure,
 			positive:  []string{CodeIMAPConnectFailed, CodeIMAPTimeout, CodeIMAPFetchFailed, CodeSMTPTimeout, CodeSMTPTransferTimeout},
-			negative:  []string{CodeSMTPRejected, CodeIMAPMessageNotFound},
+			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeIMAPMessageNotFound},
 		},
 		{
 			name:      "IsRejectedSubmission",
@@ -45,7 +45,13 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsSubmissionOutcomeUnknown",
 			predicate: IsSubmissionOutcomeUnknown,
 			positive:  []string{CodeSMTPSubmissionUnknown},
-			negative:  []string{CodeSMTPRejected},
+			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete},
+		},
+		{
+			name:      "IsSMTPDataIncomplete",
+			predicate: IsSMTPDataIncomplete,
+			positive:  []string{CodeSMTPDataIncomplete},
+			negative:  []string{CodeSMTPSubmissionUnknown, CodeSMTPRejected},
 		},
 		{
 			name:      "IsMutationOutcomeUnknown",
@@ -63,19 +69,25 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsMirrorOutcomeUncertain",
 			predicate: IsMirrorOutcomeUncertain,
 			positive:  []string{CodeIMAPAppendOutcomeUnknown, CodeIMAPAmbiguousMessageID},
-			negative:  []string{CodeIMAPAppendFailed, CodeIMAPFlagsOutcomeUnknown},
+			negative:  []string{CodeIMAPAppendFailed, CodeIMAPAppendIncomplete, CodeIMAPFlagsOutcomeUnknown},
 		},
 		{
 			name:      "IsAppendOutcomeUnknown",
 			predicate: IsAppendOutcomeUnknown,
 			positive:  []string{CodeIMAPAppendOutcomeUnknown},
-			negative:  []string{CodeIMAPAmbiguousMessageID, CodeIMAPAppendFailed},
+			negative:  []string{CodeIMAPAmbiguousMessageID, CodeIMAPAppendFailed, CodeIMAPAppendIncomplete},
+		},
+		{
+			name:      "IsAppendIncomplete",
+			predicate: IsAppendIncomplete,
+			positive:  []string{CodeIMAPAppendIncomplete},
+			negative:  []string{CodeIMAPAppendOutcomeUnknown, CodeIMAPAppendFailed},
 		},
 		{
 			name:      "IsAppendFailed",
 			predicate: IsAppendFailed,
 			positive:  []string{CodeIMAPAppendFailed},
-			negative:  []string{CodeIMAPAppendOutcomeUnknown},
+			negative:  []string{CodeIMAPAppendOutcomeUnknown, CodeIMAPAppendIncomplete},
 		},
 		{
 			name:      "IsMessageNotFound",

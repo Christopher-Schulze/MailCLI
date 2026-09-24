@@ -126,33 +126,53 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 	}
 
 	if err := c.setTransferDeadline(ctx, sess, size); err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND transfer deadline")
+		sess.dirty = true
+		return appendOutcomeIncomplete(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND transfer deadline"))
 	}
-	written, err := io.Copy(sess.bw, msg)
+	written, err := io.Copy(sess.bw, &io.LimitedReader{R: msg, N: size})
 	if err != nil {
 		sess.dirty = true
-		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write"))
+		return appendOutcomeIncomplete(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal write"))
 	}
 	if size >= 0 && written != size {
 		sess.dirty = true
-		return appendOutcomeUnknown(&transport.TransportError{
+		return appendOutcomeIncomplete(&transport.TransportError{
 			Code:    transport.CodeIMAPAppendFailed,
 			Message: fmt.Sprintf("message source ended after %d of %d bytes", written, size),
 		})
 	}
+	extraRead, extraErr := io.CopyN(io.Discard, msg, 1)
+	if extraRead > 0 {
+		sess.dirty = true
+		return appendOutcomeIncomplete(&transport.TransportError{
+			Code:    transport.CodeIMAPAppendFailed,
+			Message: "message source exceeds declared APPEND literal size",
+			Err:     extraErr,
+		})
+	}
+	if extraErr != io.EOF {
+		sess.dirty = true
+		if extraErr == nil {
+			extraErr = io.ErrNoProgress
+		}
+		return appendOutcomeIncomplete(wrapIOError(ctx, extraErr, transport.CodeIMAPAppendFailed, "IMAP APPEND source length check"))
+	}
 	if err := sess.bw.Flush(); err != nil {
 		sess.dirty = true
-		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal flush"))
+		return appendOutcomeIncomplete(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal flush"))
 	}
 	if err := c.writeLine(sess, ""); err != nil {
+		sess.dirty = true
 		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND literal CRLF"))
 	}
 
 	if err := c.setDeadline(ctx, sess); err != nil {
+		sess.dirty = true
 		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND final reply deadline"))
 	}
 	status, _, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
+		sess.dirty = true
 		return appendOutcomeUnknown(err)
 	}
 	if status == "OK" {
@@ -169,6 +189,14 @@ func appendOutcomeUnknown(err error) error {
 	return &transport.TransportError{
 		Code:    transport.CodeIMAPAppendOutcomeUnknown,
 		Message: "IMAP APPEND outcome is unknown after message data was sent",
+		Err:     err,
+	}
+}
+
+func appendOutcomeIncomplete(err error) error {
+	return &transport.TransportError{
+		Code:    transport.CodeIMAPAppendIncomplete,
+		Message: "IMAP APPEND literal failed before its terminating CRLF was attempted; the server could not commit the message",
 		Err:     err,
 	}
 }
