@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,6 +39,7 @@ type candidateScan struct {
 	catalogProven bool
 	processed     bool
 	budgetLimited bool
+	requiredBytes int64
 }
 
 type searchJob struct {
@@ -75,6 +77,19 @@ func (s *Store) SearchMessages(ctx context.Context, prepared mail.PreparedQuery)
 		page, err = s.searchBodies(ctx, prepared, plan)
 	}
 	if err != nil {
+		var budgetError *searchBudgetTooSmallError
+		if errors.As(err, &budgetError) {
+			currentRevision, revisionErr := s.searchIndexRevision(ctx)
+			if revisionErr != nil {
+				return mail.SearchPage{}, revisionErr
+			}
+			if currentRevision != indexRevision {
+				return mail.SearchPage{}, operationError(
+					"search_index_changed",
+					"Mail's Envelope Index changed during the search; retry the page",
+				)
+			}
+		}
 		return mail.SearchPage{}, err
 	}
 	currentRevision, err := s.searchIndexRevision(ctx)

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -16,6 +17,31 @@ type partialSearchGateway struct {
 type searchQueryCaptureGateway struct {
 	testGateway
 	query mail.PreparedQuery
+}
+
+type searchBudgetGateway struct {
+	testGateway
+	requiredBytes int64
+}
+
+func (g searchBudgetGateway) SearchMessages(context.Context, mail.PreparedQuery) (mail.SearchPage, error) {
+	return mail.SearchPage{}, &searchBudgetCLIError{requiredBytes: g.requiredBytes}
+}
+
+type searchBudgetCLIError struct {
+	requiredBytes int64
+}
+
+func (e *searchBudgetCLIError) Error() string {
+	return "search candidate requires more bytes; restart the same search without --cursor"
+}
+
+func (e *searchBudgetCLIError) ErrorCode() string {
+	return "search_budget_too_small"
+}
+
+func (e *searchBudgetCLIError) RequiredBytes() int64 {
+	return e.requiredBytes
 }
 
 func (g *searchQueryCaptureGateway) SearchMessages(_ context.Context, query mail.PreparedQuery) (mail.SearchPage, error) {
@@ -53,6 +79,49 @@ func TestSearchCommandsJSON(t *testing.T) {
 	)
 	if code != 0 || !strings.Contains(stdout.String(), `"command":"messages.filter"`) || !strings.Contains(stdout.String(), `"subject":"Searchable"`) {
 		t.Fatalf("filter code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestSearchBudgetTooSmallJSONIncludesRequiredBytesAndRecovery(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(
+		context.Background(), mail.NewService(searchBudgetGateway{requiredBytes: 4096}),
+		[]string{"messages", "search", "--query", "needle", "--json"},
+		&stdout, &stderr,
+	)
+	var response struct {
+		OK    bool `json:"ok"`
+		Error *struct {
+			Code          string `json:"code"`
+			Message       string `json:"message"`
+			RequiredBytes int64  `json:"required_bytes"`
+			Guidance      struct {
+				Phase           string `json:"phase"`
+				EffectCertainty string `json:"effect_certainty"`
+				Retryability    string `json:"retryability"`
+				ReplayAllowed   bool   `json:"replay_allowed"`
+				Recovery        struct {
+					Action  string   `json:"action"`
+					Command string   `json:"command"`
+					Args    []string `json:"args"`
+				} `json:"recovery"`
+			} `json:"guidance"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode search error: %v; stdout = %q", err, stdout.String())
+	}
+	if code != 1 || stderr.Len() != 0 || response.OK || response.Error == nil ||
+		response.Error.Code != "search_budget_too_small" || response.Error.RequiredBytes != 4096 ||
+		!strings.Contains(response.Error.Message, "without --cursor") ||
+		response.Error.Guidance.Phase != "read" || response.Error.Guidance.EffectCertainty != "none" ||
+		response.Error.Guidance.Retryability != "user_input_required" || response.Error.Guidance.ReplayAllowed ||
+		response.Error.Guidance.Recovery.Action != "correct" || response.Error.Guidance.Recovery.Command != "messages.search" ||
+		len(response.Error.Guidance.Recovery.Args) != 2 ||
+		response.Error.Guidance.Recovery.Args[0] != "--max-bytes" ||
+		response.Error.Guidance.Recovery.Args[1] != "4096" {
+		t.Fatalf("search error response: code=%d response=%+v stderr=%q", code, response, stderr.String())
 	}
 }
 

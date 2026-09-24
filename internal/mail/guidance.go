@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"mailcli/internal/transport"
@@ -88,6 +89,18 @@ func GuidanceForError(command string, err error) OperationGuidance {
 	if errors.As(err, &mutation) &&
 		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY") {
 		return guidanceForMutationUnknown(err)
+	}
+	if code == "search_budget_too_small" {
+		guidance := OperationGuidance{
+			Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+			Retryability: RetryUserInputRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryCorrect, Command: command},
+		}
+		var sized interface{ RequiredBytes() int64 }
+		if errors.As(err, &sized) && sized.RequiredBytes() > 0 {
+			guidance.Recovery.Args = []string{"--max-bytes", strconv.FormatInt(sized.RequiredBytes(), 10)}
+		}
+		return guidance
 	}
 	if isInputErrorCode(code) {
 		return guidanceForInput()

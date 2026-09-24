@@ -12,6 +12,26 @@ import (
 	"mailcli/internal/mailref"
 )
 
+type searchBudgetTooSmallError struct {
+	requiredBytes int64
+	maximumBytes  int64
+}
+
+func (e *searchBudgetTooSmallError) Error() string {
+	return fmt.Sprintf(
+		"search candidate requires %d RFC bytes, above --max-bytes %d; restart the same search without --cursor and set --max-bytes to at least %d",
+		e.requiredBytes, e.maximumBytes, e.requiredBytes,
+	)
+}
+
+func (e *searchBudgetTooSmallError) ErrorCode() string {
+	return "search_budget_too_small"
+}
+
+func (e *searchBudgetTooSmallError) RequiredBytes() int64 {
+	return e.requiredBytes
+}
+
 func (s *Store) searchBodies(
 	ctx context.Context,
 	prepared mail.PreparedQuery,
@@ -52,11 +72,12 @@ func (s *Store) scanSearchRecordsChunked(
 	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
 	loaded := 0
 	// progressCount tracks candidates fully classified by the scan. A
-	// candidate that exceeds the byte budget is deliberately not advanced:
-	// the next page gets a fresh budget and can retry it.
+	// byte-blocked candidate stays at an inclusive continuation boundary; if
+	// no candidate was classified, the caller receives a terminal budget error.
 	progressCount := 0
 	var lastScanned *messageRecord
 	var budgetCandidate *messageRecord
+	var budgetRequiredBytes int64
 chunkLoop:
 	// A loaded chunk can contain an unscanned tail after the page fills. Keep
 	// that tail out of later queries: lastScanned remains the resumable cursor.
@@ -92,6 +113,7 @@ chunkLoop:
 				}
 				if scan.budgetLimited {
 					budgetCandidate = &items[start+index]
+					budgetRequiredBytes = scan.requiredBytes
 				}
 				mergeSearchCoverage(&coverage, scan)
 				if !scan.match {
@@ -129,15 +151,20 @@ chunkLoop:
 	}
 	coverage.Complete = coverage.Complete && coverage.CandidateMessagesExact &&
 		progressCount == coverage.CandidateMessages
+	if budgetCandidate != nil && progressCount == 0 {
+		return mail.SearchPage{}, &searchBudgetTooSmallError{
+			requiredBytes: budgetRequiredBytes,
+			maximumBytes:  prepared.Query.MaxBytes,
+		}
+	}
 	page := mail.SearchPage{Messages: results, Coverage: coverage}
 	var cursorItem *messageRecord
 	cursorInclusive := false
-	if coverage.CandidateMessages > progressCount || !coverage.CandidateMessagesExact {
+	if budgetCandidate != nil {
+		cursorItem = budgetCandidate
+		cursorInclusive = true
+	} else if coverage.CandidateMessages > progressCount || !coverage.CandidateMessagesExact {
 		cursorItem = lastScanned
-		if cursorItem == nil {
-			cursorItem = budgetCandidate
-			cursorInclusive = cursorItem != nil
-		}
 	}
 	if cursorItem != nil {
 		var err error
@@ -329,7 +356,7 @@ func (s *Store) dispatchSearchJobs(
 			if err := source.Close(); err != nil {
 				return false, fmt.Errorf("close byte-limited search source: %w", err)
 			}
-			results[index] = candidateScan{budgetLimited: true}
+			results[index] = candidateScan{budgetLimited: true, requiredBytes: source.length}
 			return true, nil
 		}
 		select {

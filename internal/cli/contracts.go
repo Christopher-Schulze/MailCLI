@@ -139,14 +139,14 @@ var commandContracts = []commandContract{
 	{
 		ID: "messages.filter", effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
+		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"},
 		mailService:  mailServiceAlwaysRequired,
 		published:    true,
 	},
 	{
 		ID: "messages.search", effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store", mailAppDependency: "none",
-		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
+		resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"},
 		mailService:  mailServiceAlwaysRequired,
 		published:    true,
 	},

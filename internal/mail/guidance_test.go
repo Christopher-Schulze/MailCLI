@@ -90,3 +90,32 @@ func TestGuidanceForProtocolFailuresBeforeTerminators(t *testing.T) {
 		})
 	}
 }
+
+type searchBudgetGuidanceError struct {
+	requiredBytes int64
+}
+
+func (e *searchBudgetGuidanceError) Error() string {
+	return "search candidate exceeds byte budget"
+}
+
+func (e *searchBudgetGuidanceError) ErrorCode() string {
+	return "search_budget_too_small"
+}
+
+func (e *searchBudgetGuidanceError) RequiredBytes() int64 {
+	return e.requiredBytes
+}
+
+func TestGuidanceForSearchBudgetTooSmallRequiresCorrectedRestart(t *testing.T) {
+	for _, command := range []string{"messages.search", "messages.filter"} {
+		got := GuidanceForError(command, &searchBudgetGuidanceError{requiredBytes: 4096})
+		if got.Phase != OperationPhaseRead || got.EffectCertainty != EffectNone ||
+			got.Retryability != RetryUserInputRequired || got.ReplayAllowed ||
+			got.Recovery.Action != RecoveryCorrect || got.Recovery.Command != command ||
+			len(got.Recovery.Args) != 2 || got.Recovery.Args[0] != "--max-bytes" ||
+			got.Recovery.Args[1] != "4096" {
+			t.Fatalf("GuidanceForError(%q) = %+v", command, got)
+		}
+	}
+}

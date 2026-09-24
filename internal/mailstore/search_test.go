@@ -335,11 +335,11 @@ func TestBodySearchReportsByteLimit(t *testing.T) {
 		t.Fatalf("PrepareQuery() error = %v", err)
 	}
 	page, err := store.SearchMessages(context.Background(), query)
-	if err != nil {
-		t.Fatalf("SearchMessages() error = %v", err)
-	}
-	if page.Coverage.Complete || page.Coverage.ScannedBytes != 0 {
-		t.Fatalf("limited coverage = %#v", page.Coverage)
+	var requiredByteError interface{ RequiredBytes() int64 }
+	if errorCodeForTest(err) != "search_budget_too_small" ||
+		!errors.As(err, &requiredByteError) || requiredByteError.RequiredBytes() <= 1 ||
+		len(page.Messages) != 0 || page.NextCursor != "" {
+		t.Fatalf("SearchMessages() = page %#v, error %v; want terminal byte-budget error", page, err)
 	}
 }
 
@@ -354,11 +354,11 @@ func TestBodySearchStopsAtFirstCandidateOutsideByteBudget(t *testing.T) {
 		t.Fatalf("PrepareQuery() error = %v", err)
 	}
 	page, err := store.SearchMessages(context.Background(), query)
-	if err != nil {
-		t.Fatalf("SearchMessages() error = %v", err)
-	}
-	if len(page.Messages) != 0 || page.Coverage.Complete || page.Coverage.ScannedBytes != 0 {
-		t.Fatalf("byte-limited ordered search = %#v", page)
+	var requiredByteError interface{ RequiredBytes() int64 }
+	if errorCodeForTest(err) != "search_budget_too_small" ||
+		!errors.As(err, &requiredByteError) || requiredByteError.RequiredBytes() <= 256 ||
+		len(page.Messages) != 0 || page.NextCursor != "" {
+		t.Fatalf("SearchMessages() = page %#v, error %v; want first candidate byte-limit failure", page, err)
 	}
 }
 
@@ -981,9 +981,8 @@ func TestBodySearchChunkHandlesNullDateCandidates(t *testing.T) {
 }
 
 // The byte-budget stop must survive chunking: with more candidates than
-// one chunk (512), an exhausted budget stops the WHOLE scan. Oracle: the
-// first candidate alone exceeds MaxBytes=1, so the budget breaks in chunk
-// 1; row 616 lives in chunk 2 - if the outer chunk loop kept running, its
+// one chunk (512), budget exhaustion after progress stops the WHOLE scan.
+// Row 616 lives in chunk 2; if the outer chunk loop kept running, its
 // missing source would be attempted and counted.
 func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	t.Parallel()
@@ -1003,9 +1002,26 @@ func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	if err := os.Remove(base + ".emlx"); err != nil {
 		t.Fatalf("remove chunk-2 source: %v", err)
 	}
+	firstPage, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	if len(firstPage.Messages) != 1 {
+		t.Fatalf("ListMessages() returned %d candidates, want the newest candidate", len(firstPage.Messages))
+	}
+	_, firstSource, err := store.openMessageSource(context.Background(), firstPage.Messages[0].Ref)
+	if err != nil {
+		t.Fatalf("open first candidate source: %v", err)
+	}
+	maximumBytes := firstSource.length
+	if err := firstSource.Close(); err != nil {
+		t.Fatalf("close first candidate source: %v", err)
+	}
 	query, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 25,
-		MaxBytes: 1, MaxMessages: 100000,
+		MaxBytes: maximumBytes, MaxMessages: 100000,
 	})
 	if err != nil {
 		t.Fatalf("PrepareQuery() error = %v", err)
@@ -1014,11 +1030,15 @@ func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchMessages() error = %v", err)
 	}
-	if page.Coverage.Complete {
-		t.Fatalf("budget-limited scan must be incomplete: %#v", page.Coverage)
+	if len(page.Messages) != 1 || page.Coverage.Complete || page.NextCursor == "" {
+		t.Fatalf("budget-limited scan = %#v, want one classified candidate and continuation", page)
 	}
-	if page.Coverage.ScannedBytes > 1 {
-		t.Fatalf("scanned bytes %d exceed the budget of 1", page.Coverage.ScannedBytes)
+	if page.Coverage.ScannedMessages != 1 || page.Coverage.ScannedBytes != maximumBytes {
+		t.Fatalf("scanned coverage = %+v, want one candidate and %d bytes", page.Coverage, maximumBytes)
+	}
+	cursor, err := mail.DecodeSearchCursor(page.NextCursor, query.Fingerprint)
+	if err != nil || !cursor.Inclusive {
+		t.Fatalf("DecodeSearchCursor() = %+v, %v; want inclusive budget boundary", cursor, err)
 	}
 	if page.Coverage.MissingSources != 0 {
 		t.Fatalf("missing sources = %d; the outer chunk loop reached chunk 2 after the budget break",
@@ -1026,7 +1046,7 @@ func TestBodySearchBudgetBreakStopsChunkLoop(t *testing.T) {
 	}
 }
 
-func TestBudgetLimitedBodySearchResumesAtLastClassifiedCandidate(t *testing.T) {
+func TestBudgetLimitedBodySearchResumesInclusivelyAndRestartsWithLargerBudget(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -1044,6 +1064,28 @@ func TestBudgetLimitedBodySearchResumesAtLastClassifiedCandidate(t *testing.T) {
 	maxBytes := source.length
 	if err := source.Close(); err != nil {
 		t.Fatalf("closeMessageSource() error = %v", err)
+	}
+	inboxLocation, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatalf("parseMailboxURL() error = %v", err)
+	}
+	basePath, err := store.messageBasePath(inboxLocation, 102)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	oversizeBody := "needle beta " + strings.Repeat("y", int(maxBytes))
+	oversizeSource := []byte(fmt.Sprintf(
+		"From: Alice <alice@example.com>\r\nTo: Christopher <christopher@example.com>\r\nSubject: Test\r\nMessage-ID: <102@example.com>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n",
+		oversizeBody,
+	))
+	framed := append([]byte(fmt.Sprintf("%-10d\n", len(oversizeSource))), oversizeSource...)
+	framed = append(framed, validPlistTrailer()...)
+	if err := os.WriteFile(basePath+".emlx", framed, 0o600); err != nil {
+		t.Fatalf("rewrite oversize fixture source: %v", err)
+	}
+	requiredBytes := int64(len(oversizeSource))
+	if requiredBytes <= maxBytes {
+		t.Fatalf("oversize source = %d bytes, want more than budget %d", requiredBytes, maxBytes)
 	}
 	first, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: maxBytes,
@@ -1065,8 +1107,11 @@ func TestBudgetLimitedBodySearchResumesAtLastClassifiedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeSearchCursor() error = %v", err)
 	}
-	if cursor.RowID != 101 {
-		t.Fatalf("cursor row = %d, want last fully classified row 101", cursor.RowID)
+	if cursor.RowID != 102 || !cursor.Inclusive {
+		t.Fatalf("cursor = %+v, want inclusive blocked row 102", cursor)
+	}
+	if firstPage.Coverage.ScannedMessages != 1 || firstPage.Coverage.Complete {
+		t.Fatalf("first page coverage = %+v, want only row 101 classified", firstPage.Coverage)
 	}
 	next, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: maxBytes,
@@ -1076,14 +1121,49 @@ func TestBudgetLimitedBodySearchResumesAtLastClassifiedCandidate(t *testing.T) {
 		t.Fatalf("PrepareQuery(next) error = %v", err)
 	}
 	nextPage, err := store.SearchMessages(context.Background(), next)
-	if err != nil {
-		t.Fatalf("SearchMessages(next) error = %v", err)
+	var requiredByteError interface{ RequiredBytes() int64 }
+	if errorCodeForTest(err) != "search_budget_too_small" ||
+		!errors.As(err, &requiredByteError) || requiredByteError.RequiredBytes() != requiredBytes ||
+		len(nextPage.Messages) != 0 || nextPage.NextCursor != "" {
+		t.Fatalf("SearchMessages(next) = page %#v, error %v; want terminal budget error requiring %d bytes",
+			nextPage, err, requiredBytes)
 	}
-	if len(nextPage.Messages) != 1 || nextPage.Messages[0].Summary.Subject != "Status Update" {
-		t.Fatalf("next page = %#v, want the previously budget-blocked match", nextPage)
+	if !strings.Contains(err.Error(), "restart the same search without --cursor") {
+		t.Fatalf("budget error guidance = %q", err)
 	}
-	if !nextPage.Coverage.Complete || nextPage.NextCursor != "" {
-		t.Fatalf("next page = %#v, want complete final page", nextPage)
+	if _, err := mail.PrepareQuery(mail.Query{
+		MailboxRef: inboxRef, Text: "needle", Limit: 10,
+		MaxBytes: requiredBytes, Cursor: firstPage.NextCursor,
+	}); errorCodeForTest(err) != "invalid_cursor" {
+		t.Fatalf("PrepareQuery(larger budget with old cursor) error = %v, want invalid_cursor", err)
+	}
+
+	var cursorValue string
+	var subjects []string
+	var finalPage mail.SearchPage
+	for pageNumber := 0; pageNumber < 4; pageNumber++ {
+		restarted, err := mail.PrepareQuery(mail.Query{
+			MailboxRef: inboxRef, Text: "needle", Limit: 1,
+			MaxBytes: requiredBytes, Cursor: cursorValue,
+		})
+		if err != nil {
+			t.Fatalf("PrepareQuery(restart page %d) error = %v", pageNumber+1, err)
+		}
+		finalPage, err = store.SearchMessages(context.Background(), restarted)
+		if err != nil {
+			t.Fatalf("SearchMessages(restart page %d) error = %v", pageNumber+1, err)
+		}
+		for _, message := range finalPage.Messages {
+			subjects = append(subjects, message.Summary.Subject)
+		}
+		cursorValue = finalPage.NextCursor
+		if cursorValue == "" {
+			break
+		}
+	}
+	if cursorValue != "" || fmt.Sprint(subjects) != "[Quarterly Report Status Update]" || !finalPage.Coverage.Complete {
+		t.Fatalf("restarted pagination subjects=%v cursor=%t coverage=%+v",
+			subjects, cursorValue != "", finalPage.Coverage)
 	}
 }
 
@@ -1127,10 +1207,25 @@ func TestCandidateLimitedBodySearchResumesWithoutMatches(t *testing.T) {
 	}
 }
 
-func TestByteLimitedBodySearchRetriesFirstCandidateInclusively(t *testing.T) {
+func TestByteLimitedBodySearchReturnsTerminalErrorForFirstCandidate(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
+	listed, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 3,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithSubject(t, listed.Messages, "Quarterly Report")
+	_, source, err := store.openMessageSource(context.Background(), messageRef)
+	if err != nil {
+		t.Fatalf("openMessageSource() error = %v", err)
+	}
+	requiredBytes := source.length
+	if err := source.Close(); err != nil {
+		t.Fatalf("closeMessageSource() error = %v", err)
+	}
 	first, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
 	})
@@ -1138,39 +1233,15 @@ func TestByteLimitedBodySearchRetriesFirstCandidateInclusively(t *testing.T) {
 		t.Fatalf("PrepareQuery(first) error = %v", err)
 	}
 	firstPage, err := store.SearchMessages(context.Background(), first)
-	if err != nil {
-		t.Fatalf("SearchMessages(first) error = %v", err)
+	var requiredByteError interface{ RequiredBytes() int64 }
+	if errorCodeForTest(err) != "search_budget_too_small" ||
+		!errors.As(err, &requiredByteError) || requiredByteError.RequiredBytes() != requiredBytes ||
+		len(firstPage.Messages) != 0 || firstPage.NextCursor != "" {
+		t.Fatalf("SearchMessages(first) = page %#v, error %v; want terminal budget error requiring %d bytes",
+			firstPage, err, requiredBytes)
 	}
-	if len(firstPage.Messages) != 0 || firstPage.Coverage.Complete || firstPage.NextCursor == "" {
-		t.Fatalf("first page = %#v, want incomplete inclusive cursor", firstPage)
-	}
-	cursor, err := mail.DecodeSearchCursor(firstPage.NextCursor, first.Fingerprint)
-	if err != nil {
-		t.Fatalf("DecodeSearchCursor() error = %v", err)
-	}
-	if !cursor.Inclusive || cursor.RowID != 101 {
-		t.Fatalf("cursor = %+v, want inclusive row 101", cursor)
-	}
-	next, err := mail.PrepareQuery(mail.Query{
-		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
-		Cursor: firstPage.NextCursor,
-	})
-	if err != nil {
-		t.Fatalf("PrepareQuery(next) error = %v", err)
-	}
-	nextPage, err := store.SearchMessages(context.Background(), next)
-	if err != nil {
-		t.Fatalf("SearchMessages(next) error = %v", err)
-	}
-	if len(nextPage.Messages) != 0 || nextPage.NextCursor == "" {
-		t.Fatalf("next page = %#v, want the same blocked candidate to remain resumable", nextPage)
-	}
-	nextCursor, err := mail.DecodeSearchCursor(nextPage.NextCursor, next.Fingerprint)
-	if err != nil {
-		t.Fatalf("DecodeSearchCursor(next) error = %v", err)
-	}
-	if !nextCursor.Inclusive || nextCursor.RowID != cursor.RowID {
-		t.Fatalf("next cursor = %+v, want unchanged inclusive boundary", nextCursor)
+	if !strings.Contains(err.Error(), "without --cursor") {
+		t.Fatalf("budget error guidance = %q", err)
 	}
 }
 

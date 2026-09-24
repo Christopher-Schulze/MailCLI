@@ -141,7 +141,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	for _, id := range []string{"messages.filter", "messages.search"} {
 		command := manifest.Commands[slices.Index(got, id)]
 		if !slices.Equal(command.ResultStates, []string{
-			"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded",
+			"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small",
 		}) {
 			t.Fatalf("%s result states = %+v", id, command.ResultStates)
 		}

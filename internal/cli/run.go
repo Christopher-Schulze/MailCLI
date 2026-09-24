@@ -98,6 +98,7 @@ type errorData struct {
 	Code                  string                      `json:"code"`
 	Message               string                      `json:"message"`
 	Guidance              *mail.OperationGuidance     `json:"guidance"`
+	RequiredBytes         *int64                      `json:"required_bytes,omitempty"`
 	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
 	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
 }
@@ -153,7 +154,16 @@ func newErrorData(command string, data responseData, err error) *errorData {
 			guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectNone
 		}
 	}
-	return &errorData{Code: errorCode(err), Message: err.Error(), Guidance: &guidance, DraftRevisionConflict: conflict, DraftEditor: editorEvidence}
+	var requiredBytes *int64
+	var budgetError interface{ RequiredBytes() int64 }
+	if errorCode(err) == "search_budget_too_small" && errors.As(err, &budgetError) {
+		value := budgetError.RequiredBytes()
+		requiredBytes = &value
+	}
+	return &errorData{
+		Code: errorCode(err), Message: err.Error(), Guidance: &guidance,
+		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
+	}
 }
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
