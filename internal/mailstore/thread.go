@@ -2,11 +2,26 @@ package mailstore
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
+
+const (
+	threadCursorPrefix  = "thrc_"
+	threadCursorVersion = 1
+)
+
+const threadCursorDateNull uint8 = 1
+
+type threadCursor struct {
+	dateReceived     int64
+	dateReceivedNull bool
+	rowID            int64
+}
 
 // MessageThread is a local-store read; the Apple Events fallback cannot
 // provide conversation membership, so it fails closed like other
@@ -47,6 +62,9 @@ func (s *Store) MessageThread(
 		ConversationID: resolved.Record.ConversationID,
 	}
 	if resolved.Record.ConversationID <= 0 {
+		if request.Cursor != "" {
+			return mail.MessageThread{}, operationError("invalid_cursor", "ungrouped messages do not have a continuation cursor")
+		}
 		summary, _, err := s.threadSummary(resolved.Record)
 		if err != nil {
 			return mail.MessageThread{}, err
@@ -54,11 +72,22 @@ func (s *Store) MessageThread(
 		thread.Messages = []mail.MessageSummary{summary}
 		return thread, nil
 	}
-	records, err := s.conversationRecords(ctx, resolved.Record.ConversationID, request.Limit+1)
+	indexRevision, err := s.searchIndexRevision(ctx)
 	if err != nil {
 		return mail.MessageThread{}, err
 	}
-	if len(records) > request.Limit {
+	cursor, err := decodeThreadCursor(
+		request.Cursor, request.Ref, resolved.Record.ConversationID, s.storeUUID, indexRevision,
+	)
+	if err != nil {
+		return mail.MessageThread{}, err
+	}
+	records, err := s.conversationRecords(ctx, resolved.Record.ConversationID, cursor, request.Limit+1)
+	if err != nil {
+		return mail.MessageThread{}, err
+	}
+	hasMore := len(records) > request.Limit
+	if hasMore {
 		thread.Truncated = true
 		records = records[:request.Limit]
 	}
@@ -72,15 +101,25 @@ func (s *Store) MessageThread(
 		}
 		thread.Messages = append(thread.Messages, summary)
 	}
+	if hasMore && len(records) > 0 {
+		thread.NextCursor, err = encodeThreadCursor(
+			records[len(records)-1], request.Ref, resolved.Record.ConversationID, s.storeUUID, indexRevision,
+		)
+		if err != nil {
+			return mail.MessageThread{}, err
+		}
+	}
 	return thread, nil
 }
 
 func (s *Store) conversationRecords(
 	ctx context.Context,
 	conversationID int64,
+	cursor *threadCursor,
 	limit int,
 ) (result []messageRecord, resultErr error) {
-	rows, err := s.database.QueryContext(ctx, `
+	activeSQL, arguments := s.activeAccountSQL()
+	query := `
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
@@ -100,10 +139,20 @@ func (s *Store) conversationRecords(
 		JOIN subjects subject ON subject.ROWID = m.subject
 		JOIN addresses sender ON sender.ROWID = m.sender
 		LEFT JOIN summaries summary ON summary.ROWID = m.summary
-		WHERE m.conversation_id = ? AND m.deleted = 0
-		ORDER BY m.date_received ASC, m.ROWID ASC
-		LIMIT ?
-	`, conversationID, limit)
+		WHERE m.conversation_id = ? AND m.deleted = 0 AND ` + activeSQL
+	arguments = append([]any{conversationID}, arguments...)
+	if cursor != nil {
+		if cursor.dateReceivedNull {
+			query += ` AND ((m.date_received IS NULL AND m.ROWID > ?) OR m.date_received IS NOT NULL)`
+			arguments = append(arguments, cursor.rowID)
+		} else {
+			query += ` AND (m.date_received > ? OR (m.date_received = ? AND m.ROWID > ?))`
+			arguments = append(arguments, cursor.dateReceived, cursor.dateReceived, cursor.rowID)
+		}
+	}
+	query += ` ORDER BY m.date_received ASC, m.ROWID ASC LIMIT ?`
+	arguments = append(arguments, limit)
+	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("list Envelope Index conversation members: %w", err)
 	}
@@ -120,6 +169,61 @@ func (s *Store) conversationRecords(
 		return nil, fmt.Errorf("iterate Envelope Index conversation members: %w", err)
 	}
 	return items, nil
+}
+
+func encodeThreadCursor(
+	item messageRecord,
+	seedRef string,
+	conversationID int64,
+	storeUUID string,
+	indexRevision string,
+) (string, error) {
+	var flags uint8
+	if item.DateReceivedNull {
+		flags = threadCursorDateNull
+	}
+	token, err := mailref.EncodeCompactTokenPayload(threadCursorPrefix, &mailref.CompactPayload{
+		Fingerprint: threadCursorFingerprint(seedRef, conversationID), StoreUUID: storeUUID,
+		IndexRevision: indexRevision, DateReceived: item.DateReceived, Flags: flags, RowID: item.RowID,
+	}, threadCursorVersion)
+	if err != nil {
+		return "", fmt.Errorf("encode thread cursor: %w", err)
+	}
+	return token, nil
+}
+
+func decodeThreadCursor(
+	value string,
+	seedRef string,
+	conversationID int64,
+	storeUUID string,
+	indexRevision string,
+) (*threadCursor, error) {
+	if value == "" {
+		return nil, nil
+	}
+	payload, err := mailref.DecodeTokenPayload(threadCursorPrefix, value)
+	if err != nil {
+		return nil, operationError("invalid_cursor", err.Error())
+	}
+	compact, err := mailref.DecodeCompactPayload(payload, threadCursorVersion)
+	if err != nil {
+		return nil, operationError("invalid_cursor", err.Error())
+	}
+	if compact.Flags > threadCursorDateNull || compact.RowID < 1 || compact.StoreUUID != storeUUID ||
+		compact.IndexRevision != indexRevision ||
+		compact.Fingerprint != threadCursorFingerprint(seedRef, conversationID) {
+		return nil, operationError("invalid_cursor", "thread cursor does not match this conversation, Mail store, or index revision")
+	}
+	return &threadCursor{
+		dateReceived: compact.DateReceived, dateReceivedNull: compact.Flags&threadCursorDateNull != 0,
+		rowID: compact.RowID,
+	}, nil
+}
+
+func threadCursorFingerprint(seedRef string, conversationID int64) string {
+	value := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", conversationID, seedRef)))
+	return hex.EncodeToString(value[:])
 }
 
 // threadSummary projects one member into the list summary shape. The member

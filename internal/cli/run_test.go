@@ -69,6 +69,11 @@ func newTransportTestService(root string, mirror *cliMirror) *mail.Service {
 
 type testGateway struct{}
 
+type threadRequestGateway struct {
+	testGateway
+	request mail.MessageThreadRequest
+}
+
 type failingGateway struct {
 	testGateway
 }
@@ -158,6 +163,17 @@ func (testGateway) MessageThread(_ context.Context, request mail.MessageThreadRe
 	return mail.MessageThread{
 		Ref:            request.Ref,
 		ConversationID: 777,
+		Messages: []mail.MessageSummary{
+			{Ref: "msg_ref_1", Subject: "Subject", DateReceived: "2024-01-01T00:00:00Z", ConversationID: 777},
+			{Ref: request.Ref, Subject: "Subject reply", DateReceived: "2024-01-02T00:00:00Z", ConversationID: 777},
+		},
+	}, nil
+}
+
+func (g *threadRequestGateway) MessageThread(_ context.Context, request mail.MessageThreadRequest) (mail.MessageThread, error) {
+	g.request = request
+	return mail.MessageThread{
+		Ref: request.Ref, ConversationID: 777, Truncated: true, NextCursor: "thread-next",
 		Messages: []mail.MessageSummary{
 			{Ref: "msg_ref_1", Subject: "Subject", DateReceived: "2024-01-01T00:00:00Z", ConversationID: 777},
 			{Ref: request.Ref, Subject: "Subject reply", DateReceived: "2024-01-02T00:00:00Z", ConversationID: 777},
@@ -570,25 +586,32 @@ func TestReadCommandsJSONTable(t *testing.T) {
 func TestMessageThreadCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := Run(context.Background(), newTestService(),
-		[]string{"messages", "thread", "--ref", "msg_ref", "--json"}, &stdout, &stderr)
+	gateway := &threadRequestGateway{}
+	service := mail.NewService(gateway)
+	code := Run(context.Background(), service,
+		[]string{"messages", "thread", "--ref", "msg_ref", "--limit", "2", "--cursor", "thread-current", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	output := stdout.String()
 	if !strings.Contains(output, `"command":"messages.thread"`) || !strings.Contains(output, `"conversation_id":777`) ||
-		!strings.Contains(output, `"truncated":false`) || !strings.Contains(output, `"msg_ref_1"`) {
+		!strings.Contains(output, `"truncated":true`) || !strings.Contains(output, `"next_cursor":"thread-next"`) ||
+		!strings.Contains(output, `"msg_ref_1"`) {
 		t.Fatalf("thread output lacks conversation projection: %q", output)
+	}
+	if gateway.request.Ref != "msg_ref" || gateway.request.Limit != 2 || gateway.request.Cursor != "thread-current" {
+		t.Fatalf("thread request = %+v", gateway.request)
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	code = Run(context.Background(), newTestService(),
-		[]string{"messages", "thread", "--ref", "msg_ref"}, &stdout, &stderr)
+	code = Run(context.Background(), service,
+		[]string{"messages", "thread", "--ref", "msg_ref", "--cursor", "thread-current"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("human code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "conversation_id\t777") || !strings.Contains(stdout.String(), "Subject reply") {
+	if !strings.Contains(stdout.String(), "conversation_id\t777") || !strings.Contains(stdout.String(), "Subject reply") ||
+		!strings.Contains(stdout.String(), "Next cursor: thread-next") {
 		t.Fatalf("human thread output = %q", stdout.String())
 	}
 }

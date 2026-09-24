@@ -817,8 +817,9 @@ type MessagePage struct {
 }
 
 type MessageThreadRequest struct {
-	Ref   string
-	Limit int
+	Ref    string
+	Limit  int
+	Cursor string
 }
 
 // MessageThread is the bounded chronological member list of one Envelope
@@ -830,6 +831,7 @@ type MessageThread struct {
 	ConversationID int64            `json:"conversation_id"`
 	Messages       []MessageSummary `json:"messages"`
 	Truncated      bool             `json:"truncated"`
+	NextCursor     string           `json:"next_cursor,omitempty"`
 }
 
 type ListMailboxesRequest struct {

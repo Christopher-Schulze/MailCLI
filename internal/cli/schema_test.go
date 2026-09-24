@@ -182,6 +182,14 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 	}
 }
 
+func TestMessageThreadSchemaExposesContinuationCursor(t *testing.T) {
+	schema := decodeTestCommandSchema(t, schemaForCommand("messages.thread"))
+	cursor, exists := schemaFlagsByName(schema)["--cursor"]
+	if !exists || cursor.ValueType != "cursor" || !cursor.TakesValue || !cursor.ValueRequired {
+		t.Fatalf("messages.thread --cursor schema = %+v, exists=%t", cursor, exists)
+	}
+}
+
 func TestSchemaDescribesRepeatableDraftFlags(t *testing.T) {
 	for _, command := range []string{"drafts.create", "drafts.update", "messages.reply", "messages.forward"} {
 		flags := schemaFlagsByName(decodeTestCommandSchema(t, schemaForCommand(command)))

@@ -320,6 +320,7 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	flags := newFlagSet("messages thread", stderr)
 	ref := flags.String("ref", "", "message ref")
 	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
+	cursor := flags.String("cursor", "", "continuation cursor from an unchanged thread")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -328,7 +329,7 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	thread, err := service.MessageThread(operationCtx, mail.MessageThreadRequest{
-		Ref: *ref, Limit: *limit,
+		Ref: *ref, Limit: *limit, Cursor: *cursor,
 	})
 	if err != nil {
 		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
@@ -341,11 +342,13 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	for _, message := range thread.Messages {
 		rows = append(rows, []string{message.Ref, message.DateReceived, message.Sender, message.Subject})
 	}
-	if writeTerminalTable(stdout, []string{"REF", "RECEIVED", "FROM", "SUBJECT"}, rows) {
-		return 0
+	if !writeTerminalTable(stdout, []string{"REF", "RECEIVED", "FROM", "SUBJECT"}, rows) {
+		for _, message := range thread.Messages {
+			writeFormat(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))
+		}
 	}
-	for _, message := range thread.Messages {
-		writeFormat(stdout, "%s\t%s\t%s\t%s\n", message.Ref, message.DateReceived, oneLine(message.Sender), oneLine(message.Subject))
+	if thread.NextCursor != "" {
+		writeFormat(stdout, "\nNext cursor: %s\n", thread.NextCursor)
 	}
 	return 0
 }
