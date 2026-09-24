@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,8 +23,12 @@ func TestPrunePreservesSymlinkedSnapshotObjects(t *testing.T) {
 			if err := os.WriteFile(claim, []byte("retained claim"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			attemptID := "handoff_123456789012345678901234"
+			writePreparedHandoffClaimFixture(t, root, draft.Ref, attemptID, []HandoffSnapshot{{
+				Name: "keep.txt", Size: int64(len("unrelated bytes")), SHA256: strings.Repeat("0", 64),
+			}})
 			parent := filepath.Join(root, draft.Ref+handoffSnapshotSuffix)
-			attempt := "handoff_123456789012345678901234"
+			attempt := attemptID
 			parts := map[string][]string{
 				"parent":  {parent},
 				"attempt": {parent, attempt},
@@ -284,6 +289,9 @@ func TestPruneReportsUnsafeLayoutAlongsideCompletedCleanup(t *testing.T) {
 			}
 			parent := filepath.Join(root, bad.Ref+handoffSnapshotSuffix)
 			attempt, index := "handoff_123456789012345678901234", "0"
+			writePreparedHandoffClaimFixture(t, root, bad.Ref, attempt, []HandoffSnapshot{{
+				Name: "keep.txt", Size: int64(len("preserved")), SHA256: strings.Repeat("0", 64),
+			}})
 			if layout == "invalid_attempt" {
 				attempt = "unrelated"
 			}

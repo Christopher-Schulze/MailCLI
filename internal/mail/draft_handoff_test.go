@@ -123,3 +123,87 @@ func TestDraftHandoffReconcileValidatesAttemptID(t *testing.T) {
 		t.Fatalf("ReconcileDraftHandoff() error = %v, want invalid_argument", err)
 	}
 }
+
+func TestDraftHandoffRecoversPartialPreparedStagingAfterCrash(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	attachment := filepath.Join(t.TempDir(), "attachment.txt")
+	if err := os.WriteFile(attachment, []byte("complete attachment payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "ada@example.com"}}, Body: "Body", Attachments: []string{attachment},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "handoff_123456789012345678901234"
+	writePreparedHandoffClaimFixture(t, root, draft.Ref, attemptID, nil)
+	partialDirectory := filepath.Join(root, draft.Ref+handoffSnapshotSuffix, attemptID, "0")
+	if err := os.MkdirAll(partialDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	partialPath := filepath.Join(partialDirectory, filepath.Base(attachment))
+	if err := os.WriteFile(partialPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatalf("BeginDraftHandoff() after prepared crash fixture error = %v", err)
+	}
+	if session.AttemptID() == attemptID {
+		t.Fatal("retry reused the recovered handoff attempt ID")
+	}
+	if _, err := os.Lstat(partialPath); !os.IsNotExist(err) {
+		t.Fatalf("partial snapshot survived recovery: %v", err)
+	}
+	if err := session.CancelBeforeDispatch(); err != nil {
+		t.Fatalf("CancelBeforeDispatch() error = %v", err)
+	}
+}
+
+func TestDraftHandoffPreparedRecoveryPreservesSymlinkedStaging(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	attachment := filepath.Join(t.TempDir(), "attachment.txt")
+	if err := os.WriteFile(attachment, []byte("complete attachment payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "ada@example.com"}}, Body: "Body", Attachments: []string{attachment},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := "handoff_123456789012345678901234"
+	writePreparedHandoffClaimFixture(t, root, draft.Ref, attemptID, nil)
+	indexDirectory := filepath.Join(root, draft.Ref+handoffSnapshotSuffix, attemptID, "0")
+	if err := os.MkdirAll(indexDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(sentinel, []byte("external bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedPath := filepath.Join(indexDirectory, filepath.Base(attachment))
+	if err := os.Symlink(sentinel, stagedPath); err != nil {
+		t.Fatal(err)
+	}
+	claimPath := filepath.Join(root, draft.Ref+handoffClaimSuffix)
+	claimBefore, err := os.ReadFile(claimPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BeginDraftHandoff(draft.Ref); err == nil {
+		t.Fatal("BeginDraftHandoff() accepted symlinked prepared staging")
+	}
+	if info, err := os.Lstat(stagedPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("staging symlink changed: %v, %v", info, err)
+	}
+	if claimAfter, err := os.ReadFile(claimPath); err != nil || string(claimAfter) != string(claimBefore) {
+		t.Fatalf("prepared claim changed: %q, %v", claimAfter, err)
+	}
+	if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "external bytes" {
+		t.Fatalf("symlink target changed: %q, %v", payload, err)
+	}
+}

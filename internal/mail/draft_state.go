@@ -170,8 +170,12 @@ func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, er
 		if errors.As(err, &operation) && operation.Code == "not_found" {
 			err = errors.Join(err, lease.removeLock())
 		}
+		return draft, err
 	}
-	return draft, err
+	if err := removeDraftJSONTemporaryFiles(lease.storage, ref); err != nil {
+		return Draft{}, err
+	}
+	return draft, nil
 }
 
 func submissionAcceptedForAttempt(attempt SendAttempt) bool {

@@ -323,9 +323,82 @@ release:
 	return errors.Join(resultErr, lease.release())
 }
 
+func draftJSONTemporaryRef(name string) (string, bool) {
+	const marker = ".json.mailcli-"
+	if !strings.HasPrefix(name, ".") {
+		return "", false
+	}
+	markerIndex := strings.LastIndex(name, marker)
+	if markerIndex <= 1 {
+		return "", false
+	}
+	ref := name[1:markerIndex]
+	suffix := name[markerIndex+len(marker):]
+	if !validDraftReference(ref) || len(suffix) != 24 {
+		return "", false
+	}
+	for _, character := range suffix {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return "", false
+		}
+	}
+	return ref, true
+}
+
+func removeDraftJSONTemporaryFile(storage *draftStorage, name string, expected os.FileInfo) error {
+	if _, ok := draftJSONTemporaryRef(name); !ok {
+		return validationError("invalid draft temporary name")
+	}
+	if storage == nil || storage.root == nil || expected == nil || !expected.Mode().IsRegular() {
+		return draftLockUnsafeError("draft temporary is not a pinned regular file")
+	}
+	current, err := storage.lstat(name)
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(expected, current) ||
+		current.Mode().Perm() != expected.Mode().Perm() || current.Size() != expected.Size() ||
+		!current.ModTime().Equal(expected.ModTime()) {
+		return draftLockChangedError("draft temporary changed before cleanup")
+	}
+	return removeDraftStorageFile(storage, name, expected, "draft temporary")
+}
+
+// removeDraftJSONTemporaryFiles runs only while holding this draft's exclusive
+// lease. The pinned root fixes the parent identity; each file identity is
+// checked again immediately before unlink.
+func removeDraftJSONTemporaryFiles(storage *draftStorage, ref string) (resultErr error) {
+	if !validDraftReference(ref) {
+		return validationError("invalid draft ref")
+	}
+	if storage == nil || storage.root == nil {
+		return draftLockUnsafeError("draft temporary cleanup requires a pinned draft directory")
+	}
+	directory, err := storage.root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open pinned draft directory for temporary recovery: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("list draft temporaries: %w", err)
+	}
+	for _, entry := range entries {
+		candidateRef, ok := draftJSONTemporaryRef(entry.Name())
+		if !ok || candidateRef != ref {
+			continue
+		}
+		identity, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect draft temporary: %w", err)
+		}
+		if err := removeDraftJSONTemporaryFile(storage, entry.Name(), identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // listOrphanDraftArtifactRefs returns refs that own send/save/handoff claim,
-// spool, or snapshot files while their draft JSON is absent. Terminal send
-// receipts are excluded; they carry their own expiry path.
+// spool, snapshot, or draft JSON temporary files while their draft JSON is
+// absent. Terminal send receipts are excluded; they carry their own expiry path.
 func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -334,6 +407,10 @@ func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	refs := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
+		if ref, ok := draftJSONTemporaryRef(name); ok {
+			refs[ref] = struct{}{}
+			continue
+		}
 		if !strings.HasPrefix(name, "draft_") {
 			continue
 		}
@@ -373,9 +450,9 @@ func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	return out, nil
 }
 
-// sweepOrphanDraftArtifacts removes claim, spool, and handoff snapshot files
-// whose draft is gone, using the same lease evidence as draft mutation: a
-// busy lock means a live operation, so the ref is skipped rather than swept.
+// sweepOrphanDraftArtifacts removes unclaimed-safe temporary and sidecar files
+// whose draft is gone. Handoff snapshots require a matching prepared claim;
+// dispatched or ambiguous evidence is retained under the same draft lease.
 func sweepOrphanDraftArtifacts(ctx context.Context, root string) ([]string, []PruneFailure, error) {
 	refs, err := listOrphanDraftArtifactRefs(root)
 	if err != nil {
@@ -429,6 +506,9 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 		goto release
 	}
 	resultErr = removeOrphanDraftClaims(ctx, lease.storage, ref)
+	if resultErr == nil {
+		resultErr = removeDraftJSONTemporaryFiles(lease.storage, ref)
+	}
 	if resultErr == nil {
 		resultErr = removeDraftAttachmentDir(lease.storage, ref)
 	}
