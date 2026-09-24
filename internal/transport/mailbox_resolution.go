@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 type mailboxRole string
@@ -76,6 +78,9 @@ func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) 
 	if exact := exactMailboxPathMatches(mailboxes, path); len(exact) > 0 {
 		return chooseMailbox(exact, "exact account-relative mailbox path", CodeIMAPMailboxNotFound)
 	}
+	if canonical := canonicalMailboxPathMatches(mailboxes, path); len(canonical) > 0 {
+		return chooseMailbox(canonical, "canonically equivalent account-relative mailbox path", CodeIMAPMailboxNotFound)
+	}
 
 	if role, ok := mailboxRoleForPath(path); ok {
 		flagged := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
@@ -95,7 +100,7 @@ func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) 
 	if len(path) == 1 {
 		leaf := path[0]
 		if heuristic := matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
-			return mailboxLegacy(mailbox) && strings.EqualFold(mailboxLeaf(mailboxWireName(mailbox)), leaf)
+			return mailboxLegacy(mailbox) && equalFoldedCanonicalMailboxName(mailboxLeaf(mailboxWireName(mailbox)), leaf)
 		}); len(heuristic) > 0 {
 			return chooseMailbox(heuristic, "mailbox leaf name", CodeIMAPMailboxNotFound)
 		}
@@ -161,7 +166,7 @@ func mailboxRoleForPath(path []string) (mailboxRole, bool) {
 	for _, role := range mailboxRoleOrder {
 		aliases := mailboxRoleAliases[role]
 		for _, alias := range aliases {
-			if strings.EqualFold(path[0], alias) {
+			if equalFoldedCanonicalMailboxName(path[0], alias) {
 				return role, true
 			}
 		}
@@ -193,7 +198,29 @@ func exactMailboxPathMatches(mailboxes []MailboxInfo, path []string) []string {
 				legacyNames = append(legacyNames, strings.Join(path, "."))
 			}
 			for _, name := range legacyNames {
-				if strings.EqualFold(mailboxWireName(mailbox), name) {
+				if mailboxWireName(mailbox) == name {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
+func canonicalMailboxPathMatches(mailboxes []MailboxInfo, path []string) []string {
+	return matchingMailboxNames(mailboxes, func(mailbox MailboxInfo) bool {
+		for _, candidate := range mailboxDisplayPaths(mailbox) {
+			if equalCanonicalMailboxPath(candidate, path) {
+				return true
+			}
+		}
+		if mailboxLegacy(mailbox) {
+			legacyNames := []string{strings.Join(path, "/")}
+			if len(path) > 1 {
+				legacyNames = append(legacyNames, strings.Join(path, "."))
+			}
+			for _, name := range legacyNames {
+				if equalFoldedCanonicalMailboxName(mailboxWireName(mailbox), name) {
 					return true
 				}
 			}
@@ -243,9 +270,11 @@ func hasMailboxFlag(mailbox MailboxInfo, want string) bool {
 }
 
 func containsMailboxName(names []string, candidate MailboxInfo) bool {
-	candidateName := mailboxDisplayName(candidate)
+	candidateName := norm.NFC.String(mailboxDisplayName(candidate))
 	for _, name := range names {
-		if candidateName == name || (mailboxLegacy(candidate) && strings.EqualFold(name, candidateName)) {
+		normalizedName := norm.NFC.String(name)
+		if candidateName == normalizedName ||
+			(mailboxLegacy(candidate) && strings.EqualFold(normalizedName, candidateName)) {
 			return true
 		}
 	}
@@ -293,6 +322,22 @@ func equalMailboxPath(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func equalCanonicalMailboxPath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if norm.NFC.String(left[index]) != norm.NFC.String(right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalFoldedCanonicalMailboxName(left, right string) bool {
+	return strings.EqualFold(norm.NFC.String(left), norm.NFC.String(right))
 }
 
 func mailboxLeaf(name string) string {

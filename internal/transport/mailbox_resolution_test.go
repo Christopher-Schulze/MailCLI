@@ -167,6 +167,119 @@ func TestResolveMailboxPathUsesServerHierarchyAndExactCase(t *testing.T) {
 	}
 }
 
+func TestResolveMailboxPathMatchesCanonicalSegmentEquivalence(t *testing.T) {
+	composed := "Caf\u00e9"
+	decomposed := "Cafe\u0301"
+	mailboxes := []MailboxInfo{{
+		Name: "Projects." + composed, WireName: "Projects." + composed,
+		DisplayName: composed, DisplayPath: []string{"Projects", composed},
+		Delimiter: ".", Encoding: MailboxEncodingModifiedUTF7,
+	}}
+	got, err := ResolveMailboxPath(mailboxes, []string{"Projects", decomposed})
+	if err != nil || got != "Projects."+composed {
+		t.Fatalf("canonical mailbox path = %q, %v; want composed server wire name", got, err)
+	}
+}
+
+func TestResolveMailboxPathPrefersExactAndRejectsNormalizedAmbiguity(t *testing.T) {
+	composed := "Caf\u00e9"
+	decomposed := "Cafe\u0301"
+	mailboxes := []MailboxInfo{
+		{
+			Name: "wire-nfd", WireName: "wire-nfd", DisplayName: decomposed,
+			DisplayPath: []string{decomposed}, Delimiter: ".",
+		},
+		{
+			Name: "wire-nfc", WireName: "wire-nfc", DisplayName: composed,
+			DisplayPath: []string{composed}, Delimiter: ".",
+		},
+	}
+	if got, err := ResolveMailboxPath(mailboxes, []string{composed}); err != nil || got != "wire-nfc" {
+		t.Fatalf("exact NFC mailbox = %q, %v; want exact identity wire-nfc", got, err)
+	}
+
+	_, err := ResolveMailboxPath([]MailboxInfo{
+		{
+			Name: "first", WireName: "first", DisplayName: "\u01fa",
+			DisplayPath: []string{"\u01fa"}, Delimiter: ".",
+		},
+		{
+			Name: "second", WireName: "second", DisplayName: "A\u030a\u0301",
+			DisplayPath: []string{"A\u030a\u0301"}, Delimiter: ".",
+		},
+	}, []string{"\u00c5\u0301"})
+	if ErrorCode(err) != CodeIMAPAmbiguousMailbox || !strings.Contains(err.Error(), "first, second") {
+		t.Fatalf("canonical collision error = %v, want sorted ambiguous candidates", err)
+	}
+}
+
+func TestResolveMailboxPathPreservesSegmentsAndRejectsCompatibilityFolding(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mailbox MailboxInfo
+		path    []string
+	}{
+		{
+			name: "delimiter segments stay distinct",
+			mailbox: MailboxInfo{
+				Name: "Caf\u00e9/Records", WireName: "Caf\u00e9/Records",
+				DisplayName: "Caf\u00e9/Records", DisplayPath: []string{"Caf\u00e9/Records"},
+				Delimiter: "/",
+			},
+			path: []string{"Caf\u00e9", "Records"},
+		},
+		{
+			name: "compatibility characters stay distinct",
+			mailbox: MailboxInfo{
+				Name: "wire-ligature", WireName: "wire-ligature",
+				DisplayName: "\ufb01le", DisplayPath: []string{"\ufb01le"}, Delimiter: ".",
+			},
+			path: []string{"file"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ResolveMailboxPath([]MailboxInfo{test.mailbox}, test.path); ErrorCode(err) != CodeIMAPMailboxNotFound {
+				t.Fatalf("ResolveMailboxPath() error = %v, want %s", err, CodeIMAPMailboxNotFound)
+			}
+		})
+	}
+}
+
+func TestResolveMailboxPathNormalizesRoleAliasesAndFallbackNames(t *testing.T) {
+	decomposedAlias := "Entwu\u0308rfe"
+	tests := []struct {
+		name     string
+		mailbox  MailboxInfo
+		wantWire string
+	}{
+		{
+			name: "special use alias",
+			mailbox: MailboxInfo{
+				Name: "server-drafts", WireName: "server-drafts", DisplayName: "Drafts",
+				DisplayPath: []string{"System", "Drafts"}, Delimiter: ".",
+				Flags: []string{"\\Drafts"},
+			},
+			wantWire: "server-drafts",
+		},
+		{
+			name: "localized fallback name",
+			mailbox: MailboxInfo{
+				Name: "localized-drafts", WireName: "localized-drafts", DisplayName: decomposedAlias,
+				DisplayPath: []string{"System", decomposedAlias}, Delimiter: ".",
+			},
+			wantWire: "localized-drafts",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ResolveMailboxPath([]MailboxInfo{test.mailbox}, []string{decomposedAlias})
+			if err != nil || got != test.wantWire {
+				t.Fatalf("ResolveMailboxPath() = %q, %v; want %q", got, err, test.wantWire)
+			}
+		})
+	}
+}
+
 func TestResolveMailboxPathDoesNotInventHierarchyForNILDelimiter(t *testing.T) {
 	mailboxes := []MailboxInfo{{
 		Name: "A/B", WireName: "A/B", DisplayName: "A/B", DisplayPath: []string{"A/B"},

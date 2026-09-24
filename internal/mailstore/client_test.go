@@ -1735,6 +1735,67 @@ func TestSyncCheckCompleteWhenAllChecked(t *testing.T) {
 	}
 }
 
+func TestSyncCheckMatchesCanonicallyEquivalentMailboxPaths(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	address := "canonical-mailbox-sync@gmail.com"
+	installImapIdentityFixture(t, store, address)
+
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	if _, err := writer.Exec(
+		`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source)
+		 VALUES (5,?,2,0,0,1)`,
+		"imap://"+testAccountID+"/Cafe%CC%81",
+	); err != nil {
+		closeTestResourceNow(t, writer, "canonical mailbox writer")
+		t.Fatalf("insert decomposed local mailbox: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close canonical mailbox writer: %v", err)
+	}
+
+	composed := "Caf\u00e9"
+	decomposed := "Cafe\u0301"
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{
+			{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}},
+			{
+				Name: composed, WireName: composed, DisplayName: composed,
+				DisplayPath: []string{composed}, Delimiter: ".",
+			},
+		},
+		status: transport.MailboxStatus{Messages: 3},
+		statusByMailbox: map[string]transport.MailboxStatus{
+			composed: {Mailbox: composed, Messages: 2},
+		},
+	}
+	client := &Client{
+		store: store,
+		send: mail.SendTransport{
+			Imap: fakeImap, Credentials: stubCredentials{address: "secret"},
+		},
+	}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	if !result.Complete || len(result.Failures) != 0 {
+		t.Fatalf("SyncCheck() = %+v, want complete mailbox coverage", result)
+	}
+	for _, delta := range result.Mailboxes {
+		if delta.ServerName != composed {
+			continue
+		}
+		if delta.State != mail.MailboxDeltaStateMatched || strings.Join(delta.Path, "/") != decomposed ||
+			!delta.LocalMessagesAvailable || !delta.ServerMessagesAvailable ||
+			delta.LocalMessages != 2 || delta.ServerMessages != 2 {
+			t.Fatalf("canonical mailbox delta = %+v, want matched NFD-local/NFC-server counts", delta)
+		}
+		return
+	}
+	t.Fatalf("SyncCheck() mailboxes = %+v, want matched NFC server mailbox %q", result.Mailboxes, composed)
+}
+
 // failureCode maps deadline/cancelation to sync_check_timeout even when the
 // context is still alive, typed errors to their code, and anything else to
 // sync_check_failed.
