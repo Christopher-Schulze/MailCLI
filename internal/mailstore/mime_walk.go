@@ -199,10 +199,19 @@ func parseMIMEEntity(
 	}
 	if budgetErr := mimeBudgetError(document, err); budgetErr != nil {
 		markMIMEBudgetExceeded(document, budgetErr)
-		return mimeTextRepresentation{Text: text, Rank: rank}, budgetErr
+		if document.retainBodyText {
+			return mimeTextRepresentation{Text: text, Rank: rank}, budgetErr
+		}
+		return mimeTextRepresentation{}, budgetErr
 	}
 	if contextErr := document.contextErr(); contextErr != nil {
-		return mimeTextRepresentation{Text: text, Rank: rank}, contextErr
+		if document.retainBodyText {
+			return mimeTextRepresentation{Text: text, Rank: rank}, contextErr
+		}
+		return mimeTextRepresentation{}, contextErr
+	}
+	if !document.retainBodyText {
+		return mimeTextRepresentation{}, err
 	}
 	return mimeTextRepresentation{Text: text, Rank: rank}, err
 }

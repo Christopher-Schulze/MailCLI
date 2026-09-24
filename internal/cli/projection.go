@@ -51,15 +51,16 @@ type outputFlagState struct {
 }
 
 type outputOptions struct {
-	target                 projectionTarget
-	view                   string
-	fields                 map[string]struct{}
-	fieldsProvided         bool
-	exportPath             string
-	maxBytes               int64
-	stderr                 io.Writer
-	allowExport            bool
-	draftMutationCompleted bool
+	target                     projectionTarget
+	view                       string
+	fields                     map[string]struct{}
+	fieldsProvided             bool
+	exportPath                 string
+	maxBytes                   int64
+	stderr                     io.Writer
+	allowExport                bool
+	draftMutationCompleted     bool
+	omitUnselectedMessageState bool
 }
 
 type projectionInfo struct {
@@ -83,9 +84,9 @@ type messageProjection struct {
 	BCC             *[]mail.Recipient         `json:"bcc,omitempty"`
 	Headers         *string                   `json:"headers,omitempty"`
 	Content         *string                   `json:"content,omitempty"`
-	ContentSource   string                    `json:"content_source"`
-	ContentComplete bool                      `json:"content_complete"`
-	MissingParts    *[]string                 `json:"missing_parts"`
+	ContentSource   *string                   `json:"content_source,omitempty"`
+	ContentComplete *bool                     `json:"content_complete,omitempty"`
+	MissingParts    *[]string                 `json:"missing_parts,omitempty"`
 	Hydration       *mail.HydrationDiagnostic `json:"hydration,omitempty"`
 	Attachments     *[]mail.Attachment        `json:"attachments,omitempty"`
 }
@@ -580,6 +581,47 @@ func projectMessageSummary(message mail.MessageSummary, fields map[string]struct
 	return projected
 }
 
+func messageReadIntentForProjection(options outputOptions) mail.MessageReadIntent {
+	if !options.omitUnselectedMessageState {
+		return mail.MessageReadIntentFull
+	}
+	for _, field := range []string{"content", "content_source", "content_complete", "missing_parts", "hydration"} {
+		if options.includes(field) {
+			return mail.MessageReadIntentFull
+		}
+	}
+	if options.includes("attachments") {
+		return mail.MessageReadIntentAttachments
+	}
+	for _, field := range []string{"reply_to", "to", "cc", "bcc", "headers"} {
+		if options.includes(field) {
+			return mail.MessageReadIntentHeaders
+		}
+	}
+	return mail.MessageReadIntentIndex
+}
+
+func messageStateProjectionRequired(options outputOptions, retainContent bool) bool {
+	if !options.omitUnselectedMessageState || !options.fieldsProvided || retainContent {
+		return true
+	}
+	for _, field := range []string{"content", "content_source", "content_complete", "missing_parts", "hydration"} {
+		if options.includes(field) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageStateProjectionField(field string) bool {
+	switch field {
+	case "content_source", "content_complete", "missing_parts", "hydration":
+		return true
+	default:
+		return false
+	}
+}
+
 //go:noinline
 func (o outputOptions) includes(field string) bool {
 	if o.fieldsProvided {
@@ -602,6 +644,9 @@ func projectionFields(target projectionTarget, options outputOptions, contentRet
 	names := projectionFieldNames(target)
 	fields := make([]string, 0, len(names))
 	for _, field := range names {
+		if messageStateProjectionField(field) && !messageStateProjectionRequired(options, contentRetained) {
+			continue
+		}
 		if options.exportPath != "" && (field == "content" || field == "body" || field == "body_source" || field == "body_html") {
 			continue
 		}
@@ -629,10 +674,12 @@ func requiredProjectionField(target projectionTarget, field string, contentRetai
 }
 
 func messageProjectionFor(message mail.Message, options outputOptions, retainContent bool) *messageProjection {
-	projection := &messageProjection{
-		Summary: message.Summary, ContentSource: message.ContentSource,
-		ContentComplete: message.ContentComplete, MissingParts: &message.MissingParts,
-		Hydration: message.Hydration,
+	projection := &messageProjection{Summary: message.Summary}
+	if messageStateProjectionRequired(options, retainContent) {
+		projection.ContentSource = &message.ContentSource
+		projection.ContentComplete = &message.ContentComplete
+		projection.MissingParts = &message.MissingParts
+		projection.Hydration = message.Hydration
 	}
 	if options.includes("reply_to") {
 		projection.ReplyTo = &message.ReplyTo

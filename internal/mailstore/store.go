@@ -44,6 +44,9 @@ type Store struct {
 	// candidate records returned by metadata page queries, including the
 	// bounded continuation row.
 	searchMetadataRowsLoaded atomic.Int64
+
+	// readMetrics is enabled only by tests that measure message-read work.
+	readMetrics *readMetrics
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {

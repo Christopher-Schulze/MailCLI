@@ -20,10 +20,13 @@ type sourceHeaders struct {
 	References   string
 	Subject      string
 	From         string
+	ReplyToText  string
 	ReplyTo      []mail.Recipient
 	ReplyToError error
 	To           []mail.Recipient
 	CC           []mail.Recipient
+	BCC          []mail.Recipient
+	Raw          string
 }
 
 // sourceHeadersFromReader reads only the header block of a raw RFC 5322
@@ -40,6 +43,7 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	}
 	header := messageMail.Header{Header: entity.Header}
 	var out sourceHeaders
+	out.Raw = headers
 	if id, err := header.MessageID(); err == nil {
 		out.MessageID = id
 	}
@@ -47,9 +51,11 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 		out.Subject = subject
 	}
 	out.From, _ = firstFormattedAddress(&header, "From")
+	out.ReplyToText, _ = firstFormattedAddress(&header, "Reply-To")
 	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
 	out.To, _, _ = headerRecipients(&header, "To")
 	out.CC, _, _ = headerRecipients(&header, "Cc")
+	out.BCC, _, _ = headerRecipients(&header, "Bcc")
 	out.References = strings.TrimSpace(header.Get("References"))
 	return out, nil
 }

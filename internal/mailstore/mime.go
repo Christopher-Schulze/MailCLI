@@ -35,6 +35,7 @@ type mimeDocument struct {
 	// and discards the raw bytes, so I/O is unchanged. Search-only: names
 	// and counts stay exact, sizes stay unknown.
 	skipNonTextBodies bool
+	retainBodyText    bool
 	ctx               context.Context
 	budget            *mimeParseBudget
 }
@@ -63,9 +64,22 @@ func parseMIMEDocumentWithContext(
 	hashAttachments bool,
 	skipNonTextBodies bool,
 ) (mimeDocument, error) {
-	return parseMIMEDocumentWithLimits(
+	return parseMIMEDocumentWithContextAndRetention(
+		ctx, reader, partial, hashAttachments, skipNonTextBodies, true,
+	)
+}
+
+func parseMIMEDocumentWithContextAndRetention(
+	ctx context.Context,
+	reader io.Reader,
+	partial bool,
+	hashAttachments bool,
+	skipNonTextBodies bool,
+	retainBodyText bool,
+) (mimeDocument, error) {
+	return parseMIMEDocumentWithLimitsAndRetention(
 		ctx, reader, partial, hashAttachments, skipNonTextBodies,
-		defaultMIMEParseBudgetLimits(),
+		defaultMIMEParseBudgetLimits(), retainBodyText,
 	)
 }
 
@@ -77,6 +91,20 @@ func parseMIMEDocumentWithLimits(
 	skipNonTextBodies bool,
 	limits mimeParseBudgetLimits,
 ) (mimeDocument, error) {
+	return parseMIMEDocumentWithLimitsAndRetention(
+		ctx, reader, partial, hashAttachments, skipNonTextBodies, limits, true,
+	)
+}
+
+func parseMIMEDocumentWithLimitsAndRetention(
+	ctx context.Context,
+	reader io.Reader,
+	partial bool,
+	hashAttachments bool,
+	skipNonTextBodies bool,
+	limits mimeParseBudgetLimits,
+	retainBodyText bool,
+) (mimeDocument, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -84,6 +112,7 @@ func parseMIMEDocumentWithLimits(
 	document := mimeDocument{
 		Complete:          false,
 		skipNonTextBodies: skipNonTextBodies,
+		retainBodyText:    retainBodyText,
 		ctx:               ctx,
 		budget:            budget,
 	}

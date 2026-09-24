@@ -59,20 +59,24 @@ func runAttachmentsList(
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	message, err := service.GetMessage(operationCtx, *messageRef)
-	if err != nil {
+	message, readErr := service.GetMessageWithIntent(operationCtx, *messageRef, mail.MessageReadIntentAttachments)
+	if readErr != nil && message.ContentSource == "" && len(message.Attachments) == 0 {
 		if *jsonOutput {
-			return failProjectedEmpty("attachments.list", true, output, err, stdout, stderr)
+			return failProjectedEmpty("attachments.list", true, output, readErr, stdout, stderr)
 		}
-		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
+		return failCommand("attachments.list", false, readErr, stdout, stderr)
 	}
 	if *jsonOutput {
 		complete := message.ContentComplete
 		missing := message.MissingParts
-		return writeProjectedSuccess(stdout, "attachments.list", responseData{
+		data := responseData{
 			Attachments: &message.Attachments, ContentSource: message.ContentSource,
 			ContentComplete: &complete, MissingParts: &missing,
-		}, output)
+		}
+		if readErr != nil {
+			return writeProjectedFailure(stdout, "attachments.list", data, output, readErr, false)
+		}
+		return writeProjectedSuccess(stdout, "attachments.list", data, output)
 	}
 	rows := make([][]string, 0, len(message.Attachments))
 	for _, attachment := range message.Attachments {
@@ -87,6 +91,10 @@ func runAttachmentsList(
 			stdout, "\nContent: source=%s, complete=%t, missing=%s\n",
 			message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
 		)
+		if readErr != nil {
+			writeLine(stderr, oneLine(readErr.Error()))
+			return commandExitCode(readErr)
+		}
 		return 0
 	}
 	for _, attachment := range message.Attachments {
@@ -103,6 +111,10 @@ func runAttachmentsList(
 		stdout, "content\tsource=%s\tcomplete=%t\tmissing=%s\n",
 		message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
 	)
+	if readErr != nil {
+		writeLine(stderr, oneLine(readErr.Error()))
+		return commandExitCode(readErr)
+	}
 	return 0
 }
 
