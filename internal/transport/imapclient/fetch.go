@@ -43,7 +43,7 @@ func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 
 	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[])", tag, uid)
-	if err := c.setDeadline(ctx, ps.sess); err != nil {
+	if err := c.setTransferDeadline(ctx, ps.sess, maxBytes); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
 	}
 	if err := c.writeLine(ps.sess, cmd); err != nil {

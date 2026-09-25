@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
@@ -21,6 +22,36 @@ type sourceImapOperator struct {
 	closeErr     error
 	reportedSize *int64
 	lastBound    int64
+	fetchClock   *hydrationFakeClock
+	fetchElapsed time.Duration
+	fetchBudget  time.Duration
+	stallFetch   bool
+	cancelFetch  context.CancelFunc
+}
+
+type hydrationFakeClock struct{ elapsed time.Duration }
+
+func (clock *hydrationFakeClock) Advance(duration time.Duration) {
+	clock.elapsed += duration
+}
+
+func TestLocalReadContextRemainsSixtySecondsAndHonorsCancellation(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	ctx, cancel := localReadContext(parent)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("local read context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining > mail.LocalReadTimeout || mail.LocalReadTimeout-remaining > 5*time.Second {
+		t.Fatalf("local read timeout = %v, want %v", remaining, mail.LocalReadTimeout)
+	}
+	cancelParent()
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("local cancellation = %v, want context.Canceled", ctx.Err())
+	}
 }
 
 type trackedHydrationSource struct {
@@ -37,6 +68,25 @@ func (operator *sourceImapOperator) FetchMessageReader(ctx context.Context, cfg 
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
+	if operator.cancelFetch != nil {
+		operator.cancelFetch()
+		operator.cancelFetch = nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if operator.fetchClock != nil {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, 0, errors.New("hydration FETCH context has no deadline")
+		}
+		operator.fetchBudget = time.Until(deadline)
+		if operator.stallFetch || operator.fetchElapsed >= operator.fetchBudget {
+			operator.fetchClock.Advance(operator.fetchBudget)
+			return nil, 0, context.DeadlineExceeded
+		}
+		operator.fetchClock.Advance(operator.fetchElapsed)
+	}
 	operator.lastBound = maximum
 	file, err := os.CreateTemp(operator.directory, "source-*")
 	if err != nil {
@@ -52,8 +102,83 @@ func (operator *sourceImapOperator) FetchMessageReader(ctx context.Context, cfg 
 	size := int64(len(operator.raw))
 	if operator.reportedSize != nil {
 		size = *operator.reportedSize
+		if size > int64(len(operator.raw)) {
+			if err := file.Truncate(size); err != nil {
+				return nil, 0, errors.Join(err, file.Close())
+			}
+		}
 	}
 	return &trackedHydrationSource{File: file, owner: operator}, size, nil
+}
+
+func TestHydrationFetchCompletesAfterLocalReadDeadline(t *testing.T) {
+	client, ref, operator := hydrationReaderFixture(t, "Subject: bounded fixture\r\n\r\nbody")
+	size := mail.MaximumRawSourceBytes
+	operator.reportedSize = &size
+	operator.fetchClock = &hydrationFakeClock{}
+	operator.fetchElapsed = 61 * time.Second
+	if operator.fetchElapsed <= mail.LocalReadTimeout {
+		t.Fatalf("simulated FETCH duration = %v, must exceed local read timeout %v", operator.fetchElapsed, mail.LocalReadTimeout)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mail.LocalReadTimeout+transport.TransferBudgetCap)
+	defer cancel()
+
+	source, gotSize, _, err := client.hydrateMessageSource(ctx, ref, false)
+	if err != nil {
+		t.Fatalf("hydrateMessageSource() error = %v", err)
+	}
+	end, seekErr := source.Seek(0, io.SeekEnd)
+	if seekErr != nil || end != size {
+		_ = source.Close()
+		t.Fatalf("hydrated source length = %d, error %v, want %d", end, seekErr, size)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("close hydrated source: %v", err)
+	}
+	if gotSize != size || operator.lastBound != mail.MaximumRawSourceBytes {
+		t.Fatalf("hydrated size/bound = %d/%d, want %d/%d", gotSize, operator.lastBound, size, mail.MaximumRawSourceBytes)
+	}
+	if operator.fetchBudget > transport.TransferBudgetForSize(size) ||
+		transport.TransferBudgetForSize(size)-operator.fetchBudget > 5*time.Second {
+		t.Fatalf("simulated FETCH budget = %v, want %v", operator.fetchBudget, transport.TransferBudgetForSize(size))
+	}
+	if operator.fetchClock.elapsed != operator.fetchElapsed {
+		t.Fatalf("fake clock elapsed = %v, want %v", operator.fetchClock.elapsed, operator.fetchElapsed)
+	}
+}
+
+func TestStalledHydrationFetchEndsAtComputedBudget(t *testing.T) {
+	client, ref, operator := hydrationReaderFixture(t, "Subject: bounded fixture\r\n\r\nbody")
+	operator.fetchClock = &hydrationFakeClock{}
+	operator.stallFetch = true
+
+	_, _, _, err := client.hydrateMessageSource(context.Background(), ref, false)
+	wantBudget := transport.TransferBudgetForSize(mail.MaximumRawSourceBytes)
+	if !errors.Is(err, context.DeadlineExceeded) || transport.ErrorCode(err) != operationTimeoutCode {
+		t.Fatalf("stalled hydration error = %v (code %q), want bounded timeout", err, transport.ErrorCode(err))
+	}
+	if operator.fetchBudget > wantBudget || wantBudget-operator.fetchBudget > 5*time.Second ||
+		operator.fetchClock.elapsed < wantBudget-5*time.Second || operator.fetchClock.elapsed > wantBudget {
+		t.Fatalf("stalled FETCH budget/elapsed = %v/%v, want %v", operator.fetchBudget, operator.fetchClock.elapsed, wantBudget)
+	}
+	if !strings.Contains(err.Error(), "no external mutation was attempted") {
+		t.Fatalf("timeout error lacks read-only effect: %v", err)
+	}
+}
+
+func TestHydrationFetchHonorsCallerCancellation(t *testing.T) {
+	client, ref, operator := hydrationReaderFixture(t, "Subject: bounded fixture\r\n\r\nbody")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	operator.cancelFetch = cancel
+
+	message, err := client.GetMessage(ctx, ref)
+	if !errors.Is(err, context.Canceled) || transport.ErrorCode(err) != operationCanceledCode || ctx.Err() != context.Canceled {
+		t.Fatalf("canceled hydration = %+v, error %v", message, err)
+	}
+	if !strings.Contains(err.Error(), "no external mutation was attempted") {
+		t.Fatalf("canceled hydration error lacks read-only effect: %v", err)
+	}
 }
 
 func hydrationReaderFixture(t *testing.T, raw string) (*Client, string, *sourceImapOperator) {

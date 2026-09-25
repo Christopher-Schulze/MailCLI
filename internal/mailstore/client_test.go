@@ -136,7 +136,8 @@ type stubImapOperator struct {
 	statusByMailbox   map[string]transport.MailboxStatus
 	listErrByUsername map[string]error
 	// fetchErr scripts an IMAP fetch failure for raw-source tests.
-	fetchErr error
+	fetchErr    error
+	cancelFetch context.CancelFunc
 	// lastFetchMax records the bound the last FetchMessage carried.
 	lastFetchMax int64
 	listCalls    int
@@ -321,6 +322,13 @@ func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.Imap
 
 func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
 	s.lastFetchMax = maxBytes
+	if s.cancelFetch != nil {
+		s.cancelFetch()
+		s.cancelFetch = nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -592,10 +600,12 @@ func TestClientGetMessageReportsCorruptAttachment(t *testing.T) {
 
 func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 	tests := []struct {
-		name      string
-		fetchErr  error
-		wantCode  string
-		wantState mail.HydrationState
+		name           string
+		fetchErr       error
+		wantCode       string
+		wantState      mail.HydrationState
+		cancelCaller   bool
+		wantNoMutation bool
 	}{
 		{
 			name:      "authentication",
@@ -610,10 +620,17 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			wantState: mail.HydrationStateFailed,
 		},
 		{
-			name:      "canceled",
-			fetchErr:  context.Canceled,
-			wantCode:  operationCanceledCode,
-			wantState: mail.HydrationStateCanceled,
+			name:         "canceled",
+			wantCode:     operationCanceledCode,
+			wantState:    mail.HydrationStateCanceled,
+			cancelCaller: true,
+		},
+		{
+			name:           "timeout",
+			fetchErr:       context.DeadlineExceeded,
+			wantCode:       operationTimeoutCode,
+			wantState:      mail.HydrationStateFailed,
+			wantNoMutation: true,
 		},
 	}
 	for _, test := range tests {
@@ -646,10 +663,17 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			fakeImap := &stubImapOperator{
 				boxes: []transport.MailboxInfo{{Name: "INBOX"}}, fetchErr: test.fetchErr,
 			}
+			operationCtx := context.Background()
+			if test.cancelCaller {
+				var cancel context.CancelFunc
+				operationCtx, cancel = context.WithCancel(operationCtx)
+				defer cancel()
+				fakeImap.cancelFetch = cancel
+			}
 			client := &Client{store: store, send: mail.SendTransport{
 				Imap: fakeImap, Credentials: stubCredentials{account: "secret"},
 			}}
-			message, err := client.GetMessage(context.Background(), messageRef)
+			message, err := client.GetMessage(operationCtx, messageRef)
 			if err == nil || message.Content != "partial body" || message.ContentComplete {
 				t.Fatalf("GetMessage() = %+v, error = %v; want retained incomplete content and error", message, err)
 			}
@@ -668,6 +692,9 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			}
 			if strings.Contains(message.Hydration.Remote.Message, "secret-token") {
 				t.Fatalf("hydration diagnostic leaked protocol authentication text: %+v", message.Hydration.Remote)
+			}
+			if test.wantNoMutation && !strings.Contains(message.Hydration.Remote.Message, "no external mutation was attempted") {
+				t.Fatalf("timeout diagnostic lacks read-only effect: %+v", message.Hydration.Remote)
 			}
 			if test.name == "canceled" && !errors.Is(err, context.Canceled) {
 				t.Fatalf("GetMessage() error = %v, want context.Canceled cause", err)

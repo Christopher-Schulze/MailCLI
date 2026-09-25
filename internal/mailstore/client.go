@@ -199,7 +199,9 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 	hasLocal := false
 	var localErr error
 	if c.store != nil {
-		local, localErr = c.store.GetMessage(ctx, ref)
+		localCtx, cancelLocal := localReadContext(ctx)
+		local, localErr = c.store.GetMessage(localCtx, ref)
+		cancelLocal()
 		hasLocal = localErr == nil
 		if localErr == nil && local.ContentComplete {
 			return local, nil
@@ -297,7 +299,9 @@ func messageFromRawReader(ctx context.Context, base mail.Message, summary mail.M
 func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 	var localErr error
 	if c.store != nil {
-		raw, err := c.store.GetRawSource(ctx, ref)
+		localCtx, cancelLocal := localReadContext(ctx)
+		raw, err := c.store.GetRawSource(localCtx, ref)
+		cancelLocal()
 		if err == nil {
 			return raw, nil
 		}
@@ -328,7 +332,9 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
 	var localErr error
 	if c.store != nil {
-		err := c.store.WriteRawSource(ctx, ref, writer)
+		localCtx, cancelLocal := localReadContext(ctx)
+		err := c.store.WriteRawSource(localCtx, ref, writer)
+		cancelLocal()
 		if err == nil {
 			return nil
 		}
@@ -373,11 +379,14 @@ func (c *Client) SaveAttachmentToWithEvidence(
 ) (mail.AttachmentEvidence, error) {
 	var localErr error
 	if c.store != nil {
-		evidence, err := c.store.saveAttachmentToWithEvidence(ctx, messageRef, attachmentID, outputPath)
+		localCtx, cancelLocal := localReadContext(ctx)
+		evidence, err := c.store.saveAttachmentToWithEvidence(localCtx, messageRef, attachmentID, outputPath)
 		if err == nil {
+			cancelLocal()
 			return evidence, nil
 		}
 		if !safeTargetedFallback(err) {
+			cancelLocal()
 			return mail.AttachmentEvidence{}, err
 		}
 		localErr = err
@@ -385,8 +394,9 @@ func (c *Client) SaveAttachmentToWithEvidence(
 		// attachment as an external file, copying it needs no IMAP traffic
 		// even when the .emlx source is partial or missing.
 		evidence, saved, materializedErr := c.store.saveMaterializedAttachmentWithEvidence(
-			ctx, messageRef, attachmentID, outputPath,
+			localCtx, messageRef, attachmentID, outputPath,
 		)
+		cancelLocal()
 		if materializedErr != nil {
 			return mail.AttachmentEvidence{}, materializedErr
 		}

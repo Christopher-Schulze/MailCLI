@@ -183,7 +183,7 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 		return failCommand("drafts.open", *jsonOutput, err, stdout, stderr)
 	}
 	output.stderr = stderr
-	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	message, err := service.OpenDraft(operationCtx, *messageRef)
 	if err != nil {

@@ -16,29 +16,42 @@ type byteHydrationSource struct{ *bytes.Reader }
 
 func (byteHydrationSource) Close() error { return nil }
 
+func localReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, mail.LocalReadTimeout)
+}
+
+func hydrationFetchContext(ctx context.Context, maximum int64) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, transport.TransferBudgetForSize(maximum))
+}
+
 func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string, enforceRawCap bool) (io.ReadSeekCloser, int64, mail.MessageSummary, error) {
-	target, err := c.resolveImapTarget(ctx, messageRef)
+	resolveCtx, cancelResolve := localReadContext(ctx)
+	target, err := c.resolveImapTarget(resolveCtx, messageRef)
+	cancelResolve()
 	if err != nil {
-		return nil, 0, mail.MessageSummary{}, err
+		return nil, 0, mail.MessageSummary{}, typedHydrationFailure(err)
 	}
 	operator := c.send.ImapClient()
 	if operator == nil {
 		return nil, 0, target.summary, &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "IMAP operator is not configured"}
 	}
 	bound := rawFetchBound(enforceRawCap)
+	fetchCtx, cancelFetch := hydrationFetchContext(ctx, bound)
+	defer cancelFetch()
 	var source io.ReadSeekCloser
 	var size int64
 	if streaming, ok := operator.(transport.StreamingFetcher); ok {
-		source, size, err = streaming.FetchMessageReader(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound)
+		source, size, err = streaming.FetchMessageReader(fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound)
 	} else {
 		var raw []byte
-		raw, err = operator.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound)
+		raw, err = operator.FetchMessage(fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound)
 		source, size = byteHydrationSource{bytes.NewReader(raw)}, int64(len(raw))
 	}
 	if err == nil && (source == nil || size < 0 || size > bound) {
 		err = &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "IMAP returned an invalid bounded source"}
 	}
 	if err != nil {
+		err = typedHydrationFailure(err)
 		if source != nil {
 			err = errors.Join(err, source.Close())
 		}

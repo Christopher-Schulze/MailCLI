@@ -48,14 +48,23 @@ func messageHydrationDiagnostic(
 }
 
 func typedHydrationFailure(err error) error {
-	if err == nil || nestedErrorCode(err) != "" {
+	if err == nil {
+		return err
+	}
+	if code := nestedErrorCode(err); code == operationCanceledCode || code == operationTimeoutCode {
 		return err
 	}
 	if errors.Is(err, context.Canceled) {
-		return operationErrorWithCause(operationCanceledCode, "IMAP hydration was canceled", err)
+		return operationErrorWithCause(operationCanceledCode, "IMAP hydration was canceled; no external mutation was attempted", err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return operationErrorWithCause(operationTimeoutCode, "IMAP hydration timed out", err)
+		return operationErrorWithCause(operationTimeoutCode, "IMAP hydration timed out; no external mutation was attempted", err)
+	}
+	if code := nestedErrorCode(err); code != "" {
+		if code == transport.CodeIMAPTimeout {
+			return operationErrorWithCause(code, "IMAP hydration timed out; no external mutation was attempted", err)
+		}
+		return err
 	}
 	return err
 }
@@ -101,9 +110,9 @@ func safeRemoteHydrationMessage(code string) string {
 	case transport.CodeIMAPConnectFailed:
 		return "IMAP connection failed"
 	case transport.CodeIMAPTimeout, operationTimeoutCode:
-		return "IMAP hydration timed out"
+		return "IMAP hydration timed out; no external mutation was attempted"
 	case operationCanceledCode:
-		return "IMAP hydration was canceled"
+		return "IMAP hydration was canceled; no external mutation was attempted"
 	case transport.CodeIMAPRawSourceTooLarge:
 		return "the IMAP message exceeds the 64 MiB hydration limit"
 	case transport.CodeIMAPResponseMalformed:

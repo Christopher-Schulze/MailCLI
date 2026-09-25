@@ -371,6 +371,14 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `(\d+)-second read budget`, 1),
 		}},
+	{name: "hydration command window", expected: int64(hydrationReadTimeout / time.Second), unit: "seconds",
+		checks: []documentedBoundCheck{
+			boundCheck("docs/documentation.md", `hydration command window is (\d+) minutes`, 60),
+		}},
+	{name: "maximum raw hydration FETCH budget", expected: int64(transport.TransferBudgetForSize(mail.MaximumRawSourceBytes) / time.Second), unit: "seconds",
+		checks: []documentedBoundCheck{
+			boundCheck("docs/documentation.md", `maximum computes to a (\d+)-second FETCH budget`, 1),
+		}},
 	{name: "Mail access gate wait", expected: 2, unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `capped at (\w+) seconds`, 1),

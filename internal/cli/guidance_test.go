@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -154,6 +156,43 @@ func TestReadTimeoutRemainsReplayable(t *testing.T) {
 	if guidance.Phase != mail.OperationPhaseRead || guidance.Retryability != mail.RetrySafe ||
 		!guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryRetry {
 		t.Fatalf("read timeout guidance = %+v", guidance)
+	}
+}
+
+func TestHydrationReadContextAllowsBoundedTransferAndCallerCancellation(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	ctx, cancel := hydrationReadContext(parent)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("hydration read context has no deadline")
+	}
+	want := mail.LocalReadTimeout + transport.TransferBudgetCap
+	remaining := time.Until(deadline)
+	if readTimeout != 60*time.Second || remaining > want || want-remaining > 5*time.Second {
+		t.Fatalf("hydration timeout = %v, local timeout = %v, want bounded %v", remaining, readTimeout, want)
+	}
+	cancelParent()
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("caller cancellation = %v, want context.Canceled", ctx.Err())
+	}
+}
+
+func TestHydrationTimeoutReportsNoMutationAndRetainsPartialEvidence(t *testing.T) {
+	message := failedHydrationMessage()
+	message.Hydration.State = mail.HydrationStateFailed
+	message.Hydration.Remote = &mail.HydrationCause{
+		Code: "operation_timeout", Message: "IMAP hydration timed out; no external mutation was attempted",
+	}
+	err := hydrationCommandError(message.Hydration, context.DeadlineExceeded)
+	if transport.ErrorCode(err) != "operation_timeout" || !strings.Contains(err.Error(), "no external mutation was attempted") {
+		t.Fatalf("hydration timeout error = %v, code %q", err, transport.ErrorCode(err))
+	}
+	guidance := guidanceForResponse("messages.get", responseData{Message: &message}, err)
+	if guidance.EffectCertainty != mail.EffectNone || guidance.Phase != mail.OperationPhaseHydration ||
+		message.Content == "" || message.Hydration.Local == nil || message.Hydration.Local.Code != "raw_source_partial" {
+		t.Fatalf("timeout recovery evidence = guidance %+v, message %+v", guidance, message)
 	}
 }
 

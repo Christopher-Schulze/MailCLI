@@ -7,14 +7,20 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 	"unicode"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
-const readTimeout = 60 * time.Second
+const (
+	readTimeout          = mail.LocalReadTimeout
+	hydrationReadTimeout = readTimeout + transport.TransferBudgetCap
+)
+
+func hydrationReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, hydrationReadTimeout)
+}
 
 type codedError interface {
 	error
@@ -380,7 +386,7 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 
-	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	if *jsonOutput && output.fieldsProvided {
 		output.omitUnselectedMessageState = true
@@ -470,8 +476,11 @@ func hydrationCommandError(diagnostic *mail.HydrationDiagnostic, fallback error)
 	}
 	message := "message content is incomplete"
 	if diagnostic != nil {
-		if diagnostic.State == mail.HydrationStateCanceled {
-			message = "message hydration was canceled"
+		switch code {
+		case transport.CodeIMAPTimeout, "operation_timeout":
+			message = "message content is incomplete; hydration timed out; no external mutation was attempted"
+		case "operation_canceled":
+			message = "message content is incomplete; hydration was canceled; no external mutation was attempted"
 		}
 		if diagnostic.Remediation != "" {
 			message += "; " + diagnostic.Remediation
@@ -497,7 +506,7 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 			invalidDraftInput("missing required --ref"), stdout, stderr)
 	}
 
-	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	if output.exportPath != "" {
 		exported, exportErr := mail.WriteExclusiveContent(output.exportPath, func(writer io.Writer) error {

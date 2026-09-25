@@ -18,7 +18,9 @@ const (
 	MaximumDraftAttachmentBytes    = int64(512 * 1024 * 1024)
 	MaximumComposeBodyBytes        = 16 * 1024 * 1024
 	MaximumRawSourceBytes          = int64(64 * 1024 * 1024)
-	SendReceiptRetention           = 30 * 24 * time.Hour
+	// LocalReadTimeout bounds one local Mail-store read before any fallback.
+	LocalReadTimeout     = 60 * time.Second
+	SendReceiptRetention = 30 * 24 * time.Hour
 )
 
 type SenderIdentityCoverageSource string

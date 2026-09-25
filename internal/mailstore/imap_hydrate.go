@@ -12,9 +12,11 @@ import (
 // record, so the hydration fallback can fill metadata the raw message alone
 // cannot provide (ref, subject, sender, dates, flags, mailbox).
 func (c *Client) hydrateMessage(ctx context.Context, messageRef string, enforceRawCap bool) ([]byte, mail.MessageSummary, error) {
-	target, err := c.resolveImapTarget(ctx, messageRef)
+	resolveCtx, cancelResolve := localReadContext(ctx)
+	target, err := c.resolveImapTarget(resolveCtx, messageRef)
+	cancelResolve()
 	if err != nil {
-		return nil, mail.MessageSummary{}, err
+		return nil, mail.MessageSummary{}, typedHydrationFailure(err)
 	}
 
 	imapOp := c.send.ImapClient()
@@ -25,8 +27,11 @@ func (c *Client) hydrateMessage(ctx context.Context, messageRef string, enforceR
 		}
 	}
 
-	raw, err := imapOp.FetchMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, rawFetchBound(enforceRawCap))
-	return raw, target.summary, err
+	bound := rawFetchBound(enforceRawCap)
+	fetchCtx, cancelFetch := hydrationFetchContext(ctx, bound)
+	defer cancelFetch()
+	raw, err := imapOp.FetchMessage(fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound)
+	return raw, target.summary, typedHydrationFailure(err)
 }
 
 // HydrateMessageBytes fetches the complete raw RFC 5322 source of a message over IMAP.

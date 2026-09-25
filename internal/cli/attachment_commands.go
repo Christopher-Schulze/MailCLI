@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"mailcli/internal/mail"
 )
@@ -57,7 +56,7 @@ func runAttachmentsList(
 	if err != nil {
 		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	message, readErr := service.GetMessageWithIntent(operationCtx, *messageRef, mail.MessageReadIntentAttachments)
 	if readErr != nil && message.ContentSource == "" && len(message.Attachments) == 0 {
@@ -133,7 +132,7 @@ func runAttachmentsSave(
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	operationCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	saved, err := service.SaveAttachment(operationCtx, mail.SaveAttachmentRequest{
 		MessageRef: *messageRef, AttachmentID: *attachmentID, OutputPath: *outputPath,

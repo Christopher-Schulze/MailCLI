@@ -300,6 +300,28 @@ func (d *imapDeadlineRecorder) SetDeadline(deadline time.Time) error {
 	return d.Conn.SetDeadline(deadline)
 }
 
+func TestSetTransferDeadlineUsesSizeAwareBudget(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = serverConn.Close() }()
+	recorder := &imapDeadlineRecorder{Conn: clientConn}
+	sess := &session{conn: recorder}
+	size := int64(64 << 20)
+	started := time.Now()
+
+	if err := (&Client{}).setTransferDeadline(context.Background(), sess, size); err != nil {
+		t.Fatalf("setTransferDeadline() error = %v", err)
+	}
+	if len(recorder.deadlines) != 1 {
+		t.Fatalf("SetDeadline calls = %d, want 1", len(recorder.deadlines))
+	}
+	want := transport.TransferBudgetForSize(size)
+	got := recorder.deadlines[0].Sub(started)
+	if got < want-time.Second || got > want+time.Second {
+		t.Fatalf("transfer deadline = %v, want size-aware budget %v", got, want)
+	}
+}
+
 // A 10 MiB literal earns a transfer budget above the short command budget.
 // The recorder proves APPEND uses that budget only while writing the literal
 // and restores the short budget before reading the final tagged response.
