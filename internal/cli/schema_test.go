@@ -4,17 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
+	"fmt"
+	goast "go/ast"
+	goparser "go/parser"
+	gotoken "go/token"
+	"os"
 	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
 )
 
 func TestPublishedCommandSchemasAreComplete(t *testing.T) {
-	if schemaSpecCount != len(commandContracts) {
-		t.Fatalf("schema spec count = %d, command contract count = %d", schemaSpecCount, len(commandContracts))
-	}
 	for _, contract := range commandContracts {
 		if !commandIsPublished(contract) {
 			continue
@@ -45,6 +50,309 @@ func TestPublishedCommandSchemasAreComplete(t *testing.T) {
 		for _, constraint := range schema.Constraints {
 			if constraint.Kind == "" || constraint.Description == "" {
 				t.Fatalf("%s has incomplete constraint schema %+v", contract.ID, constraint)
+			}
+		}
+	}
+}
+
+func TestCanonicalCommandSchemasMatchRuntimePayload(t *testing.T) {
+	for _, contract := range commandContracts {
+		if !commandIsPublished(contract) {
+			continue
+		}
+		path := "schemas/" + contract.ID + ".json"
+		canonical, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, canonical); err != nil {
+			t.Fatalf("compact %s: %v", path, err)
+		}
+		if runtime := schemaForCommand(contract.ID); !bytes.Equal(compact.Bytes(), runtime) {
+			t.Fatalf("%s runtime schema differs from canonical file", contract.ID)
+		}
+	}
+}
+
+func TestPublishedCommandFlagsMatchActualParsers(t *testing.T) {
+	strictParsers := strictBooleanParserCalls(t)
+	for _, contract := range commandContracts {
+		if !commandIsPublished(contract) {
+			continue
+		}
+		schema := decodeTestCommandSchema(t, schemaForCommand(contract.ID))
+		want := make(map[string]testCommandFlag, len(schema.Flags))
+		for _, option := range schema.Flags {
+			want[option.Name] = option
+		}
+		var got map[string]parserFlagSnapshot
+		if allowed, ok := strictParsers[contract.ID]; ok {
+			got = make(map[string]parserFlagSnapshot, len(allowed))
+			for _, name := range allowed {
+				got[name] = parserFlagSnapshot{ValueKind: "bool", Default: "false"}
+			}
+			delete(strictParsers, contract.ID)
+			verifyStrictBooleanParser(t, contract.ID, allowed, want)
+		} else {
+			got = captureCommandParserFlags(t, contract.ID)
+		}
+		if err := compareParserFlagParity(contract.ID, want, got); err != nil {
+			t.Error(err)
+		}
+	}
+	if len(strictParsers) != 0 {
+		t.Fatalf("strict boolean parsers have no published command schema: %+v", strictParsers)
+	}
+}
+
+func TestParserSchemaDriftComparatorRejectsAddedAndRemovedFlags(t *testing.T) {
+	want := map[string]testCommandFlag{
+		"--json": {ValueType: "boolean"},
+	}
+	registered := map[string]parserFlagSnapshot{
+		"--json": {ValueKind: "bool", Default: "false"},
+	}
+	if err := compareParserFlagParity("fixture", want, registered); err != nil {
+		t.Fatalf("matching flags failed: %v", err)
+	}
+	booleanValue := map[string]testCommandFlag{
+		"--enabled": {ValueType: "boolean", TakesValue: true, ValueRequired: true},
+	}
+	if err := compareParserFlagParity("fixture", booleanValue, map[string]parserFlagSnapshot{
+		"--enabled": {ValueKind: "func", TakesValue: true},
+	}); err != nil {
+		t.Fatalf("value-taking boolean flag failed: %v", err)
+	}
+	added := map[string]parserFlagSnapshot{
+		"--json":  {ValueKind: "bool", Default: "false"},
+		"--extra": {ValueKind: "string"},
+	}
+	if err := compareParserFlagParity("fixture", want, added); err == nil {
+		t.Fatal("an added parser flag did not fail parity")
+	}
+	if err := compareParserFlagParity("fixture", want, map[string]parserFlagSnapshot{}); err == nil {
+		t.Fatal("a removed parser flag did not fail parity")
+	}
+}
+
+type parserFlagSnapshot struct {
+	ValueKind  string
+	TakesValue bool
+	Default    string
+	Repeatable bool
+}
+
+type parserFlagCapture struct {
+	sets []*flag.FlagSet
+	bytes.Buffer
+}
+
+func (capture *parserFlagCapture) observeParserFlags(flags *flag.FlagSet) {
+	capture.sets = append(capture.sets, flags)
+}
+
+func captureCommandParserFlags(t *testing.T, commandID string) map[string]parserFlagSnapshot {
+	t.Helper()
+	args := strings.Split(commandID, ".")
+	args = append(args, "--help")
+	capture := &parserFlagCapture{}
+	var stdout bytes.Buffer
+	if code := runCommand(context.Background(), nil, args, &stdout, capture); code != 0 {
+		t.Fatalf("%s help exit = %d, stdout=%q, stderr=%q", commandID, code, stdout.String(), capture.String())
+	}
+	if len(capture.sets) != 1 {
+		t.Fatalf("%s created %d FlagSets; want exactly one", commandID, len(capture.sets))
+	}
+	registered := make(map[string]parserFlagSnapshot)
+	capture.sets[0].VisitAll(func(option *flag.Flag) {
+		valueType := reflect.TypeOf(option.Value)
+		if valueType.Kind() == reflect.Pointer {
+			valueType = valueType.Elem()
+		}
+		registered["--"+option.Name] = parserFlagSnapshot{
+			ValueKind:  valueType.Kind().String(),
+			TakesValue: parserFlagTakesValue(option.Value),
+			Default:    option.DefValue,
+			Repeatable: parserFlagCollectsRepeatedValues(option),
+		}
+	})
+	return registered
+}
+
+func parserFlagTakesValue(value flag.Value) bool {
+	booleanFlag, ok := value.(interface{ IsBoolFlag() bool })
+	return !ok || !booleanFlag.IsBoolFlag()
+}
+
+func parserFlagCollectsRepeatedValues(option *flag.Flag) bool {
+	if !parserFlagTakesValue(option.Value) {
+		return false
+	}
+	first := "mailcli-schema-first"
+	second := "mailcli-schema-second"
+	if err := option.Value.Set(first); err != nil {
+		return false
+	}
+	if err := option.Value.Set(second); err != nil {
+		return false
+	}
+	value := option.Value.String()
+	return strings.Contains(value, first) && strings.Contains(value, second)
+}
+
+func compareParserFlagParity(
+	commandID string,
+	want map[string]testCommandFlag,
+	got map[string]parserFlagSnapshot,
+) error {
+	var mismatches []string
+	if len(want) != len(got) {
+		mismatches = append(mismatches, fmt.Sprintf("parser/schema flag counts differ: parser=%d schema=%d", len(got), len(want)))
+	}
+	for name, expected := range want {
+		actual, exists := got[name]
+		if !exists {
+			mismatches = append(mismatches, fmt.Sprintf("schema flag %s is not registered by the parser", name))
+			continue
+		}
+		if !parserValueTypeMatches(expected.ValueType, actual.ValueKind) {
+			mismatches = append(mismatches, fmt.Sprintf("flag %s schema type %s disagrees with parser type %s", name, expected.ValueType, actual.ValueKind))
+		}
+		if expected.TakesValue != actual.TakesValue || expected.ValueRequired != actual.TakesValue {
+			mismatches = append(mismatches, fmt.Sprintf("flag %s value-taking metadata disagrees: parser=%t schema=%t/%t", name, actual.TakesValue, expected.TakesValue, expected.ValueRequired))
+		}
+		if expected.Repeatable != actual.Repeatable {
+			mismatches = append(mismatches, fmt.Sprintf("flag %s repeatable metadata disagrees: parser=%t schema=%t", name, actual.Repeatable, expected.Repeatable))
+		}
+		if !parserDefaultMatches(expected.Default, actual.Default) {
+			mismatches = append(mismatches, fmt.Sprintf("flag %s default disagrees: parser=%q schema=%q", name, actual.Default, expected.Default))
+		}
+	}
+	for name := range got {
+		if _, exists := want[name]; !exists {
+			mismatches = append(mismatches, fmt.Sprintf("parser registers undocumented flag %s", name))
+		}
+	}
+	if len(mismatches) > 0 {
+		sort.Strings(mismatches)
+		return fmt.Errorf("%s %s", commandID, strings.Join(mismatches, "; "))
+	}
+	return nil
+}
+
+func parserValueTypeMatches(schemaType string, parserKind string) bool {
+	switch schemaType {
+	case "boolean":
+		return parserKind == "bool" || parserKind == "func"
+	case "integer":
+		return parserKind == "int"
+	case "bytes":
+		return parserKind == "int64"
+	default:
+		return parserKind == "string" || parserKind == "slice" || parserKind == "struct"
+	}
+}
+
+func parserDefaultMatches(schemaDefault string, parserDefault string) bool {
+	if schemaDefault != "" {
+		return schemaDefault == parserDefault
+	}
+	return parserDefault == "" || parserDefault == "0" || parserDefault == "false"
+}
+
+func strictBooleanParserCalls(t *testing.T) map[string][]string {
+	t.Helper()
+	source, err := os.ReadFile("run.go")
+	if err != nil {
+		t.Fatalf("read strict boolean parser source: %v", err)
+	}
+	file, err := goparser.ParseFile(gotoken.NewFileSet(), "run.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse strict boolean parser source: %v", err)
+	}
+	parsers := make(map[string][]string)
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*goast.FuncDecl)
+		if !ok || function.Body == nil || !strings.HasPrefix(function.Name.Name, "run") {
+			continue
+		}
+		var calls [][]string
+		goast.Inspect(function.Body, func(node goast.Node) bool {
+			call, ok := node.(*goast.CallExpr)
+			if !ok {
+				return true
+			}
+			name, ok := call.Fun.(*goast.Ident)
+			if !ok || name.Name != "parseBooleanFlags" {
+				return true
+			}
+			flags := make([]string, 0, len(call.Args)-1)
+			for _, argument := range call.Args[1:] {
+				literal, ok := argument.(*goast.BasicLit)
+				if !ok || literal.Kind != gotoken.STRING {
+					t.Fatalf("%s parseBooleanFlags arguments must be string literals", function.Name.Name)
+				}
+				flagName, err := strconv.Unquote(literal.Value)
+				if err != nil || !strings.HasPrefix(flagName, "--") {
+					t.Fatalf("%s has invalid boolean flag literal %q", function.Name.Name, literal.Value)
+				}
+				flags = append(flags, flagName)
+			}
+			calls = append(calls, flags)
+			return true
+		})
+		if len(calls) == 0 {
+			continue
+		}
+		if len(calls) != 1 || len(function.Name.Name) <= len("run") {
+			t.Fatalf("%s has %d strict boolean parser calls", function.Name.Name, len(calls))
+		}
+		commandID := strings.ToLower(function.Name.Name[len("run"):len("run")+1]) + function.Name.Name[len("run")+1:]
+		parsers[commandID] = calls[0]
+	}
+	return parsers
+}
+
+func verifyStrictBooleanParser(
+	t *testing.T,
+	commandID string,
+	allowed []string,
+	want map[string]testCommandFlag,
+) {
+	t.Helper()
+	if len(allowed) != len(want) {
+		t.Fatalf("%s strict parser/schema flag counts differ: parser=%d schema=%d", commandID, len(allowed), len(want))
+	}
+	for name, schemaFlag := range want {
+		if schemaFlag.ValueType != "boolean" || schemaFlag.TakesValue || schemaFlag.ValueRequired || schemaFlag.Required || schemaFlag.Repeatable {
+			t.Fatalf("%s strict parser schema flag %s is not a plain optional boolean: %+v", commandID, name, schemaFlag)
+		}
+		found := false
+		for _, allowedName := range allowed {
+			found = found || allowedName == name
+		}
+		if !found {
+			t.Fatalf("%s schema flag %s is not accepted by strict parser", commandID, name)
+		}
+	}
+	defaults, err := parseBooleanFlags(nil, allowed...)
+	if err != nil {
+		t.Fatalf("%s strict parser defaults: %v", commandID, err)
+	}
+	for name, value := range defaults {
+		if value {
+			t.Fatalf("%s strict parser default for %s = true", commandID, name)
+		}
+	}
+	for _, selected := range allowed {
+		values, err := parseBooleanFlags([]string{selected}, allowed...)
+		if err != nil {
+			t.Fatalf("%s strict parser rejected %s: %v", commandID, selected, err)
+		}
+		for name, value := range values {
+			if value != (name == selected) {
+				t.Fatalf("%s strict parser value for %s after %s = %t", commandID, name, selected, value)
 			}
 		}
 	}
@@ -264,6 +572,7 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 	concurrency := jsonFieldByName(batch.JSONInput.Fields, "concurrency")
 	maxBytes := schemaFlagsByName(batch)["--max-bytes"]
 	if items == nil || !items.Required || !schemaHasConstraint(batch, "non_empty") ||
+		items.Maximum == nil || *items.Maximum != int64(mail.MaximumBatchItems) ||
 		concurrency == nil || concurrency.Minimum == nil || *concurrency.Minimum != 0 ||
 		concurrency.Maximum == nil || *concurrency.Maximum != int64(mail.MaximumBatchConcurrency) ||
 		maxBytes.Name != "--max-bytes" || maxBytes.Default != "1048576" ||
@@ -273,12 +582,23 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 	}
 	view := jsonFieldByName(batch.JSONInput.ItemFields, "view")
 	fields := jsonFieldByName(batch.JSONInput.ItemFields, "fields")
+	id := jsonFieldByName(batch.JSONInput.ItemFields, "id")
+	ref := jsonFieldByName(batch.JSONInput.ItemFields, "ref")
 	if view == nil || !reflect.DeepEqual(view.Values, []string{outputViewMetadata, outputViewPlain, outputViewFull}) ||
-		fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) {
-		t.Fatalf("batch read projection fields = view:%+v fields:%+v", view, fields)
+		fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) ||
+		id == nil || !id.Required || !strings.Contains(id.Description, "non-empty trimmed") ||
+		ref == nil || !ref.Required {
+		t.Fatalf("batch item fields = id:%+v ref:%+v view:%+v fields:%+v", id, ref, view, fields)
 	}
-	if countJSONConstraints(batch.JSONInput, "conditional") != 9 {
+	if countJSONConstraints(batch.JSONInput, "conditional") != 10 {
 		t.Fatalf("batch operation constraints = %+v", batch.JSONInput.Constraints)
+	}
+	if !jsonInputHasFieldConstraint(batch.JSONInput, "mutually_exclusive", []string{"view", "fields"}) {
+		t.Fatalf("batch read view/fields exclusivity is missing: %+v", batch.JSONInput.Constraints)
+	}
+	if !jsonInputHasFieldConstraint(batch.JSONInput, "unique", []string{"items.id"}) ||
+		!jsonInputHasFieldConstraint(batch.JSONInput, "conditional", []string{"operation", "output_path"}) {
+		t.Fatalf("batch item uniqueness constraints are missing: %+v", batch.JSONInput.Constraints)
 	}
 	uniqueSources, uniqueCopyPairs := false, false
 	for _, constraint := range batch.JSONInput.Constraints {
@@ -392,6 +712,24 @@ func schemaHasConstraint(schema testCommandSchema, kind string) bool {
 	return false
 }
 
+func schemaHasFlagConstraint(schema testCommandSchema, kind string, flags []string) bool {
+	for _, constraint := range schema.Constraints {
+		if constraint.Kind == kind && reflect.DeepEqual(constraint.Flags, flags) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonInputHasFieldConstraint(input *testJSONInput, kind string, fields []string) bool {
+	for _, constraint := range input.Constraints {
+		if constraint.Kind == kind && reflect.DeepEqual(constraint.Fields, fields) {
+			return true
+		}
+	}
+	return false
+}
+
 func countJSONConstraints(input *testJSONInput, kind string) int {
 	count := 0
 	for _, constraint := range input.Constraints {
@@ -427,6 +765,18 @@ func TestMessagePageSchemasPublishFieldProjections(t *testing.T) {
 				!reflect.DeepEqual(fields.Values, projectionFieldNames(test.target)) {
 				t.Fatalf("page projection schema fields = %+v", fields)
 			}
+			if !schemaHasFlagConstraint(schema, "conditional", []string{"--fields"}) {
+				t.Fatalf("page projection schema omits all-field exclusivity: %+v", schema.Constraints)
+			}
 		})
+	}
+}
+
+func TestSendSetupSchemaDocumentsEndpointConstraints(t *testing.T) {
+	schema := decodeTestCommandSchema(t, schemaForCommand("send.setup"))
+	if !schemaHasFlagConstraint(schema, "conditional", []string{
+		"--smtp-host", "--smtp-port", "--imap-host", "--imap-port", "--account",
+	}) {
+		t.Fatalf("send.setup schema omits endpoint/account constraints: %+v", schema.Constraints)
 	}
 }

@@ -1,0 +1,42 @@
+{
+  "id": "sync@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--account",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "description": "account reference; omit to check all mail"
+    },
+    {
+      "name": "--check",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "check server vs local message counts over IMAP"
+    },
+    {
+      "name": "--require-complete",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "return exit 3 when an IMAP check has incomplete coverage"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "requires",
+      "flags": [
+        "--require-complete",
+        "--check"
+      ],
+      "description": "--require-complete requires --check"
+    }
+  ]
+}

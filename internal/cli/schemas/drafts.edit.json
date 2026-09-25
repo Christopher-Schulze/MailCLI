@@ -1,0 +1,76 @@
+{
+  "id": "drafts.edit@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "draft reference"
+    },
+    {
+      "name": "--editor",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "description": "editor executable"
+    },
+    {
+      "name": "--editor-arg",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "repeatable": true,
+      "description": "editor argument; repeat for multiple arguments"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--view",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "default": "plain",
+      "values": [
+        "metadata",
+        "plain",
+        "full"
+      ],
+      "description": "output view"
+    },
+    {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "description": "comma-separated JSON fields"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum bounded bytes"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "mutually_exclusive",
+      "flags": [
+        "--view",
+        "--fields"
+      ],
+      "description": "--view and --fields cannot be combined"
+    }
+  ]
+}

@@ -537,6 +537,9 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.Writer) int {
+	if observer, ok := stderr.(parserFlagObserver); ok {
+		observer.observeParserFlags(flags)
+	}
 	if helpOnly(args) {
 		writeFlagUsage(flags, stdout)
 		return 0
@@ -557,6 +560,10 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 		return 2
 	}
 	return -1
+}
+
+type parserFlagObserver interface {
+	observeParserFlags(*flag.FlagSet)
 }
 
 func writeFlagUsage(flags *flag.FlagSet, writer io.Writer) {

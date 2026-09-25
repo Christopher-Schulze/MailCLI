@@ -1,0 +1,22 @@
+{
+  "id": "drafts.save@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "draft reference"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

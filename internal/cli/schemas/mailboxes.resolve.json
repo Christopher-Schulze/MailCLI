@@ -1,0 +1,31 @@
+{
+  "id": "mailboxes.resolve@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--account",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "account reference"
+    },
+    {
+      "name": "--path",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "repeatable": true,
+      "required": true,
+      "description": "exact mailbox path segment; repeat for nested folders"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

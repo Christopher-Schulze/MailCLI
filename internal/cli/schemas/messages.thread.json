@@ -1,0 +1,39 @@
+{
+  "id": "messages.thread@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "resource reference"
+    },
+    {
+      "name": "--limit",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "10",
+      "minimum": 1,
+      "maximum": 25,
+      "description": "page size"
+    },
+    {
+      "name": "--cursor",
+      "value_type": "cursor",
+      "takes_value": true,
+      "value_required": true,
+      "description": "continuation cursor"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

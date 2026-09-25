@@ -83,6 +83,8 @@ if [[ -n "${UNFORMATTED}" ]]; then
   exit 1
 fi
 
+go run ./scripts/utils/generate-command-schemas.go --check
+
 go mod verify
 
 STATICCHECK_BIN="$(command -v staticcheck || true)"

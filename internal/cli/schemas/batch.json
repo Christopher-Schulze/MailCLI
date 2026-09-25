@@ -1,0 +1,333 @@
+{
+  "id": "batch@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--input",
+      "value_type": "path",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "JSON input file or - for standard input"
+    },
+    {
+      "name": "--concurrency",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "0",
+      "maximum": 8,
+      "description": "maximum concurrent items; 0 uses the default, 1-8 are accepted"
+    },
+    {
+      "name": "--confirm",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "confirm the delete operation"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum JSON response bytes"
+    }
+  ],
+  "positional_arguments": [],
+  "json_input": {
+    "flag": "--input",
+    "value_type": "batch_request",
+    "maximum_bytes": 16777216,
+    "additional_properties": false,
+    "fields": [
+      {
+        "name": "operation",
+        "value_type": "enum",
+        "required": true,
+        "values": [
+          "read",
+          "attachment_save",
+          "mark",
+          "move",
+          "copy",
+          "delete"
+        ],
+        "description": "batch operation"
+      },
+      {
+        "name": "items",
+        "value_type": "array\u003cbatch_item\u003e",
+        "required": true,
+        "maximum": 100,
+        "description": "ordered bounded batch items"
+      },
+      {
+        "name": "concurrency",
+        "value_type": "integer",
+        "description": "maximum concurrent items",
+        "minimum": 0,
+        "maximum": 8
+      }
+    ],
+    "item_fields": [
+      {
+        "name": "id",
+        "value_type": "string",
+        "required": true,
+        "description": "unique non-empty trimmed item ID"
+      },
+      {
+        "name": "ref",
+        "value_type": "ref",
+        "required": true,
+        "description": "resource reference"
+      },
+      {
+        "name": "attachment_id",
+        "value_type": "attachment_id",
+        "description": "attachment ID"
+      },
+      {
+        "name": "output_path",
+        "value_type": "path",
+        "description": "absolute non-existing output path"
+      },
+      {
+        "name": "read",
+        "value_type": "boolean",
+        "description": "read state"
+      },
+      {
+        "name": "flagged",
+        "value_type": "boolean",
+        "description": "flagged state"
+      },
+      {
+        "name": "junk",
+        "value_type": "boolean",
+        "description": "Junk state"
+      },
+      {
+        "name": "mailbox",
+        "value_type": "ref",
+        "description": "destination mailbox ref"
+      },
+      {
+        "name": "allow_draft_mutation",
+        "value_type": "boolean",
+        "description": "allow mutation of a draft"
+      },
+      {
+        "name": "view",
+        "value_type": "enum",
+        "values": [
+          "metadata",
+          "plain",
+          "full"
+        ],
+        "description": "read message projection view; omitted uses full"
+      },
+      {
+        "name": "fields",
+        "value_type": "array\u003cmessage_field\u003e",
+        "values": [
+          "summary",
+          "reply_to",
+          "to",
+          "cc",
+          "bcc",
+          "headers",
+          "content",
+          "content_source",
+          "content_complete",
+          "missing_parts",
+          "hydration",
+          "attachments"
+        ],
+        "description": "message fields, mutually exclusive with view"
+      }
+    ],
+    "constraints": [
+      {
+        "kind": "enum",
+        "fields": [
+          "operation"
+        ],
+        "description": "operation must be read, attachment_save, mark, move, copy, or delete"
+      },
+      {
+        "kind": "non_empty",
+        "fields": [
+          "items"
+        ],
+        "description": "items must contain at least one bounded request"
+      },
+      {
+        "kind": "mutually_exclusive",
+        "fields": [
+          "view",
+          "fields"
+        ],
+        "description": "each batch read item cannot combine view and fields"
+      },
+      {
+        "kind": "unique",
+        "fields": [
+          "items.id"
+        ],
+        "description": "batch item IDs must be non-empty, trimmed, and unique"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "ref"
+        ],
+        "description": "mark, move, and delete items require unique source refs"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "ref",
+          "mailbox"
+        ],
+        "description": "copy items may repeat a source ref only with distinct destination mailbox refs; each source/destination pair is unique"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "mailbox",
+          "allow_draft_mutation",
+          "view",
+          "fields"
+        ],
+        "description": "read items allow id and ref plus an optional view or fields projection"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "mailbox",
+          "allow_draft_mutation",
+          "view",
+          "fields"
+        ],
+        "description": "attachment_save items require attachment_id and output_path and reject mark, transfer, draft, and projection fields"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "output_path"
+        ],
+        "description": "attachment_save output paths must be unique across items"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "mailbox",
+          "view",
+          "fields"
+        ],
+        "description": "mark items require at least one of read, flagged, or junk and reject attachment, transfer, and projection fields"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "mailbox",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "view",
+          "fields"
+        ],
+        "description": "move items require mailbox and reject attachment, mark, and projection fields"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "mailbox",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "allow_draft_mutation",
+          "view",
+          "fields"
+        ],
+        "description": "copy items require mailbox and reject all other optional fields"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "attachment_id",
+          "output_path",
+          "read",
+          "flagged",
+          "junk",
+          "mailbox",
+          "view",
+          "fields"
+        ],
+        "description": "delete items reject unsupported fields, including projections"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "--confirm",
+          "operation"
+        ],
+        "description": "--confirm is required for the delete operation and rejected otherwise"
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "kind": "enum",
+      "fields": [
+        "operation"
+      ],
+      "description": "operation must be read, attachment_save, mark, move, copy, or delete"
+    },
+    {
+      "kind": "non_empty",
+      "fields": [
+        "items"
+      ],
+      "description": "items must contain at least one bounded request"
+    }
+  ]
+}

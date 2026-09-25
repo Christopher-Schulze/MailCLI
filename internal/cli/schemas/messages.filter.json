@@ -1,0 +1,157 @@
+{
+  "id": "messages.filter@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--account",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "description": "account reference"
+    },
+    {
+      "name": "--after",
+      "value_type": "date",
+      "takes_value": true,
+      "value_required": true,
+      "description": "received at or after RFC3339 or YYYY-MM-DD"
+    },
+    {
+      "name": "--attachment",
+      "value_type": "boolean",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "true",
+        "false"
+      ],
+      "description": "attachment presence"
+    },
+    {
+      "name": "--before",
+      "value_type": "date",
+      "takes_value": true,
+      "value_required": true,
+      "description": "received before RFC3339 or YYYY-MM-DD"
+    },
+    {
+      "name": "--cursor",
+      "value_type": "cursor",
+      "takes_value": true,
+      "value_required": true,
+      "description": "pagination cursor"
+    },
+    {
+      "name": "--exact-count",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "request a bounded exact candidate total"
+    },
+    {
+      "name": "--flagged",
+      "value_type": "boolean",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "true",
+        "false"
+      ],
+      "description": "flagged status"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--limit",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "10",
+      "minimum": 1,
+      "maximum": 25,
+      "description": "page size"
+    },
+    {
+      "name": "--mailbox",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "description": "mailbox reference"
+    },
+    {
+      "name": "--read",
+      "value_type": "boolean",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "true",
+        "false"
+      ],
+      "description": "read status"
+    },
+    {
+      "name": "--recipient",
+      "value_type": "text",
+      "takes_value": true,
+      "value_required": true,
+      "description": "recipient substring"
+    },
+    {
+      "name": "--sender",
+      "value_type": "text",
+      "takes_value": true,
+      "value_required": true,
+      "description": "sender substring"
+    },
+    {
+      "name": "--subject",
+      "value_type": "text",
+      "takes_value": true,
+      "value_required": true,
+      "description": "subject substring"
+    },
+    {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "all",
+        "attachment_count",
+        "date_received",
+        "date_sent",
+        "deleted",
+        "flagged",
+        "junk",
+        "message_id",
+        "read",
+        "sender",
+        "size",
+        "snippet",
+        "subject"
+      ],
+      "description": "comma-separated page fields; refs and page metadata are retained"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "conditional",
+      "flags": [
+        "--fields"
+      ],
+      "description": "the all page field cannot be combined with any other page field"
+    },
+    {
+      "kind": "ordered",
+      "fields": [
+        "after",
+        "before"
+      ],
+      "description": "when both dates are supplied, --after must be earlier than --before"
+    }
+  ]
+}

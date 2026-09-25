@@ -1,0 +1,77 @@
+{
+  "id": "drafts.inspect@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "draft reference"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--view",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "default": "metadata",
+      "values": [
+        "metadata",
+        "plain",
+        "full"
+      ],
+      "description": "output view"
+    },
+    {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "description": "comma-separated JSON fields"
+    },
+    {
+      "name": "--export",
+      "value_type": "path",
+      "takes_value": true,
+      "value_required": true,
+      "description": "exclusive absolute path for complete content export"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum bounded bytes"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "mutually_exclusive",
+      "flags": [
+        "--view",
+        "--fields"
+      ],
+      "description": "--view and --fields cannot be combined"
+    },
+    {
+      "kind": "conditional",
+      "flags": [
+        "--export",
+        "--view",
+        "--fields"
+      ],
+      "description": "--export requires a content-capable view or field and an absolute new path"
+    }
+  ]
+}

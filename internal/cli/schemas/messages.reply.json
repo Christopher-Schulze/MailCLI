@@ -1,0 +1,246 @@
+{
+  "id": "messages.reply@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--message",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "source message reference"
+    },
+    {
+      "name": "--input",
+      "value_type": "path",
+      "takes_value": true,
+      "value_required": true,
+      "description": "JSON input file or - for standard input"
+    },
+    {
+      "name": "--account",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "description": "account reference"
+    },
+    {
+      "name": "--from",
+      "value_type": "email",
+      "takes_value": true,
+      "value_required": true,
+      "description": "sender address"
+    },
+    {
+      "name": "--to",
+      "value_type": "email",
+      "takes_value": true,
+      "value_required": true,
+      "repeatable": true,
+      "description": "recipient address; repeat for multiple recipients"
+    },
+    {
+      "name": "--cc",
+      "value_type": "email",
+      "takes_value": true,
+      "value_required": true,
+      "repeatable": true,
+      "description": "CC recipient address; repeat for multiple recipients"
+    },
+    {
+      "name": "--bcc",
+      "value_type": "email",
+      "takes_value": true,
+      "value_required": true,
+      "description": "BCC recipient address; repeat for multiple recipients",
+      "repeatable": true
+    },
+    {
+      "name": "--subject",
+      "value_type": "text",
+      "takes_value": true,
+      "value_required": true,
+      "description": "message subject"
+    },
+    {
+      "name": "--body",
+      "value_type": "text",
+      "takes_value": true,
+      "value_required": true,
+      "description": "message body"
+    },
+    {
+      "name": "--body-file",
+      "value_type": "path",
+      "takes_value": true,
+      "value_required": true,
+      "description": "body file or - for standard input"
+    },
+    {
+      "name": "--format",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "plain",
+        "markdown",
+        "html"
+      ],
+      "description": "body or preview format"
+    },
+    {
+      "name": "--attach",
+      "value_type": "path",
+      "takes_value": true,
+      "description": "absolute attachment path; repeat for multiple files",
+      "value_required": true,
+      "repeatable": true
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--view",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "default": "plain",
+      "values": [
+        "metadata",
+        "plain",
+        "full"
+      ],
+      "description": "output view"
+    },
+    {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "description": "comma-separated JSON fields"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum bounded bytes"
+    },
+    {
+      "name": "--all",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "reply to all recipients"
+    }
+  ],
+  "positional_arguments": [],
+  "json_input": {
+    "flag": "--input",
+    "value_type": "draft_input",
+    "maximum_bytes": 16777216,
+    "additional_properties": false,
+    "fields": [
+      {
+        "name": "account_ref",
+        "value_type": "ref",
+        "description": "account reference for the sender identity"
+      },
+      {
+        "name": "from",
+        "value_type": "email",
+        "description": "sender address"
+      },
+      {
+        "name": "to",
+        "value_type": "array\u003crecipient\u003e",
+        "description": "recipient addresses"
+      },
+      {
+        "name": "cc",
+        "value_type": "array\u003crecipient\u003e",
+        "description": "CC recipient addresses"
+      },
+      {
+        "name": "bcc",
+        "value_type": "array\u003crecipient\u003e",
+        "description": "BCC recipient addresses"
+      },
+      {
+        "name": "subject",
+        "value_type": "string",
+        "description": "message subject"
+      },
+      {
+        "name": "body",
+        "value_type": "string",
+        "required": true,
+        "description": "message body"
+      },
+      {
+        "name": "body_format",
+        "value_type": "enum",
+        "values": [
+          "plain",
+          "markdown",
+          "html"
+        ],
+        "description": "body format"
+      },
+      {
+        "name": "attachments",
+        "value_type": "array\u003cpath\u003e",
+        "description": "absolute attachment paths"
+      }
+    ],
+    "constraints": [
+      {
+        "kind": "required",
+        "fields": [
+          "body"
+        ],
+        "description": "body must be present even when it is an empty string"
+      }
+    ]
+  },
+  "constraints": [
+    {
+      "kind": "mutually_exclusive",
+      "flags": [
+        "--input",
+        "--account",
+        "--from",
+        "--to",
+        "--cc",
+        "--bcc",
+        "--subject",
+        "--body",
+        "--body-file",
+        "--format",
+        "--attach"
+      ],
+      "description": "--input cannot be combined with terminal-native draft flags"
+    },
+    {
+      "kind": "one_of",
+      "flags": [
+        "--body",
+        "--body-file"
+      ],
+      "description": "terminal-native draft input requires exactly one of --body or --body-file"
+    },
+    {
+      "kind": "mutually_exclusive",
+      "flags": [
+        "--view",
+        "--fields"
+      ],
+      "description": "--view and --fields cannot be combined"
+    }
+  ]
+}

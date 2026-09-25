@@ -1,0 +1,26 @@
+{
+  "id": "doctor@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--live",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "run live Mail diagnostics"
+    },
+    {
+      "name": "--diagnostics",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "include phase timings"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

@@ -1,0 +1,14 @@
+{
+  "id": "version@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

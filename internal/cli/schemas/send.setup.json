@@ -1,0 +1,93 @@
+{
+  "id": "send.setup@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--from",
+      "value_type": "email",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "sender address"
+    },
+    {
+      "name": "--account",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "description": "account reference"
+    },
+    {
+      "name": "--credential-account",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "description": "Keychain account used for this sender"
+    },
+    {
+      "name": "--smtp-host",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "description": "explicit SMTP submission host for the account binding"
+    },
+    {
+      "name": "--smtp-port",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "0",
+      "description": "explicit SMTP submission port for the account binding"
+    },
+    {
+      "name": "--imap-host",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "description": "explicit IMAP host for the account binding"
+    },
+    {
+      "name": "--imap-port",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "0",
+      "description": "explicit IMAP port for the account binding"
+    },
+    {
+      "name": "--remove",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "remove the stored app-specific password"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "conditional",
+      "flags": [
+        "--credential-account",
+        "--account",
+        "--from"
+      ],
+      "description": "a credential account different from --from requires an explicit --account binding"
+    },
+    {
+      "kind": "conditional",
+      "flags": [
+        "--smtp-host",
+        "--smtp-port",
+        "--imap-host",
+        "--imap-port",
+        "--account"
+      ],
+      "description": "explicit endpoint flags require --account; each SMTP or IMAP host and port must be supplied together, with a port from 1 through 65535"
+    }
+  ]
+}

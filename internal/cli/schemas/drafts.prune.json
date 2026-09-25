@@ -1,0 +1,30 @@
+{
+  "id": "drafts.prune@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--older-than",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "30",
+      "minimum": 1,
+      "maximum": 106751,
+      "description": "age threshold in days for never-sent drafts"
+    },
+    {
+      "name": "--confirm",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "confirm the requested operation"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

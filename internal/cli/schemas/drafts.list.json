@@ -1,0 +1,67 @@
+{
+  "id": "drafts.list@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--limit",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "50",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "maximum drafts per page"
+    },
+    {
+      "name": "--cursor",
+      "value_type": "cursor",
+      "takes_value": true,
+      "value_required": true,
+      "description": "continuation cursor from an unchanged draft directory"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    },
+    {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "values": [
+        "account_ref",
+        "age_days",
+        "attachment_count",
+        "body_format",
+        "cc",
+        "created_at",
+        "ever_sent",
+        "from",
+        "handoff_attempt",
+        "kind",
+        "ref",
+        "save_attempt",
+        "send_attempt",
+        "state_error",
+        "subject",
+        "to",
+        "updated_at"
+      ],
+      "description": "comma-separated summary fields; refs, review and attempt state, and page metadata are retained"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum JSON response bytes"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}

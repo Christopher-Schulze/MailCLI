@@ -1,0 +1,45 @@
+{
+  "id": "drafts.send@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "draft reference"
+    },
+    {
+      "name": "--expected-revision",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "opaque revision from inspected draft content; missing or changed revisions block the operation"
+    },
+    {
+      "name": "--confirm",
+      "value_type": "boolean",
+      "takes_value": false,
+      "required": true,
+      "description": "confirm the requested operation"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "required",
+      "flags": [
+        "--expected-revision"
+      ],
+      "description": "review content before update or send; pass its revision separately even with --input; conflicts require a fresh review"
+    }
+  ]
+}

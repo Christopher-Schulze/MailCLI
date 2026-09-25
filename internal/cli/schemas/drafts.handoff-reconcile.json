@@ -1,0 +1,57 @@
+{
+  "id": "drafts.handoff-reconcile@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--ref",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "draft reference with an unresolved handoff"
+    },
+    {
+      "name": "--attempt",
+      "value_type": "attempt_id",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "retained handoff attempt ID"
+    },
+    {
+      "name": "--outcome",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "values": [
+        "opened",
+        "failed"
+      ],
+      "description": "observed outcome"
+    },
+    {
+      "name": "--confirm",
+      "value_type": "boolean",
+      "takes_value": false,
+      "required": true,
+      "description": "confirm cleanup of retained handoff evidence"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": [
+    {
+      "kind": "enum",
+      "fields": [
+        "outcome"
+      ],
+      "description": "outcome must be opened or failed"
+    }
+  ]
+}

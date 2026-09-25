@@ -1,0 +1,38 @@
+{
+  "id": "attachments.save@v1",
+  "version": 1,
+  "flags": [
+    {
+      "name": "--message",
+      "value_type": "ref",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "message or draft message reference"
+    },
+    {
+      "name": "--attachment",
+      "value_type": "attachment_id",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "attachment ID"
+    },
+    {
+      "name": "--output",
+      "value_type": "path",
+      "takes_value": true,
+      "value_required": true,
+      "required": true,
+      "description": "absolute non-existing output path"
+    },
+    {
+      "name": "--json",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "emit JSON"
+    }
+  ],
+  "positional_arguments": [],
+  "constraints": []
+}
