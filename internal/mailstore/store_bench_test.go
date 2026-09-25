@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mattn/go-sqlite3"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 // openBenchmarkStore opens the real local Mail store read-only. The store is
@@ -720,4 +722,189 @@ func heapAlloc() uint64 {
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
 	return stats.HeapAlloc
+}
+
+type mutationIdentityFixture struct {
+	searchFixtureData
+	bindingPath string
+}
+
+type countedMutationBindings struct {
+	mail.AccountBindingStore
+	loadCalls atomic.Int64
+}
+
+func (store *countedMutationBindings) LoadAccountBindings() (mail.AccountBindingFile, error) {
+	store.loadCalls.Add(1)
+	return store.AccountBindingStore.LoadAccountBindings()
+}
+
+type countedMutationCredentials struct {
+	strictCredentials
+	loadCalls atomic.Int64
+}
+
+func (store *countedMutationCredentials) Load(account string) (string, error) {
+	store.loadCalls.Add(1)
+	return store.strictCredentials.Load(account)
+}
+
+func newMutationIdentityFixture(tb testing.TB) mutationIdentityFixture {
+	tb.Helper()
+	fixture := createSearchFixtureData(tb, generatedStoreFixtureMessageCount-3, true)
+	databasePath := filepath.Join(fixture.mailRoot, "V10", "MailData", envelopeIndexName)
+	database := openTestWriter(tb, databasePath)
+	for _, mailbox := range []struct {
+		rowID     int64
+		accountID string
+	}{
+		{rowID: 4, accountID: testAccountID},
+		{rowID: 5, accountID: secondaryCatalogAccountID},
+	} {
+		_, err := database.Exec(
+			`INSERT INTO mailboxes(ROWID,url,total_count,unread_count,deleted_count,source) VALUES(?,?,0,0,0,1)`,
+			mailbox.rowID, "imap://"+mailbox.accountID+"/Sent",
+		)
+		if err != nil {
+			closeTestResourceNow(tb, database, "mutation identity fixture database")
+			tb.Fatalf("add generated Sent mailbox: %v", err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		tb.Fatalf("close mutation identity fixture database: %v", err)
+	}
+	writeMutationIdentityMailboxCache(tb, fixture.mailRoot, testAccountID, []string{"INBOX", "Archive", "Sent"})
+	writeMutationIdentityMailboxCache(tb, fixture.mailRoot, secondaryCatalogAccountID, []string{"INBOX", "Sent"})
+	indexInfo, err := os.Stat(databasePath)
+	if err != nil {
+		tb.Fatalf("stat generated mutation identity index: %v", err)
+	}
+	fixture.indexBytes = indexInfo.Size()
+	bindingPath := filepath.Join(tb.TempDir(), "mutation-account-bindings.json")
+	bindings := mail.NewAccountBindingStore(bindingPath)
+	for _, binding := range []mail.AccountBinding{
+		{AccountID: testAccountID, SenderAliases: []string{"identity@gmail.com"}, CredentialAccount: "identity@gmail.com"},
+		{AccountID: secondaryCatalogAccountID, SenderAliases: []string{"other@gmail.com"}, CredentialAccount: "other@gmail.com"},
+	} {
+		if err := bindings.UpsertAccountBinding(binding); err != nil {
+			tb.Fatalf("write generated mutation identity binding: %v", err)
+		}
+	}
+	return mutationIdentityFixture{searchFixtureData: fixture, bindingPath: bindingPath}
+}
+
+func writeMutationIdentityMailboxCache(
+	tb testing.TB,
+	mailRoot string,
+	accountID string,
+	mailboxNames []string,
+) {
+	tb.Helper()
+	var cache strings.Builder
+	cache.WriteString(`<?xml version="1.0"?><plist version="1.0"><dict><key>mboxes</key><dict>`)
+	for _, name := range mailboxNames {
+		attributes := 0
+		if name == "Sent" {
+			attributes = mailboxAttributeSent
+		}
+		if _, err := fmt.Fprintf(&cache,
+			`<key>%s</key><dict><key>MailboxPathComponent</key><string>%s</string><key>IMAPMailboxAttributes</key><integer>%d</integer><key>IMAPMailboxChildren</key><dict/></dict>`,
+			name, name, attributes,
+		); err != nil {
+			tb.Fatalf("format generated mutation identity mailbox cache: %v", err)
+		}
+	}
+	cache.WriteString(`</dict></dict></plist>`)
+	cachePath := filepath.Join(mailRoot, "V10", accountID, ".mboxCache.plist")
+	if err := os.WriteFile(cachePath, []byte(cache.String()), 0o600); err != nil {
+		tb.Fatalf("write generated mutation identity mailbox cache: %v", err)
+	}
+}
+
+func openMutationIdentityClient(
+	tb testing.TB,
+	fixture mutationIdentityFixture,
+) (*Store, *Client, *accountIdentityCounters, *countedMutationBindings, *countedMutationCredentials) {
+	tb.Helper()
+	bindings := &countedMutationBindings{AccountBindingStore: mail.NewAccountBindingStore(fixture.bindingPath)}
+	store, err := Open(context.Background(), Config{
+		MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs,
+		AccountBindings: bindings,
+	})
+	if err != nil {
+		tb.Fatalf("open generated mutation identity store: %v", err)
+	}
+	counters := &accountIdentityCounters{}
+	store.accountIdentityCounters = counters
+	credentials := &countedMutationCredentials{strictCredentials: strictCredentials{
+		"identity@gmail.com": "generated-test-password",
+	}}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap:        &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}}},
+		Credentials: credentials,
+	}}
+	tb.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			tb.Errorf("close generated mutation identity store: %v", err)
+		}
+	})
+	return store, client, counters, bindings, credentials
+}
+
+func mutationTargetReferences(tb testing.TB, store *Store, fixture searchFixtureData, count int) []string {
+	tb.Helper()
+	refs := make([]string, 0, count)
+	cursor := ""
+	for len(refs) < count {
+		limit := min(mail.MaximumPageLimit, count-len(refs))
+		page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+			MailboxRef: fixture.inboxRef, Cursor: cursor, Limit: limit,
+		})
+		if err != nil {
+			tb.Fatalf("list generated mutation target references: %v", err)
+		}
+		for _, message := range page.Messages {
+			refs = append(refs, message.Ref)
+			if len(refs) == count {
+				return refs
+			}
+		}
+		if page.NextCursor == "" {
+			tb.Fatalf("generated mutation fixture ended after %d of %d references", len(refs), count)
+		}
+		cursor = page.NextCursor
+	}
+	return refs
+}
+
+func BenchmarkMutationAccountResolution(b *testing.B) {
+	fixture := newMutationIdentityFixture(b)
+	for _, benchmark := range []struct {
+		name  string
+		items int
+	}{
+		{name: "items_1", items: 1},
+		{name: "items_100", items: 100},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			store, client, counters, bindings, credentials := openMutationIdentityClient(b, fixture)
+			messageRefs := mutationTargetReferences(b, store, fixture.searchFixtureData, benchmark.items)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				for _, messageRef := range messageRefs {
+					target, err := client.resolveImapTargetForMutation(context.Background(), messageRef)
+					if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
+						b.Fatalf("resolve generated mutation target: target=%+v error=%v", target, err)
+					}
+				}
+			}
+			iterations := float64(b.N)
+			b.ReportMetric(float64(counters.fullCatalogBuilds.Load())/iterations, "catalog_builds/op")
+			b.ReportMetric(float64(counters.sentScanQueries.Load())/iterations, "sent_scan_queries/op")
+			b.ReportMetric(float64(bindings.loadCalls.Load())/iterations, "binding_loads/op")
+			b.ReportMetric(float64(credentials.loadCalls.Load())/iterations, "credential_loads/op")
+			reportGeneratedStoreFixture(b, fixture.searchFixtureData)
+		})
+	}
 }

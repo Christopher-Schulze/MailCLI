@@ -13,6 +13,11 @@ import (
 	"mailcli/internal/mail"
 )
 
+type accountIdentityCounters struct {
+	fullCatalogBuilds atomic.Int64
+	sentScanQueries   atomic.Int64
+}
+
 type Store struct {
 	database                *sql.DB
 	versionRoot             string
@@ -47,6 +52,9 @@ type Store struct {
 
 	// readMetrics is enabled only by tests that measure message-read work.
 	readMetrics *readMetrics
+
+	// accountIdentityCounters is enabled only by tests and benchmarks.
+	accountIdentityCounters *accountIdentityCounters
 }
 
 func Open(ctx context.Context, config Config) (*Store, error) {

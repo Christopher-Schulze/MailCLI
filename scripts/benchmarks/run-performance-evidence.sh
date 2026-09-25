@@ -41,6 +41,10 @@ summarize_results() {
       messages = "-"
       index_bytes = "-"
       source_bytes = "-"
+      catalog_builds = "-"
+      sent_scan_queries = "-"
+      binding_loads = "-"
+      credential_loads = "-"
       for (field = 2; field < NF; field++) {
         if ($(field + 1) == "ns/op") ns = $field
         if ($(field + 1) == "B/op") bytes = $field
@@ -48,10 +52,15 @@ summarize_results() {
         if ($(field + 1) == "messages") messages = $field
         if ($(field + 1) == "index_B") index_bytes = $field
         if ($(field + 1) == "source_B") source_bytes = $field
+        if ($(field + 1) == "catalog_builds/op") catalog_builds = $field
+        if ($(field + 1) == "sent_scan_queries/op") sent_scan_queries = $field
+        if ($(field + 1) == "binding_loads/op") binding_loads = $field
+        if ($(field + 1) == "credential_loads/op") credential_loads = $field
       }
       if (ns != "" && bytes != "" && allocs != "") {
-        printf "%s\t%.3f\t%.3f\t%.3f\t%s\t%s\t%s\n",
-          name, ns, bytes, allocs, messages, index_bytes, source_bytes
+        printf "%s\t%.3f\t%.3f\t%.3f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+          name, ns, bytes, allocs, messages, index_bytes, source_bytes,
+          catalog_builds, sent_scan_queries, binding_loads, credential_loads
       }
     }
   ' "${RESULT_PATH}" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n >"${SAMPLE_PATH}"
@@ -88,8 +97,14 @@ summarize_results() {
         fixture_messages[name] = $5
         fixture_index_bytes[name] = $6
         fixture_source_bytes[name] = $7
+        catalog_builds[name, sample] = $8
+        sent_scan_queries[name, sample] = $9
+        binding_loads[name, sample] = $10
+        credential_loads[name, sample] = $11
       } else if (fixture_messages[name] != $5 || fixture_index_bytes[name] != $6 ||
-        fixture_source_bytes[name] != $7) {
+        fixture_source_bytes[name] != $7 || catalog_builds[name, 1] != $8 ||
+        sent_scan_queries[name, 1] != $9 || binding_loads[name, 1] != $10 ||
+        credential_loads[name, 1] != $11) {
         printf "Benchmark %s changed its fixture metrics between repetitions\n", name > "/dev/stderr"
         failed = 1
       }
@@ -103,11 +118,23 @@ summarize_results() {
           failed = 1
           continue
         }
+        if (name ~ /^BenchmarkMutationAccountResolution\// &&
+          (catalog_builds[name, 1] == "-" || sent_scan_queries[name, 1] == "-" ||
+            binding_loads[name, 1] == "-" || credential_loads[name, 1] == "-")) {
+          printf "Benchmark %s is missing account resolution counters\n", name > "/dev/stderr"
+          failed = 1
+          continue
+        }
         p50 = int((samples + 1) / 2)
         p95 = int((95 * samples + 99) / 100)
         summary = sprintf("summary benchmark=%s repetitions=%d p50_ns/op=%.0f p95_ns/op=%.0f p50_B/op=%.0f p50_allocs/op=%.0f",
           name, samples, ns[name, p50], ns[name, p95],
           percentile_metric(bytes, name, samples, p50), percentile_metric(allocs, name, samples, p50))
+        if (name ~ /^BenchmarkMutationAccountResolution\//) {
+          summary = summary sprintf(" catalog_builds/op=%.0f sent_scan_queries/op=%.0f binding_loads/op=%.0f credential_loads/op=%.0f",
+            catalog_builds[name, 1], sent_scan_queries[name, 1],
+            binding_loads[name, 1], credential_loads[name, 1])
+        }
         if (fixture_messages[name] != "-") {
           summary = summary sprintf(" fixture_messages=%.0f index_B=%.0f source_B=%.0f",
             fixture_messages[name], fixture_index_bytes[name], fixture_source_bytes[name])
@@ -201,6 +228,12 @@ run_group \
   ./internal/mailstore \
   '^BenchmarkGeneratedStoreLifecycle$' \
   20x
+run_group \
+  mutation-account-resolution \
+  'generated 600-message/two-account store; one or 100 per-item mutation target resolutions with file-backed bindings and a fake IMAP boundary' \
+  ./internal/mailstore \
+  '^BenchmarkMutationAccountResolution$' \
+  1x
 run_group \
   search-fold \
   '1 MiB lowercase and mixed ASCII plus decomposed Unicode; the shared SQL and body search folding policy' \

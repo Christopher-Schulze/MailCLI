@@ -76,7 +76,55 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 }
 
 func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, error) {
+	if s.accountIdentityCounters != nil {
+		s.accountIdentityCounters.fullCatalogBuilds.Add(1)
+	}
 	return s.listAccountCatalog(ctx, false)
+}
+
+func (s *Store) accountForIdentity(ctx context.Context, accountID string) (mail.Account, bool, error) {
+	var location mailboxLocation
+	found := false
+	for _, activeAccount := range s.activeAccounts {
+		if activeAccount.AccountID == accountID {
+			location = activeAccount
+			found = true
+			break
+		}
+	}
+	if !found {
+		return mail.Account{}, false, nil
+	}
+
+	records, err := s.mailboxRecords(ctx)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return mail.Account{}, true, contextErr
+		}
+		return mail.Account{}, true, accountCatalogError("", err)
+	}
+	bindings, err := s.loadAccountBindings()
+	if err != nil {
+		return mail.Account{}, true, err
+	}
+	recordsByPath := make(map[string]mailboxRecord)
+	for _, record := range records {
+		if record.Location.rootKey() == location.rootKey() {
+			recordsByPath[record.pathKey] = record
+		}
+	}
+	account, err := s.loadAccountWithBindings(ctx, location, recordsByPath, bindings, false)
+	if err != nil {
+		var issue *accountCatalogIssue
+		if errors.As(err, &issue) {
+			return issue.account, true, nil
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return mail.Account{}, true, contextErr
+		}
+		return mail.Account{}, true, err
+	}
+	return account, true, nil
 }
 
 // ListBindingValidationCatalog lists the account catalog for send-time
@@ -421,6 +469,9 @@ func (s *Store) querySenderIdentityRows(
 	limit int,
 ) (result []senderIdentity, observed int, resultErr error) {
 	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit, limit, 0)
+	if s.accountIdentityCounters != nil {
+		s.accountIdentityCounters.sentScanQueries.Add(1)
+	}
 	rows, err := s.database.QueryContext(ctx, cte+`
 		SELECT (SELECT count(*) FROM membership), sender.ROWID,
 			COALESCE(sender.address, ''), COALESCE(sender.comment, ''),
@@ -515,6 +566,9 @@ func (s *Store) hasMoreSenderIdentityRows(
 	limit int,
 ) (more bool, resultErr error) {
 	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit+1, 1, limit)
+	if s.accountIdentityCounters != nil {
+		s.accountIdentityCounters.sentScanQueries.Add(1)
+	}
 	rows, err := s.database.QueryContext(ctx, cte+`
 		SELECT 1 FROM membership
 	`, arguments...)

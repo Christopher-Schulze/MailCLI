@@ -303,13 +303,24 @@ func credentialSetupCommand(sender, credential string) string {
 }
 
 func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (string, string, *mail.AccountBinding, error) {
-	accounts, err := c.store.ListAccounts(ctx)
+	account, found, err := c.store.accountForIdentity(ctx, accountID)
 	if err != nil {
 		return "", "", nil, operationErrorWithCause(
 			"account_catalog_incomplete",
 			fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
 			err,
 		)
+	}
+	accounts := []mail.Account{account}
+	if !found {
+		accounts, err = c.store.ListAccounts(ctx)
+		if err != nil {
+			return "", "", nil, operationErrorWithCause(
+				"account_catalog_incomplete",
+				fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
+				err,
+			)
+		}
 	}
 	var bindings mail.AccountBindingFile
 	bindingStore := c.send.AccountBindings
