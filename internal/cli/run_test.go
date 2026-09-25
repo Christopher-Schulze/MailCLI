@@ -518,6 +518,68 @@ func TestJSONSyntaxFailuresUseEnvelopeTable(t *testing.T) {
 	}
 }
 
+func TestJSONGroupSubcommandFailuresReturnValidChoices(t *testing.T) {
+	groups := []struct {
+		name             string
+		validSubcommands []string
+	}{
+		{name: "accounts", validSubcommands: []string{"list"}},
+		{name: "mailboxes", validSubcommands: []string{"list", "resolve"}},
+		{name: "messages", validSubcommands: []string{
+			"list", "filter", "search", "get", "raw", "state", "thread", "reply", "forward", "mark", "move", "copy", "delete",
+		}},
+		{name: "attachments", validSubcommands: []string{"list", "save"}},
+		{name: "drafts", validSubcommands: []string{
+			"create", "list", "inspect", "preview", "edit", "handoff", "update", "save", "open", "adopt", "send", "reconcile", "discard", "prune", "handoff-reconcile",
+		}},
+		{name: "send", validSubcommands: []string{"setup"}},
+	}
+	for _, group := range groups {
+		t.Run(group.name, func(t *testing.T) {
+			for _, missing := range []bool{true, false} {
+				name := "unknown"
+				if missing {
+					name = "missing"
+				}
+				t.Run(name, func(t *testing.T) {
+					assertJSONGroupSubcommandFailure(t, group.name, group.validSubcommands, missing)
+				})
+			}
+		})
+	}
+}
+
+func assertJSONGroupSubcommandFailure(t *testing.T, group string, validSubcommands []string, missing bool) {
+	args := []string{group}
+	wantCommand := group
+	wantCode := "invalid_argument"
+	wantMessage := group + " requires a subcommand"
+	if !missing {
+		args = append(args, "missing")
+		wantCommand = group + ".missing"
+		wantCode = "unknown_command"
+		wantMessage = fmt.Sprintf("unknown %s command %q", group, "missing")
+	}
+	args = append(args, "--json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(), args, &stdout, &stderr)
+	if code != 2 || stderr.Len() != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v, stdout = %q", err, stdout.String())
+	}
+	if response.Error == nil {
+		t.Fatalf("response has no error: %+v", response)
+	}
+	if response.OK || response.Command != wantCommand || response.Error.Code != wantCode ||
+		response.Error.Message != wantMessage || !slices.Equal(response.Error.ValidSubcommands, validSubcommands) {
+		t.Fatalf("response = %+v, valid_subcommands = %q", response, response.Error.ValidSubcommands)
+	}
+}
+
 func TestDoctorJSONWithoutLiveProbe(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -98,6 +98,7 @@ type errorData struct {
 	Code                  string                      `json:"code"`
 	Message               string                      `json:"message"`
 	Guidance              *mail.OperationGuidance     `json:"guidance"`
+	ValidSubcommands      []string                    `json:"valid_subcommands,omitempty"`
 	RequiredBytes         *int64                      `json:"required_bytes,omitempty"`
 	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
 	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
@@ -435,6 +436,12 @@ func runJSONCommand(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
+	if errorCode, message, command, validSubcommands := jsonSubcommandFailure(args); errorCode != "" {
+		if writeFailureEnvelope(stdout, command, errorCode, message, validSubcommands) != 0 {
+			return 1
+		}
+		return 2
+	}
 	commandOutput := countingWriter{writer: stdout}
 	commandError := commandDiagnosticBuffer{processOutput: stderr}
 	code := runCommand(ctx, mailService, args, &commandOutput, &commandError)
@@ -461,6 +468,39 @@ func runJSONCommand(
 		return 1
 	}
 	return code
+}
+
+func jsonSubcommandFailure(args []string) (string, string, string, []string) {
+	if len(args) == 0 {
+		return "", "", "", nil
+	}
+	prefix := args[0] + "."
+	validSubcommands := make([]string, 0)
+	for _, contract := range commandContracts {
+		if !strings.HasPrefix(contract.ID, prefix) {
+			continue
+		}
+		subcommand := strings.TrimPrefix(contract.ID, prefix)
+		if !strings.Contains(subcommand, ".") {
+			validSubcommands = append(validSubcommands, subcommand)
+		}
+	}
+	if len(validSubcommands) == 0 {
+		return "", "", "", nil
+	}
+	if len(args) == 1 || args[1] == "--json" {
+		return "invalid_argument", args[0] + " requires a subcommand", args[0], validSubcommands
+	}
+	if isHelpArgument(args[1]) {
+		return "", "", "", nil
+	}
+	for _, validSubcommand := range validSubcommands {
+		if args[1] == validSubcommand {
+			return "", "", "", nil
+		}
+	}
+	return "unknown_command", fmt.Sprintf("unknown %s command %q", args[0], args[1]),
+		AttemptedCommand(args), validSubcommands
 }
 
 type countingWriter struct {
@@ -744,12 +784,24 @@ func writeJSON(writer io.Writer, value envelope) int {
 
 //go:noinline
 func WriteFailureEnvelope(writer io.Writer, command string, code string, message string) int {
+	return writeFailureEnvelope(writer, command, code, message, nil)
+}
+
+func writeFailureEnvelope(
+	writer io.Writer,
+	command string,
+	code string,
+	message string,
+	validSubcommands []string,
+) int {
+	failure := newErrorData(command, responseData{}, &commandError{code: code, message: message})
+	failure.ValidSubcommands = validSubcommands
 	return writeJSON(writer, envelope{
 		SchemaVersion: schemaVersion,
 		OK:            false,
 		Command:       command,
 		Data:          responseData{},
-		Error:         newErrorData(command, responseData{}, &commandError{code: code, message: message}),
+		Error:         failure,
 	})
 }
 
