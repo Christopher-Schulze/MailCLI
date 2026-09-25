@@ -111,6 +111,88 @@ type updateInstallOutcome struct {
 	failedPhase string
 }
 
+type stagedUpdate struct {
+	root          string
+	latestVersion string
+	archiveName   string
+	release       updateRelease
+	metadata      []byte
+	checksums     []byte
+	signature     []byte
+	archive       []byte
+}
+
+func revalidateStagedUpdate(staged stagedUpdate, environment updateEnvironment) ([]byte, error) {
+	rootInfo, err := os.Lstat(staged.root)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || rootInfo.Mode().Perm() != 0o700 {
+		return nil, updateFailure("update_package_invalid", "private update staging directory changed")
+	}
+	metadata, err := readStagedUpdateFile(filepath.Join(staged.root, updateMetadataStageName), maximumReleaseMetadata)
+	if err != nil || !bytes.Equal(metadata, staged.metadata) {
+		return nil, updateFailure("update_package_invalid", "staged release metadata changed after verification")
+	}
+	checksums, err := readStagedUpdateFile(filepath.Join(staged.root, updateChecksumsStageName), maximumChecksumFile)
+	if err != nil || !bytes.Equal(checksums, staged.checksums) {
+		return nil, updateFailure("update_package_invalid", "staged checksum manifest changed after verification")
+	}
+	signature, err := readStagedUpdateFile(filepath.Join(staged.root, updateSignatureStageName), maximumSignatureFile)
+	if err != nil || !bytes.Equal(signature, staged.signature) {
+		return nil, updateFailure("update_package_invalid", "staged release signature changed after verification")
+	}
+	archive, err := readStagedUpdateFile(filepath.Join(staged.root, staged.archiveName), maximumReleaseArchive)
+	if err != nil || !bytes.Equal(archive, staged.archive) {
+		return nil, updateFailure("update_package_invalid", "staged release archive changed after verification")
+	}
+	if err := verifyReleaseSignature(checksums, signature, environment.releasePublicKey); err != nil {
+		return nil, err
+	}
+	if err := verifyReleaseChecksum(staged.archiveName, archive, checksums); err != nil {
+		return nil, err
+	}
+	return archive, nil
+}
+
+func readStagedUpdateFile(path string, maximumBytes int64) ([]byte, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 || pathInfo.Size() > maximumBytes {
+		return nil, fmt.Errorf("staged file is missing, unsafe, or oversized")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	fileInfo, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(pathInfo, fileInfo) {
+		return nil, errors.Join(fmt.Errorf("staged file identity changed"), statErr, file.Close())
+	}
+	contents, readErr := io.ReadAll(io.LimitReader(file, maximumBytes+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	if int64(len(contents)) > maximumBytes {
+		return nil, fmt.Errorf("staged file is oversized")
+	}
+	return contents, nil
+}
+
+func readInstalledBinaryVersion(ctx context.Context, binaryPath string) (string, error) {
+	output, err := exec.CommandContext(ctx, binaryPath, "version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("run installed binary: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	value := strings.TrimSpace(string(output))
+	prefix := name + " "
+	if !strings.HasPrefix(value, prefix) {
+		return "", fmt.Errorf("installed binary returned invalid version output %q", value)
+	}
+	_, normalized, err := parseReleaseVersion(strings.TrimPrefix(value, prefix))
+	if err != nil {
+		return "", fmt.Errorf("installed binary returned invalid version: %w", err)
+	}
+	return normalized, nil
+}
+
 func installVerifiedArchive(
 	ctx context.Context,
 	environment updateEnvironment,

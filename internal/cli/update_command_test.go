@@ -19,7 +19,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCompareReleaseVersions(t *testing.T) {
@@ -78,6 +81,125 @@ func TestPerformUpdateInstallsVerifiedRelease(t *testing.T) {
 	}
 	if _, err := os.Stat(environment.executablePath + ".mailcli-backup"); !os.IsNotExist(err) {
 		t.Fatalf("binary backup remains after update: %v", err)
+	}
+}
+
+func TestPerformUpdateStagesNetworkBeforeLockAndSerializesConcurrentUpdates(t *testing.T) {
+	fixture := newGatedUpdateFixture(t, "1.0.4", 2)
+	installCount := countUpdateInstalls(&fixture.environment)
+	lockIntervals := recordUpdateLockIntervals(&fixture.environment)
+	updateContext, cancelUpdates := context.WithCancel(context.Background())
+	defer cancelUpdates()
+	startedAt := time.Now()
+	attempts := startUpdateAttempts(updateContext, fixture.environment, 2)
+	networkStart := waitForArchiveStart(t, fixture.archiveStarted)
+	secondNetworkStart := waitForArchiveStart(t, fixture.archiveStarted)
+	if secondNetworkStart.Before(networkStart) {
+		networkStart = secondNetworkStart
+	}
+	assertInstallerLockAvailable(t, fixture.environment.homeDirectory)
+	networkEnd := fixture.releaseArchiveAfter(networkStart, 250*time.Millisecond)
+	updates := collectUpdateAttempts(t, attempts, 2)
+	assertConcurrentUpdateResults(t, updates, installCount, fixture.environment)
+	lockIntervals.assertExcludesNetworkDelay(t, startedAt, networkStart, networkEnd)
+}
+
+func TestPerformUpdateSkipsWhenSameOrNewerVersionWasInstalledDuringStaging(t *testing.T) {
+	for _, installedVersion := range []string{"1.0.5", "1.0.6"} {
+		t.Run(installedVersion, func(t *testing.T) {
+			assertConcurrentVersionSkipsStagedUpdate(t, installedVersion)
+		})
+	}
+}
+
+func assertConcurrentVersionSkipsStagedUpdate(t *testing.T, installedVersion string) {
+	t.Helper()
+	fixture := newGatedUpdateFixture(t, "1.0.4", 1)
+	installCount := countUpdateInstalls(&fixture.environment)
+	updateContext, cancelUpdate := context.WithCancel(context.Background())
+	defer cancelUpdate()
+	attempts := startUpdateAttempts(updateContext, fixture.environment, 1)
+	waitForArchiveStart(t, fixture.archiveStarted)
+	installVersionDuringDownload(t, fixture.environment, installedVersion, "concurrent skill")
+	fixture.releaseArchive()
+	attempt := collectUpdateAttempts(t, attempts, 1)[0]
+	if attempt.err != nil || attempt.result.Updated || attempt.result.CurrentVersion != installedVersion {
+		t.Fatalf("stale update result = %+v, %v", attempt.result, attempt.err)
+	}
+	if installCount.Load() != 0 {
+		t.Fatalf("stale update invoked installer %d times", installCount.Load())
+	}
+	if err := verifyBinaryVersion(context.Background(), fixture.environment.executablePath, installedVersion); err != nil {
+		t.Fatalf("concurrently installed binary changed: %v", err)
+	}
+	skill, err := os.ReadFile(filepath.Join(fixture.environment.homeDirectory, ".agents", "skills", "mailcli", "SKILL.md"))
+	if err != nil || string(skill) != "concurrent skill\n" {
+		t.Fatalf("concurrently installed skill changed: %q, %v", skill, err)
+	}
+}
+
+func TestRevalidateStagedUpdateRejectsChangedArtifacts(t *testing.T) {
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)
+	server := newUpdateTestServer(t, "1.0.5", archive, checksums)
+	defer server.Close()
+	environment := updateTestEnvironment(t, server, "1.0.4")
+	release, metadata, err := fetchLatestRelease(context.Background(), environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestVersion, comparison, err := compareReleaseVersions(environment.currentVersion, release.TagName)
+	if err != nil || comparison >= 0 {
+		t.Fatalf("compare staged release: version=%s comparison=%d error=%v", latestVersion, comparison, err)
+	}
+	staged, err := stageUpdateResources(
+		context.Background(), environment, newUpdateReporter(io.Discard, false, false), release, latestVersion, metadata,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(staged.root); err != nil {
+			t.Errorf("remove staged update fixture: %v", err)
+		}
+	})
+	for _, artifact := range []struct {
+		name     string
+		filename string
+		contents []byte
+	}{
+		{name: "metadata", filename: updateMetadataStageName, contents: metadata},
+		{name: "checksums", filename: updateChecksumsStageName, contents: checksums},
+		{name: "signature", filename: updateSignatureStageName, contents: staged.signature},
+		{name: "archive", filename: staged.archiveName, contents: archive},
+	} {
+		t.Run(artifact.name, func(t *testing.T) {
+			assertChangedStagedArtifactRejected(t, staged, environment, artifact.filename, artifact.contents)
+		})
+	}
+}
+
+func assertChangedStagedArtifactRejected(
+	t *testing.T,
+	staged stagedUpdate,
+	environment updateEnvironment,
+	filename string,
+	original []byte,
+) {
+	t.Helper()
+	path := filepath.Join(staged.root, filename)
+	changed := append([]byte(nil), original...)
+	changed[len(changed)/2] ^= 0xff
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.WriteFile(path, original, 0o600); err != nil {
+			t.Errorf("restore staged %q fixture: %v", filename, err)
+		}
+	}()
+	if _, err := revalidateStagedUpdate(staged, environment); updateErrorCodeForTest(err) != "update_package_invalid" {
+		t.Fatalf("changed staged %q error = %v", filename, err)
 	}
 }
 
@@ -551,6 +673,242 @@ type updateTestServer struct {
 	publicKey ed25519.PublicKey
 }
 
+type updateAttemptResult struct {
+	result updateResult
+	err    error
+}
+
+type gatedUpdateFixture struct {
+	environment    updateEnvironment
+	archiveStarted chan time.Time
+	archiveGate    chan struct{}
+	archiveOnce    sync.Once
+}
+
+type updateLockIntervals struct {
+	mutex  sync.Mutex
+	starts []time.Time
+	ends   []time.Time
+}
+
+func newGatedUpdateFixture(t *testing.T, currentVersion string, attemptCount int) *gatedUpdateFixture {
+	t.Helper()
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)
+	fixture := &gatedUpdateFixture{
+		archiveStarted: make(chan time.Time, attemptCount),
+		archiveGate:    make(chan struct{}),
+	}
+	server := newGatedUpdateTestServer(
+		t, "1.0.5", archive, checksums, fixture.archiveStarted, fixture.archiveGate,
+	)
+	fixture.environment = updateTestEnvironment(t, server, currentVersion)
+	createInstalledUpdateFixture(t, fixture.environment, currentVersion, "old skill")
+	t.Cleanup(func() {
+		fixture.releaseArchive()
+		server.Close()
+	})
+	return fixture
+}
+
+func (fixture *gatedUpdateFixture) releaseArchive() {
+	fixture.archiveOnce.Do(func() { close(fixture.archiveGate) })
+}
+
+func (fixture *gatedUpdateFixture) releaseArchiveAfter(
+	networkStart time.Time,
+	delay time.Duration,
+) time.Time {
+	if wait := time.Until(networkStart.Add(delay)); wait > 0 {
+		time.Sleep(wait)
+	}
+	fixture.releaseArchive()
+	return time.Now()
+}
+
+func countUpdateInstalls(environment *updateEnvironment) *atomic.Int32 {
+	var installs atomic.Int32
+	install := environment.installPackage
+	environment.installPackage = func(
+		ctx context.Context,
+		installerPath string,
+		binaryPath string,
+		homeDirectory string,
+		installationLock *os.File,
+	) error {
+		installs.Add(1)
+		return install(ctx, installerPath, binaryPath, homeDirectory, installationLock)
+	}
+	return &installs
+}
+
+func recordUpdateLockIntervals(environment *updateEnvironment) *updateLockIntervals {
+	intervals := &updateLockIntervals{}
+	readVersion := environment.readInstalledVersion
+	environment.readInstalledVersion = func(ctx context.Context, path string) (string, error) {
+		intervals.recordStart(time.Now())
+		return readVersion(ctx, path)
+	}
+	closeLock := environment.closeLock
+	environment.closeLock = func(lock *os.File) error {
+		var err error
+		if closeLock == nil {
+			err = lock.Close()
+		} else {
+			err = closeLock(lock)
+		}
+		intervals.recordEnd(time.Now())
+		return err
+	}
+	return intervals
+}
+
+func (intervals *updateLockIntervals) recordStart(at time.Time) {
+	intervals.mutex.Lock()
+	defer intervals.mutex.Unlock()
+	intervals.starts = append(intervals.starts, at)
+}
+
+func (intervals *updateLockIntervals) recordEnd(at time.Time) {
+	intervals.mutex.Lock()
+	defer intervals.mutex.Unlock()
+	intervals.ends = append(intervals.ends, at)
+}
+
+func (intervals *updateLockIntervals) assertExcludesNetworkDelay(
+	t *testing.T,
+	operationStart time.Time,
+	networkStart time.Time,
+	networkEnd time.Time,
+) {
+	t.Helper()
+	intervals.mutex.Lock()
+	starts := append([]time.Time(nil), intervals.starts...)
+	ends := append([]time.Time(nil), intervals.ends...)
+	intervals.mutex.Unlock()
+	if len(starts) != 2 || len(ends) != 2 {
+		t.Fatalf("recorded lock intervals = %d starts, %d ends; want 2 each", len(starts), len(ends))
+	}
+	var lockDuration time.Duration
+	for index := range starts {
+		if starts[index].Before(networkEnd) || ends[index].Before(starts[index]) {
+			t.Fatalf("lock interval %d overlaps network staging: %s to %s", index, starts[index], ends[index])
+		}
+		lockDuration += ends[index].Sub(starts[index])
+	}
+	networkDelay := networkEnd.Sub(networkStart)
+	if elapsedOutsideLock := time.Since(operationStart) - lockDuration; elapsedOutsideLock < networkDelay {
+		t.Fatalf("network delay %s was included in lock-held time %s", networkDelay, lockDuration)
+	}
+}
+
+func assertInstallerLockAvailable(t *testing.T, homeDirectory string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lock, err := acquireUpdateLock(ctx, homeDirectory)
+	if err != nil {
+		t.Fatalf("installation lock unavailable during staged download: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatalf("close installation lock probe: %v", err)
+	}
+}
+
+func startUpdateAttempts(
+	ctx context.Context,
+	environment updateEnvironment,
+	attemptCount int,
+) <-chan updateAttemptResult {
+	results := make(chan updateAttemptResult, attemptCount)
+	for range attemptCount {
+		go func() {
+			result, err := performUpdate(ctx, environment, newUpdateReporter(io.Discard, false, false))
+			results <- updateAttemptResult{result: result, err: err}
+		}()
+	}
+	return results
+}
+
+func collectUpdateAttempts(
+	t *testing.T,
+	results <-chan updateAttemptResult,
+	attemptCount int,
+) []updateAttemptResult {
+	t.Helper()
+	attempts := make([]updateAttemptResult, 0, attemptCount)
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for range attemptCount {
+		select {
+		case attempt := <-results:
+			attempts = append(attempts, attempt)
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for %d update attempts", attemptCount)
+		}
+	}
+	return attempts
+}
+
+func assertConcurrentUpdateResults(
+	t *testing.T,
+	attempts []updateAttemptResult,
+	installCount *atomic.Int32,
+	environment updateEnvironment,
+) {
+	t.Helper()
+	if installCount.Load() != 1 {
+		t.Fatalf("concurrent update invoked installer %d times; want 1", installCount.Load())
+	}
+	updated := 0
+	for _, attempt := range attempts {
+		if attempt.err != nil || attempt.result.LatestVersion != "1.0.5" {
+			t.Fatalf("concurrent update result = %+v, %v", attempt.result, attempt.err)
+		}
+		if attempt.result.Updated {
+			updated++
+		}
+	}
+	if updated != 1 {
+		t.Fatalf("concurrent updates reported %d installations; want 1", updated)
+	}
+	if err := verifyBinaryVersion(context.Background(), environment.executablePath, "1.0.5"); err != nil {
+		t.Fatalf("final binary version = %v", err)
+	}
+}
+
+func installVersionDuringDownload(
+	t *testing.T,
+	environment updateEnvironment,
+	version string,
+	skill string,
+) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lock, err := acquireUpdateLock(ctx, environment.homeDirectory)
+	if err != nil {
+		t.Fatalf("acquire competing update lock: %v", err)
+	}
+	defer func() {
+		if err := lock.Close(); err != nil {
+			t.Errorf("close competing update lock: %v", err)
+		}
+	}()
+	createInstalledUpdateFixture(t, environment, version, skill)
+}
+
+func waitForArchiveStart(t *testing.T, archiveStarted <-chan time.Time) time.Time {
+	t.Helper()
+	select {
+	case startedAt := <-archiveStarted:
+		return startedAt
+	case <-time.After(10 * time.Second):
+		t.Fatal("update did not reach its delayed archive request")
+		return time.Time{}
+	}
+}
+
 func newUpdateTestServer(
 	t *testing.T,
 	releaseVersion string,
@@ -567,6 +925,31 @@ func newUpdateTestServerWithSignature(
 	checksums []byte,
 	corruptSignature bool,
 ) *updateTestServer {
+	return newUpdateTestServerFixture(t, releaseVersion, archive, checksums, corruptSignature, nil)
+}
+
+func newGatedUpdateTestServer(
+	t *testing.T,
+	releaseVersion string,
+	archive []byte,
+	checksums []byte,
+	archiveStarted chan<- time.Time,
+	archiveGate <-chan struct{},
+) *updateTestServer {
+	return newUpdateTestServerFixture(t, releaseVersion, archive, checksums, false, func() {
+		archiveStarted <- time.Now()
+		<-archiveGate
+	})
+}
+
+func newUpdateTestServerFixture(
+	t *testing.T,
+	releaseVersion string,
+	archive []byte,
+	checksums []byte,
+	corruptSignature bool,
+	beforeArchiveWrite func(),
+) *updateTestServer {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -579,7 +962,23 @@ func newUpdateTestServerWithSignature(
 	encodedSignature := []byte(base64.StdEncoding.EncodeToString(signature) + "\n")
 	archiveName := "mailcli_" + releaseVersion + "_darwin_arm64.tar.gz"
 	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server = httptest.NewServer(updateTestHandler(
+		func() string { return server.URL }, releaseVersion, archiveName, archive, checksums, encodedSignature,
+		beforeArchiveWrite,
+	))
+	return &updateTestServer{Server: server, publicKey: publicKey}
+}
+
+func updateTestHandler(
+	serverURL func() string,
+	releaseVersion string,
+	archiveName string,
+	archive []byte,
+	checksums []byte,
+	encodedSignature []byte,
+	beforeArchiveWrite func(),
+) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/latest":
 			writer.Header().Set("Content-Type", "application/json")
@@ -589,9 +988,12 @@ func newUpdateTestServerWithSignature(
 					`{"name":"%s","browser_download_url":"%s/archive"},`+
 					`{"name":"SHA256SUMS","browser_download_url":"%s/checksums"},`+
 					`{"name":"SHA256SUMS.sig","browser_download_url":"%s/signature"}]}`,
-				releaseVersion, server.URL, archiveName, server.URL, server.URL, server.URL,
+				releaseVersion, serverURL(), archiveName, serverURL(), serverURL(), serverURL(),
 			)
 		case "/archive":
+			if beforeArchiveWrite != nil {
+				beforeArchiveWrite()
+			}
 			_, _ = writer.Write(archive)
 		case "/checksums":
 			_, _ = writer.Write(checksums)
@@ -600,8 +1002,7 @@ func newUpdateTestServerWithSignature(
 		default:
 			http.NotFound(writer, request)
 		}
-	}))
-	return &updateTestServer{Server: server, publicKey: publicKey}
+	})
 }
 
 func updateTestEnvironment(t *testing.T, server *updateTestServer, currentVersion string) updateEnvironment {
@@ -614,7 +1015,8 @@ func updateTestEnvironment(t *testing.T, server *updateTestServer, currentVersio
 	}
 	environment := updateEnvironment{
 		client: client, metadataURL: server.URL + "/latest", currentVersion: currentVersion,
-		executablePath: filepath.Join(testRoot, "bin", "mailcli"), homeDirectory: filepath.Join(testRoot, "home"),
+		readInstalledVersion: readInstalledBinaryVersion,
+		executablePath:       filepath.Join(testRoot, "bin", "mailcli"), homeDirectory: filepath.Join(testRoot, "home"),
 		operatingSystem: "darwin", architecture: "arm64",
 		urlPolicy:     policy,
 		verifyPackage: verifyBinaryVersion, installPackage: runReleaseInstaller,

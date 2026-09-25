@@ -11,27 +11,27 @@ import (
 	"strings"
 )
 
-func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (updateRelease, error) {
+func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (updateRelease, []byte, error) {
 	if err := environment.urlPolicy.validate(environment.metadataURL); err != nil {
-		return updateRelease{}, contextualUpdateFailure("update_check_failed", "invalid release metadata URL", err)
+		return updateRelease{}, nil, contextualUpdateFailure("update_check_failed", "invalid release metadata URL", err)
 	}
 	payload, err := downloadUpdateResource(
 		ctx, environment.client, environment.metadataURL, maximumReleaseMetadata,
 	)
 	if err != nil {
-		return updateRelease{}, contextualUpdateFailure("update_check_failed", "check latest GitHub release", err)
+		return updateRelease{}, nil, contextualUpdateFailure("update_check_failed", "check latest GitHub release", err)
 	}
 	var release updateRelease
 	if err := json.Unmarshal(payload, &release); err != nil {
-		return updateRelease{}, updateFailure("update_check_failed", "decode latest GitHub release: %v", err)
+		return updateRelease{}, nil, updateFailure("update_check_failed", "decode latest GitHub release: %v", err)
 	}
 	if release.TagName == "" || release.HTMLURL == "" {
-		return updateRelease{}, updateFailure("update_check_failed", "latest GitHub release metadata is incomplete")
+		return updateRelease{}, nil, updateFailure("update_check_failed", "latest GitHub release metadata is incomplete")
 	}
 	if err := environment.urlPolicy.validate(release.HTMLURL); err != nil {
-		return updateRelease{}, contextualUpdateFailure("update_check_failed", "invalid release page URL", err)
+		return updateRelease{}, nil, contextualUpdateFailure("update_check_failed", "invalid release page URL", err)
 	}
-	return release, nil
+	return release, payload, nil
 }
 
 func compareReleaseVersions(current string, releaseTag string) (string, int, error) {
