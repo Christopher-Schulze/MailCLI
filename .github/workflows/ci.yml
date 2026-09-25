@@ -1,9 +1,9 @@
-# Minimal portability gate: proves the build and unit suite are green on a
-# clean second environment (macOS arm64, matching the verified dev host).
-# Scope is deliberately narrow — no live tests, no keychain-dependent live
-# paths, and no publication step. Release authority stays local: this
-# workflow must never push, tag, release, or call the GitHub API; the local
-# release-authority gate scans workflow files for exactly those commands.
+# Minimal portability gate: run the same build and uncached race/coverage
+# suite on macos-latest and macOS 15 arm64.
+# Both lanes are non-live, receive no Mail or Keychain credentials, and have
+# no publication step. Release authority stays local: this workflow must never
+# push, tag, release, or call the GitHub API; the local release-authority gate
+# scans workflow files for exactly those commands.
 name: ci
 
 on:
@@ -15,8 +15,14 @@ on:
 permissions:
   contents: read
 
+env:
+  MAILCLI_LIVE_TESTS: ""
+  MAILCLI_KEYCHAIN_LIVE: ""
+  MAILCLI_LIVE_RESPONSIVENESS: ""
+
 jobs:
   build-test:
+    # Preserve the existing macos-latest job and check identity.
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -25,6 +31,34 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: verify macOS arm64 runner
+        run: |
+          printf 'os=%s\n' "$(uname -s)"
+          printf 'architecture=%s\n' "$(uname -m)"
+          printf 'macos=%s\n' "$(sw_vers -productVersion)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+      - name: build
+        run: go build ./...
+      - name: unit suite
+        run: go test -count=1 -race -cover ./...
+
+  build-test-macos-15:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: verify macOS arm64 runner
+        run: |
+          printf 'os=%s\n' "$(uname -s)"
+          printf 'architecture=%s\n' "$(uname -m)"
+          printf 'macos=%s\n' "$(sw_vers -productVersion)"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
       - name: build
         run: go build ./...
       - name: unit suite
