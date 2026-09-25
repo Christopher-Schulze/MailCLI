@@ -14,6 +14,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -907,4 +908,89 @@ func BenchmarkMutationAccountResolution(b *testing.B) {
 			reportGeneratedStoreFixture(b, fixture.searchFixtureData)
 		})
 	}
+}
+
+var rawSourceBuilderBenchmarkSink string
+
+func BenchmarkRawSourceBuilder(b *testing.B) {
+	fixture := createSearchFixtureData(b, 0, true)
+	store := openGeneratedStoreFixture(b, fixture)
+	defer func() {
+		if err := store.Close(); err != nil {
+			b.Errorf("close generated raw-source store: %v", err)
+		}
+	}()
+	ctx := context.Background()
+	mailboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"Archive"})
+	if err != nil {
+		b.Fatalf("encode generated raw-source mailbox: %v", err)
+	}
+	page, err := store.ListMessages(ctx, mail.ListMessagesRequest{MailboxRef: mailboxRef, Limit: 3})
+	if err != nil {
+		b.Fatalf("list generated raw-source messages: %v", err)
+	}
+	messageRef := ""
+	for _, message := range page.Messages {
+		if message.Subject == "Quarterly Report" {
+			messageRef = message.Ref
+			break
+		}
+	}
+	if messageRef == "" {
+		b.Fatal("generated raw-source message was not listed")
+	}
+	resolved, err := store.resolveMessage(ctx, messageRef)
+	if err != nil {
+		b.Fatalf("resolve generated raw-source message: %v", err)
+	}
+	base, err := store.messageBasePath(resolved.PhysicalLocation, resolved.Record.RowID)
+	if err != nil {
+		b.Fatalf("resolve generated raw-source path: %v", err)
+	}
+	for _, sourceSize := range []int{8 << 20, 32 << 20, int(mail.MaximumRawSourceBytes)} {
+		b.Run(fmt.Sprintf("source_%d_MiB", sourceSize>>20), func(b *testing.B) {
+			rawSourceBuilderBenchmarkSink = ""
+			if err := writeRawSourceBenchmarkFrame(b, base+".emlx", sourceSize); err != nil {
+				b.Fatalf("write generated raw-source fixture: %v", err)
+			}
+			runtime.GC()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				raw, err := store.GetRawSource(ctx, messageRef)
+				if err != nil {
+					b.Fatalf("GetRawSource() error = %v", err)
+				}
+				if len(raw) != sourceSize {
+					b.Fatalf("GetRawSource() bytes = %d, want %d", len(raw), sourceSize)
+				}
+				rawSourceBuilderBenchmarkSink = raw
+			}
+			b.ReportMetric(float64(sourceSize), "source_B")
+		})
+	}
+	rawSourceBuilderBenchmarkSink = ""
+}
+
+func writeRawSourceBenchmarkFrame(b *testing.B, path string, sourceSize int) error {
+	if sourceSize < 0 || sourceSize > int(mail.MaximumRawSourceBytes) {
+		b.Fatalf("raw-source fixture size %d is outside the supported range", sourceSize)
+	}
+	prefix := fmt.Sprintf("%-10d\n", sourceSize)
+	if len(prefix) != emlxPrefixBytes {
+		b.Fatalf("EMLX prefix length = %d, want %d", len(prefix), emlxPrefixBytes)
+	}
+	trailer := validPlistTrailer()
+	framed := make([]byte, emlxPrefixBytes+sourceSize+len(trailer))
+	copy(framed, prefix)
+	header := "From: benchmark@example.com\r\nSubject: Raw source benchmark\r\n\r\n"
+	if len(header) > sourceSize {
+		b.Fatalf("raw-source fixture size %d cannot hold its header", sourceSize)
+	}
+	copy(framed[emlxPrefixBytes:], header)
+	for index := emlxPrefixBytes + len(header); index < emlxPrefixBytes+sourceSize; index++ {
+		framed[index] = 'x'
+	}
+	copy(framed[emlxPrefixBytes+sourceSize:], trailer)
+	return os.WriteFile(path, framed, 0o600)
 }

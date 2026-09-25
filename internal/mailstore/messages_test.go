@@ -64,9 +64,51 @@ func TestStoreReturnsExactFullRawSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRawSource() error = %v", err)
 	}
-	if !strings.HasPrefix(raw, "From: Alice <alice@example.com>\r\n") ||
-		!strings.HasSuffix(raw, "needle beta\r\n") {
-		t.Fatal("GetRawSource() did not preserve the exact framed RFC source")
+	want := "From: Alice <alice@example.com>\r\n" +
+		"To: Christopher <christopher@example.com>\r\n" +
+		"Subject: Test\r\n" +
+		"Message-ID: <102@example.com>\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"needle beta\r\n"
+	if raw != want {
+		t.Fatalf("GetRawSource() = %q, want exact source %q", raw, want)
+	}
+	var written strings.Builder
+	if err := store.WriteRawSource(context.Background(), ref, &written); err != nil {
+		t.Fatalf("WriteRawSource() error = %v", err)
+	}
+	if written.String() != want {
+		t.Fatalf("WriteRawSource() = %q, want exact source %q", written.String(), want)
+	}
+}
+
+func TestStoreWriteRawSourceRejectsPartialSourceBeforeOutput(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Status Update")
+	resolved, err := store.resolveMessage(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("resolveMessage() error = %v", err)
+	}
+	base, err := store.messageBasePath(resolved.PhysicalLocation, resolved.Record.RowID)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Rename(base+".emlx", base+".partial.emlx"); err != nil {
+		t.Fatalf("rename partial source: %v", err)
+	}
+	var output strings.Builder
+	err = store.WriteRawSource(context.Background(), ref, &output)
+	if errorCodeForTest(err) != "raw_source_partial" || output.Len() != 0 ||
+		!strings.Contains(err.Error(), "targeted Mail.app fallback") {
+		t.Fatalf("WriteRawSource() error = %v, output bytes = %d", err, output.Len())
 	}
 }
 

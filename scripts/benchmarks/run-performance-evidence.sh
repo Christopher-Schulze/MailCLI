@@ -277,6 +277,12 @@ run_group \
   '^BenchmarkMIMETextOwnership$' \
   5x
 run_group \
+  raw-source-builder \
+  'generated exact 8, 32 and 64 MiB EMLX sources through Store.GetRawSource; one operation per sample' \
+  ./internal/mailstore \
+  '^BenchmarkRawSourceBuilder$' \
+  1x
+run_group \
   incoming-html \
   'ordinary, dense 512 KiB, and excessive-token received HTML; legacy and context-bounded conversion' \
   ./internal/mail \

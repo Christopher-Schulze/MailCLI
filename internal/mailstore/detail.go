@@ -75,6 +75,9 @@ func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer
 	if source.length < 0 || source.length > mail.MaximumRawSourceBytes {
 		return operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
 	}
+	if builder, ok := writer.(*strings.Builder); ok {
+		builder.Grow(int(source.length))
+	}
 	if _, err := io.CopyN(writer, source.Reader(), source.length); err != nil {
 		return fmt.Errorf("stream RFC message source: %w", err)
 	}
