@@ -3,6 +3,7 @@ package mailstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	stdmail "net/mail"
@@ -114,38 +115,70 @@ func (s *Store) queryMailboxMessages(
 	mailboxRowID int64,
 	cursor *listCursor,
 	limit int,
-) (result []messageRecord, resultErr error) {
-	query := mailboxMessagesSQL("")
-	arguments := []any{mailboxRowID, mailboxRowID}
+) ([]messageRecord, error) {
+	transaction, err := s.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin Envelope Index mailbox snapshot: %w", err)
+	}
+	defer func() {
+		_ = transaction.Rollback()
+	}()
+
+	var hasLabels bool
+	if err := transaction.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM labels WHERE mailbox_id = ?)", mailboxRowID,
+	).Scan(&hasLabels); err != nil {
+		return nil, fmt.Errorf("check Envelope Index mailbox labels: %w", err)
+	}
+
+	arguments := make([]any, 0, 6)
+	arguments = append(arguments, mailboxRowID)
+	if hasLabels {
+		arguments = append(arguments, mailboxRowID)
+	}
+	cursorClause := ""
 	if cursor != nil {
 		if cursor.DateReceivedNull {
-			query = mailboxMessagesSQL(`
+			cursorClause = `
 				AND m.date_received IS NULL AND m.ROWID < ?
-			`)
+			`
 			arguments = append(arguments, cursor.RowID)
 		} else {
-			query = mailboxMessagesSQL(`
+			cursorClause = `
 				AND ((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)
-			`)
+			`
 			arguments = append(arguments, cursor.DateReceived, cursor.DateReceived, cursor.RowID)
 		}
 	}
+	query := physicalMailboxMessagesSQL(cursorClause)
+	if hasLabels {
+		query = mailboxMessagesSQL(cursorClause)
+	}
 	arguments = append(arguments, limit)
-	rows, err := s.database.QueryContext(ctx, query, arguments...)
-	if err != nil {
-		return nil, fmt.Errorf("list Envelope Index messages: %w", err)
-	}
-	defer joinCloseError(&resultErr, rows, "message rows")
-	items := make([]messageRecord, 0, limit)
-	for rows.Next() {
-		item, err := scanListMessageRecord(rows)
+	items, err := func() (items []messageRecord, resultErr error) {
+		rows, err := transaction.QueryContext(ctx, query, arguments...)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list Envelope Index messages: %w", err)
 		}
-		items = append(items, item)
+		defer joinCloseError(&resultErr, rows, "message rows")
+		items = make([]messageRecord, 0, limit)
+		for rows.Next() {
+			item, err := scanListMessageRecord(rows)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate Envelope Index messages: %w", err)
+		}
+		return items, nil
+	}()
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate Envelope Index messages: %w", err)
+	if err := transaction.Commit(); err != nil {
+		return nil, fmt.Errorf("finish Envelope Index mailbox snapshot: %w", err)
 	}
 	return items, nil
 }
@@ -157,6 +190,15 @@ func mailboxMessagesSQL(cursorClause string) string {
 			UNION
 			SELECT message_id FROM labels WHERE mailbox_id = ?
 		)
+	` + mailboxMessagePageSQL("membership membership JOIN messages m ON m.ROWID = membership.id", "", cursorClause)
+}
+
+func physicalMailboxMessagesSQL(cursorClause string) string {
+	return mailboxMessagePageSQL("messages m", " AND m.mailbox = ?", cursorClause)
+}
+
+func mailboxMessagePageSQL(fromClause, filterClause, cursorClause string) string {
+	return `
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
@@ -171,12 +213,12 @@ func mailboxMessagesSQL(cursorClause string) string {
 			m.size,
 			(SELECT count(*) FROM attachments attachment WHERE attachment.message = m.ROWID),
 			COALESCE(m.conversation_id, 0)
-		FROM membership membership
-		JOIN messages m ON m.ROWID = membership.id
+		FROM ` + fromClause + `
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
 		JOIN subjects subject ON subject.ROWID = m.subject
 		JOIN addresses sender ON sender.ROWID = m.sender
 		WHERE m.deleted = 0
+		` + filterClause + `
 	` + cursorClause + `
 		ORDER BY m.date_received DESC, m.ROWID DESC
 		LIMIT ?

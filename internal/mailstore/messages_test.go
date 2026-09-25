@@ -49,6 +49,34 @@ func TestStoreReadsNullableMessageIdentity(t *testing.T) {
 	}
 }
 
+func TestListMessagesWithoutMailboxLabelsUsesPhysicalMailboxMembership(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	updateFixtureMessage(t, store, `DELETE FROM labels WHERE mailbox_id = 1`)
+
+	ctx := context.Background()
+	first, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1,
+	})
+	if err != nil || len(first.Messages) != 1 || first.NextCursor == "" {
+		t.Fatalf("ListMessages(first) = %+v, error = %v; want one message and a cursor", first, err)
+	}
+	if first.Messages[0].Subject != "Status Update" {
+		t.Fatalf("ListMessages(first) subject = %q, want Status Update", first.Messages[0].Subject)
+	}
+
+	later, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+		MailboxRef: inboxRef, Limit: 1, Cursor: first.NextCursor,
+	})
+	if err != nil || len(later.Messages) != 1 || later.NextCursor != "" {
+		t.Fatalf("ListMessages(later) = %+v, error = %v; want one final message", later, err)
+	}
+	if later.Messages[0].Subject != "Noise" {
+		t.Fatalf("ListMessages(later) subject = %q, want Noise", later.Messages[0].Subject)
+	}
+}
+
 func TestStoreReturnsExactFullRawSource(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
