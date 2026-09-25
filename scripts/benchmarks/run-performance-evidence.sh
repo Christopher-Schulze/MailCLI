@@ -283,6 +283,12 @@ run_group \
   '^BenchmarkRawSourceBuilder$' \
   1x
 run_group \
+  list-summary-read \
+  'generated 25-message pages with short and 1 MiB summary rows; one operation per sample' \
+  ./internal/mailstore \
+  '^BenchmarkListSummaryRead$' \
+  1x
+run_group \
   incoming-html \
   'ordinary, dense 512 KiB, and excessive-token received HTML; legacy and context-bounded conversion' \
   ./internal/mail \

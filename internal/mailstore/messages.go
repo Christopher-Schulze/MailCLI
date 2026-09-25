@@ -138,7 +138,7 @@ func (s *Store) queryMailboxMessages(
 	defer joinCloseError(&resultErr, rows, "message rows")
 	items := make([]messageRecord, 0, limit)
 	for rows.Next() {
-		item, err := scanMessageRecord(rows)
+		item, err := scanListMessageRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +162,7 @@ func mailboxMessagesSQL(cursorClause string) string {
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
 			m.mailbox, mb.url,
 			subject.subject, sender.address, sender.comment,
-			COALESCE(summary.summary, ''), COALESCE(m.date_sent, 0), m.date_sent IS NULL,
+			COALESCE(m.date_sent, 0), m.date_sent IS NULL,
 			COALESCE(m.date_received, 0), m.date_received IS NULL, m.read, m.flagged, m.deleted,
 			EXISTS(
 				SELECT 1 FROM server_messages sm
@@ -176,7 +176,6 @@ func mailboxMessagesSQL(cursorClause string) string {
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
 		JOIN subjects subject ON subject.ROWID = m.subject
 		JOIN addresses sender ON sender.ROWID = m.sender
-		LEFT JOIN summaries summary ON summary.ROWID = m.summary
 		WHERE m.deleted = 0
 	` + cursorClause + `
 		ORDER BY m.date_received DESC, m.ROWID DESC
@@ -200,6 +199,22 @@ func scanMessageRecord(row rowScanner) (messageRecord, error) {
 		&item.Junk, &item.Size, &item.AttachmentCount, &item.ConversationID,
 	); err != nil {
 		return messageRecord{}, fmt.Errorf("scan Envelope Index message: %w", err)
+	}
+	return item, nil
+}
+
+func scanListMessageRecord(row rowScanner) (messageRecord, error) {
+	var item messageRecord
+	if err := row.Scan(
+		&item.RowID, &item.StoreMessageID, &item.StoreGlobalID, &item.RemoteID, &item.RemoteMailboxID,
+		&item.StoreMailboxID,
+		&item.PhysicalURL,
+		&item.Subject, &item.SenderAddress, &item.SenderName,
+		&item.DateSent, &item.DateSentNull, &item.DateReceived, &item.DateReceivedNull,
+		&item.Read, &item.Flagged, &item.Deleted,
+		&item.Junk, &item.Size, &item.AttachmentCount, &item.ConversationID,
+	); err != nil {
+		return messageRecord{}, fmt.Errorf("scan Envelope Index list message: %w", err)
 	}
 	return item, nil
 }

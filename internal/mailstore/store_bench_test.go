@@ -529,6 +529,53 @@ func benchmarkGeneratedStoreListMessages(b *testing.B, fixture searchFixtureData
 	reportGeneratedStoreFixture(b, fixture)
 }
 
+func BenchmarkListSummaryRead(b *testing.B) {
+	for _, variant := range []struct {
+		name    string
+		summary string
+	}{
+		{name: "short", summary: "status summary"},
+		{name: "large", summary: strings.Repeat("s", 1<<20)},
+	} {
+		b.Run(variant.name, func(b *testing.B) {
+			fixture := newGeneratedStoreFixture(b)
+			writer := openTestWriter(b, filepath.Join(
+				fixture.mailRoot, "V10", "MailData", envelopeIndexName,
+			))
+			if _, err := writer.Exec(
+				"UPDATE summaries SET summary = ? WHERE ROWID = 2", variant.summary,
+			); err != nil {
+				closeTestResourceNow(b, writer, "generated summary writer")
+				b.Fatalf("update generated summary: %v", err)
+			}
+			closeTestResourceNow(b, writer, "generated summary writer")
+			store := openGeneratedStoreFixture(b, fixture)
+			b.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					b.Errorf("close generated summary store: %v", err)
+				}
+			})
+			ctx := context.Background()
+			request := mail.ListMessagesRequest{MailboxRef: fixture.inboxRef, Limit: 25}
+			page, err := store.ListMessages(ctx, request)
+			if err != nil {
+				b.Fatalf("verify generated summary page: %v", err)
+			}
+			assertGeneratedStorePage(b, fixture, page)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				page, err := store.ListMessages(ctx, request)
+				if err != nil || len(page.Messages) != 25 || page.NextCursor == "" {
+					b.Fatalf("list generated summary page: count=%d error=%v", len(page.Messages), err)
+				}
+			}
+			b.ReportMetric(float64(len(variant.summary)), "summary_row_B")
+			reportGeneratedStoreFixture(b, fixture)
+		})
+	}
+}
+
 func benchmarkGeneratedStoreGetMessage(b *testing.B, fixture searchFixtureData) {
 	setupStore := openGeneratedStoreFixture(b, fixture)
 	ctx := context.Background()

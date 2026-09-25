@@ -112,6 +112,67 @@ func TestStoreWriteRawSourceRejectsPartialSourceBeforeOutput(t *testing.T) {
 	}
 }
 
+func TestListMessagesIgnoreSummaryStorageChanges(t *testing.T) {
+	t.Parallel()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	ctx := context.Background()
+	request := mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 10}
+	before, err := store.ListMessages(ctx, request)
+	if err != nil {
+		t.Fatalf("ListMessages(before) error = %v", err)
+	}
+	writer := openTestWriter(t, filepath.Join(store.versionRoot, "MailData", envelopeIndexName))
+	if _, err := writer.Exec("UPDATE summaries SET summary = NULL WHERE ROWID = 2"); err != nil {
+		closeTestResourceNow(t, writer, "fixture writer")
+		t.Fatalf("null fixture summary: %v", err)
+	}
+	largeSummary := strings.Repeat("s", 1<<20)
+	if _, err := writer.Exec(
+		"INSERT INTO summaries(ROWID, summary) VALUES (4, ?)", largeSummary,
+	); err != nil {
+		closeTestResourceNow(t, writer, "fixture writer")
+		t.Fatalf("insert large fixture summary: %v", err)
+	}
+	if _, err := writer.Exec("UPDATE messages SET summary = 4 WHERE ROWID = 103"); err != nil {
+		closeTestResourceNow(t, writer, "fixture writer")
+		t.Fatalf("assign large fixture summary: %v", err)
+	}
+	closeTestResourceNow(t, writer, "fixture writer")
+	after, err := store.ListMessages(ctx, request)
+	if err != nil {
+		t.Fatalf("ListMessages(after) error = %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("ListMessages() changed with null/large summaries: before=%#v after=%#v", before, after)
+	}
+	rows, err := store.database.QueryContext(
+		ctx, "EXPLAIN QUERY PLAN "+mailboxMessagesSQL(""), 1, 1, request.Limit+1,
+	)
+	if err != nil {
+		t.Fatalf("explain list query: %v", err)
+	}
+	closeTestResource(t, rows, "list query plan rows")
+	planRows := 0
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan list query plan: %v", err)
+		}
+		planRows++
+		if strings.Contains(strings.ToLower(detail), "summary") {
+			t.Fatalf("list query plan still reads summaries: %s", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate list query plan: %v", err)
+	}
+	if planRows == 0 {
+		t.Fatal("list query plan is empty")
+	}
+}
+
 func TestStoreRejectsRefAfterLogicalMailboxMembershipChanges(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
