@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -253,8 +254,27 @@ func runDraftList(ctx context.Context, service *mail.Service, args []string, std
 	limit := flags.Int("limit", mail.DefaultDraftListLimit, "maximum drafts per page (1-200)")
 	cursor := flags.String("cursor", "", "continuation cursor from an unchanged draft directory")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	fieldsValue := flags.String("fields", "", "comma-separated JSON fields; draft identity, review and attempt state remain present")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	output := outputOptions{target: projectionTargetDraftList, maxBytes: *maxBytes}
+	if err := validateOutputByteLimit(output.maxBytes); err != nil {
+		return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
+	}
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "fields" {
+			output.fieldsProvided = true
+		}
+	})
+	if output.fieldsProvided {
+		var err error
+		output.fields, err = parseProjectionFields(projectionTargetDraftList, *fieldsValue)
+		if err != nil {
+			return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
+		}
+		output.view = "custom"
 	}
 	if *limit < 1 || *limit > mail.MaximumDraftListLimit {
 		return failCommand("drafts.list", *jsonOutput, &commandError{code: "invalid_argument", message: "--limit must be between 1 and 200"}, stdout, stderr)
@@ -273,7 +293,26 @@ func runDraftList(ctx context.Context, service *mail.Service, args []string, std
 		})
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.list", responseData{Drafts: &entries, Page: rawResponsePage(page.Pagination)})
+		retryCommand := "mailcli drafts list --limit 50"
+		if *cursor != "" {
+			retryCommand += " --cursor " + *cursor
+		}
+		if output.fieldsProvided {
+			retryCommand += " --fields '" + *fieldsValue + "'"
+		}
+		retryCommand += fmt.Sprintf(" --max-bytes %d --json", maximumJSONOutputBytes)
+		output.recoveryRoute = fmt.Sprintf("retry with '%s'", retryCommand)
+		if len(entries) > 0 {
+			output.recoveryRoute += fmt.Sprintf(
+				" or inspect/export draft %s with 'mailcli drafts inspect --ref %s --view full --export /absolute/new/path --json'",
+				entries[0].Ref, entries[0].Ref,
+			)
+		}
+		data := responseData{Drafts: &entries, Page: rawResponsePage(page.Pagination)}
+		if data.StoreProfile == nil && invocationStoreProfile != nil {
+			data.StoreProfile = invocationStoreProfile
+		}
+		return writeProjectedSuccess(stdout, "drafts.list", data, output)
 	}
 	rows := make([][]string, 0, len(entries))
 	for _, entry := range entries {

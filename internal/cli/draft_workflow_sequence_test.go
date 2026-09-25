@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -80,5 +82,68 @@ func TestDraftWorkflowReusesReviewedResultsThroughRecovery(t *testing.T) {
 				t.Fatalf("recovery duplicated the draft: %v %v", paths, err)
 			}
 		})
+	}
+}
+
+func TestDraftPreviewBudgetKeepsCompletePayloadOrReturnsInspectRoute(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
+	small, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "recipient@example.com"}}, Subject: "Stable preview", Body: "complete preview body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := service.GetDraft(small.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := makeDraftPreview(stored, "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &bytes.Buffer{}
+	if code := writeSuccess(want, "drafts.preview", responseData{DraftPreview: &preview}); code != 0 {
+		t.Fatalf("marshal baseline preview: %d", code)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), service, []string{"drafts", "preview", "--ref", small.Ref, "--json"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 || !bytes.Equal(stdout.Bytes(), want.Bytes()) {
+		t.Fatalf("default preview payload changed: code=%d got=%s want=%s stderr=%s", code, stdout.String(), want.String(), stderr.String())
+	}
+
+	large, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "recipient@example.com"}}, Body: strings.Repeat("b", mail.MaximumDraftBodyBytes),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := Run(context.Background(), service, []string{"drafts", "preview", "--ref", large.Ref, "--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("default limit accepted maximum body: code=%d, output=%s", code, stdout.String())
+	}
+	var limited envelope
+	if err := json.Unmarshal(stdout.Bytes(), &limited); err != nil || limited.OK || limited.Error == nil || limited.Error.Code != "output_too_large" ||
+		limited.Data.DraftPreview != nil || !strings.Contains(limited.Error.Message, large.Ref) || !strings.Contains(limited.Error.Message, "--export /absolute/new/path") || bytes.Contains(stdout.Bytes(), []byte(`"body"`)) {
+		t.Fatalf("oversized preview returned partial content or lost recovery: decode=%v response=%+v output=%s", err, limited, stdout.String())
+	}
+
+	largeArgs := []string{"drafts", "preview", "--ref", large.Ref, "--max-bytes", strconv.FormatInt(maximumJSONOutputBytes, 10), "--json"}
+	stdout.Reset()
+	if code := Run(context.Background(), service, largeArgs, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("64 MiB preview failed: code=%d output=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var complete envelope
+	if err := json.Unmarshal(stdout.Bytes(), &complete); err != nil || !complete.OK || complete.Data.DraftPreview == nil || complete.Data.DraftPreview.Body != strings.Repeat("b", mail.MaximumDraftBodyBytes) {
+		t.Fatalf("maximum body preview was incomplete: decode=%v, output bytes=%d", err, stdout.Len())
+	}
+	boundary := append([]byte(nil), stdout.Bytes()...)
+	largeArgs[len(largeArgs)-2] = strconv.Itoa(len(boundary))
+	stdout.Reset()
+	if code := Run(context.Background(), service, largeArgs, &stdout, &stderr); code != 0 || !bytes.Equal(stdout.Bytes(), boundary) {
+		t.Fatalf("exact preview byte boundary rejected: code=%d output bytes=%d", code, stdout.Len())
+	}
+	largeArgs[len(largeArgs)-2] = strconv.Itoa(len(boundary) - 1)
+	stdout.Reset()
+	if code := Run(context.Background(), service, largeArgs, &stdout, &stderr); code != 1 || json.Unmarshal(stdout.Bytes(), &limited) != nil || limited.OK || limited.Error == nil || limited.Error.Code != "output_too_large" || limited.Data.DraftPreview != nil {
+		t.Fatalf("one-byte-over preview did not fail without content: code=%d output=%s", code, stdout.String())
 	}
 }

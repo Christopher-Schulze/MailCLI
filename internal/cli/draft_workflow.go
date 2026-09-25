@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -196,8 +197,12 @@ func runDraftPreview(service *mail.Service, args []string, stdout io.Writer, std
 	ref := flags.String("ref", "", "draft ref")
 	view := flags.String("format", "plain", "preview format: plain, source, or html")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validateOutputByteLimit(*maxBytes); err != nil {
+		return failCommand("drafts.preview", *jsonOutput, err, stdout, stderr)
 	}
 	draft, err := service.GetDraft(*ref)
 	if err != nil {
@@ -208,10 +213,29 @@ func runDraftPreview(service *mail.Service, args []string, stdout io.Writer, std
 		return failCommand("drafts.preview", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.preview", responseData{DraftPreview: &preview})
+		return writeBoundedDraftPreview(stdout, stderr, preview, *maxBytes)
 	}
 	writeHumanDraftPreview(stdout, preview)
 	return 0
+}
+
+func writeBoundedDraftPreview(stdout io.Writer, stderr io.Writer, preview draftPreview, maxBytes int64) int {
+	var buffer bytes.Buffer
+	if code := writeSuccess(&buffer, "drafts.preview", responseData{DraftPreview: &preview}); code != 0 {
+		return code
+	}
+	payload := buffer.Bytes()
+	if int64(len(payload)) > maxBytes {
+		limitErr := &outputTooLargeError{
+			actual: len(payload), limit: maxBytes, target: "draft preview",
+			recoveryRoute: fmt.Sprintf(
+				"the complete preview was not returned; inspect/export it with 'mailcli drafts inspect --ref %s --view full --export /absolute/new/path --json'",
+				preview.Ref,
+			),
+		}
+		return failCommand("drafts.preview", true, limitErr, stdout, stderr)
+	}
+	return writeEnvelopeBytes(stdout, payload)
 }
 
 func makeDraftPreview(draft mail.Draft, view string) (draftPreview, error) {

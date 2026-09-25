@@ -302,7 +302,11 @@ printf '%s' '{
 mailcli drafts inspect --ref DRAFT_REF --json
 mailcli drafts inspect --ref DRAFT_REF --view plain --json
 mailcli drafts preview --ref DRAFT_REF --format plain
+mailcli drafts list --limit 200 --fields age_days --json
+mailcli drafts preview --ref DRAFT_REF --max-bytes 67108864 --json
 ```
+
+Draft list and preview JSON output is limited to 1 MiB by default; `--max-bytes` accepts up to 64 MiB. `drafts list --fields` can omit derived age and timestamps while retaining each ref, review fields, send/save/handoff state, and page revision/cursor. A preview is returned whole or fails with `output_too_large` and a complete inspect/export command; MailCLI never truncates preview content.
 
 The same draft can be created without JSON plumbing:
 

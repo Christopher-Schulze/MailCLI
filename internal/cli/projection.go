@@ -38,6 +38,7 @@ const (
 	projectionTargetDraft      projectionTarget = "draft"
 	projectionTargetAttachment projectionTarget = "attachment"
 	projectionTargetRaw        projectionTarget = "raw"
+	projectionTargetDraftList  projectionTarget = "draft list"
 	projectionTargetListPage   projectionTarget = "list page"
 	projectionTargetSearchPage projectionTarget = "search page"
 )
@@ -61,6 +62,7 @@ type outputOptions struct {
 	allowExport                bool
 	draftMutationCompleted     bool
 	omitUnselectedMessageState bool
+	recoveryRoute              string
 }
 
 type projectionInfo struct {
@@ -72,6 +74,7 @@ type serializedProjection struct {
 	message     *messageProjection
 	draft       *draftProjection
 	attachments *[]attachmentProjection
+	drafts      *[]draftListEntryProjection
 	batch       *batchResultProjection
 	hideRaw     bool
 }
@@ -141,6 +144,26 @@ type draftProjection struct {
 	HandoffAttempt     *mail.DraftHandoffAttemptSummary `json:"handoff_attempt,omitempty"`
 }
 
+type draftListEntryProjection struct {
+	Ref             *string                          `json:"ref,omitempty"`
+	Kind            *mail.DraftKind                  `json:"kind,omitempty"`
+	AccountRef      *string                          `json:"account_ref,omitempty"`
+	Subject         *string                          `json:"subject,omitempty"`
+	From            *string                          `json:"from,omitempty"`
+	To              *[]mail.Recipient                `json:"to,omitempty"`
+	CC              *[]mail.Recipient                `json:"cc,omitempty"`
+	CreatedAt       *time.Time                       `json:"created_at,omitempty"`
+	UpdatedAt       *time.Time                       `json:"updated_at,omitempty"`
+	BodyFormat      *mail.DraftBodyFormat            `json:"body_format,omitempty"`
+	AttachmentCount *int                             `json:"attachment_count,omitempty"`
+	EverSent        *bool                            `json:"ever_sent,omitempty"`
+	SendAttempt     *mail.DraftSendAttemptSummary    `json:"send_attempt,omitempty"`
+	SaveAttempt     *mail.DraftSaveAttemptSummary    `json:"save_attempt,omitempty"`
+	HandoffAttempt  *mail.DraftHandoffAttemptSummary `json:"handoff_attempt,omitempty"`
+	StateError      *string                          `json:"state_error,omitempty"`
+	AgeDays         *int                             `json:"age_days,omitempty"`
+}
+
 type attachmentProjection struct {
 	ID         *string `json:"id,omitempty"`
 	Name       *string `json:"name,omitempty"`
@@ -188,6 +211,7 @@ type outputTooLargeError struct {
 	target            string
 	allowExport       bool
 	completedDraftRef string
+	recoveryRoute     string
 }
 
 func (e *outputTooLargeError) Error() string {
@@ -197,6 +221,9 @@ func (e *outputTooLargeError) Error() string {
 	)
 	if e.completedDraftRef != "" {
 		return fmt.Sprintf("%s; draft mutation already completed; inspect with 'mailcli drafts inspect --ref %s --view full --json' instead of repeating the mutation", message, e.completedDraftRef)
+	}
+	if e.recoveryRoute != "" {
+		return message + "; " + e.recoveryRoute
 	}
 	if e.allowExport {
 		return message + "; use --export PATH with a content-capable view for complete content or raise --max-bytes"
@@ -495,6 +522,12 @@ func projectionFieldNames(target projectionTarget) []string {
 		return []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}
 	case projectionTargetRaw:
 		return []string{"raw_source"}
+	case projectionTargetDraftList:
+		return []string{
+			"account_ref", "age_days", "attachment_count", "body_format", "cc", "created_at", "ever_sent",
+			"from", "handoff_attempt", "kind", "ref", "save_attempt", "send_attempt", "state_error",
+			"subject", "to", "updated_at",
+		}
 	case projectionTargetListPage:
 		return []string{
 			"all", "attachment_count", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id",
@@ -667,6 +700,11 @@ func requiredProjectionField(target projectionTarget, field string, contentRetai
 	case projectionTargetDraft:
 		switch field {
 		case "ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt":
+			return true
+		}
+	case projectionTargetDraftList:
+		switch field {
+		case "ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error":
 			return true
 		}
 	}
@@ -849,6 +887,49 @@ func projectedDraftData(data responseData, draft mail.Draft, options outputOptio
 	return data
 }
 
+func projectedDraftListData(data responseData, entries []draftListEntry, options outputOptions) responseData {
+	if !options.fieldsProvided {
+		return data
+	}
+	data.Projection = &projectionInfo{View: "custom", Fields: projectionFields(projectionTargetDraftList, options, false)}
+	values := make([]draftListEntryProjection, len(entries))
+	for index, entry := range entries {
+		values[index] = draftListEntryProjectionFor(entry, options)
+	}
+	data.serialization = &serializedProjection{drafts: &values}
+	return data
+}
+
+func draftListEntryProjectionFor(entry draftListEntry, options outputOptions) draftListEntryProjection {
+	projection := draftListEntryProjection{Ref: &entry.Ref}
+	if entry.StateError != "" {
+		projection.StateError = &entry.StateError
+		return projection
+	}
+	projection.Kind = &entry.Kind
+	projection.AccountRef = &entry.AccountRef
+	projection.Subject = &entry.Subject
+	projection.From = &entry.From
+	projection.To = &entry.To
+	projection.CC = &entry.CC
+	projection.BodyFormat = &entry.BodyFormat
+	projection.AttachmentCount = &entry.AttachmentCount
+	projection.EverSent = &entry.EverSent
+	projection.SendAttempt = entry.SendAttempt
+	projection.SaveAttempt = entry.SaveAttempt
+	projection.HandoffAttempt = entry.HandoffAttempt
+	if options.includes("created_at") {
+		projection.CreatedAt = &entry.CreatedAt
+	}
+	if options.includes("updated_at") {
+		projection.UpdatedAt = &entry.UpdatedAt
+	}
+	if options.includes("age_days") {
+		projection.AgeDays = &entry.AgeDays
+	}
+	return projection
+}
+
 func projectedAttachmentData(data responseData, attachments []mail.Attachment, options outputOptions) responseData {
 	data.Projection = &projectionInfo{View: options.view, Fields: projectionFields(projectionTargetAttachment, options, false)}
 	values := attachmentProjections(attachments, options)
@@ -937,7 +1018,7 @@ func writeProjectedSuccess(stdout io.Writer, command string, data responseData, 
 	if int64(len(payload)) > options.maxBytes {
 		limitErr := &outputTooLargeError{
 			actual: len(payload), limit: options.maxBytes, target: string(options.target),
-			allowExport: options.allowExport,
+			allowExport: options.allowExport, recoveryRoute: options.recoveryRoute,
 		}
 		if data.draftMutationCompleted && data.Draft != nil {
 			limitErr.completedDraftRef = data.Draft.Ref
@@ -962,15 +1043,23 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 		// An error envelope must remain parseable even when the requested view is
 		// too large. Keep the identity and recovery evidence that fits without
 		// replaying the omitted body or headers.
-		fallbackOptions := options
-		fallbackOptions.fields = map[string]struct{}{}
-		fallbackOptions.fieldsProvided = true
-		fallback := dataForProjection(data, fallbackOptions, false)
-		fallback.Projection = &projectionInfo{View: options.view, Fields: fallback.Projection.Fields}
-		payload, marshalErr = marshalEnvelope(envelope{
-			SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
-			Error: newErrorData(command, fallback, err),
-		})
+		if options.target == projectionTargetDraftList && errors.As(err, &oversized) {
+			fallback := responseData{Page: data.Page}
+			payload, marshalErr = marshalEnvelope(envelope{
+				SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
+				Error: newErrorData(command, fallback, err),
+			})
+		} else {
+			fallbackOptions := options
+			fallbackOptions.fields = map[string]struct{}{}
+			fallbackOptions.fieldsProvided = true
+			fallback := dataForProjection(data, fallbackOptions, false)
+			fallback.Projection = &projectionInfo{View: options.view, Fields: fallback.Projection.Fields}
+			payload, marshalErr = marshalEnvelope(envelope{
+				SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
+				Error: newErrorData(command, fallback, err),
+			})
+		}
 	}
 	if marshalErr != nil {
 		return 1
@@ -1001,6 +1090,10 @@ func dataForProjection(data responseData, options outputOptions, failed bool) re
 			return projectedDraftData(data, *data.Draft, options)
 		}
 		data.Projection = &projectionInfo{View: options.view, Fields: []string{}}
+	case projectionTargetDraftList:
+		if data.Drafts != nil {
+			return projectedDraftListData(data, *data.Drafts, options)
+		}
 	case projectionTargetAttachment:
 		if data.Attachments != nil {
 			return projectedAttachmentData(data, *data.Attachments, options)
@@ -1058,6 +1151,11 @@ func (data responseData) MarshalJSON() ([]byte, error) {
 			*responseDataAlias
 			Attachments *[]attachmentProjection `json:"attachments,omitempty"`
 		}{&copy, projection.attachments})
+	case data.Drafts != nil && projection.drafts != nil:
+		return json.Marshal(struct {
+			*responseDataAlias
+			Drafts *[]draftListEntryProjection `json:"drafts,omitempty"`
+		}{&copy, projection.drafts})
 	case data.BatchResult != nil && projection.batch != nil:
 		return json.Marshal(struct {
 			*responseDataAlias
