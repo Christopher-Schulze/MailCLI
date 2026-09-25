@@ -56,6 +56,87 @@ func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
 	}
 }
 
+func TestCIRunnerDocumentationMatchesWorkflow(t *testing.T) {
+	workflow := strings.ReplaceAll(readRepositoryFile(t, ".github/workflows/ci.yml"), "\r\n", "\n")
+	paragraph := ciDocumentationParagraph(t, readRepositoryFile(t, "docs/documentation.md"))
+	runners := ciWorkflowRunners(t, workflow)
+	if len(runners) == 0 {
+		t.Fatal("CI workflow declares no runner label")
+	}
+	for _, runner := range runners {
+		if !strings.Contains(paragraph, "`"+runner+"`") {
+			t.Errorf("CI documentation paragraph omits runner %q", runner)
+		}
+	}
+	commands := ciRunCommandPattern.FindAllStringSubmatch(workflow, -1)
+	if len(commands) == 0 {
+		t.Fatal("CI workflow runs no Go command")
+	}
+	for _, command := range commands {
+		if !strings.Contains(paragraph, "`"+command[1]+"`") {
+			t.Errorf("CI documentation paragraph omits command %q", command[1])
+		}
+	}
+	if strings.Contains(paragraph, "ARM64") && !strings.Contains(workflow, `test "$(uname -m)" = arm64`) {
+		t.Error("CI documentation claims ARM64 lanes but the workflow does not assert arm64")
+	}
+}
+
+func TestPublicDocumentationOmitsPrivateTaskArchivePaths(t *testing.T) {
+	paths := []string{"README.md", "docs/documentation.md", "skills/mailcli/SKILL.md"}
+	references, err := filepath.Glob(filepath.Join(repositoryRoot(t), "skills/mailcli/references/*.md"))
+	if err != nil {
+		t.Fatalf("list skill references: %v", err)
+	}
+	for _, reference := range references {
+		relative, err := filepath.Rel(repositoryRoot(t), reference)
+		if err != nil {
+			t.Fatalf("relative skill reference path: %v", err)
+		}
+		paths = append(paths, relative)
+	}
+	for _, path := range paths {
+		if strings.Contains(readRepositoryFile(t, path), "docs/tasks/done/") {
+			t.Errorf("%s links a private, untracked task archive path", path)
+		}
+	}
+}
+
+var (
+	ciRunnerPattern       = regexp.MustCompile(`(?m)^[ \t]*runs-on:[ \t]*["']?([A-Za-z0-9._-]+)["']?[ \t]*(?:#.*)?$`)
+	ciMatrixRunnerPattern = regexp.MustCompile(`(?m)^[ \t]*runs-on:[ \t]*\$\{\{[ \t]*matrix\.([A-Za-z0-9_-]+)[ \t]*\}\}`)
+	ciRunCommandPattern   = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]+)?run:[ \t]*(go [^#\n]*?)[ \t]*(?:#.*)?$`)
+)
+
+func ciWorkflowRunners(t *testing.T, workflow string) []string {
+	t.Helper()
+	var runners []string
+	for _, match := range ciRunnerPattern.FindAllStringSubmatch(workflow, -1) {
+		runners = append(runners, match[1])
+	}
+	for _, match := range ciMatrixRunnerPattern.FindAllStringSubmatch(workflow, -1) {
+		values := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(match[1]) + `:[ \t]*\[([^\]]*)\]`).FindStringSubmatch(workflow)
+		if values == nil {
+			t.Fatalf("CI matrix key %q has no inline label list", match[1])
+		}
+		for _, value := range strings.Split(values[1], ",") {
+			runners = append(runners, strings.Trim(strings.TrimSpace(value), `"'`))
+		}
+	}
+	return runners
+}
+
+func ciDocumentationParagraph(t *testing.T, documentation string) string {
+	t.Helper()
+	for _, paragraph := range strings.Split(documentation, "\n\n") {
+		if strings.Contains(paragraph, "`.github/workflows/ci.yml`") {
+			return paragraph
+		}
+	}
+	t.Fatal("product documentation has no paragraph describing .github/workflows/ci.yml")
+	return ""
+}
+
 func assertCapabilitySemantics(t *testing.T, manifest capabilityManifest) {
 	t.Helper()
 	send := findCapability(t, manifest, "drafts.send")
