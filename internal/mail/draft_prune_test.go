@@ -2,6 +2,8 @@ package mail
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -385,4 +387,145 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestPruneCandidateSelectionVisitsEachGeneratedDirectoryEntryOnce(t *testing.T) {
+	for _, count := range []int{10000, 100000} {
+		t.Run(fmt.Sprintf("entries-%d", count), func(t *testing.T) {
+			root, refs := draftSelectionFixture(t, count)
+			selection, err := collectPruneCandidates(context.Background(), root, time.Now())
+			if err != nil {
+				t.Fatalf("collectPruneCandidates() error = %v", err)
+			}
+			if selection.entryVisits != int64(count) || selection.entryVisits > 2*int64(count) {
+				t.Fatalf("entry visits = %d, want exactly %d and at most %d", selection.entryVisits, count, 2*count)
+			}
+			if len(selection.candidates) != 0 || selection.metadataBytes != 0 || len(refs) != count {
+				t.Fatalf("selection = %+v, fixture refs = %d; incomplete drafts must not become candidates", selection, len(refs))
+			}
+		})
+	}
+}
+
+func TestPruneSkipsIncompleteAndCorruptDrafts(t *testing.T) {
+	service, refs := createDraftListFixture(t, 1, 32)
+	ageDraftFile(t, service.draftRoot, refs[0], 40)
+	incompleteRef := "draft_000000000000000000000001"
+	corruptRef := "draft_000000000000000000000002"
+	fixtures := map[string]string{
+		incompleteRef: `{"ref":"draft_000000000000000000000001","subject":`,
+		corruptRef:    `{"ref":"draft_000000000000000000000002","subject":42}`,
+	}
+	for ref, content := range fixtures {
+		if err := os.WriteFile(filepath.Join(service.draftRoot, ref+".json"), []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s fixture: %v", ref, err)
+		}
+	}
+
+	result, err := service.PruneDraftsContext(context.Background(), PruneDraftsRequest{
+		OlderThan: 30 * 24 * time.Hour, Confirm: true,
+	})
+	if err != nil || len(result.Candidates) != 1 || result.Candidates[0].Ref != refs[0] ||
+		len(result.Removed) != 1 || result.Removed[0] != refs[0] {
+		t.Fatalf("PruneDraftsContext() = %+v, %v; want only the validated stale draft", result, err)
+	}
+	for ref, content := range fixtures {
+		actual, err := os.ReadFile(filepath.Join(service.draftRoot, ref+".json"))
+		if err != nil || string(actual) != content {
+			t.Fatalf("invalid draft %s changed: %q, %v", ref, actual, err)
+		}
+	}
+}
+
+func TestPruneCancellationDuringCandidateCollectionDoesNotDelete(t *testing.T) {
+	service, refs := createDraftListFixture(t, 1, 32)
+	ageDraftFile(t, service.draftRoot, refs[0], 40)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &draftListBoundaryContext{Context: base, trigger: 4, action: cancel}
+	result, err := service.PruneDraftsContext(ctx, PruneDraftsRequest{
+		OlderThan: 30 * 24 * time.Hour, Confirm: true,
+	})
+	if ctx.checks < 2 || errorCode(err) != "draft_operation_canceled" || len(result.Removed) != 0 {
+		t.Fatalf("PruneDraftsContext() = %+v, %v after %d checks; want bounded cancellation before deletion", result, err, ctx.checks)
+	}
+	if _, err := os.Stat(filepath.Join(service.draftRoot, refs[0]+".json")); err != nil {
+		t.Fatalf("canceled prune removed the draft: %v", err)
+	}
+}
+
+func TestPruneDirectoryRevisionChangeBeforeCleanupDoesNotDelete(t *testing.T) {
+	service, refs := createDraftListFixture(t, 1, 32)
+	ageDraftFile(t, service.draftRoot, refs[0], 40)
+	ctx := &draftListBoundaryContext{
+		Context: context.Background(),
+		trigger: 4,
+		action: func() {
+			marker := filepath.Join(service.draftRoot, "external-revision-change")
+			if err := os.WriteFile(marker, []byte("changed"), 0o600); err != nil {
+				t.Errorf("write revision marker: %v", err)
+				return
+			}
+			future := time.Now().Add(2 * time.Second)
+			if err := os.Chtimes(service.draftRoot, future, future); err != nil {
+				t.Errorf("advance directory revision: %v", err)
+			}
+		},
+	}
+	result, err := service.PruneDraftsContext(ctx, PruneDraftsRequest{
+		OlderThan: 30 * 24 * time.Hour, Confirm: true,
+	})
+	if ctx.checks < 2 || errorCode(err) != "prune_state_changed" || len(result.Removed) != 0 {
+		t.Fatalf("PruneDraftsContext() = %+v, %v after %d checks; want revision refusal before deletion", result, err, ctx.checks)
+	}
+	if _, err := os.Stat(filepath.Join(service.draftRoot, refs[0]+".json")); err != nil {
+		t.Fatalf("revision-changed prune removed the draft: %v", err)
+	}
+}
+
+func TestPruneCandidateMetadataLimitReturnsTypedNoDeletionError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := NewServiceWithDraftRoot(nil, root)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create draft root: %v", err)
+	}
+	subject := strings.Repeat("s", MaximumDraftSubjectBytes)
+	updatedAt := time.Now().Add(-40 * 24 * time.Hour).UTC()
+	for index := 0; index < 1024; index++ {
+		ref := fmt.Sprintf("draft_%024d", index)
+		payload, err := json.Marshal(Draft{Ref: ref, Subject: subject, UpdatedAt: updatedAt})
+		if err != nil {
+			t.Fatalf("marshal %s fixture: %v", ref, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ref+".json"), payload, 0o600); err != nil {
+			t.Fatalf("write %s fixture: %v", ref, err)
+		}
+	}
+	firstPath := filepath.Join(root, "draft_000000000000000000000000.json")
+	lastPath := filepath.Join(root, "draft_000000000000000000001023.json")
+	result, err := service.PruneDraftsContext(context.Background(), PruneDraftsRequest{
+		OlderThan: 30 * 24 * time.Hour, Confirm: true,
+	})
+	if errorCode(err) != "prune_candidate_limit_exceeded" || len(result.Candidates) != 0 || len(result.Removed) != 0 {
+		t.Fatalf("PruneDraftsContext() = %+v, %v; want typed refusal before deletion", result, err)
+	}
+	for _, path := range []string{firstPath, lastPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("candidate file missing after bounded refusal: %v", err)
+		}
+	}
+}
+
+func BenchmarkDraftPruneCandidateSelection(b *testing.B) {
+	const count = 10000
+	root, _ := draftSelectionFixture(b, count)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		selection, err := collectPruneCandidates(context.Background(), root, time.Now())
+		if err != nil || selection.entryVisits != count {
+			b.Fatalf("entry visits = %d, error = %v; want %d", selection.entryVisits, err, count)
+		}
+	}
+	b.ReportMetric(float64(count), "entry_visits/op")
 }

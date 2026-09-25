@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 type PruneCandidate struct {
@@ -35,6 +37,31 @@ type PruneDraftsResult struct {
 type PruneDraftsRequest struct {
 	OlderThan time.Duration
 	Confirm   bool
+}
+
+const (
+	maximumPruneCandidateMetadataBytes int64 = 64 << 20
+	draftPruneDirectoryBatchSize             = 256
+)
+
+type draftPruneCandidateSelection struct {
+	candidates        []PruneCandidate
+	directoryRevision string
+	entryVisits       int64
+	metadataBytes     int64
+}
+
+func (selection *draftPruneCandidateSelection) appendCandidate(candidate PruneCandidate) error {
+	metadataBytes := int64(unsafe.Sizeof(PruneCandidate{})) + int64(len(candidate.Ref)+len(candidate.Subject))
+	if metadataBytes > maximumPruneCandidateMetadataBytes-selection.metadataBytes {
+		return &OperationError{
+			Code:    "prune_candidate_limit_exceeded",
+			Message: "draft prune candidates exceed the 64 MiB metadata limit; no drafts were removed",
+		}
+	}
+	selection.candidates = append(selection.candidates, candidate)
+	selection.metadataBytes += metadataBytes
+	return nil
 }
 
 func pruneEligible(draft DraftSummary, cutoff time.Time) bool {
@@ -66,26 +93,11 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		return PruneDraftsResult{}, err
 	}
 	cutoff := time.Now().Add(-request.OlderThan)
-	result := PruneDraftsResult{DryRun: !request.Confirm}
-	listRequest := ListDraftsRequest{Limit: MaximumDraftListLimit}
-	for {
-		page, err := s.ListDrafts(ctx, listRequest)
-		if err != nil {
-			return PruneDraftsResult{}, err
-		}
-		for _, draft := range page.Drafts {
-			if !pruneEligible(draft, cutoff) {
-				continue
-			}
-			result.Candidates = append(result.Candidates, PruneCandidate{
-				Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
-			})
-		}
-		listRequest.Cursor = page.Pagination.NextCursor
-		if listRequest.Cursor == "" {
-			break
-		}
+	selection, err := collectPruneCandidates(ctx, root, cutoff)
+	if err != nil {
+		return PruneDraftsResult{}, classifyDraftContextError(ctx, err, "prune")
 	}
+	result := PruneDraftsResult{DryRun: !request.Confirm, Candidates: selection.candidates}
 	receiptCandidates, err := listExpiredSendReceipts(root, time.Now().UTC())
 	if err != nil {
 		return result, err
@@ -95,9 +107,21 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		return result, err
 	}
 	if !request.Confirm {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return PruneDraftsResult{}, err
+		}
+		if err := verifyPruneDraftRevision(root, selection.directoryRevision); err != nil {
+			return PruneDraftsResult{}, err
+		}
 		result.ExpiredReceipts = receiptCandidates
 		result.OrphanArtifacts = orphanRefs
 		return result, nil
+	}
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return PruneDraftsResult{}, err
+	}
+	if err := verifyPruneDraftRevision(root, selection.directoryRevision); err != nil {
+		return PruneDraftsResult{}, err
 	}
 	for _, candidate := range result.Candidates {
 		if err := draftContextError(ctx, "prune"); err != nil {
@@ -146,6 +170,92 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		return result, &OperationError{Code: "prune_failed", Message: "one or more drafts could not be pruned"}
 	}
 	return result, nil
+}
+
+func collectPruneCandidates(ctx context.Context, root string, cutoff time.Time) (selection draftPruneCandidateSelection, resultErr error) {
+	pinned, err := os.OpenRoot(root)
+	if err != nil {
+		return draftPruneCandidateSelection{}, fmt.Errorf("open draft directory: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, pinned.Close()) }()
+	directory, err := pinned.Open(".")
+	if err != nil {
+		return draftPruneCandidateSelection{}, fmt.Errorf("open draft listing: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
+	state := &draftStorage{rootName: root, root: pinned, directory: directory}
+	identity, err := directory.Stat()
+	if err != nil {
+		return draftPruneCandidateSelection{}, fmt.Errorf("inspect draft directory: %w", err)
+	}
+	selection.directoryRevision, err = draftListRevision(root, identity)
+	if err != nil {
+		return draftPruneCandidateSelection{}, err
+	}
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return draftPruneCandidateSelection{}, err
+	}
+	for {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return draftPruneCandidateSelection{}, err
+		}
+		names, err := directory.Readdirnames(draftPruneDirectoryBatchSize)
+		selection.entryVisits += int64(len(names))
+		if err != nil && !errors.Is(err, io.EOF) {
+			return draftPruneCandidateSelection{}, fmt.Errorf("list draft candidates: %w", err)
+		}
+		for _, name := range names {
+			if !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			ref := strings.TrimSuffix(name, ".json")
+			if !validDraftReference(ref) {
+				continue
+			}
+			draft, err := readDraftSummary(ctx, ref, state)
+			if err != nil {
+				if ctx.Err() != nil {
+					return draftPruneCandidateSelection{}, draftContextError(ctx, "prune")
+				}
+				continue
+			}
+			if draft.StateError != "" || !pruneEligible(draft, cutoff) {
+				continue
+			}
+			candidate := PruneCandidate{
+				Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
+			}
+			if err := selection.appendCandidate(candidate); err != nil {
+				return draftPruneCandidateSelection{}, err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	sort.Slice(selection.candidates, func(left int, right int) bool {
+		return selection.candidates[left].Ref < selection.candidates[right].Ref
+	})
+	return selection, nil
+}
+
+func verifyPruneDraftRevision(root string, expectedRevision string) error {
+	identity, err := os.Stat(root)
+	if err != nil {
+		return pruneDraftRevisionChangedError()
+	}
+	revision, err := draftListRevision(root, identity)
+	if err != nil || revision != expectedRevision {
+		return pruneDraftRevisionChangedError()
+	}
+	return nil
+}
+
+func pruneDraftRevisionChangedError() error {
+	return &OperationError{
+		Code:    "prune_state_changed",
+		Message: "draft directory changed before prune cleanup; no drafts were removed",
+	}
 }
 
 func listExpiredSendReceipts(root string, now time.Time) ([]string, error) {

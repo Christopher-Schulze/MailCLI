@@ -290,9 +290,9 @@ run_group \
   5x
 run_group \
   draft-directory \
-  '0/32/10000 generated draft names, first/middle/last cursors and 1/51/201 refs through the production pinned directory boundary' \
+  '0/32/10000 generated draft names through paginated selection; one-pass prune candidate selection over 10000 names' \
   ./internal/mail \
-  '^BenchmarkDraftReferenceSelection$' \
+  '^Benchmark(DraftReferenceSelection|DraftPruneCandidateSelection)$' \
   5x
 run_group \
   projected-output \
