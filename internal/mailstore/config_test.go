@@ -1,11 +1,47 @@
 package mailstore
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+const accountOrderingPreferencesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>AccountOrdering</key><array>
+<string>imap://account-one/</string><string>local://account-two/</string>
+</array></dict></plist>`
+
+const unrelatedPreferencesPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>UnrelatedPreference</key><string>unchanged</string></dict></plist>`
+
+func requirePlutil(t *testing.T) {
+	t.Helper()
+	info, err := os.Stat("/usr/bin/plutil")
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("/usr/bin/plutil is unavailable")
+	}
+	if err != nil {
+		t.Fatalf("stat /usr/bin/plutil: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		t.Skip("/usr/bin/plutil is not an executable regular file")
+	}
+}
+
+func writePreferencesFixture(t *testing.T, source string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "com.apple.mail.plist")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
 
 func TestDiscoverVersionRootSelectsHighestReadableStore(t *testing.T) {
 	t.Parallel()
@@ -100,6 +136,52 @@ func TestParseAccountOrderingXML(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "imap://951FB9AB-537B-4E97-8DCC-B241B71AD9DD/" {
 		t.Fatalf("parseAccountOrderingXML() = %#v", got)
+	}
+}
+
+func TestLoadActiveAccountURLsInvokesPlutilReadOnly(t *testing.T) {
+	requirePlutil(t)
+	path := writePreferencesFixture(t, accountOrderingPreferencesPlist)
+	got, err := loadActiveAccountURLs(context.Background(), Config{PreferencesPath: path})
+	if err != nil {
+		t.Fatalf("loadActiveAccountURLs() error = %v", err)
+	}
+	want := []string{"imap://account-one/", "local://account-two/"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("loadActiveAccountURLs() = %#v, want %#v", got, want)
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(unchanged) != accountOrderingPreferencesPlist {
+		t.Fatal("plutil invocation changed the temporary preferences fixture")
+	}
+}
+
+func TestLoadActiveAccountURLsClassifiesMissingPlistKey(t *testing.T) {
+	requirePlutil(t)
+	path := writePreferencesFixture(t, unrelatedPreferencesPlist)
+	got, err := loadActiveAccountURLs(context.Background(), Config{PreferencesPath: path})
+	if got != nil || errorCodeForTest(err) != "mail_store_preferences_unavailable" {
+		t.Fatalf("loadActiveAccountURLs() = (%#v, %v), want typed preferences-unavailable error", got, err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("loadActiveAccountURLs() error = %v, want fixture path %q", err, path)
+	}
+}
+
+func TestLoadActiveAccountURLsClassifiesContextCancellation(t *testing.T) {
+	requirePlutil(t)
+	path := writePreferencesFixture(t, accountOrderingPreferencesPlist)
+	operationContext, cancelOperation := context.WithCancel(context.Background())
+	cancelOperation()
+	got, err := loadActiveAccountURLs(operationContext, Config{PreferencesPath: path})
+	if operationContext.Err() != context.Canceled || got != nil || errorCodeForTest(err) != "mail_store_preferences_unavailable" {
+		t.Fatalf("loadActiveAccountURLs() = (%#v, %v), context error = %v", got, err, operationContext.Err())
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("loadActiveAccountURLs() error = %v, want fixture path %q", err, path)
 	}
 }
 
