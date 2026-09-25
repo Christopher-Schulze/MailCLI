@@ -10,7 +10,7 @@ require_command() {
   fi
 }
 
-for command_name in go shasum tar file size codesign diff grep wc; do
+for command_name in go shasum tar file size codesign diff grep wc awk link stat env; do
   require_command "${command_name}"
 done
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -61,15 +61,41 @@ if [[ ! "${TEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Built binary reports a malformed version: %s\n' "${TEST_VERSION}" >&2
   exit 1
 fi
-if MAILCLI_RELEASE_DIRECTORY="${TEST_ROOT}/version-mismatch" \
+assert_no_release_assets() {
+  local RELEASE_DIRECTORY="$1"
+  local VERSION="$2"
+  local ASSET_NAME
+  for ASSET_NAME in "mailcli_${VERSION}_darwin_arm64.tar.gz" SHA256SUMS SHA256SUMS.sig; do
+    if [[ -e "${RELEASE_DIRECTORY}/${ASSET_NAME}" || -L "${RELEASE_DIRECTORY}/${ASSET_NAME}" ]]; then
+      printf 'Unexpected release asset after failed build: %s\n' "${RELEASE_DIRECTORY}/${ASSET_NAME}" >&2
+      return 1
+    fi
+  done
+  if [[ -e "${RELEASE_DIRECTORY}/.mailcli-release-staging-${VERSION}" ||
+    -L "${RELEASE_DIRECTORY}/.mailcli-release-staging-${VERSION}" ]]; then
+    printf 'Unexpected release staging directory after failed build: %s\n' \
+      "${RELEASE_DIRECTORY}/.mailcli-release-staging-${VERSION}" >&2
+    return 1
+  fi
+}
+run_test_release_builder() {
+  local RELEASE_DIRECTORY="$1"
+  shift
+  env \
+    MAILCLI_RELEASE_DIRECTORY="${RELEASE_DIRECTORY}" \
+    MAILCLI_RELEASE_SIGNING_KEY="${TEST_SIGNING_KEY}" \
+    MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
+    "$@" \
+    "${MAILCLI_ROOT}/scripts/release/build-release.sh" "${TEST_VERSION}"
+}
+VERSION_MISMATCH_DIRECTORY="${TEST_ROOT}/version-mismatch"
+if MAILCLI_RELEASE_DIRECTORY="${VERSION_MISMATCH_DIRECTORY}" \
   "${MAILCLI_ROOT}/scripts/release/build-release.sh" 0.1.0 >/dev/null 2>&1; then
   printf 'Release builder accepted a version that disagrees with the binary\n' >&2
   exit 1
 fi
-MAILCLI_RELEASE_DIRECTORY="${RELEASE_DIRECTORY}" \
-  MAILCLI_RELEASE_SIGNING_KEY="${TEST_SIGNING_KEY}" \
-  MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
-  "${MAILCLI_ROOT}/scripts/release/build-release.sh" "${TEST_VERSION}"
+assert_no_release_assets "${VERSION_MISMATCH_DIRECTORY}" "0.1.0"
+run_test_release_builder "${RELEASE_DIRECTORY}"
 
 ARCHIVE="${RELEASE_DIRECTORY}/mailcli_${TEST_VERSION}_darwin_arm64.tar.gz"
 CHECKSUMS="${RELEASE_DIRECTORY}/SHA256SUMS"
@@ -83,6 +109,176 @@ go run -mod=readonly "${MAILCLI_ROOT}/cmd/mailcli-release-sign" verify \
   --public "${TEST_PUBLIC_KEY}" \
   --input "${CHECKSUMS}" \
   --signature "${SIGNATURE}"
+if [[ -e "${RELEASE_DIRECTORY}/.mailcli-release-staging-${TEST_VERSION}" ||
+  -L "${RELEASE_DIRECTORY}/.mailcli-release-staging-${TEST_VERSION}" ]]; then
+  printf 'Release builder retained staging after complete publication\n' >&2
+  exit 1
+fi
+
+TAR_BINARY="$(command -v tar)"
+STAGING_FAILURE_DIRECTORY="${TEST_ROOT}/staging-failure"
+STAGING_FAILURE_BIN="${TEST_ROOT}/staging-failure-bin"
+mkdir -p "${STAGING_FAILURE_BIN}"
+cat >"${STAGING_FAILURE_BIN}/tar" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == "-czf" ]]; then
+  printf 'injected staging ENOSPC\n' >&2
+  exit 28
+fi
+exec "${MAILCLI_TEST_REAL_TAR}" "$@"
+EOF
+chmod 0755 "${STAGING_FAILURE_BIN}/tar"
+STAGING_FAILURE_LOG="${TEST_ROOT}/staging-failure.log"
+if run_test_release_builder "${STAGING_FAILURE_DIRECTORY}" \
+  "PATH=${STAGING_FAILURE_BIN}:${PATH}" \
+  "MAILCLI_TEST_REAL_TAR=${TAR_BINARY}" >"${STAGING_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder ignored a staging ENOSPC failure\n' >&2
+  exit 1
+fi
+grep -Fq 'injected staging ENOSPC' "${STAGING_FAILURE_LOG}"
+grep -Fq 'no new final assets were published' "${STAGING_FAILURE_LOG}"
+assert_no_release_assets "${STAGING_FAILURE_DIRECTORY}" "${TEST_VERSION}"
+
+MISSING_SIGNING_KEY="${TEST_ROOT}/missing-release-signing-key"
+if [[ -e "${MISSING_SIGNING_KEY}" || -L "${MISSING_SIGNING_KEY}" ]]; then
+  printf 'Missing-key test path unexpectedly exists\n' >&2
+  exit 1
+fi
+SIGNING_FAILURE_DIRECTORY="${TEST_ROOT}/signing-failure"
+SIGNING_FAILURE_LOG="${TEST_ROOT}/signing-failure.log"
+if run_test_release_builder "${SIGNING_FAILURE_DIRECTORY}" \
+  "MAILCLI_RELEASE_SIGNING_KEY=${MISSING_SIGNING_KEY}" >"${SIGNING_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder published assets without a signing key\n' >&2
+  exit 1
+fi
+grep -Fq 'open private key' "${SIGNING_FAILURE_LOG}"
+grep -Fq 'no new final assets were published' "${SIGNING_FAILURE_LOG}"
+assert_no_release_assets "${SIGNING_FAILURE_DIRECTORY}" "${TEST_VERSION}"
+
+GO_BINARY="$(command -v go)"
+VERIFY_FAILURE_DIRECTORY="${TEST_ROOT}/verify-failure"
+VERIFY_FAILURE_BIN="${TEST_ROOT}/verify-failure-bin"
+mkdir -p "${VERIFY_FAILURE_BIN}"
+cat >"${VERIFY_FAILURE_BIN}/go" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+if [[ "${MAILCLI_TEST_TAMPER_RELEASE_SIGNATURE:-}" == "1" ]]; then
+  arguments=("$@")
+  for ((argument_index = 0; argument_index < ${#arguments[@]}; argument_index++)); do
+    if [[ "${arguments[argument_index]}" == "verify" ]]; then
+      for ((signature_index = argument_index + 1; signature_index + 1 < ${#arguments[@]}; signature_index++)); do
+        if [[ "${arguments[signature_index]}" == "--signature" ]]; then
+          if [[ "${arguments[signature_index + 1]}" == */SHA256SUMS.sig ]]; then
+            printf 'invalid injected signature\n' >"${arguments[signature_index + 1]}"
+          fi
+          break
+        fi
+      done
+      break
+    fi
+  done
+fi
+exec "${MAILCLI_TEST_REAL_GO}" "$@"
+EOF
+chmod 0755 "${VERIFY_FAILURE_BIN}/go"
+VERIFY_FAILURE_LOG="${TEST_ROOT}/verify-failure.log"
+if run_test_release_builder "${VERIFY_FAILURE_DIRECTORY}" \
+  "PATH=${VERIFY_FAILURE_BIN}:${PATH}" \
+  'MAILCLI_TEST_TAMPER_RELEASE_SIGNATURE=1' \
+  "MAILCLI_TEST_REAL_GO=${GO_BINARY}" >"${VERIFY_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder published assets after signature verification failed\n' >&2
+  exit 1
+fi
+grep -Fq 'Release checksum signature verification failed' "${VERIFY_FAILURE_LOG}"
+assert_no_release_assets "${VERIFY_FAILURE_DIRECTORY}" "${TEST_VERSION}"
+
+CP_BINARY="$(command -v cp)"
+PUBLICATION_FAILURE_DIRECTORY="${TEST_ROOT}/publication-failure"
+PUBLICATION_FAILURE_BIN="${TEST_ROOT}/publication-failure-bin"
+PUBLICATION_COPY_COUNT="${TEST_ROOT}/publication-copy-count"
+mkdir -p "${PUBLICATION_FAILURE_BIN}"
+cat >"${PUBLICATION_FAILURE_BIN}/cp" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+destination=''
+for argument in "$@"; do
+  destination="${argument}"
+done
+case "${destination}" in
+  */.publish.*)
+    count=0
+    if [[ -f "${MAILCLI_TEST_PUBLICATION_COUNT}" ]]; then
+      IFS= read -r count <"${MAILCLI_TEST_PUBLICATION_COUNT}"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${MAILCLI_TEST_PUBLICATION_COUNT}"
+    if [[ "${count}" -eq 2 ]]; then
+      printf 'injected publication ENOSPC\n' >&2
+      exit 28
+    fi
+    ;;
+esac
+exec "${MAILCLI_TEST_REAL_CP}" "$@"
+EOF
+chmod 0755 "${PUBLICATION_FAILURE_BIN}/cp"
+PUBLICATION_FAILURE_LOG="${TEST_ROOT}/publication-failure.log"
+if run_test_release_builder "${PUBLICATION_FAILURE_DIRECTORY}" \
+  "PATH=${PUBLICATION_FAILURE_BIN}:${PATH}" \
+  "MAILCLI_TEST_REAL_CP=${CP_BINARY}" \
+  "MAILCLI_TEST_PUBLICATION_COUNT=${PUBLICATION_COPY_COUNT}" \
+  >"${PUBLICATION_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder ignored a publication ENOSPC failure\n' >&2
+  exit 1
+fi
+PARTIAL_STAGE="${PUBLICATION_FAILURE_DIRECTORY}/.mailcli-release-staging-${TEST_VERSION}"
+PARTIAL_ARCHIVE="${PUBLICATION_FAILURE_DIRECTORY}/mailcli_${TEST_VERSION}_darwin_arm64.tar.gz"
+PARTIAL_CHECKSUMS="${PUBLICATION_FAILURE_DIRECTORY}/SHA256SUMS"
+PARTIAL_SIGNATURE="${PUBLICATION_FAILURE_DIRECTORY}/SHA256SUMS.sig"
+[[ -d "${PARTIAL_STAGE}" && ! -L "${PARTIAL_STAGE}" ]]
+[[ -f "${PARTIAL_ARCHIVE}" && ! -e "${PARTIAL_CHECKSUMS}" && ! -e "${PARTIAL_SIGNATURE}" ]]
+[[ ! "${PARTIAL_ARCHIVE}" -ef "${PARTIAL_STAGE}/mailcli_${TEST_VERSION}_darwin_arm64.tar.gz" ]]
+PARTIAL_STAGE_MODE="$(stat -f '%Lp' "${PARTIAL_STAGE}")"
+[[ "${PARTIAL_STAGE_MODE}" == "700" || "${PARTIAL_STAGE_MODE}" == "0700" ]]
+grep -Fq 'injected publication ENOSPC' "${PUBLICATION_FAILURE_LOG}"
+grep -Fqx "matching_final=${PARTIAL_ARCHIVE}" "${PUBLICATION_FAILURE_LOG}"
+grep -Fqx "missing_final=${PARTIAL_CHECKSUMS}" "${PUBLICATION_FAILURE_LOG}"
+grep -Fqx "missing_final=${PARTIAL_SIGNATURE}" "${PUBLICATION_FAILURE_LOG}"
+[[ "$(grep -c '^matching_final=' "${PUBLICATION_FAILURE_LOG}")" == "1" ]]
+[[ "$(grep -c '^missing_final=' "${PUBLICATION_FAILURE_LOG}")" == "2" ]]
+
+EXPECTED_PARTIAL_ARCHIVE="${TEST_ROOT}/expected-partial-archive"
+cp "${PARTIAL_ARCHIVE}" "${EXPECTED_PARTIAL_ARCHIVE}"
+DIVERGENT_ARCHIVE="${TEST_ROOT}/divergent-archive"
+DIVERGENT_ARCHIVE_COPY="${TEST_ROOT}/divergent-archive-copy"
+printf 'divergent pre-existing release asset\n' >"${DIVERGENT_ARCHIVE}"
+mv "${DIVERGENT_ARCHIVE}" "${PARTIAL_ARCHIVE}"
+cp "${PARTIAL_ARCHIVE}" "${DIVERGENT_ARCHIVE_COPY}"
+DIVERGENT_FAILURE_LOG="${TEST_ROOT}/divergent-failure.log"
+if run_test_release_builder "${PUBLICATION_FAILURE_DIRECTORY}" >"${DIVERGENT_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder accepted a divergent pre-existing asset\n' >&2
+  exit 1
+fi
+cmp -s "${DIVERGENT_ARCHIVE_COPY}" "${PARTIAL_ARCHIVE}"
+grep -Fqx "divergent_final=${PARTIAL_ARCHIVE}" "${DIVERGENT_FAILURE_LOG}"
+grep -Fqx "missing_final=${PARTIAL_CHECKSUMS}" "${DIVERGENT_FAILURE_LOG}"
+grep -Fqx "missing_final=${PARTIAL_SIGNATURE}" "${DIVERGENT_FAILURE_LOG}"
+
+RESTORED_ARCHIVE="${TEST_ROOT}/restored-partial-archive"
+cp "${EXPECTED_PARTIAL_ARCHIVE}" "${RESTORED_ARCHIVE}"
+mv "${RESTORED_ARCHIVE}" "${PARTIAL_ARCHIVE}"
+run_test_release_builder "${PUBLICATION_FAILURE_DIRECTORY}"
+cmp -s "${EXPECTED_PARTIAL_ARCHIVE}" "${PARTIAL_ARCHIVE}"
+[[ -f "${PARTIAL_CHECKSUMS}" && -f "${PARTIAL_SIGNATURE}" ]]
+[[ ! -e "${PARTIAL_STAGE}" && ! -L "${PARTIAL_STAGE}" ]]
+(
+  cd "${PUBLICATION_FAILURE_DIRECTORY}"
+  shasum -a 256 -c SHA256SUMS
+)
+go run -mod=readonly "${MAILCLI_ROOT}/cmd/mailcli-release-sign" verify \
+  --public "${TEST_PUBLIC_KEY}" \
+  --input "${PARTIAL_CHECKSUMS}" \
+  --signature "${PARTIAL_SIGNATURE}"
 
 ARCHIVE_LIST="${TEST_ROOT}/archive-list.txt"
 tar -tzf "${ARCHIVE}" >"${ARCHIVE_LIST}"
