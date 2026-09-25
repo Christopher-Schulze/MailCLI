@@ -24,10 +24,41 @@ type attachmentRecord struct {
 	Name string
 }
 
+const (
+	maximumExternalAttachmentDirectoryEntries = 10_000
+	maximumPinnedExternalAttachmentFileStats  = 10_000
+	maximumExternalAttachmentHashCandidates   = 128
+	maximumExternalAttachmentHashBytes        = int64(1 << 30)
+)
+
+type externalAttachmentDiscoveryBudget struct {
+	directoryEntries          int
+	pinnedFileStats           int
+	hashedAmbiguityCandidates int
+	hashBytes                 int64
+}
+
 type externalAttachment struct {
 	Path     string
 	Size     int64
 	identity os.FileInfo
+	budget   *externalAttachmentDiscoveryBudget
+}
+
+func (budget *externalAttachmentDiscoveryBudget) reserveHashBytes(size int64) error {
+	if size < 0 || budget.hashBytes > maximumExternalAttachmentHashBytes ||
+		size > maximumExternalAttachmentHashBytes-budget.hashBytes {
+		return externalAttachmentResourceLimit("cumulative hash bytes", maximumExternalAttachmentHashBytes)
+	}
+	budget.hashBytes += size
+	return nil
+}
+
+func externalAttachmentResourceLimit(resource string, limit int64) error {
+	return operationError(
+		"attachment_resource_limit",
+		fmt.Sprintf("external attachment discovery is incomplete: %s limit of %d exceeded", resource, limit),
+	)
 }
 
 func (s *Store) messageAttachments(
@@ -253,23 +284,64 @@ func (s *Store) findExternalAttachment(
 		return externalAttachment{}, false, externalAttachmentPathError("directory", err)
 	}
 	defer joinCloseError(&resultErr, directoryFile, "external attachment directory")
-	entries, err := directoryFile.ReadDir(-1)
-	if err != nil {
-		return externalAttachment{}, false, fmt.Errorf("list external attachment files: %w", err)
+	budget := &externalAttachmentDiscoveryBudget{}
+	entries := make([]os.DirEntry, 0, maximumExternalAttachmentDirectoryEntries)
+	directoryEnded := false
+	for len(entries) < maximumExternalAttachmentDirectoryEntries {
+		readSize := maximumExternalAttachmentDirectoryEntries - len(entries)
+		batch, readErr := directoryFile.ReadDir(readSize)
+		entries = append(entries, batch...)
+		budget.directoryEntries = len(entries)
+		if errors.Is(readErr, io.EOF) {
+			directoryEnded = true
+			break
+		}
+		if readErr != nil {
+			return externalAttachment{}, false, fmt.Errorf("list external attachment files: %w", readErr)
+		}
+		if len(batch) == 0 {
+			return externalAttachment{}, false, errors.New("external attachment directory listing made no progress")
+		}
+	}
+	if len(entries) == maximumExternalAttachmentDirectoryEntries && !directoryEnded {
+		extra, readErr := directoryFile.ReadDir(1)
+		if len(extra) > 0 {
+			budget.directoryEntries++
+			return externalAttachment{}, false, externalAttachmentResourceLimit(
+				"directory entries", maximumExternalAttachmentDirectoryEntries,
+			)
+		}
+		if !errors.Is(readErr, io.EOF) {
+			if readErr != nil {
+				return externalAttachment{}, false, fmt.Errorf("finish listing external attachment files: %w", readErr)
+			}
+			return externalAttachment{}, false, errors.New("external attachment directory listing ended without EOF")
+		}
+	}
+	if len(entries) < maximumExternalAttachmentDirectoryEntries && !directoryEnded {
+		return externalAttachment{}, false, errors.New("external attachment directory listing ended without EOF")
 	}
 	files := make([]externalAttachment, 0, len(entries))
 	nameMatches := make([]externalAttachment, 0, 1)
 	wantedName := norm.NFC.String(record.Name)
 	for _, entry := range entries {
+		if budget.pinnedFileStats >= maximumPinnedExternalAttachmentFileStats {
+			return externalAttachment{}, false, externalAttachmentResourceLimit(
+				"pinned file stats", maximumPinnedExternalAttachmentFileStats,
+			)
+		}
 		path := filepath.Join(directory, entry.Name())
 		file, fileInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, path)
 		if err != nil {
 			return externalAttachment{}, false, externalAttachmentPathError("file", err)
 		}
+		budget.pinnedFileStats++
 		if err := file.Close(); err != nil {
 			return externalAttachment{}, false, fmt.Errorf("close external attachment file: %w", err)
 		}
-		candidate := externalAttachment{Path: path, Size: fileInfo.Size(), identity: fileInfo}
+		candidate := externalAttachment{
+			Path: path, Size: fileInfo.Size(), identity: fileInfo, budget: budget,
+		}
 		files = append(files, candidate)
 		if wantedName != "" && norm.NFC.String(entry.Name()) == wantedName {
 			nameMatches = append(nameMatches, candidate)
@@ -328,9 +400,32 @@ func validAttachmentID(value string) bool {
 }
 
 func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalAttachment, bool, error) {
+	if len(files) > maximumExternalAttachmentHashCandidates {
+		return externalAttachment{}, false, externalAttachmentResourceLimit(
+			"hashed ambiguity candidates", maximumExternalAttachmentHashCandidates,
+		)
+	}
+	if len(files) == 0 {
+		return externalAttachment{}, false, operationError(
+			"ambiguous_attachment", "external attachment candidate set is empty",
+		)
+	}
+	budget := files[0].budget
+	if budget == nil {
+		budget = &externalAttachmentDiscoveryBudget{}
+	}
+	for index := range files {
+		files[index].budget = budget
+	}
 	sort.Slice(files, func(left int, right int) bool { return files[left].Path < files[right].Path })
 	var expected [sha256.Size]byte
 	for index, file := range files {
+		if budget.hashedAmbiguityCandidates >= maximumExternalAttachmentHashCandidates {
+			return externalAttachment{}, false, externalAttachmentResourceLimit(
+				"hashed ambiguity candidates", maximumExternalAttachmentHashCandidates,
+			)
+		}
+		budget.hashedAmbiguityCandidates++
 		digest, err := s.hashStoreFile(file)
 		if err != nil {
 			return externalAttachment{}, false, err
@@ -357,9 +452,23 @@ func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]
 	if !sameExternalAttachment(selected, opened) {
 		return result, operationError("store_changed", "external attachment changed before hashing")
 	}
+	budget := selected.budget
+	if budget == nil {
+		budget = &externalAttachmentDiscoveryBudget{}
+	}
+	if err := budget.reserveHashBytes(selected.Size); err != nil {
+		return result, err
+	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	copied, err := io.CopyN(hash, file, selected.Size)
+	if errors.Is(err, io.EOF) {
+		return result, operationError("store_changed", "external attachment ended before its pinned size")
+	}
+	if err != nil {
 		return result, fmt.Errorf("hash external attachment: %w", err)
+	}
+	if copied != selected.Size {
+		return result, operationError("store_changed", "external attachment ended before its pinned size")
 	}
 	final, err := file.Stat()
 	if err != nil || opened.Size() != final.Size() || !opened.ModTime().Equal(final.ModTime()) {

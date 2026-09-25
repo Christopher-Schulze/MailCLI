@@ -1,6 +1,7 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -143,6 +144,73 @@ func TestMessageAttachmentsRejectSymlinkedExternalBytes(t *testing.T) {
 	_, err = store.messageAttachments(context.Background(), resolved, source, map[string]mimePart{})
 	if errorCodeForTest(err) != "ambiguous_attachment" {
 		t.Fatalf("messageAttachments() error = %v, want ambiguous_attachment", err)
+	}
+}
+
+func TestMessageAttachmentsKeepExternalPrecedenceForCompleteInlinePart(t *testing.T) {
+	store, messageRef, resolved, directory := newExternalAttachmentFixture(t)
+	writeCompleteInlineAttachmentMessage(t, store, resolved)
+	inlineMessage, err := store.GetMessage(context.Background(), messageRef)
+	if err != nil || !inlineMessage.ContentComplete || len(inlineMessage.Attachments) != 1 ||
+		!inlineMessage.Attachments[0].Downloaded {
+		t.Fatalf("GetMessage() without external bytes = %+v, error = %v; want complete inline attachment",
+			inlineMessage, err)
+	}
+	externalBytes := []byte("external bytes override inline MIME")
+	if err := os.WriteFile(filepath.Join(directory, "invoice.pdf"), externalBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile(external attachment) error = %v", err)
+	}
+	message, err := store.GetMessage(context.Background(), messageRef)
+	if err != nil || !message.ContentComplete || len(message.Attachments) != 1 ||
+		!message.Attachments[0].Downloaded || !message.Attachments[0].SizeKnown ||
+		message.Attachments[0].Size != int64(len(externalBytes)) {
+		t.Fatalf("GetMessage() = %+v, error = %v; want complete inline content and external size %d",
+			message, err, len(externalBytes))
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	evidence, err := store.saveAttachmentToWithEvidence(
+		context.Background(), messageRef, "2", output,
+	)
+	if err != nil {
+		t.Fatalf("saveAttachmentToWithEvidence() error = %v", err)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("ReadFile(saved attachment) error = %v", err)
+	}
+	if !bytes.Equal(got, externalBytes) || evidence.Size != int64(len(externalBytes)) {
+		t.Fatalf("saved attachment = %q with evidence %+v; want external bytes %q",
+			got, evidence, externalBytes)
+	}
+}
+
+func TestMessageAttachmentsFailClosedOnExternalDirectoryLimit(t *testing.T) {
+	store, messageRef, resolved, directory := newExternalAttachmentFixture(t)
+	writeCompleteInlineAttachmentMessage(t, store, resolved)
+	inlineMessage, err := store.GetMessage(context.Background(), messageRef)
+	if err != nil || !inlineMessage.ContentComplete || len(inlineMessage.Attachments) != 1 ||
+		!inlineMessage.Attachments[0].Downloaded {
+		t.Fatalf("GetMessage() without external candidates = %+v, error = %v; want complete inline attachment",
+			inlineMessage, err)
+	}
+	createExternalAttachmentHardLinks(
+		t, store, directory, maximumExternalAttachmentDirectoryEntries+1,
+	)
+	partialMessage, err := store.GetMessage(context.Background(), messageRef)
+	if errorCodeForTest(err) != "attachment_resource_limit" || len(partialMessage.Attachments) != 0 {
+		t.Fatalf("GetMessage() = %+v, error = %v; want no partial result and typed limit",
+			partialMessage, err)
+	}
+	if safeTargetedFallback(err) {
+		t.Fatalf("safeTargetedFallback(%v) = true; a partial directory scan must not hydrate over IMAP", err)
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	_, err = store.saveAttachmentToWithEvidence(context.Background(), messageRef, "2", output)
+	if errorCodeForTest(err) != "attachment_resource_limit" {
+		t.Fatalf("saveAttachmentToWithEvidence() error = %v, want attachment_resource_limit", err)
+	}
+	if _, err := os.Lstat(output); !os.IsNotExist(err) {
+		t.Fatalf("output exists after incomplete external discovery: %v", err)
 	}
 }
 

@@ -211,6 +211,12 @@ run_group \
   '^Benchmark(SkipVsFullAttachment1MiB|ReadRawHeaders|HydratedSource)$' \
   5x
 run_group \
+  attachment-discovery \
+  '1024 external entries with one name match and 128 identical ambiguity candidates' \
+  ./internal/mailstore \
+  '^BenchmarkExternalAttachmentDiscovery$' \
+  5x
+run_group \
   search-fixture \
   'generated 603-message store; first 25-result metadata, default body, and explicit exact-count body pages' \
   ./internal/mailstore \
