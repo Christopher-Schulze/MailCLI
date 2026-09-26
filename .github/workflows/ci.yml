@@ -38,4 +38,4 @@ jobs:
       - name: build
         run: go build ./...
       - name: full verification
-        run: scripts/tests/test.sh
+        run: scripts/tests/test.sh --full

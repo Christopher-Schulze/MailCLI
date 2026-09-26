@@ -2,17 +2,31 @@
 set -euo pipefail
 
 # Executed from the lease baseline, never from the staged patch itself.
-[[ "$#" -eq 4 || ( "$#" -ge 6 && "$5" == --checks ) ]] || {
-  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--checks REGISTERED_PATH...]\n' >&2; exit 2;
+[[ "$#" -eq 4 || ( "$#" -eq 5 && ( "$5" == --fast || "$5" == --full ) ) || ( "$#" -ge 6 && "$5" == --checks ) ]] || {
+  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--fast|--full|--checks REGISTERED_PATH...]\n' >&2; exit 2;
 }
 SOURCE_ROOT="$1"
 BASELINE_HEAD="$2"
 INDEX_TREE="$3"
 TASK_IDS="$4"
 shift 4
+FAST_SHELL_ONLY=false
+if [[ "${1:-}" == --fast ]]; then
+  if git -C "${SOURCE_ROOT}" cat-file -e "${BASELINE_HEAD}:go.mod" 2>/dev/null ||
+    git -C "${SOURCE_ROOT}" cat-file -e "${INDEX_TREE}:go.mod" 2>/dev/null; then
+    GIT_DIRECTORY="$(git -C "${SOURCE_ROOT}" rev-parse --absolute-git-dir)"
+    LINT_RECEIPT=""
+    [[ ! -d "${GIT_DIRECTORY}/mailcli-write-lease" ]] || LINT_RECEIPT="${GIT_DIRECTORY}/mailcli-write-lease/lint_identity"
+    exec "$(dirname "${BASH_SOURCE[0]}")/run-fast-gate.sh" "${SOURCE_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --fast \
+      "${LINT_RECEIPT}" "${TASK_IDS}"
+  fi
+  # A shell-only product has no Go analysis; its registered shell checks remain required.
+  FAST_SHELL_ONLY=true
+fi
 GATE_TIER=full
 SELECTED_CASES=()
 if [[ "${1:-}" == --checks ]]; then GATE_TIER=targeted; shift; SELECTED_CASES=("$@"); fi
+[[ "${FAST_SHELL_ONLY}" == false ]] || GATE_TIER=targeted
 for VARIABLE in $(git rev-parse --local-env-vars); do unset "${VARIABLE}"; done
 unset MAILCLI_WRITE_ROOT MAILCLI_GATE_RECEIPTS
 umask 077
@@ -102,6 +116,9 @@ done <"${TEST_ROOT}/baseline-live"
 
 cp "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/executed-cases"
 if [[ "${GATE_TIER}" == targeted ]]; then
+  if [[ "${FAST_SHELL_ONLY}" == true ]]; then
+    while IFS= read -r CASE_PATH; do SELECTED_CASES+=("${CASE_PATH}"); done <"${TEST_ROOT}/staged-cases"
+  fi
   printf '%s\n' "${SELECTED_CASES[@]}" >"${TEST_ROOT}/executed-cases"
   [[ -z "$(LC_ALL=C sort "${TEST_ROOT}/executed-cases" | uniq -d)" ]] || fail 'Duplicate selected check'
   while IFS= read -r CASE_PATH; do
@@ -109,7 +126,7 @@ if [[ "${GATE_TIER}" == targeted ]]; then
   done <"${TEST_ROOT}/executed-cases"
   MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}" --checks "${SELECTED_CASES[@]}"
 else
-  MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}"
+  MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}" --full-checks
 fi
 : >"${TEST_ROOT}/expected-receipts"
 if [[ "${GATE_TIER}" == full ]]; then

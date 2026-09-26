@@ -6,5 +6,8 @@ linters:
     generated: disable
 formatters:
   enable: [gofmt]
+  settings:
+    gofmt:
+      simplify: false
   exclusions:
     generated: disable

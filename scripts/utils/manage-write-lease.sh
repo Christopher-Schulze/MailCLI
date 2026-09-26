@@ -10,7 +10,8 @@ usage() {
     '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN [--diff]' \
-    '  manage-write-lease.sh gate TOKEN [--checks REGISTERED_PATH...]' \
+    '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH...]' \
+    '  manage-write-lease.sh push-check' \
     '  manage-write-lease.sh release TOKEN' \
     '  manage-write-lease.sh abort TOKEN'
 }
@@ -40,7 +41,7 @@ remove_lease_files() {
   for NAME in task owner_session token acquired_at baseline_head \
     allowed_paths allowed_fingerprints \
     ignored_asset_fingerprints \
-    reviewed_digest reviewed_patch_sha256 \
+    reviewed_digest reviewed_patch_sha256 lint_identity \
     gate_patch_sha256 gate_index_tree \
     gate_harness gate_tier gate_shell_receipts changed_paths; do
     rm -f "${LEASE_DIRECTORY}/${NAME}"
@@ -146,7 +147,7 @@ verify_ignored_asset_scope() {
       $1 == "docs/tasks.md" || $1 == "docs/tasks" || index($1, "docs/tasks/") == 1 { next }
       !($1 in allowed)' \
       "$(lease_file allowed_paths)" "${BASELINE}") \
-    <(printf '%s\n' "${CURRENT}" |
+    <(printf '%s' "${CURRENT}" |
       awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
         "$(lease_file allowed_paths)" -))"; then
     return 0
@@ -371,6 +372,21 @@ review_lease() {
     fail "HEAD changed after lease acquisition; stop and inspect the concurrent commit"
   verify_staged_scope
 
+  local INDEX_TREE
+  local LINT_REQUIRED=false
+  local PATH_NAME
+  while IFS= read -r PATH_NAME; do
+    case "${PATH_NAME}" in *.go | go.mod | go.sum | .golangci.yml) LINT_REQUIRED=true ;; esac
+    [[ "${PATH_NAME}" != *.sh || ! -f "${MAILCLI_ROOT}/${PATH_NAME}" ]] || bash -n "${MAILCLI_ROOT}/${PATH_NAME}"
+  done <"$(lease_file changed_paths)"
+  if [[ "${LINT_REQUIRED}" == true ]]; then
+    INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
+    "${MAILCLI_ROOT}/scripts/utils/run-fast-gate.sh" "${MAILCLI_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --lint-only "$(lease_file lint_identity)" "$(<"$(lease_file task)")"
+    [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" &&
+      "$(git -C "${MAILCLI_ROOT}" write-tree)" == "${INDEX_TREE}" ]] || fail 'Review source changed during lint'
+    verify_staged_scope
+  fi
+
   local RELATIVE_PATH
   local BASELINE_FINGERPRINT
   local CURRENT_FINGERPRINT
@@ -415,10 +431,16 @@ review_lease() {
 gate_lease() {
   local TOKEN="$1"
   shift
-  local GATE_TIER=full
+  local GATE_TIER=fast
+  local GATE_ARGS=(--fast)
   if [[ "$#" -gt 0 ]]; then
-    [[ "$#" -ge 2 && "$1" == --checks ]] || fail 'Gate selection requires --checks and registered paths'
-    GATE_TIER=targeted
+    if [[ "$#" -eq 1 && ( "$1" == --fast || "$1" == --full ) ]]; then
+      GATE_TIER="${1#--}"
+    else
+      [[ "$#" -ge 2 && "$1" == --checks ]] || fail 'Gate requires --fast, --full, or registered --checks paths'
+      GATE_TIER=targeted
+    fi
+    GATE_ARGS=("$@")
   fi
   require_token "${TOKEN}"
   [[ -f "$(lease_file reviewed_digest)" ]] || fail "Review the staged TASK patch before the full gate"
@@ -451,10 +473,10 @@ gate_lease() {
   trap 'rm -rf -- "${HARNESS_DIR}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils/run-staged-gate.sh |
+  git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils |
     tar -x -C "${HARNESS_DIR}"
   "${HARNESS_DIR}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
-    "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
+    "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "${GATE_ARGS[@]}" |
     tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
   GATE_HARNESS_MODE="$(sed -n 's/^gate_harness=//p' "${HARNESS_DIR}/gate-output")"
   trap - INT TERM
@@ -558,6 +580,10 @@ case "${COMMAND}" in
   status)
     [[ "$#" -eq 1 ]] || fail "status accepts no additional arguments"
     status_lease
+    ;;
+  push-check)
+    [[ "$#" -eq 1 ]] || fail 'push-check accepts no additional arguments'
+    "${MAILCLI_ROOT}/scripts/utils/manage-full-proof.sh" check "${MAILCLI_ROOT}"
     ;;
   gate)
     [[ "$#" -ge 2 ]] || fail 'gate requires a lease token'

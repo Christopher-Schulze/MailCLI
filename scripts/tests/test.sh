@@ -16,6 +16,7 @@ SHELL_TESTS=(
   scripts/tests/test-release-authority.sh
   scripts/tests/test-staged-gate.sh
   scripts/tests/test-verification-policy.sh
+  scripts/tests/test-fast-gate.sh
   scripts/tests/test-release.sh
 )
 LIVE_SHELL_TESTS=(scripts/tests/test-live-responsiveness.sh)
@@ -23,8 +24,14 @@ case "${1:-}" in
   --list-shell-tests) printf '%s\n' "${SHELL_TESTS[@]}"; exit 0 ;;
   --list-live-shell-tests) printf '%s\n' "${LIVE_SHELL_TESTS[@]}"; exit 0 ;;
   --core-source | --core-only) ;;
+  --full) exec "${MAILCLI_ROOT}/scripts/utils/manage-full-proof.sh" run "${MAILCLI_ROOT}" ;;
+  --push-check) exec "${MAILCLI_ROOT}/scripts/utils/manage-full-proof.sh" check "${MAILCLI_ROOT}" ;;
+  --full-checks) ;;
+  --fast | '')
+    INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
+    exec "${MAILCLI_ROOT}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
+      "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" "${INDEX_TREE}" 506 --fast ;;
   --checks) [[ "$#" -ge 2 ]] || { printf 'Specify at least one registered check\n' >&2; exit 2; } ;;
-  '') ;;
   *) printf 'Unknown verification argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 
@@ -192,6 +199,7 @@ run_shell_test scripts/tests/test-commit-authority.sh
 run_shell_test scripts/tests/test-release-authority.sh
 run_shell_test scripts/tests/test-staged-gate.sh
 run_shell_test scripts/tests/test-verification-policy.sh
+run_shell_test scripts/tests/test-fast-gate.sh
 RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
   refs/heads refs/remotes refs/tags)"
 run_shell_test scripts/tests/test-release.sh

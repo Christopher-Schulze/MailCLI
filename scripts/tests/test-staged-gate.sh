@@ -105,7 +105,9 @@ run_gate() {
   SOURCE_HEAD="$(git -C "${REPOSITORY}" rev-parse HEAD)"
   SOURCE_DIFF="$(git -C "${REPOSITORY}" diff --binary)"
   SOURCE_REFS="$(git -C "${REPOSITORY}" for-each-ref --format='%(refname) %(objectname)')"
-  "${GATE_TOOL}" "${REPOSITORY}" "${BASELINE_HEAD}" "${SOURCE_INDEX}" "${TASK_IDS}" "${@:4}" \
+  local GATE_ARGS=(--full)
+  [[ "$#" -le 3 ]] || GATE_ARGS=("${@:4}")
+  "${GATE_TOOL}" "${REPOSITORY}" "${BASELINE_HEAD}" "${SOURCE_INDEX}" "${TASK_IDS}" "${GATE_ARGS[@]}" \
     >"${TEST_ROOT}/output" 2>&1 || STATUS=$?
   [[ "${STATUS}" == "${EXPECTED_STATUS}" ]] || {
     printf 'Staged fixture expected status %s, got %s\n' "${EXPECTED_STATUS}" "${STATUS}" >&2
@@ -284,7 +286,7 @@ printf 'scripts/tests/test-new.sh\n' >>"${REPOSITORY}/scripts/tests/cases"
 stage_all
 MAILCLI_WRITE_ROOT="${REPOSITORY}" "${REPOSITORY}/scripts/utils/manage-write-lease.sh" review "${TOKEN}" >/dev/null
 STATUS=0
-MAILCLI_WRITE_ROOT="${REPOSITORY}" "${REPOSITORY}/scripts/utils/manage-write-lease.sh" gate "${TOKEN}" \
+MAILCLI_WRITE_ROOT="${REPOSITORY}" "${REPOSITORY}/scripts/utils/manage-write-lease.sh" gate "${TOKEN}" --checks scripts/tests/test-new.sh \
   >"${TEST_ROOT}/lease-output" 2>&1 || STATUS=$?
 [[ "${STATUS}" == 23 && ! -e "${REPOSITORY}/.git/mailcli-write-lease/gate_patch_sha256" ]]
 reset_fixture

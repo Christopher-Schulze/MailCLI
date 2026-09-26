@@ -83,7 +83,7 @@ func TestCIRunnerDocumentationMatchesWorkflow(t *testing.T) {
 	if len(runners) != 1 || runners[0] != "macos-26" {
 		t.Errorf("CI must declare one supported ARM64 runner, got %v", runners)
 	}
-	if !strings.Contains(workflow, "run: scripts/tests/test.sh") || !strings.Contains(paragraph, "`scripts/tests/test.sh`") {
+	if !strings.Contains(workflow, "run: scripts/tests/test.sh --full") || !strings.Contains(paragraph, "`scripts/tests/test.sh --full`") {
 		t.Error("CI and its documentation must use the supported full verification entry point")
 	}
 	pin := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindStringSubmatch(readRepositoryFile(t, "go.mod"))
