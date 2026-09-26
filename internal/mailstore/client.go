@@ -215,7 +215,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 		}
 	}
 	if c.send.ImapClient() != nil {
-		rawSource, size, summary, rawErr := c.hydrateMessageSource(ctx, ref, false)
+		rawSource, size, summary, rawErr := c.hydrateMessageSource(ctx, ref)
 		if rawErr == nil {
 			if size > 0 {
 				message, err := messageFromRawReader(ctx, local, summary, rawSource)
@@ -311,7 +311,7 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref)
 		if rawErr != nil {
 			return "", newHydrationError("read raw source", localErr, rawErr)
 		}
@@ -344,7 +344,7 @@ func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Write
 		localErr = err
 	}
 	if c.send.ImapClient() != nil {
-		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, ref)
 		if rawErr != nil {
 			return newHydrationError("write raw source", localErr, rawErr)
 		}
@@ -405,7 +405,7 @@ func (c *Client) SaveAttachmentToWithEvidence(
 		}
 	}
 	if c.send.ImapClient() != nil {
-		source, size, _, rawErr := c.hydrateMessageSource(ctx, messageRef, true)
+		source, size, _, rawErr := c.hydrateMessageSource(ctx, messageRef)
 		if rawErr != nil {
 			return mail.AttachmentEvidence{}, newHydrationError("save attachment", localErr, rawErr)
 		}

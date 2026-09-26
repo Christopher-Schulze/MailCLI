@@ -123,7 +123,7 @@ func TestHydrationFetchCompletesAfterLocalReadDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), mail.LocalReadTimeout+transport.TransferBudgetCap)
 	defer cancel()
 
-	source, gotSize, _, err := client.hydrateMessageSource(ctx, ref, false)
+	source, gotSize, _, err := client.hydrateMessageSource(ctx, ref)
 	if err != nil {
 		t.Fatalf("hydrateMessageSource() error = %v", err)
 	}
@@ -152,7 +152,7 @@ func TestStalledHydrationFetchEndsAtComputedBudget(t *testing.T) {
 	operator.fetchClock = &hydrationFakeClock{}
 	operator.stallFetch = true
 
-	_, _, _, err := client.hydrateMessageSource(context.Background(), ref, false)
+	_, _, _, err := client.hydrateMessageSource(context.Background(), ref)
 	wantBudget := transport.TransferBudgetForSize(mail.MaximumRawSourceBytes)
 	if !errors.Is(err, context.DeadlineExceeded) || transport.ErrorCode(err) != operationTimeoutCode {
 		t.Fatalf("stalled hydration error = %v (code %q), want bounded timeout", err, transport.ErrorCode(err))
@@ -206,6 +206,15 @@ func hydrationReaderFixture(t *testing.T, raw string) (*Client, string, *sourceI
 	operator := &sourceImapOperator{stubImapOperator: &stubImapOperator{raw: []byte(raw), boxes: []transport.MailboxInfo{{Name: "INBOX"}}, uid: 101}, directory: t.TempDir()}
 	client := &Client{store: store, send: mail.SendTransport{Imap: operator, Credentials: stubCredentials{"identity@gmail.com": "secret"}}}
 	return client, ref, operator
+}
+
+func TestHydrateMessageBytesPreservesBytesAndBound(t *testing.T) {
+	const raw = "Subject: bounded byte fixture\r\n\r\ncomplete body"
+	client, ref, operator := hydrationReaderFixture(t, raw)
+	got, err := client.HydrateMessageBytes(context.Background(), ref)
+	if err != nil || string(got) != raw || operator.lastFetchMax != mail.MaximumRawSourceBytes {
+		t.Fatalf("byte hydration = %q, %v, bound=%d", got, err, operator.lastFetchMax)
+	}
 }
 
 func TestHydrationConsumersUseOwnedReaders(t *testing.T) {

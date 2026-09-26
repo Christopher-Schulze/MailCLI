@@ -158,7 +158,7 @@ func (c *Client) getMessageHeaders(ctx context.Context, ref string) (mail.Messag
 	if !safeTargetedFallback(localErr) || c.send.ImapClient() == nil {
 		return local, localErr
 	}
-	source, _, summary, remoteErr := c.hydrateMessageSource(ctx, ref, false)
+	source, _, summary, remoteErr := c.hydrateMessageSource(ctx, ref)
 	if remoteErr != nil {
 		return local, newHydrationError("read message headers", localErr, remoteErr)
 	}
@@ -209,7 +209,7 @@ func (c *Client) getMessageAttachments(ctx context.Context, ref string) (mail.Me
 	if c.send.ImapClient() == nil {
 		return mail.Message{}, localErr
 	}
-	source, size, summary, remoteErr := c.hydrateMessageSource(ctx, ref, false)
+	source, size, summary, remoteErr := c.hydrateMessageSource(ctx, ref)
 	if remoteErr == nil {
 		if size > 0 {
 			message, parseErr := messageFromRawReaderWithIntent(ctx, local, summary, source, mail.MessageReadIntentAttachments)

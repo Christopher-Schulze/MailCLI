@@ -24,7 +24,7 @@ func hydrationFetchContext(ctx context.Context, maximum int64) (context.Context,
 	return context.WithTimeout(ctx, transport.TransferBudgetForSize(maximum))
 }
 
-func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string, enforceRawCap bool) (io.ReadSeekCloser, int64, mail.MessageSummary, error) {
+func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string) (io.ReadSeekCloser, int64, mail.MessageSummary, error) {
 	resolveCtx, cancelResolve := localReadContext(ctx)
 	target, err := c.resolveImapTarget(resolveCtx, messageRef)
 	cancelResolve()
@@ -35,7 +35,7 @@ func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string, en
 	if operator == nil {
 		return nil, 0, target.summary, &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "IMAP operator is not configured"}
 	}
-	bound := rawFetchBound(enforceRawCap)
+	bound := rawFetchBound()
 	fetchCtx, cancelFetch := hydrationFetchContext(ctx, bound)
 	defer cancelFetch()
 	var source io.ReadSeekCloser
