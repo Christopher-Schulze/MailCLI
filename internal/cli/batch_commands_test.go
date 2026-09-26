@@ -219,6 +219,82 @@ func writeBatchInput(t *testing.T, request mail.BatchRequest) string {
 	return inputPath
 }
 
+func TestBatchProjectionErrorsNameIndexedJSONPath(t *testing.T) {
+	for _, test := range []struct {
+		name, field string
+		item        mail.BatchItem
+	}{
+		{name: "empty", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{})}},
+		{name: "empty element", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{""})}},
+		{name: "unknown", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{"unknown"})}},
+		{name: "duplicate", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{"summary", "summary"})}},
+		{name: "mixed all", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{"all", "summary"})}},
+		{name: "comma", field: "fields", item: mail.BatchItem{Fields: stringSlicePointer([]string{"summary,content"})}},
+		{name: "conflict", field: "fields", item: mail.BatchItem{View: stringPointer("metadata"), Fields: stringSlicePointer([]string{"summary"})}},
+		{name: "view", field: "view", item: mail.BatchItem{View: stringPointer("unknown")}},
+	} {
+		for _, index := range []int{0, 3} {
+			for _, jsonOutput := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/index%d/json%t", test.name, index, jsonOutput), func(t *testing.T) {
+					assertBatchProjectionErrorBeforeRetrieval(t, test.item, index, test.field, jsonOutput)
+				})
+			}
+		}
+	}
+}
+
+func assertBatchProjectionErrorBeforeRetrieval(t *testing.T, item mail.BatchItem, index int, field string, jsonOutput bool) {
+	t.Helper()
+	items := make([]mail.BatchItem, index+1)
+	for preceding := range items {
+		items[preceding] = mail.BatchItem{ID: fmt.Sprintf("preceding-%d", preceding), Ref: "msg_ref"}
+	}
+	item.ID, item.Ref = "target-item", "msg_ref"
+	items[index] = item
+	inputPath := writeBatchInput(t, mail.BatchRequest{Operation: mail.BatchOperationRead, Items: items})
+	gateway := &projectionGateway{message: projectionMessage()}
+	args := []string{"batch", "--input", inputPath}
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	code, output, stderr := runProjectionCommand(t, gateway, args...)
+	message := stderr
+	if jsonOutput {
+		var response envelope
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error == nil || response.Error.Code != "invalid_argument" || response.OK || stderr != "" {
+			t.Fatalf("batch error envelope=%+v stderr=%q", response, stderr)
+		}
+		message = response.Error.Message
+	} else if output != "" {
+		t.Fatalf("human validation wrote stdout: %q", output)
+	}
+	if code != 2 || gateway.getCalls != 0 || !strings.Contains(message, fmt.Sprintf("items[%d].%s", index, field)) ||
+		!strings.Contains(message, `item "target-item"`) || strings.Contains(message, "--fields") || strings.Contains(message, "--view") {
+		t.Fatalf("batch error: code=%d calls=%d message=%q", code, gateway.getCalls, message)
+	}
+}
+
+func TestBatchProjectionSerializationErrorsNameIndexedJSONPath(t *testing.T) {
+	items := make([]mail.BatchItem, 4)
+	results := make([]mail.BatchItemResult, 4)
+	for index := range items {
+		id := fmt.Sprintf("item-%d", index)
+		items[index] = mail.BatchItem{ID: id, Ref: "msg_ref"}
+		results[index] = mail.BatchItemResult{ID: id, State: mail.BatchItemCompleted}
+	}
+	items[3].Fields = stringSlicePointer([]string{})
+	result := mail.BatchResult{Operation: mail.BatchOperationRead, Items: results}
+	projection, err := projectBatchResult(result, items, defaultJSONOutputBytes, true, true, true, true)
+	if err == nil || projection != nil || errorCode(err) != "invalid_argument" ||
+		!strings.Contains(err.Error(), "items[3].fields") || !strings.Contains(err.Error(), `item "item-3"`) ||
+		strings.Contains(err.Error(), "--fields") {
+		t.Fatalf("serialization projection=%+v error=%v", projection, err)
+	}
+}
+
 func stringPointer(value string) *string {
 	return &value
 }

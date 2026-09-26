@@ -359,29 +359,54 @@ func projectionViewError(target projectionTarget, view string) string {
 	}
 }
 
+type projectionInputKind uint8
+
+const (
+	projectionInputFlag projectionInputKind = iota
+	projectionInputBatchItem
+)
+
+type projectionInputSource struct {
+	kind      projectionInputKind
+	itemIndex int
+	itemID    string
+}
+
+func projectionValidationError(source projectionInputSource, field, detail string) error {
+	name := "--" + field
+	if source.kind == projectionInputBatchItem {
+		name = fmt.Sprintf("batch read item %q at items[%d].%s", source.itemID, source.itemIndex, field)
+	}
+	return &commandError{code: "invalid_argument", message: name + " " + detail}
+}
+
 func parseProjectionFields(target projectionTarget, value string) (map[string]struct{}, error) {
+	return parseProjectionFieldsFrom(target, value, projectionInputSource{kind: projectionInputFlag})
+}
+
+func parseProjectionFieldsFrom(target projectionTarget, value string, source projectionInputSource) (map[string]struct{}, error) {
 	if strings.TrimSpace(value) == "" {
-		return nil, &commandError{code: "invalid_argument", message: "--fields must contain at least one field"}
+		return nil, projectionValidationError(source, "fields", "must contain at least one field")
 	}
 	allowed := projectionFieldNames(target)
 	fields := make(map[string]struct{})
 	for _, raw := range strings.Split(value, ",") {
 		field := strings.ToLower(strings.TrimSpace(raw))
 		if field == "" {
-			return nil, &commandError{code: "invalid_argument", message: "--fields contains an empty field"}
+			return nil, projectionValidationError(source, "fields", "contains an empty field")
 		}
 		if !slices.Contains(allowed, field) {
-			return nil, &commandError{code: "invalid_argument", message: fmt.Sprintf(
-				"unknown %s field %q; allowed fields: %s", target, field, strings.Join(allowed, ", "),
-			)}
+			return nil, projectionValidationError(source, "fields", fmt.Sprintf(
+				"contains unknown %s field %q; allowed fields: %s", target, field, strings.Join(allowed, ", "),
+			))
 		}
 		if _, duplicate := fields[field]; duplicate {
-			return nil, &commandError{code: "invalid_argument", message: fmt.Sprintf("duplicate %s field %q", target, field)}
+			return nil, projectionValidationError(source, "fields", fmt.Sprintf("contains duplicate %s field %q", target, field))
 		}
 		fields[field] = struct{}{}
 	}
 	if _, all := fields["all"]; all && len(fields) > 1 {
-		return nil, &commandError{code: "invalid_argument", message: "all cannot be combined with other fields"}
+		return nil, projectionValidationError(source, "fields", "cannot combine all with other fields")
 	}
 	return fields, nil
 }
@@ -416,21 +441,22 @@ func pageProjectionOptions(
 	return fields, &projectionInfo{View: "custom", Fields: selected}, nil
 }
 
-func batchReadOutputOptions(item mail.BatchItem, maxBytes int64) (outputOptions, error) {
+func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (outputOptions, error) {
+	source := projectionInputSource{kind: projectionInputBatchItem, itemIndex: index, itemID: item.ID}
 	options := outputOptions{target: projectionTargetMessage, view: outputViewFull, maxBytes: maxBytes}
 	if item.View != nil {
 		options.view = strings.ToLower(strings.TrimSpace(*item.View))
 	}
 	if item.Fields != nil {
 		if item.View != nil {
-			return outputOptions{}, &commandError{code: "invalid_argument", message: "batch read item cannot combine view and fields"}
+			return outputOptions{}, projectionValidationError(source, "fields", "cannot be combined with view")
 		}
 		for _, field := range *item.Fields {
 			if strings.Contains(field, ",") {
-				return outputOptions{}, &commandError{code: "invalid_argument", message: "batch read fields must contain one field name per array item"}
+				return outputOptions{}, projectionValidationError(source, "fields", "must contain one field name per array item")
 			}
 		}
-		fields, err := parseProjectionFields(projectionTargetMessage, strings.Join(*item.Fields, ","))
+		fields, err := parseProjectionFieldsFrom(projectionTargetMessage, strings.Join(*item.Fields, ","), source)
 		if err != nil {
 			return outputOptions{}, err
 		}
@@ -438,7 +464,7 @@ func batchReadOutputOptions(item mail.BatchItem, maxBytes int64) (outputOptions,
 		return options, nil
 	}
 	if !validProjectionView(projectionTargetMessage, options.view) {
-		return outputOptions{}, &commandError{code: "invalid_argument", message: projectionViewError(projectionTargetMessage, options.view)}
+		return outputOptions{}, projectionValidationError(source, "view", projectionViewError(projectionTargetMessage, options.view))
 	}
 	return options, nil
 }
@@ -496,9 +522,9 @@ func projectBatchItem(
 	if operation != mail.BatchOperationRead || (!includeReadMessages && !includeProjection) {
 		return projected, nil
 	}
-	options, err := batchReadOutputOptions(items[index], maxBytes)
+	options, err := batchReadOutputOptions(items[index], index, maxBytes)
 	if err != nil {
-		return batchItemResultProjection{}, fmt.Errorf("batch read item %q: %w", item.ID, err)
+		return batchItemResultProjection{}, err
 	}
 	if includeProjection {
 		projected.Projection = &projectionInfo{

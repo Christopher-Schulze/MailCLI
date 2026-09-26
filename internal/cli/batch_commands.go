@@ -91,9 +91,9 @@ func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) erro
 		return nil
 	}
 	for index := range request.Items {
-		options, err := batchReadOutputOptions(request.Items[index], maxBytes)
+		options, err := batchReadOutputOptions(request.Items[index], index, maxBytes)
 		if err != nil {
-			return fmt.Errorf("batch read item %q: %w", request.Items[index].ID, err)
+			return err
 		}
 		request.Items[index].RetainReadContent = options.includes("content")
 		request.Items[index].RetainReadHeaders = options.includes("headers")

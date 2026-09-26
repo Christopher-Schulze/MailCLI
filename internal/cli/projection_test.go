@@ -130,6 +130,28 @@ func TestProjectionValidationPrecedesDraftMutation(t *testing.T) {
 	}
 }
 
+func TestProjectionFieldErrorsNameCLIFlag(t *testing.T) {
+	for _, value := range []string{"", "summary,", "unknown", "summary,summary", "all,summary"} {
+		t.Run(value, func(t *testing.T) {
+			gateway := &projectionGateway{message: projectionMessage()}
+			code, output, stderr := runProjectionCommand(t, gateway,
+				"messages", "get", "--ref", "msg_ref", "--fields", value, "--json")
+			var response envelope
+			if err := json.Unmarshal([]byte(output), &response); err != nil {
+				t.Fatal(err)
+			}
+			if code != 2 || stderr != "" || gateway.getCalls != 0 || response.Error == nil ||
+				response.Error.Code != "invalid_argument" || !strings.Contains(response.Error.Message, "--fields") ||
+				strings.Contains(response.Error.Message, "items[") {
+				t.Fatalf("CLI field error: code=%d calls=%d stderr=%q response=%+v", code, gateway.getCalls, stderr, response.Error)
+			}
+			if value == "" && response.Error.Message != "--fields must contain at least one field" {
+				t.Fatalf("CLI empty-fields wording changed: %q", response.Error.Message)
+			}
+		})
+	}
+}
+
 func TestProjectionFieldsAreExplicitAndCanonical(t *testing.T) {
 	gateway := &projectionGateway{message: projectionMessage()}
 	code, output, stderr := runProjectionCommand(t, gateway,
@@ -203,13 +225,13 @@ func TestMessageAndRawAllFieldsMatchFullViews(t *testing.T) {
 func TestBatchReadFieldsUseMessageRegistry(t *testing.T) {
 	for _, field := range projectionFieldNames(projectionTargetMessage) {
 		fields := []string{field}
-		options, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, defaultJSONOutputBytes)
+		options, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, 0, defaultJSONOutputBytes)
 		if err != nil || options.target != projectionTargetMessage || !options.fieldsProvided || !options.includes(field) {
 			t.Fatalf("batch field %q differs from message parser: options=%+v error=%v", field, options, err)
 		}
 	}
 	for _, fields := range [][]string{{"unknown"}, {"all", "content"}, {"content", "content"}, {"summary,content"}} {
-		if _, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, defaultJSONOutputBytes); err == nil {
+		if _, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, 0, defaultJSONOutputBytes); err == nil {
 			t.Fatalf("invalid batch field selector accepted: %v", fields)
 		}
 	}
