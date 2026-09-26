@@ -76,6 +76,7 @@ type responseData struct {
 	UpdateResult             *updateResult                `json:"update_result,omitempty"`
 	serialization            *serializedProjection        `json:"-"`
 	draftMutationCompleted   bool                         `json:"-"`
+	draftRef                 string                       `json:"-"`
 }
 
 func rawResponsePage(value any) *json.RawMessage {
@@ -169,6 +170,12 @@ func newErrorData(command string, data responseData, err error) *errorData {
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if command == "drafts.send" && transport.IsSMTPSourceInvalid(err) && data.draftRef != "" {
+		guidance.Recovery = mail.RecoveryGuidance{
+			Action: mail.RecoveryInspect, Command: "drafts.inspect",
+			Args: []string{"--ref", data.draftRef, "--json"},
+		}
+	}
 	if data.draftMutationCompleted && errorCode(err) == "output_too_large" {
 		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectComplete
 		guidance.Retryability, guidance.ReplayAllowed = mail.RetryObserveRequired, false

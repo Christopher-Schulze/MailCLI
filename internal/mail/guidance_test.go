@@ -18,6 +18,11 @@ func TestGuidanceForProtocolFailuresBeforeTerminators(t *testing.T) {
 		recovery      RecoveryAction
 	}{
 		{
+			name: "SMTP source integrity requires inspection", command: "drafts.send",
+			code: transport.CodeSMTPSourceInvalid, phase: OperationPhaseSubmission,
+			effect: EffectNone, retryability: RetryObserveRequired, recovery: RecoveryInspect,
+		},
+		{
 			name:          "SMTP DATA incomplete before terminator",
 			command:       "drafts.send",
 			code:          transport.CodeSMTPDataIncomplete,

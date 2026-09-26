@@ -204,12 +204,24 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg io.Re
 	}
 
 	w := client.Text.DotWriter()
-	written, err := io.Copy(w, msg)
+	source := smtpSourceReader{reader: msg}
+	written, err := io.Copy(w, &io.LimitedReader{R: source, N: size})
 	if err != nil {
+		var sourceErr *smtpSourceReadError
+		if errors.As(err, &sourceErr) {
+			return "", submissionSourceInvalidError(sourceErr.err)
+		}
 		return "", submissionDataIncompleteError(transferError(ctx, err))
 	}
-	if size >= 0 && written != size {
-		return "", submissionDataIncompleteError(fmt.Errorf("message source ended after %d of %d bytes", written, size))
+	if written != size {
+		return "", submissionSourceInvalidError(fmt.Errorf("message source ended after %d of %d bytes", written, size))
+	}
+	extra, err := io.CopyN(io.Discard, source, 1)
+	if extra != 0 {
+		return "", submissionSourceInvalidError(fmt.Errorf("message source exceeds declared size of %d bytes", size))
+	}
+	if err != io.EOF {
+		return "", submissionSourceInvalidError(err)
 	}
 	if err := w.Close(); err != nil {
 		return "", submissionUnknownError(ctx, "DATA", transferError(ctx, err))
@@ -223,6 +235,35 @@ func sendData(conn net.Conn, ctx context.Context, client *smtp.Client, msg io.Re
 		return "", classifyFinalReplyError(ctx, err)
 	}
 	return fmt.Sprintf("%d %s", code, text), nil
+}
+
+// Wrap source errors at the read boundary so network-shaped reader errors
+// cannot be confused with failures writing the SMTP connection.
+type smtpSourceReader struct {
+	reader io.Reader
+}
+
+func (r smtpSourceReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	if err != nil && err != io.EOF {
+		return n, &smtpSourceReadError{err: err}
+	}
+	return n, err
+}
+
+type smtpSourceReadError struct {
+	err error
+}
+
+func (e *smtpSourceReadError) Error() string { return e.err.Error() }
+func (e *smtpSourceReadError) Unwrap() error { return e.err }
+
+func submissionSourceInvalidError(err error) error {
+	return &transport.TransportError{
+		Code:    transport.CodeSMTPSourceInvalid,
+		Message: "SMTP message source is invalid; end-of-data terminator was not attempted",
+		Err:     err,
+	}
 }
 
 func readFinalSMTPResponse(reader *bufio.Reader) (int, string, error) {

@@ -147,6 +147,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseCleanup, EffectCertainty: EffectUnknown, Retryability: RetryObserveRequired, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case code == "serialization_failed":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectUnknown, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
+	case transport.IsSMTPSourceInvalid(err):
+		if command == "drafts.send" {
+			return OperationGuidance{
+				Phase: OperationPhaseSubmission, EffectCertainty: EffectNone,
+				Retryability: RetryObserveRequired,
+				Recovery:     RecoveryGuidance{Action: RecoveryInspect},
+			}
+		}
 	case transport.IsSMTPDataIncomplete(err):
 		if command == "drafts.send" {
 			return OperationGuidance{

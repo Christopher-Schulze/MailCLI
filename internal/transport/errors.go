@@ -122,6 +122,7 @@ const (
 	CodeSMTPTransferTimeout      = "smtp_transfer_timeout"
 	CodeSMTPSubmissionUnknown    = "smtp_submission_unknown"
 	CodeSMTPDataIncomplete       = "smtp_data_incomplete"
+	CodeSMTPSourceInvalid        = "smtp_source_invalid"
 	CodeIMAPConnectFailed        = "imap_connect_failed"
 	CodeIMAPCanceled             = "imap_canceled"
 	CodeIMAPDisconnected         = "imap_disconnected"

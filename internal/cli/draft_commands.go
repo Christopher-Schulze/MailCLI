@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 const (
@@ -572,6 +573,9 @@ func runDraftSend(ctx context.Context, service *mail.Service, args []string, std
 			return failCommandWithData(
 				"drafts.send", *jsonOutput, responseData{SendResult: &result}, err, stdout, stderr,
 			)
+		}
+		if transport.IsSMTPSourceInvalid(err) {
+			return failCommandWithData("drafts.send", *jsonOutput, responseData{draftRef: *ref}, err, stdout, stderr)
 		}
 		return failCommand("drafts.send", *jsonOutput, err, stdout, stderr)
 	}

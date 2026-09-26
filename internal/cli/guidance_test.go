@@ -61,6 +61,66 @@ func TestSendFailureGuidanceRequiresReconciliation(t *testing.T) {
 	}
 }
 
+type sourceInvalidSubmitter struct {
+	calls int
+}
+
+func (s *sourceInvalidSubmitter) Submit(context.Context, transport.SubmitConfig, string, []string, []byte) (transport.SubmitEvidence, error) {
+	s.calls++
+	return transport.SubmitEvidence{}, &transport.TransportError{
+		Code: transport.CodeSMTPSourceInvalid, Message: "message source is shorter than declared",
+	}
+}
+
+func TestDraftSendSourceInvalidGuidanceInspectsRetainedDraft(t *testing.T) {
+	submitter := &sourceInvalidSubmitter{}
+	mirror := &cliMirror{}
+	service := mail.NewServiceWithTransport(nil, filepath.Join(t.TempDir(), "drafts"), mail.SendTransport{
+		Submitter: submitter, Mirror: mirror, Credentials: cliCredentials{},
+	})
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Source integrity", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runDraftSend(context.Background(), service,
+		[]string{"--ref", draft.Ref, "--expected-revision", draft.Revision, "--confirm", "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 || submitter.calls != 1 || mirror.calls != 0 {
+		t.Fatalf("send code=%d submit=%d mirror=%d stdout=%q stderr=%q", code, submitter.calls, mirror.calls, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Error == nil || response.Error.Code != transport.CodeSMTPSourceInvalid || response.Error.Guidance == nil || response.Data.SendResult != nil {
+		t.Fatalf("source-invalid response = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseSubmission || guidance.EffectCertainty != mail.EffectNone ||
+		guidance.Retryability != mail.RetryObserveRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryInspect || guidance.Recovery.Command != "drafts.inspect" ||
+		guidance.Recovery.OperationID != "" || !equalStrings(guidance.Recovery.Args, []string{"--ref", draft.Ref, "--json"}) {
+		t.Fatalf("source-invalid guidance = %+v", guidance)
+	}
+	if strings.Contains(stdout.String(), `"draftRef"`) || strings.Contains(stdout.String(), `"attempt_id"`) {
+		t.Fatalf("invented source-invalid evidence: %s", stdout.String())
+	}
+	stdout.Reset()
+	args := append([]string{"drafts", "inspect"}, guidance.Recovery.Args...)
+	if code := Run(context.Background(), service, args, &stdout, &stderr); code != 0 {
+		t.Fatalf("emitted inspection command code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Data.Draft == nil || response.Data.Draft.Ref != draft.Ref || response.Data.Draft.SendAttempt != nil {
+		t.Fatalf("retained draft inspection = %+v", response.Data.Draft)
+	}
+}
+
 func TestHandoffUnknownGuidanceKeepsRecoveryWithoutAttachments(t *testing.T) {
 	result := draftHandoffResult{
 		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeUnknown,
@@ -130,6 +190,10 @@ func TestPartialHydrationGuidanceUsesSupportedCommandArguments(t *testing.T) {
 }
 
 func TestGuidanceDoesNotEmitInvalidRecoveryCommands(t *testing.T) {
+	sourceGuidance := guidanceForResponse("drafts.send", responseData{}, &transport.TransportError{Code: transport.CodeSMTPSourceInvalid, Message: "invalid source"})
+	if sourceGuidance.Recovery.Action != mail.RecoveryInspect || sourceGuidance.Recovery.Command != "" || len(sourceGuidance.Recovery.Args) != 0 {
+		t.Fatalf("source recovery without draft ref = %+v", sourceGuidance.Recovery)
+	}
 	result := mail.SendResult{AttemptID: "send_attempt", Outcome: mail.SendOutcomeUnknown}
 	guidance := guidanceForResponse("drafts.send", responseData{SendResult: &result}, &transport.SubmissionError{Stage: "reply"})
 	if guidance.Recovery.Command != "" || len(guidance.Recovery.Args) != 0 || guidance.Recovery.OperationID != "send_attempt" {

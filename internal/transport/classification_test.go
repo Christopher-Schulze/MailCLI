@@ -33,7 +33,7 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsTransientTransportFailure",
 			predicate: IsTransientTransportFailure,
 			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed, CodeSMTPTimeout, CodeSMTPTransferTimeout},
-			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeIMAPMessageNotFound},
+			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeSMTPSourceInvalid, CodeIMAPMessageNotFound},
 		},
 		{
 			name:      "IsRejectedSubmission",
@@ -45,13 +45,19 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			name:      "IsSubmissionOutcomeUnknown",
 			predicate: IsSubmissionOutcomeUnknown,
 			positive:  []string{CodeSMTPSubmissionUnknown},
-			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete},
+			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeSMTPSourceInvalid},
 		},
 		{
 			name:      "IsSMTPDataIncomplete",
 			predicate: IsSMTPDataIncomplete,
 			positive:  []string{CodeSMTPDataIncomplete},
-			negative:  []string{CodeSMTPSubmissionUnknown, CodeSMTPRejected},
+			negative:  []string{CodeSMTPSubmissionUnknown, CodeSMTPRejected, CodeSMTPSourceInvalid},
+		},
+		{
+			name:      "IsSMTPSourceInvalid",
+			predicate: IsSMTPSourceInvalid,
+			positive:  []string{CodeSMTPSourceInvalid},
+			negative:  []string{CodeSMTPDataIncomplete, CodeSMTPSubmissionUnknown, CodeSMTPTransferTimeout},
 		},
 		{
 			name:      "IsMutationOutcomeUnknown",
@@ -135,6 +141,10 @@ func TestFailureClassificationPredicates(t *testing.T) {
 }
 
 func TestClassificationPrefersOutcomeUncertainty(t *testing.T) {
+	submission := &SubmissionError{Stage: "final reply", Err: codedErr(CodeSMTPSourceInvalid)}
+	if IsSMTPSourceInvalid(submission) || !IsSubmissionOutcomeUnknown(submission) {
+		t.Fatal("submission uncertainty must outrank a wrapped source-integrity error")
+	}
 	outcomeErr := &MutationOutcomeError{
 		Code:     CodeIMAPFlagsOutcomeUnknown,
 		Evidence: MutationEvidence{Command: "STORE", OperationID: "op_1"},

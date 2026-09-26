@@ -47,10 +47,15 @@ func IsSubmissionOutcomeUnknown(err error) bool {
 	return ErrorCode(err) == CodeSMTPSubmissionUnknown
 }
 
-// IsSMTPDataIncomplete reports that DATA failed before the end-of-data
-// terminator was attempted, so the server could not accept the message.
+// IsSMTPDataIncomplete reports a transfer failure before the end-of-data
+// terminator was attempted. Source-integrity failures have a separate code.
 func IsSMTPDataIncomplete(err error) bool {
 	return ErrorCode(err) == CodeSMTPDataIncomplete
+}
+
+// IsSMTPSourceInvalid reports a source-integrity failure before the DATA terminator.
+func IsSMTPSourceInvalid(err error) bool {
+	return ErrorCode(err) == CodeSMTPSourceInvalid
 }
 
 // IsMutationOutcomeUnknown reports that a mailbox mutation's final outcome
