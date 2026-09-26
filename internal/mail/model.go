@@ -827,13 +827,15 @@ type MessageThreadRequest struct {
 // MessageThread is the bounded chronological member list of one Envelope
 // Index conversation. ConversationID is Mail's opaque store-local grouping
 // key (zero when the seed message is ungrouped), not RFC threading.
-// Truncated reports that more members exist beyond the requested Limit.
+// The initial page contains the seed; cursors page toward newer or older members.
+// Truncated reports that more members exist in either direction.
 type MessageThread struct {
 	Ref            string           `json:"ref"`
 	ConversationID int64            `json:"conversation_id"`
 	Messages       []MessageSummary `json:"messages"`
 	Truncated      bool             `json:"truncated"`
 	NextCursor     string           `json:"next_cursor,omitempty"`
+	PrevCursor     string           `json:"prev_cursor,omitempty"`
 }
 
 type ListMailboxesRequest struct {

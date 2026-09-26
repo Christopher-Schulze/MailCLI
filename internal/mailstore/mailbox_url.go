@@ -13,6 +13,27 @@ type mailboxLocation struct {
 	VisiblePath []string
 }
 
+const mailboxAccountRootSQLName = "mailcli_mailbox_account_root"
+
+// mailboxAccountRoot normalizes only the authority for SQL membership.
+// Full path validation remains mandatory after selection so an unsafe path
+// in an active account produces a schema error rather than disappearing.
+func mailboxAccountRoot(value string) string {
+	separator := strings.Index(value, "://")
+	if separator < 1 {
+		return ""
+	}
+	pathIndex := strings.IndexByte(value[separator+3:], '/')
+	if pathIndex < 0 {
+		return ""
+	}
+	location, err := parseAccountRoot(value[:separator+3+pathIndex] + "/")
+	if err != nil {
+		return ""
+	}
+	return location.rootKey()
+}
+
 func (m mailboxLocation) rootKey() string {
 	return m.Scheme + "://" + strings.ToUpper(m.AccountID)
 }

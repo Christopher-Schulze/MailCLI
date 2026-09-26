@@ -336,7 +336,7 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	flags := newFlagSet("messages thread", stderr)
 	ref := flags.String("ref", "", "message ref")
 	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
-	cursor := flags.String("cursor", "", "continuation cursor from an unchanged thread")
+	cursor := flags.String("cursor", "", "next or previous cursor from this thread")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -365,6 +365,9 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	}
 	if thread.NextCursor != "" {
 		writeFormat(stdout, "\nNext cursor: %s\n", thread.NextCursor)
+	}
+	if thread.PrevCursor != "" {
+		writeFormat(stdout, "\nPrevious cursor: %s\n", thread.PrevCursor)
 	}
 	return 0
 }

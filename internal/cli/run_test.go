@@ -173,7 +173,7 @@ func (testGateway) MessageThread(_ context.Context, request mail.MessageThreadRe
 func (g *threadRequestGateway) MessageThread(_ context.Context, request mail.MessageThreadRequest) (mail.MessageThread, error) {
 	g.request = request
 	return mail.MessageThread{
-		Ref: request.Ref, ConversationID: 777, Truncated: true, NextCursor: "thread-next",
+		Ref: request.Ref, ConversationID: 777, Truncated: true, NextCursor: "thread-next", PrevCursor: "thread-prev",
 		Messages: []mail.MessageSummary{
 			{Ref: "msg_ref_1", Subject: "Subject", DateReceived: "2024-01-01T00:00:00Z", ConversationID: 777},
 			{Ref: request.Ref, Subject: "Subject reply", DateReceived: "2024-01-02T00:00:00Z", ConversationID: 777},
@@ -658,7 +658,7 @@ func TestMessageThreadCommand(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, `"command":"messages.thread"`) || !strings.Contains(output, `"conversation_id":777`) ||
 		!strings.Contains(output, `"truncated":true`) || !strings.Contains(output, `"next_cursor":"thread-next"`) ||
-		!strings.Contains(output, `"msg_ref_1"`) {
+		!strings.Contains(output, `"prev_cursor":"thread-prev"`) || !strings.Contains(output, `"msg_ref_1"`) {
 		t.Fatalf("thread output lacks conversation projection: %q", output)
 	}
 	if gateway.request.Ref != "msg_ref" || gateway.request.Limit != 2 || gateway.request.Cursor != "thread-current" {
@@ -673,7 +673,7 @@ func TestMessageThreadCommand(t *testing.T) {
 		t.Fatalf("human code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "conversation_id\t777") || !strings.Contains(stdout.String(), "Subject reply") ||
-		!strings.Contains(stdout.String(), "Next cursor: thread-next") {
+		!strings.Contains(stdout.String(), "Next cursor: thread-next") || !strings.Contains(stdout.String(), "Previous cursor: thread-prev") {
 		t.Fatalf("human thread output = %q", stdout.String())
 	}
 }

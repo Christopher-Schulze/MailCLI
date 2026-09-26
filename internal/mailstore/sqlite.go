@@ -55,6 +55,9 @@ func openReadOnlyDatabase(ctx context.Context, path string) (*sql.DB, error) {
 	database := sql.OpenDB(&sqliteConnector{
 		driver: &sqlite3.SQLiteDriver{
 			ConnectHook: func(connection *sqlite3.SQLiteConn) error {
+				if err := connection.RegisterFunc(mailboxAccountRootSQLName, mailboxAccountRoot, true); err != nil {
+					return err
+				}
 				return connection.RegisterFunc(searchFoldSQLName, foldSearchText, true)
 			},
 		},

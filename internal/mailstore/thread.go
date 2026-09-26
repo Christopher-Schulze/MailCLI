@@ -5,22 +5,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
+	"sort"
+	"strings"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
 
 const (
-	threadCursorPrefix  = "thrc_"
-	threadCursorVersion = 1
+	threadCursorPrefix        = "thrc_"
+	threadCursorVersion       = 2
+	legacyThreadCursorVersion = 1
 )
 
-const threadCursorDateNull uint8 = 1
+const (
+	threadCursorDateNull uint8 = 1 << iota
+	threadCursorOlder
+)
 
 type threadCursor struct {
 	dateReceived     int64
 	dateReceivedNull bool
 	rowID            int64
+	older            bool
 }
 
 // MessageThread is a local-store read; the Apple Events fallback cannot
@@ -65,45 +73,42 @@ func (s *Store) MessageThread(
 		if request.Cursor != "" {
 			return mail.MessageThread{}, operationError("invalid_cursor", "ungrouped messages do not have a continuation cursor")
 		}
-		summary, _, err := s.threadSummary(resolved.Record)
+		summary, err := s.threadSummary(resolved.Record)
 		if err != nil {
 			return mail.MessageThread{}, err
 		}
 		thread.Messages = []mail.MessageSummary{summary}
 		return thread, nil
 	}
-	indexRevision, err := s.searchIndexRevision(ctx)
-	if err != nil {
-		return mail.MessageThread{}, err
-	}
 	cursor, err := decodeThreadCursor(
-		request.Cursor, request.Ref, resolved.Record.ConversationID, s.storeUUID, indexRevision,
+		request.Cursor, request.Ref, resolved.Record.ConversationID, s.storeUUID,
 	)
 	if err != nil {
 		return mail.MessageThread{}, err
 	}
-	records, err := s.conversationRecords(ctx, resolved.Record.ConversationID, cursor, request.Limit+1)
+	records, hasOlder, hasNewer, err := s.threadPageRecords(ctx, resolved.Record, cursor, request.Limit)
 	if err != nil {
 		return mail.MessageThread{}, err
 	}
-	hasMore := len(records) > request.Limit
-	if hasMore {
-		thread.Truncated = true
-		records = records[:request.Limit]
-	}
+	thread.Truncated = hasOlder || hasNewer
 	for _, record := range records {
-		summary, visible, err := s.threadSummary(record)
+		summary, err := s.threadSummary(record)
 		if err != nil {
 			return mail.MessageThread{}, err
 		}
-		if !visible {
-			continue
-		}
 		thread.Messages = append(thread.Messages, summary)
 	}
-	if hasMore && len(records) > 0 {
+	if hasNewer && len(records) > 0 {
 		thread.NextCursor, err = encodeThreadCursor(
-			records[len(records)-1], request.Ref, resolved.Record.ConversationID, s.storeUUID, indexRevision,
+			records[len(records)-1], request.Ref, resolved.Record.ConversationID, s.storeUUID, false,
+		)
+		if err != nil {
+			return mail.MessageThread{}, err
+		}
+	}
+	if hasOlder && len(records) > 0 {
+		thread.PrevCursor, err = encodeThreadCursor(
+			records[0], request.Ref, resolved.Record.ConversationID, s.storeUUID, true,
 		)
 		if err != nil {
 			return mail.MessageThread{}, err
@@ -112,13 +117,82 @@ func (s *Store) MessageThread(
 	return thread, nil
 }
 
+func (s *Store) threadPageRecords(ctx context.Context, seed messageRecord, cursor *threadCursor, limit int) ([]messageRecord, bool, bool, error) {
+	if cursor == nil {
+		return s.seedThreadRecords(ctx, seed, limit)
+	}
+	records, err := s.conversationRecords(ctx, seed.ConversationID, cursor, limit+1)
+	if err != nil {
+		return nil, false, false, err
+	}
+	hasMore := len(records) > limit
+	if hasMore {
+		if cursor.older {
+			records = records[1:]
+		} else {
+			records = records[:limit]
+		}
+	}
+	if len(records) == 0 {
+		return records, false, false, nil
+	}
+	boundary := records[0]
+	if cursor.older {
+		boundary = records[len(records)-1]
+	}
+	opposite, err := s.conversationRecords(ctx, seed.ConversationID, threadCursorFor(boundary, !cursor.older), 1)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if cursor.older {
+		return records, hasMore, len(opposite) > 0, nil
+	}
+	return records, len(opposite) > 0, hasMore, nil
+}
+
+func (s *Store) seedThreadRecords(ctx context.Context, seed messageRecord, limit int) ([]messageRecord, bool, bool, error) {
+	older, err := s.conversationRecords(ctx, seed.ConversationID, threadCursorFor(seed, true), limit)
+	if err != nil {
+		return nil, false, false, err
+	}
+	newer, err := s.conversationRecords(ctx, seed.ConversationID, threadCursorFor(seed, false), limit)
+	if err != nil {
+		return nil, false, false, err
+	}
+	olderCount := min((limit-1)/2, len(older))
+	newerCount := min(limit-1-olderCount, len(newer))
+	olderCount = min(limit-1-newerCount, len(older))
+	records := append(append(older[len(older)-olderCount:], seed), newer[:newerCount]...)
+	return records, len(older) > olderCount, len(newer) > newerCount, nil
+}
+
+func threadCursorFor(item messageRecord, older bool) *threadCursor {
+	return &threadCursor{dateReceived: item.DateReceived, dateReceivedNull: item.DateReceivedNull, rowID: item.RowID, older: older}
+}
+
+func (s *Store) threadAccountSQL() (string, []any) {
+	keys := make([]string, 0, len(s.activeAccountKeys))
+	for key := range s.activeAccountKeys {
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return "0", nil
+	}
+	sort.Strings(keys)
+	arguments := make([]any, len(keys))
+	for index, key := range keys {
+		arguments[index] = key
+	}
+	return mailboxAccountRootSQLName + "(mb.url) IN (" + strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",") + ")", arguments
+}
+
 func (s *Store) conversationRecords(
 	ctx context.Context,
 	conversationID int64,
 	cursor *threadCursor,
 	limit int,
 ) (result []messageRecord, resultErr error) {
-	activeSQL, arguments := s.activeAccountSQL()
+	activeSQL, arguments := s.threadAccountSQL()
 	query := `
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
@@ -142,7 +216,13 @@ func (s *Store) conversationRecords(
 		WHERE m.conversation_id = ? AND m.deleted = 0 AND ` + activeSQL
 	arguments = append([]any{conversationID}, arguments...)
 	if cursor != nil {
-		if cursor.dateReceivedNull {
+		if cursor.older && cursor.dateReceivedNull {
+			query += ` AND m.date_received IS NULL AND m.ROWID < ?`
+			arguments = append(arguments, cursor.rowID)
+		} else if cursor.older {
+			query += ` AND (m.date_received IS NULL OR m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?))`
+			arguments = append(arguments, cursor.dateReceived, cursor.dateReceived, cursor.rowID)
+		} else if cursor.dateReceivedNull {
 			query += ` AND ((m.date_received IS NULL AND m.ROWID > ?) OR m.date_received IS NOT NULL)`
 			arguments = append(arguments, cursor.rowID)
 		} else {
@@ -150,7 +230,11 @@ func (s *Store) conversationRecords(
 			arguments = append(arguments, cursor.dateReceived, cursor.dateReceived, cursor.rowID)
 		}
 	}
-	query += ` ORDER BY m.date_received ASC, m.ROWID ASC LIMIT ?`
+	if cursor != nil && cursor.older {
+		query += ` ORDER BY m.date_received DESC, m.ROWID DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY m.date_received ASC, m.ROWID ASC LIMIT ?`
+	}
 	arguments = append(arguments, limit)
 	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
@@ -168,6 +252,9 @@ func (s *Store) conversationRecords(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate Envelope Index conversation members: %w", err)
 	}
+	if cursor != nil && cursor.older {
+		slices.Reverse(items)
+	}
 	return items, nil
 }
 
@@ -176,15 +263,18 @@ func encodeThreadCursor(
 	seedRef string,
 	conversationID int64,
 	storeUUID string,
-	indexRevision string,
+	older bool,
 ) (string, error) {
 	var flags uint8
 	if item.DateReceivedNull {
 		flags = threadCursorDateNull
 	}
+	if older {
+		flags |= threadCursorOlder
+	}
 	token, err := mailref.EncodeCompactTokenPayload(threadCursorPrefix, &mailref.CompactPayload{
 		Fingerprint: threadCursorFingerprint(seedRef, conversationID), StoreUUID: storeUUID,
-		IndexRevision: indexRevision, DateReceived: item.DateReceived, Flags: flags, RowID: item.RowID,
+		DateReceived: item.DateReceived, Flags: flags, RowID: item.RowID,
 	}, threadCursorVersion)
 	if err != nil {
 		return "", fmt.Errorf("encode thread cursor: %w", err)
@@ -197,7 +287,6 @@ func decodeThreadCursor(
 	seedRef string,
 	conversationID int64,
 	storeUUID string,
-	indexRevision string,
 ) (*threadCursor, error) {
 	if value == "" {
 		return nil, nil
@@ -207,17 +296,21 @@ func decodeThreadCursor(
 		return nil, operationError("invalid_cursor", err.Error())
 	}
 	compact, err := mailref.DecodeCompactPayload(payload, threadCursorVersion)
+	maximumFlags := threadCursorDateNull | threadCursorOlder
+	if err != nil {
+		compact, err = mailref.DecodeCompactPayload(payload, legacyThreadCursorVersion)
+		maximumFlags = threadCursorDateNull
+	}
 	if err != nil {
 		return nil, operationError("invalid_cursor", err.Error())
 	}
-	if compact.Flags > threadCursorDateNull || compact.RowID < 1 || compact.StoreUUID != storeUUID ||
-		compact.IndexRevision != indexRevision ||
+	if compact.Flags > maximumFlags || compact.RowID < 1 || compact.StoreUUID != storeUUID ||
 		compact.Fingerprint != threadCursorFingerprint(seedRef, conversationID) {
-		return nil, operationError("invalid_cursor", "thread cursor does not match this conversation, Mail store, or index revision")
+		return nil, operationError("invalid_cursor", "thread cursor does not match this conversation, Mail store, or keyset")
 	}
 	return &threadCursor{
 		dateReceived: compact.DateReceived, dateReceivedNull: compact.Flags&threadCursorDateNull != 0,
-		rowID: compact.RowID,
+		rowID: compact.RowID, older: compact.Flags&threadCursorOlder != 0,
 	}, nil
 }
 
@@ -228,25 +321,24 @@ func threadCursorFingerprint(seedRef string, conversationID int64) string {
 
 // threadSummary projects one member into the list summary shape. The member
 // mailbox comes from the record itself because conversations span mailboxes
-// (for example Sent copies next to Inbox messages). Members whose account is
-// no longer active report visible=false because their references could not
-// resolve again.
-func (s *Store) threadSummary(record messageRecord) (mail.MessageSummary, bool, error) {
+// (for example Sent copies next to Inbox messages). SQL has already selected
+// active account roots; the full URL and membership checks assert that boundary.
+func (s *Store) threadSummary(record messageRecord) (mail.MessageSummary, error) {
 	location, err := parseMailboxURL(record.PhysicalURL)
 	if err != nil {
-		return mail.MessageSummary{}, false, operationError(
+		return mail.MessageSummary{}, operationError(
 			"unsupported_mail_store_schema", fmt.Sprintf("message has an unsafe physical mailbox URL: %v", err),
 		)
 	}
 	if _, active := s.activeAccountKeys[location.rootKey()]; !active {
-		return mail.MessageSummary{}, false, nil
+		return mail.MessageSummary{}, operationError("unsupported_mail_store_schema", "thread SQL returned a member outside the active account roots")
 	}
 	mailboxRef, err := mailref.EncodeMailbox(location.AccountID, location.VisiblePath)
 	if err != nil {
-		return mail.MessageSummary{}, false, err
+		return mail.MessageSummary{}, err
 	}
 	summary, err := mapMessageSummary(
 		record, mailboxRef, location.AccountID, location.VisiblePath, s.storeUUID,
 	)
-	return summary, err == nil, err
+	return summary, err
 }
