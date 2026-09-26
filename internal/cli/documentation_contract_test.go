@@ -50,6 +50,14 @@ func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
 			t.Errorf("batch output guide omits %q", claim)
 		}
 	}
+	for _, path := range []string{"docs/documentation.md", "skills/mailcli/references/output-and-recovery.md"} {
+		content := readRepositoryFile(t, path)
+		for _, claim := range []string{"data.required_bytes", "data.limit_bytes", "data.measured", "lower_bound"} {
+			if !strings.Contains(content, claim) {
+				t.Errorf("%s omits structured output-size claim %q", path, claim)
+			}
+		}
+	}
 	skill := readRepositoryFile(t, "skills/mailcli/SKILL.md")
 	if !strings.Contains(skill, `"view":"metadata"`) {
 		t.Error("skill batch-read guidance omits the metadata-default example")

@@ -69,6 +69,7 @@ func TestOversizedResponseRetainsExactSizeAndRecovery(t *testing.T) {
 		!strings.Contains(result.Error.Message, fmt.Sprintf("%d bytes", len(full))) {
 		t.Fatalf("oversized response lost size/error contract: %s", &output)
 	}
+	assertOutputSizeEvidence(t, result, int64(len(full)), options.maxBytes, string(outputSizeExact))
 }
 
 func TestFinalizationRetainsTypedValidation(t *testing.T) {

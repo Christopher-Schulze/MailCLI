@@ -211,14 +211,9 @@ func batchOutputFailureEnvelope(result mail.BatchResult, data responseData, err 
 
 func batchOutputTooLargeError(result mail.BatchResult, maxBytes, actualBytes int64) error {
 	if result.ReadContentExceeded {
-		return &commandError{code: "output_too_large", message: fmt.Sprintf(
-			"batch read content requires at least %d encoded JSON bytes, above the --max-bytes limit of %d",
-			result.ReadContentRequiredBytes, maxBytes,
-		)}
+		return newOutputTooLargeError(result.ReadContentRequiredBytes, maxBytes, outputSizeLowerBound, "batch read content")
 	}
-	return &commandError{code: "output_too_large", message: fmt.Sprintf(
-		"batch JSON output is %d bytes, above the --max-bytes limit of %d", actualBytes, maxBytes,
-	)}
+	return newOutputTooLargeError(actualBytes, maxBytes, outputSizeExact, "batch")
 }
 
 func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error {
@@ -238,9 +233,8 @@ func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error
 		return err
 	}
 	serializerSample := batchOutputFailureEnvelope(
-		result, serializerSampleData, &commandError{code: "output_too_large", message: fmt.Sprintf(
-			"batch JSON output is %d bytes, above the --max-bytes limit of %d", int64(^uint64(0)>>1), maxBytes,
-		)},
+		result, serializerSampleData,
+		newOutputTooLargeError(int64(^uint64(0)>>1), maxBytes, outputSizeExact, "batch"),
 	)
 	serializerPayload, err := marshalEnvelope(serializerSample)
 	if err != nil {

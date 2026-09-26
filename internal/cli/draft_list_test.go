@@ -248,6 +248,7 @@ func TestDraftListBudgetPreservesDefaultPayloadAndExactBoundary(t *testing.T) {
 	if code := Run(context.Background(), service, boundaryArgs, &stdout, &stderr); code != 1 || json.Unmarshal(stdout.Bytes(), &response) != nil || response.OK || response.Error == nil || response.Error.Code != "output_too_large" || !strings.Contains(response.Error.Message, draft.Ref) || !strings.Contains(response.Error.Message, "--export /absolute/new/path") {
 		t.Fatalf("one-byte-over response lacks recovery: code=%d, stdout=%s", code, stdout.String())
 	}
+	assertOutputSizeEvidence(t, response, int64(len(boundary)), int64(len(boundary)-1), string(outputSizeExact))
 }
 
 func TestDraftListTwoHundredLongSummariesReturnRecoverableJSON(t *testing.T) {

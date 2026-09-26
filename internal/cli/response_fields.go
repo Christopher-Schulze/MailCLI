@@ -10,7 +10,8 @@ package cli
 //
 //   - envelopeLayerFields: injected by the shared envelope path for every
 //     command when the condition applies (store_profile whenever an opened
-//     store profile exists, finalization on finalization failure).
+//     store profile exists, finalization on teardown failure, and output-size
+//     evidence on output_too_large failure).
 //   - projectionLayerFields: emitted by the projection layer for any command
 //     that registers output flags (projection view/fields metadata).
 //
@@ -23,7 +24,7 @@ const (
 )
 
 var commandDataFields = map[string][]string{
-	envelopeLayerOwner:         {"finalization", "store_profile"},
+	envelopeLayerOwner:         {"finalization", "store_profile", "required_bytes", "limit_bytes", "measured"},
 	projectionLayerOwner:       {"projection"},
 	"capabilities":             {"capabilities"},
 	"version":                  {"name", "version"},

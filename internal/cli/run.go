@@ -74,6 +74,9 @@ type responseData struct {
 	StoreProfile             *mail.StoreProfile           `json:"store_profile,omitempty"`
 	Finalization             *finalizationData            `json:"finalization,omitempty"`
 	UpdateResult             *updateResult                `json:"update_result,omitempty"`
+	RequiredBytes            *int64                       `json:"required_bytes,omitempty"`
+	LimitBytes               *int64                       `json:"limit_bytes,omitempty"`
+	Measured                 string                       `json:"measured,omitempty"`
 	serialization            *serializedProjection        `json:"-"`
 	draftMutationCompleted   bool                         `json:"-"`
 	draftRef                 string                       `json:"-"`
@@ -105,6 +108,7 @@ type errorData struct {
 	ObservedAtLeast       *int64                      `json:"observed_at_least,omitempty"`
 	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
 	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
+	outputSize            *outputSizeEvidence         `json:"-"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
@@ -165,10 +169,16 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		value := budgetError.RequiredBytes()
 		requiredBytes = &value
 	}
+	var outputSize *outputSizeEvidence
+	var oversized *outputTooLargeError
+	if errors.As(err, &oversized) {
+		evidence := oversized.sizeEvidence()
+		outputSize = &evidence
+	}
 	return &errorData{
 		Code: code, Message: publicFailureMessage(err), Guidance: &guidance,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
-		Limit: limit, ObservedAtLeast: observedAtLeast,
+		Limit: limit, ObservedAtLeast: observedAtLeast, outputSize: outputSize,
 	}
 }
 

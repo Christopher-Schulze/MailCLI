@@ -39,6 +39,11 @@ func TestDraftOutputLimitRetainsCompletedMutation(t *testing.T) {
 				response.Data.Draft.Ref != stored.Ref || response.Data.Draft.Revision != stored.Revision {
 				t.Fatalf("completed state lost: guidance=%+v data=%+v", guidance, response.Data.Draft)
 			}
+			if response.Data.RequiredBytes == nil || *response.Data.RequiredBytes <= 1 ||
+				response.Data.LimitBytes == nil || *response.Data.LimitBytes != 1 ||
+				response.Data.Measured != string(outputSizeExact) || response.Error.RequiredBytes != nil {
+				t.Fatalf("completed mutation lost overflow-size evidence: data=%+v error=%+v", response.Data, response.Error)
+			}
 			if strings.Contains(response.Error.Message, "--export") || !strings.Contains(response.Error.Message, stored.Ref) {
 				t.Fatalf("unsupported or unusable recovery text: %s", response.Error.Message)
 			}

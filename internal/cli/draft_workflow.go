@@ -231,13 +231,11 @@ func writeBoundedDraftPreview(stdout io.Writer, stderr io.Writer, preview draftP
 	}
 	payload := buffer.Bytes()
 	if int64(len(payload)) > maxBytes {
-		limitErr := &outputTooLargeError{
-			actual: len(payload), limit: maxBytes, target: "draft preview",
-			recoveryRoute: fmt.Sprintf(
-				"the complete preview was not returned; inspect/export it with 'mailcli drafts inspect --ref %s --view full --export /absolute/new/path --json'",
-				preview.Ref,
-			),
-		}
+		limitErr := newOutputTooLargeError(int64(len(payload)), maxBytes, outputSizeExact, "draft preview")
+		limitErr.recoveryRoute = fmt.Sprintf(
+			"the complete preview was not returned; inspect/export it with 'mailcli drafts inspect --ref %s --view full --export /absolute/new/path --json'",
+			preview.Ref,
+		)
 		return failCommand("drafts.preview", true, limitErr, stdout, stderr)
 	}
 	return writeEnvelopeBytes(stdout, payload)

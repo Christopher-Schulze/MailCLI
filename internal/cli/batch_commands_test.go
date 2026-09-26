@@ -125,6 +125,13 @@ func TestBatchCommandSerializerOverflowReturnsBoundedEvidence(t *testing.T) {
 	})
 	message := projectionMessage()
 	message.Summary.Subject = strings.Repeat("s", 4096)
+	var completeOutput, completeStderr bytes.Buffer
+	completeCode := Run(context.Background(), mail.NewService(&projectionGateway{message: message}),
+		[]string{"batch", "--input", inputPath, "--max-bytes", fmt.Sprint(maximumJSONOutputBytes), "--json"},
+		&completeOutput, &completeStderr)
+	if completeCode != 0 || completeStderr.Len() != 0 {
+		t.Fatalf("complete batch baseline failed: code=%d stderr=%q output bytes=%d", completeCode, completeStderr.String(), completeOutput.Len())
+	}
 	gateway := &projectionGateway{message: message}
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), mail.NewService(gateway),
@@ -144,6 +151,7 @@ func TestBatchCommandSerializerOverflowReturnsBoundedEvidence(t *testing.T) {
 		response.Data.BatchResult.Items[0].Message != nil {
 		t.Fatalf("bounded overflow response = %+v", response)
 	}
+	assertOutputSizeEvidence(t, response, int64(completeOutput.Len()), 1024, string(outputSizeExact))
 }
 
 func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
@@ -158,6 +166,13 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 	})
 	message := projectionMessage()
 	message.Content = strings.Repeat("x", 16*1024)
+	var completeOutput, completeStderr bytes.Buffer
+	completeCode := Run(context.Background(), mail.NewService(&projectionGateway{message: message}),
+		[]string{"batch", "--input", inputPath, "--max-bytes", fmt.Sprint(maximumJSONOutputBytes), "--json"},
+		&completeOutput, &completeStderr)
+	if completeCode != 0 || completeStderr.Len() != 0 {
+		t.Fatalf("complete read baseline failed: code=%d stderr=%q output bytes=%d", completeCode, completeStderr.String(), completeOutput.Len())
+	}
 	gateway := &projectionGateway{message: message}
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), mail.NewService(gateway),
@@ -174,6 +189,12 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 		response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != itemCount ||
 		response.Data.BatchResult.Completed != itemCount || gateway.getCalls != itemCount {
 		t.Fatalf("100-item overflow response = %+v", response)
+	}
+	if response.Data.RequiredBytes == nil || *response.Data.RequiredBytes <= 32768 || *response.Data.RequiredBytes > int64(completeOutput.Len()) ||
+		response.Data.LimitBytes == nil || *response.Data.LimitBytes != 32768 ||
+		response.Data.Measured != string(outputSizeLowerBound) || response.Error.RequiredBytes != nil {
+		t.Fatalf("read-content lower-bound evidence = data:%+v error:%+v complete_bytes=%d",
+			response.Data, response.Error, completeOutput.Len())
 	}
 	for index, item := range response.Data.BatchResult.Items {
 		if item.ID != fmt.Sprintf("item-%03d", index) || item.State != mail.BatchItemCompleted || item.Message != nil {

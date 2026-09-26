@@ -146,4 +146,5 @@ func TestDraftPreviewBudgetKeepsCompletePayloadOrReturnsInspectRoute(t *testing.
 	if code := Run(context.Background(), service, largeArgs, &stdout, &stderr); code != 1 || json.Unmarshal(stdout.Bytes(), &limited) != nil || limited.OK || limited.Error == nil || limited.Error.Code != "output_too_large" || limited.Data.DraftPreview != nil {
 		t.Fatalf("one-byte-over preview did not fail without content: code=%d output=%s", code, stdout.String())
 	}
+	assertOutputSizeEvidence(t, limited, int64(len(boundary)), int64(len(boundary)-1), string(outputSizeExact))
 }

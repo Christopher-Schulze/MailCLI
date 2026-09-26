@@ -208,19 +208,48 @@ type messagePageItemProjection struct {
 	StalenessNote   *string                      `json:"staleness_note,omitempty"`
 }
 
+type outputSizeMeasurement string
+
+const (
+	outputSizeExact      outputSizeMeasurement = "exact"
+	outputSizeLowerBound outputSizeMeasurement = "lower_bound"
+)
+
+type outputSizeEvidence struct {
+	requiredBytes int64
+	limitBytes    int64
+	measured      outputSizeMeasurement
+}
+
 type outputTooLargeError struct {
 	actual            int
+	requiredBytes     int64
 	limit             int64
+	measured          outputSizeMeasurement
 	target            string
 	allowExport       bool
 	completedDraftRef string
 	recoveryRoute     string
 }
 
+func newOutputTooLargeError(requiredBytes, limitBytes int64, measured outputSizeMeasurement, target string) *outputTooLargeError {
+	return &outputTooLargeError{
+		requiredBytes: requiredBytes, limit: limitBytes, measured: measured, target: target,
+	}
+}
+
 func (e *outputTooLargeError) Error() string {
+	requiredBytes := e.requiredBytes
+	if requiredBytes == 0 {
+		requiredBytes = int64(e.actual)
+	}
+	if e.measured == outputSizeLowerBound {
+		return fmt.Sprintf("%s requires at least %d encoded JSON bytes, above the --max-bytes limit of %d",
+			e.target, requiredBytes, e.limit)
+	}
 	message := fmt.Sprintf(
 		"%s JSON output is %d bytes, above the %d-byte limit",
-		e.target, e.actual, e.limit,
+		e.target, requiredBytes, e.limit,
 	)
 	if e.completedDraftRef != "" {
 		return fmt.Sprintf("%s; draft mutation already completed; inspect with 'mailcli drafts inspect --ref %s --view full --json' instead of repeating the mutation", message, e.completedDraftRef)
@@ -232,6 +261,18 @@ func (e *outputTooLargeError) Error() string {
 		return message + "; use --export PATH with a content-capable view for complete content or raise --max-bytes"
 	}
 	return message + "; narrow --fields or raise --max-bytes"
+}
+
+func (e *outputTooLargeError) sizeEvidence() outputSizeEvidence {
+	requiredBytes := e.requiredBytes
+	if requiredBytes == 0 {
+		requiredBytes = int64(e.actual)
+	}
+	measured := e.measured
+	if measured == "" {
+		measured = outputSizeExact
+	}
+	return outputSizeEvidence{requiredBytes: requiredBytes, limitBytes: e.limit, measured: measured}
 }
 
 func (e *outputTooLargeError) ErrorCode() string {
@@ -1051,10 +1092,9 @@ func writeProjectedSuccess(stdout io.Writer, command string, data responseData, 
 		return 1
 	}
 	if int64(len(payload)) > options.maxBytes {
-		limitErr := &outputTooLargeError{
-			actual: len(payload), limit: options.maxBytes, target: string(options.target),
-			allowExport: options.allowExport, recoveryRoute: options.recoveryRoute,
-		}
+		limitErr := newOutputTooLargeError(int64(len(payload)), options.maxBytes, outputSizeExact, string(options.target))
+		limitErr.actual = len(payload)
+		limitErr.allowExport, limitErr.recoveryRoute = options.allowExport, options.recoveryRoute
 		if data.draftMutationCompleted && data.Draft != nil {
 			limitErr.completedDraftRef = data.Draft.Ref
 		}
@@ -1141,6 +1181,13 @@ func dataForProjection(data responseData, options outputOptions, failed bool) re
 }
 
 func marshalEnvelope(value envelope) ([]byte, error) {
+	if value.Error != nil && value.Error.outputSize != nil {
+		requiredBytes := value.Error.outputSize.requiredBytes
+		limitBytes := value.Error.outputSize.limitBytes
+		value.Data.RequiredBytes = &requiredBytes
+		value.Data.LimitBytes = &limitBytes
+		value.Data.Measured = string(value.Error.outputSize.measured)
+	}
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
