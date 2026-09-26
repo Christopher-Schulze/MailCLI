@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +14,25 @@ import (
 const maximumDraftStateBytes = int64(20 * 1024 * 1024)
 
 func writeDraftFile(root string, draft Draft, storage ...*draftStorage) error {
+	return writeDraftFileContext(context.Background(), root, draft, storage...)
+}
+
+// JSON publication shares the ref lease with update, claims and prune. Initial
+// creation acquires it only after attachment preparation has completed.
+func writeDraftFileContext(ctx context.Context, root string, draft Draft, storage ...*draftStorage) (resultErr error) {
 	state := draftStorageFor(root, storage...)
 	if _, err := draftPath(root, draft.Ref); err != nil {
 		return err
+	}
+	if state.root == nil {
+		lockContext, cancel := draftLockContext(ctx)
+		defer cancel()
+		lease, err := acquireDraftLease(lockContext, root, draft.Ref)
+		if err != nil {
+			return err
+		}
+		defer func() { resultErr = errors.Join(resultErr, lease.release()) }()
+		state = lease.storage
 	}
 	name := draft.Ref + ".json"
 	var err error
@@ -30,7 +47,7 @@ func writeDraftFile(root string, draft Draft, storage ...*draftStorage) error {
 	if int64(len(payload)) > maximumDraftStateBytes {
 		return validationError("draft state exceeds 20 MiB")
 	}
-	return replacePrivateDraftFile(state, name, payload, "write draft", "publish draft")
+	return replacePrivateDraftFile(ctx, state, name, payload, "write draft", "publish draft")
 }
 
 func readDraftFile(root string, ref string, storage ...*draftStorage) (Draft, error) {

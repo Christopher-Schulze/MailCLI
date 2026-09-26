@@ -1284,7 +1284,13 @@ func TestPruneConfirmRemovesStaleDraftsAndLockFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, fresh.Ref+".json")); err != nil {
 		t.Fatalf("fresh draft was removed: %v", err)
 	}
-	assertNoDraftLockFiles(t, root)
+	if _, err := os.Lstat(filepath.Join(root, stale.Ref+".lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed draft lock remains: %v", err)
+	}
+	identity, err := os.Lstat(filepath.Join(root, fresh.Ref+".lock"))
+	if err != nil || !identity.Mode().IsRegular() || identity.Mode().Perm() != 0o600 {
+		t.Fatalf("live draft lost its private regular lock: %v", err)
+	}
 }
 
 func TestPruneSkipsDraftsWithSendAttempt(t *testing.T) {

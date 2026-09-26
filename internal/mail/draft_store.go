@@ -31,8 +31,8 @@ func (s *Service) CreateDraftContext(ctx context.Context, request CreateDraftReq
 	if err := refreshDraftRevision(&draft); err != nil {
 		return Draft{}, err
 	}
-	if err := writeDraftFile(root, draft); err != nil {
-		return Draft{}, err
+	if err := writeDraftFileContext(ctx, root, draft); err != nil {
+		return Draft{}, classifyDraftContextError(ctx, err, "create")
 	}
 	return draft, nil
 }
@@ -223,8 +223,8 @@ func (s *Service) UpdateDraftContext(ctx context.Context, request UpdateDraftReq
 	if err := refreshDraftRevision(&replacement); err != nil {
 		return Draft{}, err
 	}
-	if err := writeDraftFile(root, replacement, lease.storage); err != nil {
-		return Draft{}, err
+	if err := writeDraftFileContext(ctx, root, replacement, lease.storage); err != nil {
+		return Draft{}, classifyDraftContextError(ctx, err, "update")
 	}
 	return replacement, nil
 }

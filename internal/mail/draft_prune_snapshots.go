@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"syscall"
 )
 
 const (
@@ -89,12 +90,14 @@ func removeOrphanHandoffSnapshotTree(ctx context.Context, ref string, storage *d
 	claimName := ref + handoffClaimSuffix
 	claimIdentity, err := storage.lstat(claimName)
 	if os.IsNotExist(err) {
-		if _, snapshotErr := storage.lstat(ref + handoffSnapshotSuffix); os.IsNotExist(snapshotErr) {
+		parentName := ref + handoffSnapshotSuffix
+		if parentIdentity, snapshotErr := storage.lstat(parentName); os.IsNotExist(snapshotErr) {
 			return nil
 		} else if snapshotErr != nil {
 			return fmt.Errorf("inspect unclaimed handoff snapshots: %w", snapshotErr)
+		} else {
+			return removeEmptyOrphanSnapshotParent(storage, parentName, parentIdentity, checkDraft)
 		}
-		return draftLockUnsafeError("orphan handoff snapshots have no owning claim; preserved")
 	}
 	if err != nil {
 		return fmt.Errorf("inspect orphan handoff claim: %w", err)
@@ -152,11 +155,6 @@ func removeOrphanHandoffSnapshotTree(ctx context.Context, ref string, storage *d
 	}
 	if err := removeHandoffSnapshotAttempt(ref, *attempt, attempt.Snapshots, false, storage, checkClaim); err != nil {
 		return err
-	}
-	if parentErr == nil {
-		if err := removeEmptyOrphanSnapshotParent(storage, parentName, parentIdentity, checkClaim); err != nil {
-			return err
-		}
 	}
 	return removePreparedHandoffAttempt(ref, *attempt, claimIdentity, storage)
 }
@@ -320,8 +318,8 @@ func removeHandoffSnapshotAttempt(
 	if err != nil {
 		return fmt.Errorf("inspect handoff snapshot parent: %w", err)
 	}
-	if parentIdentity.Mode().Perm() != 0o700 {
-		return draftLockUnsafeError("handoff snapshot parent has an unsafe mode")
+	if err := validateHandoffSnapshotParent(parentIdentity); err != nil {
+		return err
 	}
 	parentDirectory, err := openOrphanSnapshotDirectory(storage.root, parentName, parentIdentity, check)
 	if err != nil {
@@ -333,7 +331,7 @@ func removeHandoffSnapshotAttempt(
 		if !allowPartial && len(expected) > 0 {
 			return draftLockChangedError("handoff snapshot attempt disappeared before cleanup")
 		}
-		return nil
+		return removeEmptyOrphanSnapshotParent(storage, parentName, parentIdentity, check)
 	}
 	if err != nil {
 		return fmt.Errorf("inspect handoff snapshot attempt: %w", err)
@@ -466,10 +464,19 @@ func removeHandoffSnapshotAttempt(
 	if err := attemptDirectory.parent.Remove(attemptDirectory.name); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove handoff snapshot attempt: %w", err)
 	}
-	return storage.apply(draftStorageSync, "", "", 0)
+	return removeEmptyOrphanSnapshotParent(storage, parentName, parentIdentity, check)
 }
 
 func removeEmptyOrphanSnapshotParent(storage *draftStorage, name string, identity os.FileInfo, check func() error) (resultErr error) {
+	if storage == nil || storage.root == nil {
+		return draftLockUnsafeError("handoff snapshot parent is not a pinned private directory")
+	}
+	if err := validateHandoffSnapshotParent(identity); err != nil {
+		return err
+	}
+	if check == nil {
+		check = func() error { return nil }
+	}
 	directory, err := openOrphanSnapshotDirectory(storage.root, name, identity, check)
 	if err != nil {
 		return err
@@ -485,7 +492,31 @@ func removeEmptyOrphanSnapshotParent(storage *draftStorage, name string, identit
 	if err := directory.verify(); err != nil {
 		return err
 	}
-	return storage.root.Remove(name)
+	current, err := storage.lstat(name)
+	if err != nil {
+		return err
+	}
+	if err := validateHandoffSnapshotParent(current); err != nil {
+		return err
+	}
+	if !os.SameFile(identity, current) {
+		return draftLockChangedError("handoff snapshot parent changed before cleanup")
+	}
+	if err := storage.root.Remove(name); err != nil {
+		return fmt.Errorf("remove empty handoff snapshot parent: %w", err)
+	}
+	return storage.apply(draftStorageSync, "", "", 0)
+}
+
+func validateHandoffSnapshotParent(identity os.FileInfo) error {
+	if identity == nil || !identity.IsDir() || identity.Mode().Perm() != 0o700 {
+		return draftLockUnsafeError("handoff snapshot parent is not a private directory")
+	}
+	owner, ok := identity.Sys().(*syscall.Stat_t)
+	if !ok || owner.Uid != uint32(os.Geteuid()) {
+		return draftLockUnsafeError("handoff snapshot parent has a foreign owner")
+	}
+	return nil
 }
 
 func removeOrphanSnapshotDirectory(directory *orphanSnapshotDirectory, depth int) (resultErr error) {

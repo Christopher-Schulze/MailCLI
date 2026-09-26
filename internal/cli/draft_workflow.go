@@ -140,7 +140,12 @@ func runDraftHandoffWithDispatch(
 			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
 		}
 		if errors.As(handoffErr, &composeErr) && !composeErr.DispatchedToNative() && !composeErr.OutcomeUnknown() {
-			cleanupErr := session.CancelBeforeDispatch()
+			var cleanupErr error
+			if session.Dispatched() {
+				cleanupErr = session.Finish(mail.HandoffOutcomeConfirmedFailed)
+			} else {
+				cleanupErr = session.CancelBeforeDispatch()
+			}
 			outcome := mail.HandoffOutcomeConfirmedFailed
 			if composeErr.State == compose.StateCanceledBeforeDispatch ||
 				errors.Is(handoffErr, context.Canceled) || errors.Is(handoffErr, context.DeadlineExceeded) {

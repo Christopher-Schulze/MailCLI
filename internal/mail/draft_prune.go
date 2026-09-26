@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -23,15 +25,24 @@ type PruneFailure struct {
 	Error string `json:"error"`
 }
 
+type PruneTemporaryArtifact struct {
+	Ref  string `json:"ref"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
 type PruneDraftsResult struct {
-	DryRun          bool             `json:"dry_run"`
-	Candidates      []PruneCandidate `json:"candidates,omitempty"`
-	ExpiredReceipts []string         `json:"expired_receipts,omitempty"`
-	OrphanArtifacts []string         `json:"orphan_artifacts,omitempty"`
-	Removed         []string         `json:"removed,omitempty"`
-	SweptLocks      []string         `json:"swept_locks,omitempty"`
-	SweptArtifacts  []string         `json:"swept_artifacts,omitempty"`
-	Failed          []PruneFailure   `json:"failed,omitempty"`
+	DryRun                  bool                     `json:"dry_run"`
+	Candidates              []PruneCandidate         `json:"candidates,omitempty"`
+	ExpiredReceipts         []string                 `json:"expired_receipts,omitempty"`
+	OrphanArtifacts         []string                 `json:"orphan_artifacts,omitempty"`
+	Removed                 []string                 `json:"removed,omitempty"`
+	SweptLocks              []string                 `json:"swept_locks,omitempty"`
+	SweptArtifacts          []string                 `json:"swept_artifacts,omitempty"`
+	Failed                  []PruneFailure           `json:"failed,omitempty"`
+	TemporaryArtifacts      []PruneTemporaryArtifact `json:"temporary_artifacts,omitempty"`
+	PreservedTemporaries    []string                 `json:"preserved_temporaries,omitempty"`
+	PreservedTemporaryCount int                      `json:"preserved_temporary_count,omitempty"`
 }
 
 type PruneDraftsRequest struct {
@@ -40,8 +51,10 @@ type PruneDraftsRequest struct {
 }
 
 const (
-	maximumPruneCandidateMetadataBytes int64 = 64 << 20
-	draftPruneDirectoryBatchSize             = 256
+	maximumPruneCandidateMetadataBytes   int64 = 64 << 20
+	draftPruneDirectoryBatchSize               = 256
+	draftTemporaryMinimumAge                   = 10 * time.Minute
+	maximumPreservedTemporaryDiagnostics       = 20
 )
 
 type draftPruneCandidateSelection struct {
@@ -106,6 +119,10 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 	if err != nil {
 		return result, err
 	}
+	result.TemporaryArtifacts, result.PreservedTemporaries, result.PreservedTemporaryCount, err = listDraftTemporaryArtifacts(ctx, root)
+	if err != nil {
+		return result, err
+	}
 	if !request.Confirm {
 		if err := draftContextError(ctx, "prune"); err != nil {
 			return PruneDraftsResult{}, err
@@ -114,7 +131,20 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 			return PruneDraftsResult{}, err
 		}
 		result.ExpiredReceipts = receiptCandidates
-		result.OrphanArtifacts = orphanRefs
+		for _, ref := range orphanRefs {
+			busy, err := draftArtifactRefBusy(root, ref)
+			if err != nil {
+				return result, err
+			}
+			if busy {
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(root, ref+".json")); os.IsNotExist(err) {
+				result.OrphanArtifacts = append(result.OrphanArtifacts, ref)
+			} else if err != nil {
+				return result, err
+			}
+		}
 		return result, nil
 	}
 	if err := draftContextError(ctx, "prune"); err != nil {
@@ -433,16 +463,18 @@ release:
 	return errors.Join(resultErr, lease.release())
 }
 
-func draftJSONTemporaryRef(name string) (string, bool) {
-	const marker = ".json.mailcli-"
+// A nonempty ref with known=false is a well-formed but unknown writer suffix.
+// Those files are diagnostic evidence, never cleanup authority.
+func draftTemporaryRef(name string) (string, bool) {
+	const marker = ".mailcli-"
 	if !strings.HasPrefix(name, ".") {
 		return "", false
 	}
 	markerIndex := strings.LastIndex(name, marker)
-	if markerIndex <= 1 {
+	if markerIndex <= 31 || len(name) < 31 {
 		return "", false
 	}
-	ref := name[1:markerIndex]
+	ref := name[1:31]
 	suffix := name[markerIndex+len(marker):]
 	if !validDraftReference(ref) || len(suffix) != 24 {
 		return "", false
@@ -452,11 +484,16 @@ func draftJSONTemporaryRef(name string) (string, bool) {
 			return "", false
 		}
 	}
-	return ref, true
+	switch name[31:markerIndex] {
+	case ".json", ".send-spool", ".send-claim", ".save-claim", handoffClaimSuffix:
+		return ref, true
+	default:
+		return ref, false
+	}
 }
 
-func removeDraftJSONTemporaryFile(storage *draftStorage, name string, expected os.FileInfo) error {
-	if _, ok := draftJSONTemporaryRef(name); !ok {
+func removeDraftTemporaryFile(storage *draftStorage, name string, expected os.FileInfo) error {
+	if _, ok := draftTemporaryRef(name); !ok {
 		return validationError("invalid draft temporary name")
 	}
 	if storage == nil || storage.root == nil || expected == nil || !expected.Mode().IsRegular() {
@@ -471,44 +508,51 @@ func removeDraftJSONTemporaryFile(storage *draftStorage, name string, expected o
 	return removeDraftStorageFile(storage, name, expected, "draft temporary")
 }
 
-// removeDraftJSONTemporaryFiles runs only while holding this draft's exclusive
+// removeDraftTemporaryFiles runs only while holding this draft's exclusive
 // lease. The pinned root fixes the parent identity; each file identity is
 // checked again immediately before unlink.
-func removeDraftJSONTemporaryFiles(storage *draftStorage, ref string) (resultErr error) {
+func removeDraftTemporaryFiles(storage *draftStorage, ref string) (removed int, resultErr error) {
 	if !validDraftReference(ref) {
-		return validationError("invalid draft ref")
+		return 0, validationError("invalid draft ref")
 	}
 	if storage == nil || storage.root == nil {
-		return draftLockUnsafeError("draft temporary cleanup requires a pinned draft directory")
+		return 0, draftLockUnsafeError("draft temporary cleanup requires a pinned draft directory")
 	}
 	directory, err := storage.root.Open(".")
 	if err != nil {
-		return fmt.Errorf("open pinned draft directory for temporary recovery: %w", err)
+		return 0, fmt.Errorf("open pinned draft directory for temporary recovery: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
 	entries, err := directory.ReadDir(-1)
 	if err != nil {
-		return fmt.Errorf("list draft temporaries: %w", err)
+		return 0, fmt.Errorf("list draft temporaries: %w", err)
 	}
 	for _, entry := range entries {
-		candidateRef, ok := draftJSONTemporaryRef(entry.Name())
+		candidateRef, ok := draftTemporaryRef(entry.Name())
 		if !ok || candidateRef != ref {
 			continue
 		}
 		identity, err := entry.Info()
 		if err != nil {
-			return fmt.Errorf("inspect draft temporary: %w", err)
+			return removed, fmt.Errorf("inspect draft temporary: %w", err)
 		}
-		if err := removeDraftJSONTemporaryFile(storage, entry.Name(), identity); err != nil {
-			return err
+		if !identity.Mode().IsRegular() {
+			return removed, draftLockUnsafeError("draft temporary is not a regular file")
 		}
+		if !identity.ModTime().Before(time.Now().Add(-draftTemporaryMinimumAge)) {
+			continue
+		}
+		if err := removeDraftTemporaryFile(storage, entry.Name(), identity); err != nil {
+			return removed, err
+		}
+		removed++
 	}
-	return nil
+	return removed, nil
 }
 
-// listOrphanDraftArtifactRefs returns refs that own send/save/handoff claim,
-// spool, snapshot, or draft JSON temporary files while their draft JSON is
-// absent. Terminal send receipts are excluded; they carry their own expiry path.
+// listOrphanDraftArtifactRefs returns orphan sidecar refs and refs with known
+// aged or unsafe temporaries, including live drafts. Terminal send receipts
+// are excluded; they carry their own expiry path.
 func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -517,7 +561,14 @@ func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	refs := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
-		if ref, ok := draftJSONTemporaryRef(name); ok {
+		if ref, ok := draftTemporaryRef(name); ok {
+			info, err := entry.Info()
+			if err != nil {
+				return nil, err
+			}
+			if info.Mode().IsRegular() && !info.ModTime().Before(time.Now().Add(-draftTemporaryMinimumAge)) {
+				continue
+			}
 			refs[ref] = struct{}{}
 			continue
 		}
@@ -560,8 +611,8 @@ func listOrphanDraftArtifactRefs(root string) ([]string, error) {
 	return out, nil
 }
 
-// sweepOrphanDraftArtifacts removes unclaimed-safe temporary and sidecar files
-// whose draft is gone. Handoff snapshots require a matching prepared claim;
+// sweepOrphanDraftArtifacts removes known inactive temporaries for every ref
+// and safe sidecars whose draft is gone. Handoff snapshots require a prepared claim;
 // dispatched or ambiguous evidence is retained under the same draft lease.
 func sweepOrphanDraftArtifacts(ctx context.Context, root string) ([]string, []PruneFailure, error) {
 	refs, err := listOrphanDraftArtifactRefs(root)
@@ -591,6 +642,9 @@ func sweepOrphanDraftArtifacts(ctx context.Context, root string) ([]string, []Pr
 }
 
 func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string) (bool, error) {
+	if busy, err := draftArtifactRefBusy(root, ref); err != nil || busy {
+		return false, err
+	}
 	lockContext, cancel := draftLockContext(ctx)
 	defer cancel()
 	lease, err := acquireDraftLease(lockContext, root, ref)
@@ -602,13 +656,22 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 		return false, classifyDraftContextError(ctx, err, "prune")
 	}
 	var resultErr error
+	var removedTemporaries int
 	swept := false
 	err = draftContextError(ctx, "prune")
 	if err != nil {
 		resultErr = err
 		goto release
 	}
+	removedTemporaries, resultErr = removeDraftTemporaryFiles(lease.storage, ref)
+	if resultErr != nil {
+		goto release
+	}
 	if _, err = lease.storage.lstat(ref + ".json"); err == nil || !os.IsNotExist(err) {
+		swept = err == nil && removedTemporaries > 0
+		if err != nil {
+			resultErr = err
+		}
 		goto release
 	}
 	resultErr = removeOrphanHandoffSnapshotTree(ctx, ref, lease.storage)
@@ -616,9 +679,6 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 		goto release
 	}
 	resultErr = removeOrphanDraftClaims(ctx, lease.storage, ref)
-	if resultErr == nil {
-		resultErr = removeDraftJSONTemporaryFiles(lease.storage, ref)
-	}
 	if resultErr == nil {
 		resultErr = removeDraftAttachmentDir(lease.storage, ref)
 	}
@@ -628,4 +688,66 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 	}
 release:
 	return swept, errors.Join(resultErr, lease.release())
+}
+
+// Existing writers create the lock before exposing any temporary. This
+// nonblocking probe skips busy refs; deletion still reacquires the full lease.
+func draftArtifactRefBusy(root string, ref string) (bool, error) {
+	lock, err := openExistingDraftLockResource(root, ref)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	err = syscall.Flock(int(lock.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true, lock.close()
+	}
+	if err != nil {
+		return false, errors.Join(err, lock.close())
+	}
+	return false, errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
+}
+
+func listDraftTemporaryArtifacts(ctx context.Context, root string) ([]PruneTemporaryArtifact, []string, int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	var candidates []PruneTemporaryArtifact
+	var preserved []string
+	var preservedCount int
+	cutoff := time.Now().Add(-draftTemporaryMinimumAge)
+	for _, entry := range entries {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return nil, nil, 0, err
+		}
+		ref, known := draftTemporaryRef(entry.Name())
+		if ref == "" {
+			continue
+		}
+		if !known {
+			preservedCount++
+			if len(preserved) < maximumPreservedTemporaryDiagnostics {
+				preserved = append(preserved, entry.Name())
+			}
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		busy, err := draftArtifactRefBusy(root, ref)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if !busy {
+			candidates = append(candidates, PruneTemporaryArtifact{Ref: ref, Name: entry.Name(), Size: info.Size()})
+		}
+	}
+	return candidates, preserved, preservedCount, nil
 }

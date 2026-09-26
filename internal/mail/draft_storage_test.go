@@ -3,11 +3,182 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
+
+// The real cancellation boundary observes the completed private temporary.
+// Only this test context pauses; production has no injected test callback.
+type draftTemporaryBoundaryContext struct {
+	context.Context
+	root    string
+	ref     string
+	entered chan string
+	resume  chan struct{}
+	once    sync.Once
+}
+
+func (c *draftTemporaryBoundaryContext) Err() error {
+	entries, err := os.ReadDir(c.root)
+	if err == nil {
+		for _, entry := range entries {
+			if ref, known := draftTemporaryRef(entry.Name()); known && ref == c.ref {
+				c.once.Do(func() { c.entered <- entry.Name(); <-c.resume })
+				break
+			}
+		}
+	}
+	return c.Context.Err()
+}
+
+func TestDraftTemporaryWriterLeaseRefusalPreservesStoredDraft(t *testing.T) {
+	root := t.TempDir()
+	draft, err := prepareDraft(CreateDraftRequest{Input: DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Subject: "original", Body: "complete bytes"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDraftFile(root, draft); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(root, draft.Ref+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := acquireDraftLease(context.Background(), root, draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := lease.release(); err != nil {
+			t.Error(err)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	draft.Subject = "must not publish"
+	if err := writeDraftFileContext(ctx, root, draft); errorCode(err) != "draft_busy" {
+		t.Fatalf("competing writer = %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(root, draft.Ref+".json"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("refused writer changed draft: %q, %v", after, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if _, known := draftTemporaryRef(entry.Name()); known {
+			t.Fatalf("refused writer exposed %s", entry.Name())
+		}
+	}
+}
+
+func TestDraftTemporaryPublicationLeaseProtectsActualWriter(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		for _, canceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("update_%t/canceled_%t", update, canceled), func(t *testing.T) {
+				root := t.TempDir()
+				service := NewServiceWithDraftRoot(nil, root)
+				draft, err := prepareDraft(CreateDraftRequest{Input: DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Subject: "original", Body: "complete draft bytes"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var storage []*draftStorage
+				if update {
+					if err := writeDraftFile(root, draft); err != nil {
+						t.Fatal(err)
+					}
+					lease, err := acquireDraftLease(context.Background(), root, draft.Ref)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() {
+						if err := lease.release(); err != nil {
+							t.Error(err)
+						}
+					})
+					storage = append(storage, lease.storage)
+				}
+				draft.Subject = "published"
+				base, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ctx := &draftTemporaryBoundaryContext{Context: base, root: root, ref: draft.Ref, entered: make(chan string, 1), resume: make(chan struct{})}
+				var resumeOnce sync.Once
+				resume := func() { resumeOnce.Do(func() { close(ctx.resume) }) }
+				finished := make(chan error, 1)
+				go func() { finished <- writeDraftFileContext(ctx, root, draft, storage...) }()
+				joined := false
+				t.Cleanup(func() {
+					resume()
+					if !joined {
+						select {
+						case <-finished:
+						case <-time.After(5 * time.Second):
+							t.Error("writer did not terminate")
+						}
+					}
+				})
+				var name string
+				select {
+				case name = <-ctx.entered:
+				case err := <-finished:
+					joined = true
+					t.Fatalf("writer did not expose its temporary: %v", err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("writer boundary timed out")
+				}
+				path := filepath.Join(root, name)
+				ageDraftTemporary(t, path)
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true})
+				if err != nil || len(result.Failed) != 0 || len(result.SweptArtifacts) != 0 || len(result.TemporaryArtifacts) != 0 {
+					t.Fatalf("prune touched active writer: %+v, %v", result, err)
+				}
+				if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+					t.Fatalf("active temporary changed: %q, %v", after, err)
+				}
+				if canceled {
+					cancel()
+				}
+				resume()
+				select {
+				case err = <-finished:
+					joined = true
+				case <-time.After(5 * time.Second):
+					t.Fatal("writer did not finish")
+				}
+				if (err != nil) != canceled {
+					t.Fatalf("writer error=%v canceled=%t", err, canceled)
+				}
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("publication temporary remains: %v", err)
+				}
+				loaded, err := service.GetDraft(draft.Ref)
+				if canceled && !update {
+					if errorCode(err) != "not_found" {
+						t.Fatalf("canceled create published: %+v, %v", loaded, err)
+					}
+					return
+				}
+				want := "published"
+				if canceled {
+					want = "original"
+				}
+				if err != nil || loaded.Subject != want || loaded.Body != draft.Body {
+					t.Fatalf("published draft=%+v, %v", loaded, err)
+				}
+			})
+		}
+	}
+}
 
 type draftRootSwapObserver struct {
 	once        sync.Once

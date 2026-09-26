@@ -158,7 +158,7 @@ func replaceHandoffAttempt(ref string, attempt HandoffAttempt, state *draftStora
 	if err != nil {
 		return err
 	}
-	return replacePrivateDraftFile(state, name, payload, "write handoff claim update", "publish handoff claim update")
+	return replacePrivateDraftFile(context.Background(), state, name, payload, "write handoff claim update", "publish handoff claim update")
 }
 
 func removeHandoffAttempt(ref string, state *draftStorage) error {
@@ -492,13 +492,13 @@ func (s *DraftHandoffSession) CancelBeforeDispatch() error {
 	if s.closed {
 		return &OperationError{Code: "handoff_session_closed", Message: "handoff session is already closed"}
 	}
-	if s.attempt.DispatchStarted && s.attempt.Outcome != HandoffOutcomeDispatched {
+	if s.attempt.DispatchStarted {
 		return s.Finish(HandoffOutcomeUnknown)
 	}
-	cleanupErr := errors.Join(
-		removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage),
-		removeHandoffAttempt(s.ref, s.lease.storage),
-	)
+	cleanupErr := removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage)
+	if cleanupErr == nil {
+		cleanupErr = removeHandoffAttempt(s.ref, s.lease.storage)
+	}
 	s.closed = true
 	return errors.Join(cleanupErr, s.lease.release())
 }

@@ -394,7 +394,7 @@ func runDraftPrune(ctx context.Context, service *mail.Service, args []string, st
 
 func writeDraftPruneResult(stdout io.Writer, result mail.PruneDraftsResult, complete bool) {
 	if complete && len(result.Candidates)+len(result.ExpiredReceipts)+len(result.OrphanArtifacts)+
-		len(result.Removed)+len(result.SweptLocks)+len(result.SweptArtifacts)+len(result.Failed) == 0 {
+		len(result.Removed)+len(result.SweptLocks)+len(result.SweptArtifacts)+len(result.Failed)+len(result.TemporaryArtifacts)+result.PreservedTemporaryCount == 0 {
 		writeLine(stdout, "no stale never-sent drafts")
 		return
 	}
@@ -407,6 +407,9 @@ func writeDraftPruneResult(stdout io.Writer, result mail.PruneDraftsResult, comp
 		}
 		for _, ref := range result.OrphanArtifacts {
 			writeFormat(stdout, "would sweep artifacts\t%s\n", ref)
+		}
+		for _, artifact := range result.TemporaryArtifacts {
+			writeFormat(stdout, "would remove temporary\t%s\t%d bytes\n", oneLine(artifact.Name), artifact.Size)
 		}
 	}
 	for _, ref := range result.Removed {
@@ -425,6 +428,12 @@ func writeDraftPruneResult(stdout io.Writer, result mail.PruneDraftsResult, comp
 	}
 	for _, failure := range result.Failed {
 		writeFormat(stdout, "failed\t%s\t%s\n", failure.Ref, oneLine(failure.Error))
+	}
+	for _, name := range result.PreservedTemporaries {
+		writeFormat(stdout, "preserved unknown temporary\t%s\n", oneLine(name))
+	}
+	if omitted := result.PreservedTemporaryCount - len(result.PreservedTemporaries); omitted > 0 {
+		writeFormat(stdout, "preserved unknown temporaries omitted\t%d\n", omitted)
 	}
 }
 

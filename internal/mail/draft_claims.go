@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -256,7 +257,7 @@ func replaceSendAttempt(root string, ref string, attempt SendAttempt, storage ..
 	if err != nil {
 		return err
 	}
-	return replacePrivateDraftFile(state, name, payload, "write send claim update", "publish send claim update")
+	return replacePrivateDraftFile(context.Background(), state, name, payload, "write send claim update", "publish send claim update")
 }
 
 func removeSendAttempt(root string, ref string, state *draftStorage) error {
@@ -583,5 +584,5 @@ func replaceDraftSaveAttempt(root string, ref string, attempt DraftSaveAttempt, 
 	if err != nil {
 		return err
 	}
-	return replacePrivateDraftFile(state, name, payload, "write draft-save claim update", "publish draft-save claim update")
+	return replacePrivateDraftFile(context.Background(), state, name, payload, "write draft-save claim update", "publish draft-save claim update")
 }

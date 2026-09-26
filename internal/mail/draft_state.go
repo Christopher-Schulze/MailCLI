@@ -172,7 +172,7 @@ func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, er
 		}
 		return draft, err
 	}
-	if err := removeDraftJSONTemporaryFiles(lease.storage, ref); err != nil {
+	if _, err := removeDraftTemporaryFiles(lease.storage, ref); err != nil {
 		return Draft{}, err
 	}
 	return draft, nil
@@ -280,6 +280,14 @@ func discardDraftFiles(lease *draftLease, root string, ref string) error {
 		return err
 	} else if attempt != nil {
 		return handoffRetryBlockedError(attempt.ID)
+	}
+	parentName := ref + handoffSnapshotSuffix
+	if identity, err := state.lstat(parentName); err == nil {
+		if err := removeEmptyOrphanSnapshotParent(state, parentName, identity, nil); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	name := ref + ".json"
 	if err := state.apply(draftStorageRemove, name, "", 0); err != nil {

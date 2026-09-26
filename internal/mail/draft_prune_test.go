@@ -287,6 +287,8 @@ func TestPruneFindsAndRemovesOrphanDraftJSONTemporary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Crash cleanup now requires age as well as exclusive ref ownership.
+	ageDraftTemporary(t, filepath.Join(root, validName))
 	dryRun, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour})
 	if err != nil || !dryRun.DryRun || len(dryRun.OrphanArtifacts) != 1 || dryRun.OrphanArtifacts[0] != ref {
 		t.Fatalf("orphan temporary dry run = %+v, %v", dryRun, err)
@@ -312,6 +314,7 @@ func TestDraftMutationRecoversJSONTemporaryUnderLease(t *testing.T) {
 	if err := os.WriteFile(path, []byte("partial draft update"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	ageDraftTemporary(t, path)
 	lease, err := acquireDraftLease(context.Background(), root, draft.Ref)
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +361,7 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 				if err := os.Symlink(sentinel, path); err != nil {
 					t.Fatal(err)
 				}
-				if err := removeDraftJSONTemporaryFiles(lease.storage, draft.Ref); err == nil {
+				if _, err := removeDraftTemporaryFiles(lease.storage, draft.Ref); err == nil {
 					t.Fatal("symlink temporary was removed")
 				}
 				if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -375,7 +378,7 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 				if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := removeDraftJSONTemporaryFile(lease.storage, name, expected); err == nil {
+				if err := removeDraftTemporaryFile(lease.storage, name, expected); err == nil {
 					t.Fatal("replacement temporary was removed")
 				}
 				if payload, err := os.ReadFile(path); err != nil || string(payload) != "replacement" {
@@ -528,4 +531,181 @@ func BenchmarkDraftPruneCandidateSelection(b *testing.B) {
 		}
 	}
 	b.ReportMetric(float64(count), "entry_visits/op")
+}
+
+func ageDraftTemporary(t *testing.T, path string) {
+	t.Helper()
+	old := time.Now().Add(-2 * draftTemporaryMinimumAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPruneDraftTemporaryWriterSuffixes(t *testing.T) {
+	for _, suffix := range []string{".json", ".send-spool", ".send-claim", ".save-claim", handoffClaimSuffix} {
+		for _, live := range []bool{false, true} {
+			for _, state := range []string{"old", "young", "busy", "symlink", "replacement"} {
+				t.Run(fmt.Sprintf("%s/live_%t/%s", suffix, live, state), func(t *testing.T) {
+					root := t.TempDir()
+					service := NewServiceWithDraftRoot(nil, root)
+					ref := "draft_123456789012345678901234"
+					finalArtifacts := make(map[string][]byte)
+					if live {
+						draft := createSendTestDraft(t, service)
+						ref = draft.Ref
+						finalArtifacts[".send-spool"] = []byte("retained final evidence")
+						now := time.Now().UTC()
+						claimSuffix := ".send-claim"
+						var claim []byte
+						var err error
+						switch suffix {
+						case ".save-claim":
+							claimSuffix = suffix
+							claim, err = encodeDraftSaveAttempt(ref, DraftSaveAttempt{ID: "save-retained", StartedAt: now, UpdatedAt: now, ObservationBaseline: &SendObservationBaseline{StoreUUID: "store", CapturedUnix: now.Unix(), SentMailboxIDs: []int64{1}}})
+						case handoffClaimSuffix:
+							claimSuffix = suffix
+							claim, err = encodeHandoffAttempt(ref, HandoffAttempt{ID: "handoff_0123456789abcdefghijklmn", DraftRef: ref, StartedAt: now, UpdatedAt: now, Outcome: HandoffOutcomeUnknown, DispatchStarted: true})
+						default:
+							claim, err = encodeSendAttempt(ref, SendAttempt{ID: "send-retained", StartedAt: now, UpdatedAt: now, Outcome: SendOutcomeUnknown, DraftRevision: draft.Revision})
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+						finalArtifacts[claimSuffix] = claim
+						for finalSuffix, payload := range finalArtifacts {
+							if err := os.WriteFile(filepath.Join(root, ref+finalSuffix), payload, 0o600); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					name := "." + ref + suffix + ".mailcli-0123456789abcdef01234567"
+					path := filepath.Join(root, name)
+					payload := []byte("verified unpublished bytes")
+					if err := os.WriteFile(path, payload, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if state != "young" {
+						ageDraftTemporary(t, path)
+					}
+					var lease *draftLease
+					if state == "busy" || state == "replacement" {
+						var err error
+						lease, err = acquireDraftLease(context.Background(), root, ref)
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() {
+							if err := lease.release(); err != nil {
+								t.Error(err)
+							}
+						})
+					}
+					if state == "replacement" {
+						identity, err := lease.storage.lstat(name)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(path, path+".original"); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if err := removeDraftTemporaryFile(lease.storage, name, identity); errorCode(err) != "draft_lock_changed" {
+							t.Fatalf("replacement cleanup = %v", err)
+						}
+						if got, err := os.ReadFile(path); err != nil || string(got) != "replacement" {
+							t.Fatalf("replacement changed: %q, %v", got, err)
+						}
+						return
+					}
+					if state == "symlink" {
+						if err := os.Rename(path, path+".original"); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(path+".original", path); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var jsonBefore []byte
+					if live {
+						var err error
+						jsonBefore, err = os.ReadFile(filepath.Join(root, ref+".json"))
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					for _, confirm := range []bool{false, true} {
+						result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: confirm})
+						wantFailure := confirm && state == "symlink"
+						if (err != nil) != wantFailure {
+							t.Fatalf("prune confirm=%t: %+v, %v", confirm, result, err)
+						}
+						wantCandidates := 0
+						if state == "old" {
+							wantCandidates = 1
+						}
+						if len(result.TemporaryArtifacts) != wantCandidates {
+							t.Fatalf("temporary candidates=%+v", result.TemporaryArtifacts)
+						}
+						if wantCandidates == 1 && (result.TemporaryArtifacts[0].Name != name || result.TemporaryArtifacts[0].Ref != ref || result.TemporaryArtifacts[0].Size != int64(len(payload))) {
+							t.Fatalf("temporary evidence=%+v", result.TemporaryArtifacts)
+						}
+						if confirm && state == "old" {
+							if _, err := os.Lstat(path); !os.IsNotExist(err) {
+								t.Fatalf("old temporary remains: %v", err)
+							}
+						} else if _, err := os.Lstat(path); err != nil {
+							t.Fatalf("retained temporary missing: %v", err)
+						}
+					}
+					if live {
+						if got, err := os.ReadFile(filepath.Join(root, ref+".json")); err != nil || string(got) != string(jsonBefore) {
+							t.Fatalf("live draft changed: %q, %v", got, err)
+						}
+						for finalSuffix, payload := range finalArtifacts {
+							if got, err := os.ReadFile(filepath.Join(root, ref+finalSuffix)); err != nil || string(got) != string(payload) {
+								t.Fatalf("live final artifact %s changed: %q, %v", finalSuffix, got, err)
+							}
+						}
+					}
+					if state == "symlink" {
+						if got, err := os.ReadFile(path + ".original"); err != nil || string(got) != string(payload) {
+							t.Fatalf("symlink target changed: %q, %v", got, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPruneDraftTemporaryUnknownAndMalformedNames(t *testing.T) {
+	root := t.TempDir()
+	ref := "draft_123456789012345678901234"
+	var names []string
+	for _, suffix := range []string{".json", ".send-spool", ".send-claim", ".save-claim", handoffClaimSuffix} {
+		names = append(names, ref+suffix+".mailcli-0123456789abcdef01234567", "."+ref+suffix+".mailcli-0123456789abcdef0123456g", "."+ref+suffix+".mailcli-0123456789abcdef012345678", ".bad"+suffix+".mailcli-0123456789abcdef01234567")
+	}
+	for index := 0; index < maximumPreservedTemporaryDiagnostics+5; index++ {
+		names = append(names, fmt.Sprintf(".%s.unknown.mailcli-%024x", ref, index))
+	}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ageDraftTemporary(t, filepath.Join(root, name))
+	}
+	service := NewServiceWithDraftRoot(nil, root)
+	for _, confirm := range []bool{false, true} {
+		result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: confirm})
+		if err != nil || result.PreservedTemporaryCount != maximumPreservedTemporaryDiagnostics+5 || len(result.PreservedTemporaries) != maximumPreservedTemporaryDiagnostics || len(result.SweptArtifacts) != 0 {
+			t.Fatalf("unknown cleanup=%+v, %v", result, err)
+		}
+		for _, name := range names {
+			if got, err := os.ReadFile(filepath.Join(root, name)); err != nil || string(got) != "preserve" {
+				t.Fatalf("preserved temporary=%q, %v", got, err)
+			}
+		}
+	}
 }

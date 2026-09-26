@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -97,12 +98,16 @@ func draftStorageFor(root string, storage ...*draftStorage) *draftStorage {
 }
 
 func replacePrivateDraftFile(
+	ctx context.Context,
 	storage *draftStorage,
 	name string,
 	payload []byte,
 	writeMessage string,
 	publishMessage string,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	temporaryPath, err := attachmentTemporaryPath(storage.absolute(name))
 	if err != nil {
 		return err
@@ -111,6 +116,9 @@ func replacePrivateDraftFile(
 	temporaryIdentity, err := writePrivateDraftFile(storage, temporary, payload)
 	if err != nil {
 		return fmt.Errorf("%s: %w", writeMessage, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, removeDraftStorageFile(storage, temporary, temporaryIdentity, ""))
 	}
 	var publishErr error
 	if storage.root == nil {

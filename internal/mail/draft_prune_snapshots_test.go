@@ -365,3 +365,105 @@ func TestPruneRejectsUnclaimedSymlinkSnapshotRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneHealsOnlyEmptyPrivateUnclaimedSnapshotParents(t *testing.T) {
+	for _, state := range []string{"empty", "nonempty", "mode"} {
+		t.Run(state, func(t *testing.T) {
+			root := t.TempDir()
+			ref := "draft_123456789012345678901234"
+			parent := filepath.Join(root, ref+handoffSnapshotSuffix)
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if state == "nonempty" {
+				if err := os.WriteFile(filepath.Join(parent, "foreign"), []byte("preserved"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if state == "mode" {
+				if err := os.Chmod(parent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			service := NewServiceWithDraftRoot(nil, root)
+			result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true})
+			if state == "empty" {
+				if err != nil || len(result.SweptArtifacts) != 1 {
+					t.Fatalf("empty parent not healed: %+v, %v", result, err)
+				}
+				if _, err := os.Lstat(parent); !os.IsNotExist(err) {
+					t.Fatalf("parent remains: %v", err)
+				}
+				return
+			}
+			if errorCode(err) != "prune_failed" || len(result.Failed) != 1 {
+				t.Fatalf("unsafe parent accepted: %+v, %v", result, err)
+			}
+			if _, err := os.Lstat(parent); err != nil {
+				t.Fatalf("unsafe parent removed: %v", err)
+			}
+			if state == "nonempty" {
+				if got, err := os.ReadFile(filepath.Join(parent, "foreign")); err != nil || string(got) != "preserved" {
+					t.Fatalf("foreign content changed: %q, %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEmptySnapshotParentCleanupRejectsReplacement(t *testing.T) {
+	root := t.TempDir()
+	ref := "draft_123456789012345678901234"
+	lease, err := acquireDraftLease(context.Background(), root, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.release(); err != nil {
+			t.Error(err)
+		}
+	})
+	name := ref + handoffSnapshotSuffix
+	parent := filepath.Join(root, name)
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := lease.storage.lstat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	check := func() error {
+		checks++
+		if checks == 3 {
+			if err := os.Rename(parent, parent+".retained"); err != nil {
+				return err
+			}
+			return os.Mkdir(parent, 0o700)
+		}
+		return nil
+	}
+	if err := removeEmptyOrphanSnapshotParent(lease.storage, name, identity, check); errorCode(err) != "draft_lock_changed" {
+		t.Fatalf("replacement cleanup=%v checks=%d", err, checks)
+	}
+	for _, path := range []string{parent, parent + ".retained"} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("pinned or replacement parent removed: %v", err)
+		}
+	}
+}
+
+func TestDiscardRemovesEmptyLegacySnapshotParent(t *testing.T) {
+	service := NewServiceWithDraftRoot(nil, t.TempDir())
+	draft := createSendTestDraft(t, service)
+	parent := filepath.Join(service.draftRoot, draft.Ref+handoffSnapshotSuffix)
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DiscardDraft(draft.Ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(parent); !os.IsNotExist(err) {
+		t.Fatalf("legacy parent remains: %v", err)
+	}
+}

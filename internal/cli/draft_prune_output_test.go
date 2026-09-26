@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/mail"
 )
@@ -123,6 +124,7 @@ func TestDraftPruneHumanResultCategories(t *testing.T) {
 		{"partial", mail.PruneDraftsResult{Candidates: []mail.PruneCandidate{{Ref: "candidate"}}, Removed: []string{"draft"}, SweptLocks: []string{"lock"}, ExpiredReceipts: []string{"receipt"}, SweptArtifacts: []string{"orphan"}, Failed: []mail.PruneFailure{{Ref: "failed", Error: "reason"}}}, false, "removed\tdraft\nswept_lock\tlock\nremoved receipt\treceipt\nswept_artifacts\torphan\nfailed\tfailed\treason\n"},
 		{"uncompleted candidate", mail.PruneDraftsResult{Candidates: []mail.PruneCandidate{{Ref: "candidate"}}}, false, ""},
 		{"dry failure", mail.PruneDraftsResult{DryRun: true, Failed: []mail.PruneFailure{{Ref: "ref", Error: "reason"}}}, false, "failed\tref\treason\n"},
+		{"bounded unknown", mail.PruneDraftsResult{PreservedTemporaries: []string{"unknown"}, PreservedTemporaryCount: 21}, true, "preserved unknown temporary\tunknown\npreserved unknown temporaries omitted\t20\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var out bytes.Buffer
@@ -131,5 +133,71 @@ func TestDraftPruneHumanResultCategories(t *testing.T) {
 				t.Fatalf("output=%q want=%q", out.String(), test.want)
 			}
 		})
+	}
+}
+
+func TestDraftPruneTemporaryOutputMatchesEligibility(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		for _, live := range []bool{false, true} {
+			t.Run(fmt.Sprintf("json_%t/live_%t", jsonOutput, live), func(t *testing.T) {
+				root := t.TempDir()
+				service := mail.NewServiceWithDraftRoot(nil, root)
+				ref := "draft_123456789012345678901234"
+				if live {
+					draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{To: []mail.Recipient{{Address: "ada@example.com"}}, Body: "retained body"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					ref = draft.Ref
+				}
+				name := "." + ref + ".send-spool.mailcli-0123456789abcdef01234567"
+				unknown := "." + ref + ".future.mailcli-0123456789abcdef01234567"
+				for _, name := range []string{name, unknown} {
+					path := filepath.Join(root, name)
+					if err := os.WriteFile(path, []byte("temporary bytes"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					old := time.Now().Add(-time.Hour)
+					if err := os.Chtimes(path, old, old); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, confirm := range []bool{false, true} {
+					args := []string{"drafts", "prune"}
+					if confirm {
+						args = append(args, "--confirm")
+					}
+					if jsonOutput {
+						args = append(args, "--json")
+					}
+					var stdout, stderr bytes.Buffer
+					if code := Run(context.Background(), service, args, &stdout, &stderr); code != 0 {
+						t.Fatalf("code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+					}
+					if jsonOutput {
+						var response envelope
+						if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+							t.Fatal(err)
+						}
+						result := response.Data.PruneResult
+						if !response.OK || result == nil || len(result.TemporaryArtifacts) != 1 || result.TemporaryArtifacts[0].Name != name || result.TemporaryArtifacts[0].Size != 15 || result.PreservedTemporaryCount != 1 || len(result.PreservedTemporaries) != 1 || result.PreservedTemporaries[0] != unknown {
+							t.Fatalf("temporary response=%s", &stdout)
+						}
+					} else if (!confirm && !strings.Contains(stdout.String(), "would remove temporary\t"+name+"\t15 bytes\n")) || !strings.Contains(stdout.String(), "preserved unknown temporary\t"+unknown+"\n") || strings.Contains(stdout.String(), "no stale") {
+						t.Fatalf("temporary stdout=%s", &stdout)
+					}
+					if confirm {
+						if _, err := os.Lstat(filepath.Join(root, name)); !os.IsNotExist(err) {
+							t.Fatalf("confirmed temporary remains: %v", err)
+						}
+					} else if _, err := os.Lstat(filepath.Join(root, name)); err != nil {
+						t.Fatal(err)
+					}
+					if got, err := os.ReadFile(filepath.Join(root, unknown)); err != nil || string(got) != "temporary bytes" {
+						t.Fatalf("unknown temporary changed: %q, %v", got, err)
+					}
+				}
+			})
+		}
 	}
 }

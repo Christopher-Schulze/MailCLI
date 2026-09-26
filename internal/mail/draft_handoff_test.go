@@ -2,10 +2,73 @@ package mail
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestDraftHandoffTerminalPathsRemoveSnapshotParent(t *testing.T) {
+	for _, outcome := range []string{"cancel", "finish", "reconcile", "discard"} {
+		for _, attachments := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/attachments_%t", outcome, attachments), func(t *testing.T) {
+				root := filepath.Join(t.TempDir(), "drafts")
+				service := NewServiceWithDraftRoot(nil, root)
+				input := DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Body: "body"}
+				if attachments {
+					path := filepath.Join(t.TempDir(), "attachment.txt")
+					if err := os.WriteFile(path, []byte("attachment bytes"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					input.Attachments = []string{path}
+				}
+				draft, err := service.CreateDraft(CreateDraftRequest{Input: input})
+				if err != nil {
+					t.Fatal(err)
+				}
+				session, err := service.BeginDraftHandoff(draft.Ref)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := session.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				switch outcome {
+				case "cancel", "discard":
+					err = session.CancelBeforeDispatch()
+				case "finish":
+					if err = session.MarkDispatched(context.Background()); err == nil {
+						err = session.Finish(HandoffOutcomeConfirmedOpened)
+					}
+				case "reconcile":
+					if err = session.MarkDispatched(context.Background()); err == nil {
+						err = session.Finish(HandoffOutcomeUnknown)
+					}
+					if err == nil {
+						_, err = service.ReconcileDraftHandoff(draft.Ref, session.AttemptID(), HandoffResolutionFailed)
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if outcome == "discard" {
+					if err := service.DiscardDraft(draft.Ref); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := os.Lstat(filepath.Join(root, draft.Ref+handoffSnapshotSuffix)); !os.IsNotExist(err) {
+					t.Fatalf("snapshot parent remains: %v", err)
+				}
+				if result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true}); err != nil || len(result.Failed) != 0 {
+					t.Fatalf("prune = %+v, %v", result, err)
+				}
+			})
+		}
+	}
+}
 
 func TestDraftHandoffUnknownAttemptRetainsEvidenceUntilReconciliation(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
@@ -205,5 +268,114 @@ func TestDraftHandoffPreparedRecoveryPreservesSymlinkedStaging(t *testing.T) {
 	}
 	if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "external bytes" {
 		t.Fatalf("symlink target changed: %q, %v", payload, err)
+	}
+}
+
+func TestDraftHandoffCancelPreservesClaimAfterCleanupRefusal(t *testing.T) {
+	for _, unsafe := range []string{"nonempty", "symlink", "mode"} {
+		t.Run(unsafe, func(t *testing.T) {
+			root := t.TempDir()
+			service := NewServiceWithDraftRoot(nil, root)
+			draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Body: "body"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := service.BeginDraftHandoff(draft.Ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if !session.closed {
+					if err := session.lease.release(); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			parent := filepath.Join(root, draft.Ref+handoffSnapshotSuffix)
+			claim := filepath.Join(root, draft.Ref+handoffClaimSuffix)
+			before, err := os.ReadFile(claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch unsafe {
+			case "nonempty":
+				if err := os.WriteFile(filepath.Join(parent, "foreign"), []byte("foreign bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Rename(parent, parent+".retained"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), parent); err != nil {
+					t.Fatal(err)
+				}
+			case "mode":
+				if err := os.Chmod(parent, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := session.CancelBeforeDispatch(); err == nil {
+				t.Fatal("unsafe cancellation cleanup succeeded")
+			}
+			if after, err := os.ReadFile(claim); err != nil || string(after) != string(before) {
+				t.Fatalf("owning claim changed: %q, %v", after, err)
+			}
+			if _, err := os.Lstat(parent); err != nil {
+				t.Fatalf("unsafe parent removed: %v", err)
+			}
+			if err := service.DiscardDraft(draft.Ref); errorCode(err) != "handoff_retry_blocked" {
+				t.Fatalf("claim no longer blocks discard: %v", err)
+			}
+		})
+	}
+}
+
+func TestDraftHandoffCancelAfterDispatchRetainsUncertainty(t *testing.T) {
+	service := NewServiceWithDraftRoot(nil, t.TempDir())
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Body: "body"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.MarkDispatched(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CancelBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := service.GetDraft(draft.Ref)
+	if err != nil || loaded.HandoffAttempt == nil || !loaded.HandoffAttempt.DispatchStarted || loaded.HandoffAttempt.Outcome != HandoffOutcomeUnknown {
+		t.Fatalf("dispatch evidence lost: %+v, %v", loaded.HandoffAttempt, err)
+	}
+	if _, err := os.Lstat(filepath.Join(service.draftRoot, draft.Ref+handoffSnapshotSuffix)); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DiscardDraft(draft.Ref); errorCode(err) != "handoff_retry_blocked" {
+		t.Fatalf("uncertain handoff discarded: %v", err)
+	}
+}
+
+func TestDraftHandoffCancelRemovesParentWithAbsentEmptyAttempt(t *testing.T) {
+	service := NewServiceWithDraftRoot(nil, t.TempDir())
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{To: []Recipient{{Address: "ada@example.com"}}, Body: "body"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(service.draftRoot, draft.Ref+handoffSnapshotSuffix)
+	if err := os.Remove(filepath.Join(parent, session.AttemptID())); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CancelBeforeDispatch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(parent); !os.IsNotExist(err) {
+		t.Fatalf("parent remains: %v", err)
 	}
 }
