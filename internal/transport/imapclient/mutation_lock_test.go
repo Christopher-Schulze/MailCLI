@@ -4,12 +4,14 @@ package imapclient
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,26 +169,20 @@ func TestMutationLockFilesystemFailureBlocksMutationBeforeNetwork(t *testing.T) 
 	assertMutationLockFailureDoesNotConnect(t, client)
 }
 
+type mutationLockCountingDialer struct {
+	dialer *tls.Dialer
+	calls  atomic.Int64
+}
+
+func (d *mutationLockCountingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.calls.Add(1)
+	return d.dialer.DialContext(ctx, network, address)
+}
+
 func assertMutationLockFailureDoesNotConnect(t *testing.T, client *Client) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := listener.Close(); err != nil {
-			t.Errorf("close mutation-lock test listener: %v", err)
-		}
-	}()
-	accepted := make(chan struct{}, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err == nil {
-			_ = conn.Close()
-			accepted <- struct{}{}
-		}
-	}()
-	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	server := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	host, portText, err := net.SplitHostPort(server.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,17 +190,31 @@ func assertMutationLockFailureDoesNotConnect(t *testing.T, client *Client) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	dialer := &mutationLockCountingDialer{dialer: &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: imapDialTimeout}, Config: client.tlsConfig(host),
+	}}
+	client.dialer = dialer
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close mutation-lock test client: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err = client.SetFlags(ctx, transport.ImapConfig{
-		Host: host, Port: port, Username: "agent@example.com",
-	}, "INBOX", 42, 7, []string{"\\Seen"}, nil)
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "agent@example.com"}
+	_, err = client.SetFlags(ctx, cfg, "INBOX", 42, 7, []string{"\\Seen"}, nil)
 	if got := transport.ErrorCode(err); got != transport.CodeIMAPLockUnavailable {
 		t.Fatalf("SetFlags() error code = %q, error %v; want %q", got, err, transport.CodeIMAPLockUnavailable)
 	}
-	select {
-	case <-accepted:
-		t.Fatal("SetFlags() connected before the mutation lock was available")
-	case <-time.After(100 * time.Millisecond):
+	if calls := dialer.calls.Load(); calls != 0 {
+		t.Fatalf("SetFlags() made %d dial attempts before the mutation lock was available", calls)
+	}
+	mailboxes, err := client.ListMailboxes(ctx, cfg)
+	if err != nil || len(mailboxes) != 1 || mailboxes[0].Name != "INBOX" {
+		t.Fatalf("ListMailboxes() after mutation refusal = %+v, %v", mailboxes, err)
+	}
+	if calls := dialer.calls.Load(); calls != 1 {
+		t.Fatalf("ListMailboxes() made %d dial attempts, want one real TLS connection", calls)
 	}
 }

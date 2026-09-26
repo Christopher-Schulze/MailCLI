@@ -64,6 +64,10 @@ type mailbox struct {
 	flags       []string
 }
 
+type contextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
 func (c *Client) dial(ctx context.Context, cfg transport.ImapConfig) (net.Conn, error) {
 	host := cfg.Host
 	port := cfg.Port
@@ -72,10 +76,12 @@ func (c *Client) dial(ctx context.Context, cfg transport.ImapConfig) (net.Conn, 
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
-	tlsCfg := c.tlsConfig(host)
-	d := &tls.Dialer{
-		NetDialer: &net.Dialer{Timeout: imapDialTimeout},
-		Config:    tlsCfg,
+	d := c.dialer
+	if d == nil {
+		d = &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: imapDialTimeout},
+			Config:    c.tlsConfig(host),
+		}
 	}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {

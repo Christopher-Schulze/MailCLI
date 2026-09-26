@@ -52,6 +52,7 @@ type PoolStats struct {
 // reusable.
 type Client struct {
 	TLSConfig *tls.Config
+	dialer    contextDialer
 
 	lifecycle           sync.RWMutex
 	lifecycleGeneration uint64
