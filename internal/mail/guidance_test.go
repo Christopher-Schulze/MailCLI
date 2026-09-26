@@ -1,11 +1,15 @@
 package mail
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -110,6 +114,137 @@ func TestGuidanceForProtocolFailuresBeforeTerminators(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAttachmentSaveGuidanceRequiresClassifiedTransientCause(t *testing.T) {
+	type guidanceCase struct {
+		name         string
+		cause        error
+		certainty    EffectCertainty
+		effect       EffectCertainty
+		retryability Retryability
+		replay       bool
+		recovery     RecoveryAction
+	}
+
+	check := func(t *testing.T, test guidanceCase) {
+		t.Helper()
+		if test.certainty == "" {
+			test.certainty = EffectNone
+		}
+		outcome := &AttachmentSaveOutcomeError{
+			Cause: test.cause, Phase: OperationPhaseExecution, EffectCertainty: test.certainty,
+		}
+		single := GuidanceForError("attachments.save", outcome)
+		batchItem := (&batchExecution{request: BatchRequest{Operation: BatchOperationAttachmentSave}}).itemError(outcome)
+		if batchItem.Guidance == nil || !reflect.DeepEqual(batchItem.Guidance, &single) {
+			t.Fatalf("single guidance = %+v, batch guidance = %+v", single, batchItem.Guidance)
+		}
+		if single.EffectCertainty != test.effect || single.Retryability != test.retryability ||
+			single.ReplayAllowed != test.replay || single.Recovery.Action != test.recovery ||
+			batchItem.Retryable != test.replay {
+			t.Fatalf("single guidance = %+v, batch retryable = %t", single, batchItem.Retryable)
+		}
+	}
+
+	var cases []guidanceCase
+	addCodes := func(codes []string, retryability Retryability, replay bool, recovery RecoveryAction) {
+		for _, code := range codes {
+			cases = append(cases, guidanceCase{
+				name: code, cause: &OperationError{Code: code, Message: "attachment save failure"},
+				certainty: EffectNone, effect: EffectNone, retryability: retryability,
+				replay: replay, recovery: recovery,
+			})
+		}
+	}
+	addCodes([]string{
+		"invalid_argument", "invalid_input", "missing_required", "not_found", "ambiguous_attachment",
+		"attachment_not_downloaded", "invalid_reference", "ambiguous_reference", "stale_reference",
+		"store_bound_reference_required", "message_source_missing", "raw_source_partial", "content_incomplete",
+		"local_only_mailbox", "mailbox_uidvalidity_changed", "account_disabled", "account_degraded",
+		"account_identity_missing", "account_binding_invalid", "account_binding_host_invalid",
+		"account_binding_provider_mismatch", "account_binding_version_unsupported", "account_binding_unavailable",
+		"account_binding_stale", "account_reference_version_unsupported", "mail_store_unavailable",
+		"mail_store_preferences_unavailable", "mail_store_preferences_invalid", "safe_mailbox_listing_unavailable",
+		"safe_search_unavailable", "mail_automation_denied", "mail_not_running", "mail_recovery_required",
+		transport.CodeIMAPMessageUIDUnknown, transport.CodeIMAPAmbiguousMessageID,
+		transport.CodeIMAPMailboxNotFound, transport.CodeIMAPMessageNotFound, transport.CodeIMAPAmbiguousMailbox,
+	}, RetryUserInputRequired, false, RecoveryCorrect)
+	addCodes([]string{
+		"attachment_resource_limit", "account_catalog_incomplete", "ambiguous_mail_store_generation",
+		"account_reference_corrupt", "account_reference_invalid", "ambiguous_message_source",
+		"content_export_changed", "imap_flag_read_unsupported", "invalid_emlx", "invalid_mailbox_cache",
+		"invalid_message_source", "mail_store_not_read_only", "mailbox_cache_malformed", "mail_store_path_mismatch",
+		"mailbox_catalog_incomplete", "mailbox_info_malformed", "mime_resource_limit", "raw_source_too_large",
+		"store_changed", "unsafe_message_source", "unsupported_mail_store_schema", "search_unavailable",
+		"draft_state_error", "send_receipt_invalid", transport.CodeIMAPMessageUIDMismatch,
+		transport.CodeIMAPResponseMalformed, transport.CodeIMAPUIDValidityUnknown, "attachment_changed",
+		transport.CodeIMAPFetchFailed, transport.CodeIMAPResourceLimitExceeded,
+	}, RetryTerminal, false, RecoveryInspect)
+	addCodes([]string{
+		transport.CodeSMTPAuthFailed, transport.CodeSMTPCredentialsMissing, transport.CodeIMAPAuthFailed,
+		transport.CodeSMTPTLSFailed, transport.CodeUnsupportedProvider, transport.CodeSMTPUTF8Unsupported,
+	}, RetryUserInputRequired, false, RecoveryCorrect)
+	addCodes([]string{
+		transport.CodeIMAPConnectFailed, transport.CodeIMAPCanceled, transport.CodeIMAPDisconnected,
+		transport.CodeIMAPTimeout, "operation_canceled", "operation_timeout", "mail_busy",
+		"mail_automation_timeout", "mail_process_changed",
+	}, RetrySafe, true, RecoveryRetry)
+	addCodes([]string{"operation_failed", "future_attachment_failure", "invalid_future_attachment_failure"},
+		RetryObserveRequired, false, RecoveryInspect)
+	cases = append(cases,
+		guidanceCase{
+			name: "canceled context", cause: context.Canceled, certainty: EffectNone,
+			effect: EffectNone, retryability: RetrySafe, replay: true, recovery: RecoveryRetry,
+		},
+		guidanceCase{
+			name: "deadline context", cause: context.DeadlineExceeded, certainty: EffectNone,
+			effect: EffectNone, retryability: RetrySafe, replay: true, recovery: RecoveryRetry,
+		},
+		guidanceCase{
+			name: "network-truncated FETCH", cause: &transport.TransportError{
+				Code: transport.CodeIMAPFetchFailed, Err: io.ErrUnexpectedEOF,
+			}, certainty: EffectNone, effect: EffectNone, retryability: RetrySafe, replay: true, recovery: RecoveryRetry,
+		},
+		guidanceCase{
+			name: "TLS verification failure", cause: &transport.TransportError{
+				Code: transport.CodeIMAPConnectFailed,
+				Err:  &tls.CertificateVerificationError{Err: errors.New("untrusted certificate")},
+			}, certainty: EffectNone, effect: EffectNone, retryability: RetryUserInputRequired,
+			replay: false, recovery: RecoveryCorrect,
+		},
+		guidanceCase{
+			name: "filesystem permission", cause: fs.ErrPermission, certainty: EffectNone,
+			effect: EffectNone, retryability: RetryUserInputRequired, replay: false, recovery: RecoveryCorrect,
+		},
+		guidanceCase{
+			name: "untyped filesystem failure", cause: errors.New("read failed"), certainty: EffectNone,
+			effect: EffectNone, retryability: RetryObserveRequired, replay: false, recovery: RecoveryInspect,
+		},
+		guidanceCase{
+			name: "untyped cancellation with other code", cause: &OperationError{
+				Code: "operation_failed", Message: "operation stopped", Err: context.Canceled,
+			}, certainty: EffectNone, effect: EffectNone, retryability: RetrySafe, replay: true, recovery: RecoveryRetry,
+		},
+	)
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) { check(t, test) })
+	}
+	for _, certainty := range []EffectCertainty{EffectComplete, EffectPartial, EffectUnknown} {
+		t.Run(string(certainty)+" outcome blocks replay", func(t *testing.T) {
+			check(t, guidanceCase{
+				name: string(certainty), cause: context.DeadlineExceeded, certainty: certainty,
+				effect: certainty, retryability: RetryObserveRequired, replay: false, recovery: RecoveryInspect,
+			})
+		})
+	}
+	t.Run("invalid outcome certainty fails closed", func(t *testing.T) {
+		check(t, guidanceCase{
+			name: "invalid certainty", cause: errors.New("unknown outcome"), certainty: "future",
+			effect: EffectUnknown, retryability: RetryObserveRequired, replay: false, recovery: RecoveryInspect,
+		})
+	})
 }
 
 func TestResourceLimitGuidancePreservesDispatchUncertainty(t *testing.T) {

@@ -441,23 +441,76 @@ func guidanceForAttachmentSaveOutcome(outcome *AttachmentSaveOutcomeError, code 
 		phase = OperationPhaseExecution
 	}
 	if outcome.EffectCertainty == EffectNone {
-		if isInputErrorCode(code) || transport.IsConfigurationFailure(outcome.Cause) {
-			guidance := guidanceForInput()
-			guidance.EffectCertainty = EffectNone
-			return guidance
-		}
-		return OperationGuidance{
-			Phase: phase, EffectCertainty: EffectNone, Retryability: RetrySafe,
-			ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry},
-		}
+		return guidanceForAttachmentSaveNoEffect(outcome.Cause, code, phase)
 	}
 	certainty := outcome.EffectCertainty
-	if certainty != EffectComplete && certainty != EffectUnknown {
+	if certainty != EffectComplete && certainty != EffectPartial && certainty != EffectUnknown {
 		certainty = EffectUnknown
 	}
 	return OperationGuidance{
 		Phase: phase, EffectCertainty: certainty, Retryability: RetryObserveRequired,
 		ReplayAllowed: false, Recovery: RecoveryGuidance{Action: RecoveryInspect},
+	}
+}
+
+func guidanceForAttachmentSaveNoEffect(cause error, code string, phase OperationPhase) OperationGuidance {
+	if guidance, matched := guidanceForAttachmentSaveCorrection(cause, code); matched {
+		return guidance
+	}
+	if code == "attachment_changed" ||
+		(code == transport.CodeIMAPFetchFailed && !transport.IsTransientReadFailure(cause)) {
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone, Retryability: RetryTerminal,
+			Recovery: RecoveryGuidance{Action: RecoveryInspect},
+		}
+	}
+	if guidance, matched := guidanceForKnownReadError(code); matched {
+		return guidance
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) ||
+		code == "operation_canceled" || code == "operation_timeout" ||
+		code == "mail_busy" || code == "mail_automation_timeout" || code == "mail_process_changed" ||
+		transport.IsTransientReadFailure(cause) {
+		guidance := guidanceForRead()
+		guidance.Phase = phase
+		return guidance
+	}
+	if transport.IsResourceLimitExceeded(cause) {
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone, Retryability: RetryTerminal,
+			Recovery: RecoveryGuidance{Action: RecoveryInspect},
+		}
+	}
+	return OperationGuidance{
+		Phase: phase, EffectCertainty: EffectNone, Retryability: RetryObserveRequired,
+		Recovery: RecoveryGuidance{Action: RecoveryInspect},
+	}
+}
+
+func guidanceForAttachmentSaveCorrection(cause error, code string) (OperationGuidance, bool) {
+	if isAttachmentSaveInputError(code) || transport.IsConfigurationFailure(cause) {
+		guidance := guidanceForInput()
+		guidance.EffectCertainty = EffectNone
+		return guidance, true
+	}
+	if errors.Is(cause, fs.ErrPermission) {
+		return guidanceForReadCorrection("Correct access to the Mail source or output directory before retrying this attachment save."), true
+	}
+	if code == "not_found" {
+		return guidanceForReadCorrection("Refresh the message and attachment listings, then retry with a current message reference and an attachment ID present on that message."), true
+	}
+	if code == "attachment_not_downloaded" {
+		return guidanceForReadCorrection("Download the attachment in Mail.app or configure targeted IMAP hydration, then retry the save."), true
+	}
+	return OperationGuidance{}, false
+}
+
+func isAttachmentSaveInputError(code string) bool {
+	switch code {
+	case "invalid_argument", "invalid_input", "missing_required":
+		return true
+	default:
+		return false
 	}
 }
 

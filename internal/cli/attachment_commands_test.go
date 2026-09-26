@@ -20,7 +20,9 @@ type attachmentSaveResult struct {
 type attachmentSaveOutcomeCase struct {
 	name          string
 	certainty     mail.EffectCertainty
+	retryability  mail.Retryability
 	replayAllowed bool
+	recovery      mail.RecoveryAction
 	saved         bool
 	cause         error
 }
@@ -35,9 +37,22 @@ func (saver *attachmentSaveResult) SaveAttachment(
 
 func TestRunAttachmentsSaveRetainsOutcomeEvidence(t *testing.T) {
 	cases := []attachmentSaveOutcomeCase{
-		{name: "before publish", certainty: mail.EffectNone, replayAllowed: true, cause: context.DeadlineExceeded},
-		{name: "after publish", certainty: mail.EffectComplete, saved: true, cause: errors.New("close failed")},
-		{name: "ambiguous cleanup", certainty: mail.EffectUnknown, cause: &mail.OperationError{Code: "attachment_changed", Message: "output changed"}},
+		{
+			name: "before publish", certainty: mail.EffectNone, retryability: mail.RetrySafe,
+			replayAllowed: true, recovery: mail.RecoveryRetry, cause: context.DeadlineExceeded,
+		},
+		{
+			name: "after publish", certainty: mail.EffectComplete, retryability: mail.RetryObserveRequired,
+			recovery: mail.RecoveryInspect, saved: true, cause: errors.New("close failed"),
+		},
+		{
+			name: "ambiguous cleanup", certainty: mail.EffectUnknown, retryability: mail.RetryObserveRequired,
+			recovery: mail.RecoveryInspect, cause: &mail.OperationError{Code: "attachment_changed", Message: "output changed"},
+		},
+		{
+			name: "missing attachment", certainty: mail.EffectNone, retryability: mail.RetryUserInputRequired,
+			recovery: mail.RecoveryCorrect, cause: &mail.OperationError{Code: "not_found", Message: "attachment not found"},
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) { runAttachmentSaveOutcomeCase(t, test) })
@@ -88,8 +103,10 @@ func assertAttachmentSaveOutcomeResponse(
 		t.Fatalf("response = %+v, want failed envelope with guidance", response)
 	}
 	guidance := response.Error.Guidance
-	if guidance.EffectCertainty != test.certainty || guidance.ReplayAllowed != test.replayAllowed {
-		t.Fatalf("guidance = %+v, want certainty %q and replay %t", guidance, test.certainty, test.replayAllowed)
+	if guidance.EffectCertainty != test.certainty || guidance.Retryability != test.retryability ||
+		guidance.ReplayAllowed != test.replayAllowed || guidance.Recovery.Action != test.recovery {
+		t.Fatalf("guidance = %+v, want certainty %q, retryability %q, replay %t, recovery %q",
+			guidance, test.certainty, test.retryability, test.replayAllowed, test.recovery)
 	}
 	if test.saved {
 		if response.Data.SavedAttachment == nil || response.Data.SavedAttachment.Path != outputPath ||
