@@ -175,13 +175,13 @@ func newInvocationImapClientWith(
 	}
 	root, err := userConfigDir()
 	if err != nil {
-		return imapclient.NewWithMutationLockSetupError(err)
+		return imapclient.NewWithMutationLockSetupError(fmt.Errorf("resolve user configuration directory: %w", err))
 	}
 	client, err := newClient(imapclient.ClientOptions{
 		MutationLockDir: filepath.Join(root, "MailCLI"),
 	})
 	if err != nil {
-		return imapclient.NewWithMutationLockSetupError(err)
+		return imapclient.NewWithMutationLockSetupError(fmt.Errorf("initialize lock directory %q: %w", filepath.Join(root, "MailCLI"), err))
 	}
 	return client
 }

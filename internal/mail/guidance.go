@@ -137,7 +137,9 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
 	case code == "initialization_failed":
 		return guidanceForInput()
-	case code == transport.CodeIMAPLockUnavailable || code == transport.CodeIMAPAccountBusy:
+	case code == transport.CodeIMAPLockUnavailable:
+		return guidanceForInput()
+	case code == transport.CodeIMAPAccountBusy:
 		return OperationGuidance{
 			Phase: OperationPhaseMutation, EffectCertainty: EffectNone,
 			Retryability: RetrySafe, ReplayAllowed: true,

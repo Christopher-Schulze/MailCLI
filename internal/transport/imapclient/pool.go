@@ -132,8 +132,8 @@ func (c *Client) MutationLockSetupError() error {
 	return c.mutationLockSetupErr
 }
 
-// CheckMutationLock verifies the configured account lock without dispatching
-// an IMAP command. An empty lock directory is the explicit process-only mode.
+// CheckMutationLock probes setup once without waiting for a current holder or
+// reserving the account. Empty selects explicit process-only ordering.
 func (c *Client) CheckMutationLock(ctx context.Context, cfg transport.ImapConfig) error {
 	if err := ctx.Err(); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP mutation lock preflight")
@@ -144,12 +144,7 @@ func (c *Client) CheckMutationLock(ctx context.Context, cfg transport.ImapConfig
 	if c.mutationLockDir == "" {
 		return nil
 	}
-	unlock, err := acquireMutationLock(ctx, c.mutationLockDir, sessionKey(cfg))
-	if err != nil {
-		return err
-	}
-	unlock()
-	return nil
+	return probeMutationLock(c.mutationLockDir, sessionKey(cfg))
 }
 
 func normalizeConnectionLimit(limit int) (int, error) {

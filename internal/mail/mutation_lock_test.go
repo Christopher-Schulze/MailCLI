@@ -40,10 +40,10 @@ func TestSendDraftFailsBeforeSMTPWhenMutationLockSetupFailed(t *testing.T) {
 		t.Fatalf("preflight failure created send attempt: %+v", retained.SendAttempt)
 	}
 	guidance := GuidanceForError("drafts.send", sendErr)
-	if guidance.Phase != OperationPhaseMutation || guidance.EffectCertainty != EffectNone ||
-		guidance.Retryability != RetrySafe || !guidance.ReplayAllowed ||
-		guidance.Recovery.Action != RecoveryRetry {
-		t.Fatalf("lock setup guidance = %+v for %T %v (code %q), want safe retry with no effect",
+	if guidance.Phase != OperationPhaseValidation || guidance.EffectCertainty != EffectNone ||
+		guidance.Retryability != RetryUserInputRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != RecoveryCorrect {
+		t.Fatalf("lock setup guidance = %+v for %T %v (code %q), want configuration correction with no effect",
 			guidance, sendErr, sendErr, transport.ErrorCode(sendErr))
 	}
 }

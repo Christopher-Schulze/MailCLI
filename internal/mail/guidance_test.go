@@ -18,6 +18,16 @@ func TestGuidanceForProtocolFailuresBeforeTerminators(t *testing.T) {
 		recovery      RecoveryAction
 	}{
 		{
+			name: "mutation lock setup requires correction", command: "drafts.send",
+			code: transport.CodeIMAPLockUnavailable, phase: OperationPhaseValidation,
+			effect: EffectNone, retryability: RetryUserInputRequired, recovery: RecoveryCorrect,
+		},
+		{
+			name: "mutation lock contention permits retry", command: "messages.mark",
+			code: transport.CodeIMAPAccountBusy, phase: OperationPhaseMutation,
+			effect: EffectNone, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry,
+		},
+		{
 			name: "SMTP source integrity requires inspection", command: "drafts.send",
 			code: transport.CodeSMTPSourceInvalid, phase: OperationPhaseSubmission,
 			effect: EffectNone, retryability: RetryObserveRequired, recovery: RecoveryInspect,

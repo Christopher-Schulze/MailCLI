@@ -31,7 +31,7 @@ const mutationLockPollInterval = 50 * time.Millisecond
 func mutationLockUnavailable(cause error) error {
 	return &transport.TransportError{
 		Code:    transport.CodeIMAPLockUnavailable,
-		Message: "required cross-process IMAP mutation lock is unavailable",
+		Message: "required cross-process IMAP mutation lock is unavailable; create or permit the lock directory named in the cause, or explicitly set MAILCLI_IMAP_MUTATION_LOCK=off for process-local ordering",
 		Err:     cause,
 	}
 }

@@ -3,11 +3,15 @@
 package imapclient
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +24,119 @@ import (
 
 func testLockIdentity() sessionIdentity {
 	return sessionIdentity{host: "imap.example.com", port: 993, username: "agent@example.com"}
+}
+
+func TestMutationLockPreflightProcessHelper(t *testing.T) {
+	dir := os.Getenv("MAILCLI_PREFLIGHT_LOCK_DIRECTORY")
+	if dir == "" {
+		return
+	}
+	release, err := acquireMutationLock(context.Background(), dir, testLockIdentity())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := fmt.Fprintln(os.Stdout, "lock-held"); err != nil {
+		t.Fatal(err)
+	}
+	var signal [1]byte
+	if _, err := io.ReadFull(os.Stdin, signal[:]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMutationLockPreflightDoesNotWaitForOtherProcess(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMutationLockPreflightProcessHelper$")
+	command.Env = append(os.Environ(), "MAILCLI_PREFLIGHT_LOCK_DIRECTORY="+dir)
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := input.Write([]byte{1}); err != nil {
+			t.Error(err)
+		}
+		if err := input.Close(); err != nil {
+			t.Error(err)
+		}
+		if _, err := io.Copy(io.Discard, output); err != nil {
+			t.Error(err)
+		}
+		if err := command.Wait(); err != nil {
+			t.Error(err)
+		}
+	})
+	if line, err := bufio.NewReader(output).ReadString('\n'); err != nil || line != "lock-held\n" {
+		t.Fatalf("lock handshake: %q, %v", line, err)
+	}
+	client, err := NewWithOptions(ClientOptions{MutationLockDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err = client.CheckMutationLock(ctx, testLockConfig())
+	elapsed := time.Since(start)
+	if err != nil || elapsed >= 10*time.Millisecond {
+		t.Fatalf("contended preflight: %v after %s, want success below 10ms", err, elapsed)
+	}
+	t.Logf("contended preflight duration: %s", elapsed)
+	previous := mutationLockMaxWait
+	mutationLockMaxWait = 20 * time.Millisecond
+	defer func() { mutationLockMaxWait = previous }()
+	if release, err := acquireMutationLock(ctx, dir, testLockIdentity()); release != nil || transport.ErrorCode(err) != transport.CodeIMAPAccountBusy {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("probe altered held lock: %v", err)
+	}
+}
+
+func TestMutationLockPreflightRejectsUnsafeSetupWithRemedy(t *testing.T) {
+	for _, kind := range []string{"directory occupied", "lock symlink", "lock hardlink", "lock directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "locks")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := mutationLockPath(dir, testLockIdentity())
+			foreign := filepath.Join(t.TempDir(), "foreign")
+			if err := os.WriteFile(foreign, []byte("retained"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "directory occupied" {
+				dir = foreign
+			} else if kind == "lock symlink" {
+				if err := os.Symlink(foreign, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if kind == "lock hardlink" {
+				if err := os.Link(foreign, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := probeMutationLock(dir, testLockIdentity())
+			if transport.ErrorCode(err) != transport.CodeIMAPLockUnavailable || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "MAILCLI_IMAP_MUTATION_LOCK=off") {
+				t.Fatalf("setup error lacks path/remedy: %v", err)
+			}
+			payload, err := os.ReadFile(foreign)
+			info, statErr := os.Lstat(foreign)
+			if err != nil || statErr != nil || string(payload) != "retained" || info.Mode().Perm() != 0o644 {
+				t.Fatalf("foreign object changed: %v, %v", err, statErr)
+			}
+		})
+	}
 }
 
 func testLockConfig() transport.ImapConfig {
