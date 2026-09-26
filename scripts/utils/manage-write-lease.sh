@@ -9,7 +9,7 @@ usage() {
     'Usage:' \
     '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
     '  manage-write-lease.sh status' \
-    '  manage-write-lease.sh review TOKEN' \
+    '  manage-write-lease.sh review TOKEN [--diff]' \
     '  manage-write-lease.sh gate TOKEN [--checks REGISTERED_PATH...]' \
     '  manage-write-lease.sh release TOKEN' \
     '  manage-write-lease.sh abort TOKEN'
@@ -363,6 +363,7 @@ verify_staged_scope() {
 
 review_lease() {
   local TOKEN="$1"
+  local OUTPUT_MODE="${2:-}"
   require_token "${TOKEN}"
   local BASELINE_HEAD
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
@@ -373,12 +374,16 @@ review_lease() {
   local RELATIVE_PATH
   local BASELINE_FINGERPRINT
   local CURRENT_FINGERPRINT
+  local IGNORED_CHANGED_COUNT=0
   while IFS=$'\t' read -r BASELINE_FINGERPRINT RELATIVE_PATH; do
     CURRENT_FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
       fail "Could not fingerprint allowed path"
     if [[ "${CURRENT_FINGERPRINT}" != "${BASELINE_FINGERPRINT}" ]] &&
       ! grep -Fxq -- "${RELATIVE_PATH}" "$(lease_file changed_paths)"; then
-      printf 'ignored_allowed_path_changed=%s\n' "${RELATIVE_PATH}"
+      IGNORED_CHANGED_COUNT=$((IGNORED_CHANGED_COUNT + 1))
+      if [[ "${OUTPUT_MODE}" == --diff ]]; then
+        printf 'ignored_allowed_path_changed=%s\n' "${RELATIVE_PATH}"
+      fi
     fi
   done <"$(lease_file allowed_fingerprints)"
 
@@ -388,10 +393,22 @@ review_lease() {
   PATCH_DIGEST="$(staged_patch_digest)"
   printf '%s\n' "${REVIEWED_DIGEST}" >"$(lease_file reviewed_digest)"
   printf '%s\n' "${PATCH_DIGEST}" >"$(lease_file reviewed_patch_sha256)"
+  local PATH_COUNT
+  local OMITTED_COUNT=0
+  PATH_COUNT="$(awk 'END { print NR }' "$(lease_file changed_paths)")"
+  [[ "${PATH_COUNT}" -le 8 ]] || OMITTED_COUNT=$((PATH_COUNT - 8))
+  printf 'reviewed_paths_count=%s\nignored_allowed_paths_changed=%s\n' "${PATH_COUNT}" "${IGNORED_CHANGED_COUNT}"
   printf 'reviewed_paths:\n'
-  sed 's/^/  /' "$(lease_file changed_paths)"
-  git -C "${MAILCLI_ROOT}" diff --cached --stat "${BASELINE_HEAD}" --
-  git -C "${MAILCLI_ROOT}" diff --cached "${BASELINE_HEAD}" --
+  if [[ "${OUTPUT_MODE}" == --diff ]]; then
+    sed 's/^/  /' "$(lease_file changed_paths)"
+    git -C "${MAILCLI_ROOT}" diff --cached --stat "${BASELINE_HEAD}" --
+    git -C "${MAILCLI_ROOT}" diff --cached "${BASELINE_HEAD}" --
+  else
+    LC_ALL=C awk 'NR <= 8 { print "  " substr($0, 1, 120) }' "$(lease_file changed_paths)"
+    printf 'reviewed_paths_omitted=%s\nreviewed_paths_preview_max_bytes=120\n' "${OMITTED_COUNT}"
+    LC_ALL=C git -C "${MAILCLI_ROOT}" -c core.quotePath=true diff --cached --stat --stat-width=80 \
+      --stat-name-width=56 --stat-graph-width=20 --stat-count=8 "${BASELINE_HEAD}" --
+  fi
   printf 'reviewed_patch_sha256=%s\n' "${PATCH_DIGEST}"
 }
 
@@ -509,6 +526,8 @@ release_lease() {
     fail "Allowed file content changed after the successful full gate"
   [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
     fail "Worktree is not clean after the TASK commit"
+  printf 'task_commit_subject=%s\n' "${COMMIT_SUBJECT}"
+  git -C "${MAILCLI_ROOT}" diff --stat "${BASELINE_HEAD}" "${CURRENT_HEAD}" --
   remove_lease_files
   printf 'write_lease=released\n'
   printf 'task_commit=%s\n' "${CURRENT_HEAD}"
@@ -545,7 +564,11 @@ case "${COMMAND}" in
     shift
     gate_lease "$@"
     ;;
-  review | release | abort)
+  review)
+    [[ "$#" -eq 2 || ( "$#" -eq 3 && "$3" == --diff ) ]] || fail 'review requires a lease token and optional --diff'
+    review_lease "$2" "${3:-}"
+    ;;
+  release | abort)
     [[ "$#" -eq 2 ]] || fail "${COMMAND} requires exactly one lease token"
     "${COMMAND}_lease" "$2"
     ;;

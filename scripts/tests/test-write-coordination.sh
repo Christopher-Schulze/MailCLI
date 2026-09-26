@@ -358,7 +358,9 @@ printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 expect_ignored_scope_failure release "${TOKEN}"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
-  "${LEASE_TOOL}" release "${TOKEN}" >/dev/null
+  "${LEASE_TOOL}" release "${TOKEN}" >"${TEST_ROOT}/singleton-release"
+grep -Fq 'task_commit_subject=TASK 174: coordination fixture' "${TEST_ROOT}/singleton-release"
+grep -Fq 'tracked.txt' "${TEST_ROOT}/singleton-release"
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
 
 DIRECTORY_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
@@ -588,7 +590,39 @@ fi
 prove_guard_failable release "${GROUP_TOKEN}" 'Worktree is not clean after the TASK commit'
 rm "${TEST_REPOSITORY}/dirty-after-commit"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
-  "${LEASE_TOOL}" release "${GROUP_TOKEN}" >/dev/null
+  "${LEASE_TOOL}" release "${GROUP_TOKEN}" >"${TEST_ROOT}/group-release"
+grep -Fq 'task_commit_subject=TASK 174, 175: grouped fixture' "${TEST_ROOT}/group-release"
+grep -Fq 'other.txt' "${TEST_ROOT}/group-release"
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+
+REVIEW_PATHS=(tracked.txt)
+for ((INDEX = 1; INDEX <= 40; INDEX++)); do
+  REVIEW_PATHS+=("review-long-file-$(printf '%0180d' "${INDEX}").txt")
+done
+LARGE_ACQUIRE="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" acquire 177 review-output-owner "${REVIEW_PATHS[@]}")"
+LARGE_TOKEN="$(printf '%s\n' "${LARGE_ACQUIRE}" | sed -n 's/^write_lease_token=//p')"
+awk 'BEGIN { for (line = 1; line <= 4000; line++) printf "review-line-%04d\n", line }' \
+  >"${TEST_REPOSITORY}/tracked.txt"
+stage_fixture_path tracked.txt 100644
+for REVIEW_PATH in "${REVIEW_PATHS[@]:1}"; do
+  printf 'large-review-path\n' >"${TEST_REPOSITORY}/${REVIEW_PATH}"
+  stage_fixture_path "${REVIEW_PATH}" 100644
+done
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" review "${LARGE_TOKEN}" \
+  >"${TEST_ROOT}/default-review"
+[[ "$(wc -c <"${TEST_ROOT}/default-review")" -le 3072 ]]
+grep -Fxq 'reviewed_paths_count=41' "${TEST_ROOT}/default-review"
+grep -Fxq 'reviewed_paths_omitted=33' "${TEST_ROOT}/default-review"
+! grep -Fq '+review-line-' "${TEST_ROOT}/default-review"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" review "${LARGE_TOKEN}" --diff \
+  >"${TEST_ROOT}/full-review"
+grep -Fxq '+review-line-0001' "${TEST_ROOT}/full-review"
+grep -Fxq '+review-line-4000' "${TEST_ROOT}/full-review"
+for REVIEW_PATH in "${REVIEW_PATHS[@]}"; do grep -Fxq "  ${REVIEW_PATH}" "${TEST_ROOT}/full-review"; done
+[[ "$(sed -n 's/^reviewed_patch_sha256=//p' "${TEST_ROOT}/default-review")" == \
+  "$(sed -n 's/^reviewed_patch_sha256=//p' "${TEST_ROOT}/full-review")" ]]
+git -C "${TEST_REPOSITORY}" read-tree --reset -u "${GROUP_COMMIT}"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" abort "${LARGE_TOKEN}" >/dev/null
 
 printf 'Write coordination passed: ownership, path and asset scope, failure-preserving gate, tested commit identity, and exact grouped TASK membership\n'
