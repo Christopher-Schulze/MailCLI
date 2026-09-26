@@ -524,22 +524,17 @@ func (r *appendCancellationReader) Read(buffer []byte) (int, error) {
 
 func TestAppendToSentCancellationDuringLiteralIsIncomplete(t *testing.T) {
 	started := make(chan struct{}, 1)
-	continueReading := make(chan struct{})
+	continueReading := make(chan struct{}, 1)
+	readFailure := make(chan error, 1)
 	sourceBlocked := make(chan struct{})
 	continueSource := make(chan struct{}, 1)
-	defer close(continueReading)
-	defer func() {
-		select {
-		case continueSource <- struct{}{}:
-		default:
-		}
-	}()
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:                  true,
 		sentMboxes:              []string{"Sent"},
 		appendOK:                true,
 		appendReadStartedEvents: started,
 		appendReadContinue:      continueReading,
+		appendReadFailureEvents: readFailure,
 	})
 	host, portStr, err := net.SplitHostPort(srv.Addr())
 	if err != nil {
@@ -555,34 +550,72 @@ func TestAppendToSentCancellationDuringLiteralIsIncomplete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	source := &appendCancellationReader{blocked: sourceBlocked, resume: continueSource}
-	result := make(chan error, 1)
+	result := make(chan struct {
+		evidence transport.AppendEvidence
+		err      error
+	}, 1)
+	done := make(chan struct{})
 	go func() {
-		_, callErr := client.AppendToSentReader(ctx, cfg, source, 1<<20, "<cancel@example.com>")
-		result <- callErr
+		defer close(done)
+		evidence, callErr := client.AppendToSentReader(ctx, cfg, source, 1<<20, "<cancel@example.com>")
+		result <- struct {
+			evidence transport.AppendEvidence
+			err      error
+		}{evidence: evidence, err: callErr}
+	}()
+	defer func() {
+		cancel()
+		for _, resume := range []chan struct{}{continueReading, continueSource} {
+			select {
+			case resume <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("APPEND goroutine did not stop during cleanup")
+		}
 	}()
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("APPEND literal did not start")
 	}
 	select {
 	case <-sourceBlocked:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("APPEND source did not block before the declared literal was complete")
 	}
-	startedAt := time.Now()
 	cancel()
+	continueReading <- struct{}{}
+	// Keep the source blocked until the real peer observes the canceled
+	// connection ending mid-literal. A reader error alone cannot prove cancel.
+	select {
+	case err := <-readFailure:
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("canceled literal peer error = %v, want EOF", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancellation did not close the connection during the literal")
+	}
 	continueSource <- struct{}{}
 	select {
-	case err := <-result:
-		if transport.ErrorCode(err) != transport.CodeIMAPAppendIncomplete {
-			t.Fatalf("canceled APPEND error = %v, want %s", err, transport.CodeIMAPAppendIncomplete)
+	case got := <-result:
+		if transport.ErrorCode(got.err) != transport.CodeIMAPAppendIncomplete {
+			t.Fatalf("canceled APPEND error = %v, want %s", got.err, transport.CodeIMAPAppendIncomplete)
 		}
-		if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
-			t.Fatalf("canceled APPEND took %v after cancellation", elapsed)
+		if got.evidence != (transport.AppendEvidence{}) {
+			t.Fatalf("canceled APPEND returned completion evidence: %+v", got.evidence)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("canceled APPEND did not return promptly")
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled APPEND did not return")
+	}
+	if called, _, _, _ := srv.AppendRecord(); called {
+		t.Fatal("server committed the canceled incomplete literal")
+	}
+	if stats := client.PoolStats(); stats.DedicatedConnections != 0 || stats.ConnectingSessions != 0 || stats.InUseSessions != 0 {
+		t.Fatalf("canceled APPEND retained connection ownership: %+v", stats)
 	}
 }
 

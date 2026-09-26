@@ -140,16 +140,8 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND write")
 	}
 
-	line, err := c.readLine(sess)
-	if err != nil {
-		return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND continuation read")
-	}
-	if !strings.HasPrefix(line, "+") {
-		return &transport.TransportError{
-			Code:    transport.CodeIMAPAppendFailed,
-			Message: "IMAP APPEND expected continuation",
-			Err:     fmt.Errorf("got: %s", line),
-		}
+	if err := c.readAppendContinuation(ctx, sess, tag); err != nil {
+		return err
 	}
 
 	if err := c.setTransferDeadline(ctx, sess, size); err != nil {
@@ -209,6 +201,56 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		Code:    transport.CodeIMAPAppendFailed,
 		Message: "IMAP APPEND failed",
 		Err:     fmt.Errorf("server returned %s", status),
+	}
+}
+
+const maxAppendContinuationLines = 100
+const maxAppendContinuationBytes int64 = 64 << 10
+
+func (c *Client) readAppendContinuation(ctx context.Context, sess *session, tag string) error {
+	var responseBytes int64
+	responseLines := 0
+	for {
+		line, wireBytes, err := c.readLineWithWireByteBudget(sess, maxAppendContinuationBytes-responseBytes)
+		var malformed *malformedResponseError
+		if errors.As(err, &malformed) || wireBytes > maxAppendContinuationBytes-responseBytes {
+			sess.dirty = true
+			return &transport.TransportError{
+				Code:    transport.CodeIMAPResourceLimitExceeded,
+				Message: "IMAP APPEND continuation response exceeds 64 KiB",
+			}
+		}
+		if err != nil {
+			return wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND continuation read")
+		}
+		responseBytes += wireBytes
+		if strings.HasPrefix(line, "+") {
+			return nil
+		}
+		if strings.HasPrefix(line, "* ") {
+			responseLines++
+			if responseLines <= maxAppendContinuationLines {
+				continue
+			}
+			sess.dirty = true
+			return &transport.TransportError{
+				Code:    transport.CodeIMAPResourceLimitExceeded,
+				Message: "IMAP APPEND continuation exceeds 100 untagged responses",
+			}
+		}
+		if strings.HasPrefix(line, tag+" ") {
+			status, err := parseTaggedCompletionStatus(line, tag)
+			if err != nil {
+				return malformedTaggedCommandResponse(sess, "APPEND", err)
+			}
+			if status == "NO" || status == "BAD" {
+				return &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "IMAP APPEND rejected: " + line}
+			}
+		}
+		sess.dirty = true
+		return &transport.TransportError{
+			Code: transport.CodeIMAPAppendFailed, Message: "IMAP APPEND expected continuation", Err: fmt.Errorf("got: %s", line),
+		}
 	}
 }
 

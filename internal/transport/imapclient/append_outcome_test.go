@@ -14,6 +14,74 @@ import (
 	"mailcli/internal/transport"
 )
 
+func TestAppendToSentContinuationResponses(t *testing.T) {
+	const messageID = "<continuation@example.com>"
+	message := []byte("Message-ID: " + messageID + "\r\n\r\nmessage\r\n")
+	lineBoundary := make([]string, 100)
+	for index := range lineBoundary {
+		lineBoundary[index] = "* 3 EXISTS"
+	}
+	// The byte budget includes CRLF and the final continuation line.
+	byteBoundary := "* OK " + strings.Repeat("x", (64<<10)-len("* OK \r\n+ go ahead\r\n"))
+	tests := []struct {
+		name      string
+		lines     []string
+		rejection string
+		wantCode  string
+		wantText  string
+	}{
+		{name: "EXISTS", lines: []string{"* 3 EXISTS"}},
+		{name: "ALERT", lines: []string{"* OK [ALERT] maintenance"}},
+		{name: "line boundary", lines: lineBoundary},
+		{name: "byte boundary", lines: []string{byteBoundary}},
+		{name: "NO", lines: []string{"* 3 EXISTS"}, rejection: "NO [OVERQUOTA] quota exceeded", wantCode: transport.CodeIMAPAppendFailed, wantText: "[OVERQUOTA] quota exceeded"},
+		{name: "BAD", rejection: "BAD invalid literal", wantCode: transport.CodeIMAPAppendFailed, wantText: "invalid literal"},
+		{name: "line flood", lines: append(append([]string(nil), lineBoundary...), "* 3 EXISTS"), wantCode: transport.CodeIMAPResourceLimitExceeded},
+		{name: "byte flood", lines: []string{byteBoundary + "x"}, wantCode: transport.CodeIMAPResourceLimitExceeded},
+		{name: "oversized line", lines: []string{"* OK " + strings.Repeat("x", maxIMAPResponseLineBytes)}, wantCode: transport.CodeIMAPResourceLimitExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newFakeServer(t, fakeServerConfig{
+				authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+				appendContinuationLines: test.lines, appendContinuationReject: test.rejection,
+			})
+			client, cfg := newFakeClient(t, srv)
+			t.Cleanup(func() { _ = client.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			source := &appendContinuationReader{reader: bytes.NewReader(message)}
+			evidence, err := client.AppendToSentReader(ctx, cfg, source, int64(len(message)), messageID)
+			if code := transport.ErrorCode(err); code != test.wantCode {
+				t.Fatalf("APPEND error = %v, want code %q", err, test.wantCode)
+			}
+			if test.wantText != "" && !strings.Contains(err.Error(), test.wantText) {
+				t.Fatalf("APPEND error = %v, want server text %q", err, test.wantText)
+			}
+			called, _, _, data := srv.AppendRecord()
+			if test.wantCode != "" {
+				if source.reads != 0 || called || evidence != (transport.AppendEvidence{}) {
+					t.Fatalf("pre-continuation failure read source %d times, committed=%v, evidence=%+v", source.reads, called, evidence)
+				}
+				return
+			}
+			if !called || !bytes.Equal(data, message) || !evidence.Appended || evidence.MatchCount != 1 {
+				t.Fatalf("APPEND committed=%v data=%q evidence=%+v", called, data, evidence)
+			}
+		})
+	}
+}
+
+type appendContinuationReader struct {
+	reader *bytes.Reader
+	reads  int
+}
+
+func (r *appendContinuationReader) Read(buffer []byte) (int, error) {
+	r.reads++
+	return r.reader.Read(buffer)
+}
+
 func TestDoAppendDistinguishesPreTerminatorFailures(t *testing.T) {
 	partial := bytes.Repeat([]byte{'x'}, 5000)
 	oversized := bytes.Repeat([]byte{'y'}, 4096)

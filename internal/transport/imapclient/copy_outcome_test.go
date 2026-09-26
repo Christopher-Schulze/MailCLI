@@ -22,6 +22,7 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 		closeAfterCommand bool
 		wantBytes         []byte
 		wantDispatched    bool
+		wantDirty         bool
 		wantOutcome       string
 		wantErrorCode     string
 	}{
@@ -29,6 +30,7 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 			name:           "deadline before write",
 			command:        command,
 			failDeadline:   true,
+			wantDirty:      true,
 			wantDispatched: false,
 			wantOutcome:    transport.MutationOutcomeNotStarted,
 			wantErrorCode:  transport.CodeIMAPTimeout,
@@ -44,6 +46,7 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 			name:           "partial command write",
 			command:        command,
 			failWriteAfter: 3,
+			wantDirty:      true,
 			wantBytes:      []byte("A00"),
 			wantDispatched: true,
 			wantOutcome:    transport.MutationOutcomeUnknown,
@@ -53,6 +56,7 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 			name:              "final reply lost",
 			command:           command,
 			closeAfterCommand: true,
+			wantDirty:         true,
 			wantBytes:         []byte(command + "\r\n"),
 			wantDispatched:    true,
 			wantOutcome:       transport.MutationOutcomeUnknown,
@@ -109,8 +113,8 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 				outcomeErr.Evidence.OperationID != evidence.OperationID || outcomeErr.Evidence.UIDValidity != 12345 {
 				t.Fatalf("mutation error evidence = %+v, want preserved operation and UIDVALIDITY: %v", outcomeErr, classifiedErr)
 			}
-			if !sess.dirty {
-				t.Fatal("COPY failure left the interrupted session clean")
+			if sess.dirty != test.wantDirty {
+				t.Fatalf("COPY failure dirty=%t, want %t", sess.dirty, test.wantDirty)
 			}
 		})
 	}

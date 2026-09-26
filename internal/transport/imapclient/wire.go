@@ -41,7 +41,6 @@ func (c *Client) setDeadlineFor(ctx context.Context, sess *session, budget time.
 
 func (c *Client) writeLine(sess *session, line string) error {
 	if strings.ContainsAny(line, "\r\n\x00") {
-		sess.dirty = true
 		return &transport.TransportError{
 			Code:    transport.CodeIMAPInvalidValue,
 			Message: "IMAP command contains a forbidden control character",
@@ -60,7 +59,6 @@ func (c *Client) writeLine(sess *session, line string) error {
 
 func (c *Client) writeLineBytes(sess *session, line []byte) error {
 	if bytes.ContainsAny(line, "\r\n\x00") {
-		sess.dirty = true
 		return &transport.TransportError{
 			Code:    transport.CodeIMAPInvalidValue,
 			Message: "IMAP command contains a forbidden control character",
@@ -87,13 +85,17 @@ func (c *Client) readLine(sess *session) (string, error) {
 }
 
 func (c *Client) readLineWithWireByteCount(sess *session) (string, int64, error) {
+	return c.readLineWithWireByteBudget(sess, maxIMAPResponseLineBytes)
+}
+
+func (c *Client) readLineWithWireByteBudget(sess *session, limit int64) (string, int64, error) {
 	var line []byte
 	for {
 		fragment, err := sess.br.ReadSlice('\n')
-		if len(line)+len(fragment) > maxIMAPResponseLineBytes {
+		if int64(len(line))+int64(len(fragment)) > limit {
 			sess.dirty = true
 			return "", 0, &malformedResponseError{err: fmt.Errorf(
-				"IMAP response line exceeds %d bytes", maxIMAPResponseLineBytes,
+				"IMAP response line exceeds %d bytes", limit,
 			)}
 		}
 		line = append(line, fragment...)

@@ -58,6 +58,71 @@ func TestSessionReuseSingleConnection(t *testing.T) {
 	}
 }
 
+func TestRejectedIMAPLineKeepsSessionReusable(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(*Client, *session, string) error
+	}{
+		{name: "string CR", write: func(c *Client, sess *session, tag string) error { return c.writeLine(sess, tag+" NOOP\r") }},
+		{name: "string LF", write: func(c *Client, sess *session, tag string) error { return c.writeLine(sess, tag+" NOOP\n") }},
+		{name: "string NUL", write: func(c *Client, sess *session, tag string) error { return c.writeLine(sess, tag+" NOOP\x00") }},
+		{name: "bytes CR", write: func(c *Client, sess *session, tag string) error { return c.writeLineBytes(sess, []byte(tag+" NOOP\r")) }},
+		{name: "bytes LF", write: func(c *Client, sess *session, tag string) error { return c.writeLineBytes(sess, []byte(tag+" NOOP\n")) }},
+		{name: "bytes NUL", write: func(c *Client, sess *session, tag string) error {
+			return c.writeLineBytes(sess, []byte(tag+" NOOP\x00"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+			client, cfg := newFakeClient(t, srv)
+			t.Cleanup(func() { _ = client.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			pooled, release, err := client.acquire(ctx, cfg)
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+			err = test.write(client, pooled.sess, pooled.sess.nextTag())
+			dirty, buffered := pooled.sess.dirty, pooled.sess.bw.Buffered()
+			release()
+			if transport.ErrorCode(err) != transport.CodeIMAPInvalidValue || dirty || buffered != 0 {
+				t.Fatalf("rejected line: error=%v dirty=%v buffered=%d", err, dirty, buffered)
+			}
+			if _, err := client.ListMailboxes(ctx, cfg); err != nil {
+				t.Fatalf("next valid LIST: %v", err)
+			}
+			commands := srv.Commands()
+			if srv.ConnectionCount() != 1 || len(commands) != 2 || commands[0] != "LOGIN" || commands[1] != "LIST" {
+				t.Fatalf("validation wrote a command or forced a new login: connections=%d commands=%q", srv.ConnectionCount(), commands)
+			}
+		})
+	}
+}
+
+func TestRejectedIMAPLinePreservesDirtySession(t *testing.T) {
+	tests := []struct {
+		name  string
+		bytes bool
+	}{
+		{name: "string"}, {name: "bytes", bytes: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sess := &session{dirty: true}
+			var err error
+			if test.bytes {
+				err = (&Client{}).writeLineBytes(sess, []byte("NOOP\n"))
+			} else {
+				err = (&Client{}).writeLine(sess, "NOOP\n")
+			}
+			if transport.ErrorCode(err) != transport.CodeIMAPInvalidValue || !sess.dirty {
+				t.Fatalf("validation error=%v dirty=%v", err, sess.dirty)
+			}
+		})
+	}
+}
+
 // DeleteMessage resolves trash and moves the message on one pooled connection.
 func TestSessionReuseDeleteSingleConnection(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{

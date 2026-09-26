@@ -36,6 +36,9 @@ type fakeServerConfig struct {
 	dropAppendResponse       bool
 	appendReadStartedEvents  chan<- struct{}
 	appendReadContinue       <-chan struct{}
+	appendReadFailureEvents  chan<- error
+	appendContinuationLines  []string
+	appendContinuationReject string
 	searchDelay              time.Duration
 	searchStarted            chan struct{}
 	searchStartedEvents      chan<- struct{}
@@ -433,6 +436,13 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.writeLine(bw, tag+" BAD literal length")
 				continue
 			}
+			for _, response := range s.config.appendContinuationLines {
+				s.writeLine(bw, response)
+			}
+			if s.config.appendContinuationReject != "" {
+				s.writeLine(bw, tag+" "+s.config.appendContinuationReject)
+				continue
+			}
 			s.writeLine(bw, "+ go ahead")
 			data := make([]byte, n)
 			if n > 0 {
@@ -447,6 +457,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 				}
 				if n > 1 {
 					if _, err := io.ReadFull(br, data[1:]); err != nil {
+						if s.config.appendReadFailureEvents != nil {
+							s.config.appendReadFailureEvents <- err
+						}
 						return
 					}
 				}
