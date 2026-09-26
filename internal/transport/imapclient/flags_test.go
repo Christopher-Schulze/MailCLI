@@ -294,10 +294,14 @@ func TestLogicalFlagResponseBudgetCountsTextAndLiteralsTogether(t *testing.T) {
 		{"combined bytes fit", 17, false}, {"combined bytes exceed", 16, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			sess := &session{br: bufio.NewReader(strings.NewReader("12345678 {6}\r\nabcdef!\r\n"))}
-			line, literals, err := (&Client{}).readLogicalLineWithLiterals(sess, 6, test.limit, 1)
+			const response = "12345678 {6}\r\nabcdef!\r\n"
+			sess := &session{br: bufio.NewReader(strings.NewReader(response))}
+			line, literals, wireBytes, err := (&Client{}).readLogicalLineWithLiteralReaderCounted(sess, 6, test.limit, 1, nil)
 			if (err != nil) != test.wantError {
 				t.Fatalf("response %q / %v, error %v, limit %d", line, literals, err, test.limit)
+			}
+			if wireBytes != int64(len(response)) {
+				t.Fatalf("wire bytes = %d, want %d", wireBytes, len(response))
 			}
 			if test.wantError && !sess.dirty {
 				t.Fatal("over-budget response left reusable session")

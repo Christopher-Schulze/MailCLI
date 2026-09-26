@@ -1146,10 +1146,10 @@ func TestListLiteralSizeLimit(t *testing.T) {
 	sess := &session{br: bufio.NewReader(strings.NewReader(
 		"* LIST (\\Sent) \".\" {" + strconv.Itoa(maxListLiteralBytes+1) + "}\r\n",
 	))}
-	_, _, err := New().readLineWithLiteral(sess)
+	_, _, _, err := New().readLineWithLiteralCounted(sess)
 	var malformed *malformedResponseError
 	if !errors.As(err, &malformed) {
-		t.Fatalf("readLineWithLiteral() error = %v, want malformed response", err)
+		t.Fatalf("readLineWithLiteralCounted() error = %v, want malformed response", err)
 	}
 }
 

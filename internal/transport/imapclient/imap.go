@@ -305,7 +305,7 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 	}
 	remaining := int64(maxFlagResponseBytes)
 	for range maxFlagResponseCount {
-		line, literals, err := c.readLogicalLineWithLiterals(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount)
+		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount, nil)
 		if err != nil {
 			return info, wrapCommandIOError(ctx, err, "IMAP SELECT read")
 		}

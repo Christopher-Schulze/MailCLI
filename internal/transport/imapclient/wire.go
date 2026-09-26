@@ -128,18 +128,13 @@ func listResponseMalformed(err error) *transport.TransportError {
 	}
 }
 
-// readLineWithLiteral reconstructs one logical response line from its line
+// readLineWithLiteralCounted reconstructs one logical response line from its line
 // fragments and server-sent literals. Each literal is represented in the
 // returned text by imapLiteralMarker and kept separately so its bytes remain
 // raw when the value parser consumes it.
-func (c *Client) readLineWithLiteral(sess *session) (string, [][]byte, error) {
-	line, literals, _, err := c.readLineWithLiteralCounted(sess)
-	return line, literals, err
-}
-
 func (c *Client) readLineWithLiteralCounted(sess *session) (string, [][]byte, int64, error) {
-	line, literals, wireBytes, err := c.readLogicalLineWithLiteralsCounted(
-		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount,
+	line, literals, wireBytes, err := c.readLogicalLineWithLiteralReaderCounted(
+		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount, nil,
 	)
 	var limitErr *literalLimitError
 	if errors.As(err, &limitErr) {
@@ -175,40 +170,6 @@ func (e *literalReadError) Error() string {
 }
 
 func (e *literalReadError) Unwrap() error { return e.err }
-
-func (c *Client) readLogicalLineWithLiterals(
-	sess *session,
-	maxLiteralBytes int64,
-	maxResponseBytes int64,
-	maxLiteralCount int,
-) (string, [][]byte, error) {
-	line, literals, _, err := c.readLogicalLineWithLiteralsCounted(
-		sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount,
-	)
-	return line, literals, err
-}
-
-func (c *Client) readLogicalLineWithLiteralsCounted(
-	sess *session,
-	maxLiteralBytes int64,
-	maxResponseBytes int64,
-	maxLiteralCount int,
-) (string, [][]byte, int64, error) {
-	return c.readLogicalLineWithLiteralReaderCounted(sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, nil)
-}
-
-func (c *Client) readLogicalLineWithLiteralReader(
-	sess *session,
-	maxLiteralBytes int64,
-	maxResponseBytes int64,
-	maxLiteralCount int,
-	readLiteral func(int) ([]byte, error),
-) (string, [][]byte, error) {
-	line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(
-		sess, maxLiteralBytes, maxResponseBytes, maxLiteralCount, readLiteral,
-	)
-	return line, literals, err
-}
 
 func (c *Client) readLogicalLineWithLiteralReaderCounted(
 	sess *session,

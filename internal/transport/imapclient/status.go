@@ -38,7 +38,7 @@ func (c *Client) doStatus(ctx context.Context, sess *session, tag, mailbox strin
 
 	seenStatus := false
 	for {
-		line, literals, err := c.readLineWithLiteral(sess)
+		line, literals, _, err := c.readLineWithLiteralCounted(sess)
 		if err != nil {
 			var malformed *malformedResponseError
 			if errors.As(err, &malformed) {

@@ -106,7 +106,7 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
 		var memoryBytes int64
-		line, literals, err := c.readLogicalLineWithLiteralReader(
+		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(
 			sess, maxBytes, responseLimit, maxFetchLiteralCount,
 			func(size int) ([]byte, error) {
 				source, err := readFetchSourceLiteral(ctx, sess.br, size, spool && int64(size)+memoryBytes >= fetchMemoryThreshold)
