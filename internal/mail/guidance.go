@@ -331,6 +331,15 @@ func guidanceForMutationUnknown(err error) OperationGuidance {
 					outcome.Evidence.Outcome == transport.MutationOutcomeRejected)) {
 			guidance.EffectCertainty = EffectNone
 		}
+		if outcome.Evidence.Command == "COPY" && outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted &&
+			!outcome.Evidence.HasPartialEffects() {
+			if isInputErrorCode(guidanceErrorCode(err)) || transport.IsConfigurationFailure(err) {
+				guidance.Retryability, guidance.Recovery.Action = RetryUserInputRequired, RecoveryCorrect
+			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || transport.IsTransientTransportFailure(err) {
+				guidance.Retryability, guidance.ReplayAllowed = RetrySafe, true
+				guidance.Recovery.Action = RecoveryRetry
+			}
+		}
 	}
 	return guidance
 }
