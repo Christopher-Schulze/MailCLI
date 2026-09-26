@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+source "${ROOT}/scripts/utils/check-go-toolchain.sh"
+source "${ROOT}/scripts/utils/run-vulnerability-check.sh"
+check_go_toolchain "${ROOT}"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-verification-policy.XXXXXX")"
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+STATUS=0
+GOTOOLCHAIN=auto check_go_toolchain "${ROOT}" >"${TEST_ROOT}/toolchain.log" 2>&1 || STATUS=$?
+[[ "${STATUS}" == 2 ]]
+grep -q 'Conflicting GOTOOLCHAIN' "${TEST_ROOT}/toolchain.log"
+
+printf 'network is unreachable\n' >"${TEST_ROOT}/offline.log"
+printf 'vulnerabilities found\n' >"${TEST_ROOT}/advisory.log"
+printf 'invalid package\n' >"${TEST_ROOT}/error.log"
+for CASE in '0 passed 0' '3 advisory_failed 3' '1 skipped_offline 1' '2 unavailable 2'; do
+  read -r INPUT EXPECTED EXPECTED_STATUS <<<"${CASE}"
+  LOG="${TEST_ROOT}/error.log"
+  [[ "${INPUT}" != 1 ]] || LOG="${TEST_ROOT}/offline.log"
+  [[ "${INPUT}" != 3 ]] || LOG="${TEST_ROOT}/advisory.log"
+  STATUS=0
+  classify_vulnerability_check "${INPUT}" "${LOG}" >"${TEST_ROOT}/result.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" == "${EXPECTED_STATUS}" ]]
+  grep -qx "vulnerability_check=${EXPECTED}" "${TEST_ROOT}/result.log"
+done
+
+LINTER="$(command -v golangci-lint || true)"
+[[ -n "${LINTER}" ]] || LINTER="$(go env GOPATH)/bin/golangci-lint"
+"${LINTER}" config verify --config "${ROOT}/.golangci.yml"
+printf 'module verificationfixture\n\ngo %s\n' "${GOTOOLCHAIN#go}" >"${TEST_ROOT}/go.mod"
+printf 'package verificationfixture\nfunc Value() int { return 42 }\n' >"${TEST_ROOT}/fixture.go"
+gofmt -w "${TEST_ROOT}/fixture.go"
+(cd "${TEST_ROOT}" && "${LINTER}" run --config "${ROOT}/.golangci.yml" ./...)
+for CASE in errcheck govet staticcheck; do
+  case "${CASE}" in
+    errcheck) printf 'package verificationfixture\nimport "io"\nfunc Close(c io.Closer) { c.Close() }\n' ;;
+    govet) printf 'package verificationfixture\nimport "fmt"\nfunc Print() { _, _ = fmt.Printf("%%d", "text") }\n' ;;
+    staticcheck) printf 'package verificationfixture\nimport "regexp"\nfunc Match(s string) (bool, error) { return regexp.MatchString("[a-", s) }\n' ;;
+  esac >"${TEST_ROOT}/fixture.go"
+  gofmt -w "${TEST_ROOT}/fixture.go"
+  STATUS=0
+  (cd "${TEST_ROOT}" && "${LINTER}" run --config "${ROOT}/.golangci.yml" ./...) >"${TEST_ROOT}/lint.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" != 0 ]]
+  grep -q "(${CASE})" "${TEST_ROOT}/lint.log"
+done
+go test -vet=off -count=1 "${ROOT}/internal/cli" -run '^TestCIRunnerDocumentationMatchesWorkflow$'
+printf 'Verification policy passed: exact toolchain, real lint diagnostics, fail-closed scanner classification\n'

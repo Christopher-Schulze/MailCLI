@@ -80,6 +80,16 @@ func TestCIRunnerDocumentationMatchesWorkflow(t *testing.T) {
 	if strings.Contains(paragraph, "ARM64") && !strings.Contains(workflow, `test "$(uname -m)" = arm64`) {
 		t.Error("CI documentation claims ARM64 lanes but the workflow does not assert arm64")
 	}
+	if len(runners) != 1 || runners[0] != "macos-26" {
+		t.Errorf("CI must declare one supported ARM64 runner, got %v", runners)
+	}
+	if !strings.Contains(workflow, "run: scripts/tests/test.sh") || !strings.Contains(paragraph, "`scripts/tests/test.sh`") {
+		t.Error("CI and its documentation must use the supported full verification entry point")
+	}
+	pin := regexp.MustCompile(`(?m)^go ([0-9]+\.[0-9]+\.[0-9]+)$`).FindStringSubmatch(readRepositoryFile(t, "go.mod"))
+	if len(pin) != 2 || !strings.Contains(workflow, "GOTOOLCHAIN: go"+pin[1]) {
+		t.Error("CI toolchain must match the exact go.mod pin")
+	}
 }
 
 func TestPublicDocumentationOmitsPrivateTaskArchivePaths(t *testing.T) {

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
 MAILCLI_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
 
 mkdir -p "$(dirname "${MAILCLI_OUTPUT}")"

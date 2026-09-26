@@ -2,6 +2,8 @@
 set -euo pipefail
 
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
 if [[ $# -lt 1 ]]; then
   printf 'Usage: %s MAJOR.MINOR.PATCH\n' "$(basename "${BASH_SOURCE[0]}")" >&2
   exit 1

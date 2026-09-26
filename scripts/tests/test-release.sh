@@ -18,16 +18,8 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     "$(uname -s)" "$(uname -m)" >&2
   exit 2
 fi
-GO_VERSION="$(go env GOVERSION)"
-if [[ ! "${GO_VERSION}" =~ ^go1\.([0-9]+)\. ]]; then
-  printf 'Release verification could not parse Go version: %s\n' "${GO_VERSION}" >&2
-  exit 2
-fi
-GO_MINOR="${BASH_REMATCH[1]}"
-if ((GO_MINOR < 27)); then
-  printf 'Release verification requires Go 1.27 or newer: %s\n' "${GO_VERSION}" >&2
-  exit 2
-fi
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
 if ! (cd "${MAILCLI_ROOT}" && go mod verify); then
   printf 'Go module verification failed before release work began\n' >&2
   exit 1

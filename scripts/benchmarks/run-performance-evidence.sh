@@ -168,6 +168,8 @@ run_group() {
 }
 
 cd "${MAILCLI_ROOT}"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
 GIT_WORKTREE_STATE=clean
 if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
   GIT_WORKTREE_STATE=dirty

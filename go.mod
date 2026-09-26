@@ -1,6 +1,6 @@
 module mailcli
 
-go 1.27.0
+go 1.27.1
 
 require (
 	github.com/emersion/go-message v0.18.2

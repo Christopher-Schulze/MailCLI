@@ -15,6 +15,7 @@ SHELL_TESTS=(
   scripts/tests/test-commit-authority.sh
   scripts/tests/test-release-authority.sh
   scripts/tests/test-staged-gate.sh
+  scripts/tests/test-verification-policy.sh
   scripts/tests/test-release.sh
 )
 LIVE_SHELL_TESTS=(scripts/tests/test-live-responsiveness.sh)
@@ -44,6 +45,12 @@ run_shell_test() {
 }
 
 cd "${MAILCLI_ROOT}"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+if [[ "${1:-}" == --core-source ]]; then
+  check_go_toolchain "${MAILCLI_ROOT}" >/dev/null
+else
+  check_go_toolchain "${MAILCLI_ROOT}"
+fi
 unset MAILCLI_BINARY_DESTINATION MAILCLI_SKILL_DESTINATION
 
 MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
@@ -139,18 +146,6 @@ run_go_checks() {
 
   go mod verify || exit "$?"
 
-  STATICCHECK_BIN="$(command -v staticcheck || true)"
-  if [[ -z "${STATICCHECK_BIN}" ]]; then
-    STATICCHECK_BIN="$(go env GOPATH)/bin/staticcheck"
-  fi
-  if [[ ! -x "${STATICCHECK_BIN}" ]]; then
-    printf 'Staticcheck is required; install it or add it to PATH\n' >&2
-    exit 1
-  fi
-  "${STATICCHECK_BIN}" ./... || exit "$?"
-
-  go vet -p "${MAILCLI_TEST_PACKAGES}" ./... || exit "$?"
-
   GOLANGCI_LINT_BIN="$(command -v golangci-lint || true)"
   if [[ -z "${GOLANGCI_LINT_BIN}" ]]; then
     GOLANGCI_LINT_BIN="$(go env GOPATH)/bin/golangci-lint"
@@ -159,20 +154,13 @@ run_go_checks() {
     printf 'golangci-lint is required; install it or add it to PATH\n' >&2
     exit 1
   fi
-  "${GOLANGCI_LINT_BIN}" run --concurrency "${MAILCLI_TEST_CPUS}" ./... || exit "$?"
+  "${GOLANGCI_LINT_BIN}" run --config "${MAILCLI_ROOT}/.golangci.yml" \
+    --concurrency "${MAILCLI_TEST_CPUS}" ./... || exit "$?"
 
-  GOVULNCHECK_BIN="$(command -v govulncheck || true)"
-  if [[ -z "${GOVULNCHECK_BIN}" ]]; then
-    GOVULNCHECK_BIN="$(go env GOPATH)/bin/govulncheck"
-  fi
-  if [[ ! -x "${GOVULNCHECK_BIN}" ]]; then
-    printf 'govulncheck is required; install it or add it to PATH\n' >&2
-    exit 1
-  fi
-  "${GOVULNCHECK_BIN}" ./... || exit "$?"
+  "${MAILCLI_ROOT}/scripts/utils/run-vulnerability-check.sh" || exit "$?"
 
   MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \
-    go test -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
+    go test -vet=off -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
     -parallel "${MAILCLI_TEST_CPUS}" ./... || exit "$?"
 }
 
@@ -203,6 +191,7 @@ run_shell_test scripts/tests/test-task-ci-report.sh
 run_shell_test scripts/tests/test-commit-authority.sh
 run_shell_test scripts/tests/test-release-authority.sh
 run_shell_test scripts/tests/test-staged-gate.sh
+run_shell_test scripts/tests/test-verification-policy.sh
 RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
   refs/heads refs/remotes refs/tags)"
 run_shell_test scripts/tests/test-release.sh

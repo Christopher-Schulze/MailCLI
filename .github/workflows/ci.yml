@@ -1,9 +1,4 @@
-# Minimal portability gate: run the same build and uncached race/coverage
-# suite on macos-latest and macOS 15 arm64.
-# Both lanes are non-live, receive no Mail or Keychain credentials, and have
-# no publication step. Release authority stays local: this workflow must never
-# push, tag, release, or call the GitHub API; the local release-authority gate
-# scans workflow files for exactly those commands.
+# The supported full verification entry point runs on one macOS ARM64 lane.
 name: ci
 
 on:
@@ -15,19 +10,15 @@ on:
 permissions:
   contents: read
 
-env:
-  MAILCLI_LIVE_TESTS: ""
-  MAILCLI_KEYCHAIN_LIVE: ""
-  MAILCLI_LIVE_RESPONSIVENESS: ""
-
 jobs:
   build-test:
-    # Preserve the existing macos-latest job and check identity.
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: go1.27.1
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -38,28 +29,13 @@ jobs:
           printf 'macos=%s\n' "$(sw_vers -productVersion)"
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
-      - name: build
-        run: go build ./...
-      - name: unit suite
-        run: go test -count=1 -race -cover ./...
-
-  build-test-macos-15:
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: verify macOS arm64 runner
+      - name: install verification tools
         run: |
-          printf 'os=%s\n' "$(uname -s)"
-          printf 'architecture=%s\n' "$(uname -m)"
-          printf 'macos=%s\n' "$(sw_vers -productVersion)"
-          test "$(uname -s)" = Darwin
-          test "$(uname -m)" = arm64
+          source scripts/utils/check-go-toolchain.sh
+          check_go_toolchain "$PWD"
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
       - name: build
         run: go build ./...
-      - name: unit suite
-        run: go test -count=1 -race -cover ./...
+      - name: full verification
+        run: scripts/tests/test.sh

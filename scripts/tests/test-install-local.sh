@@ -2,6 +2,8 @@
 set -euo pipefail
 
 MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
 GOMODCACHE_ROOT="$(go env GOMODCACHE)"
 GOCACHE_ROOT="$(go env GOCACHE)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-local-install-test.XXXXXX")"
