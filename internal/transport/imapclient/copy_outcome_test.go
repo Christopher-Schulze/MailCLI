@@ -77,13 +77,13 @@ func TestDoCopyCommandResponsePreservesPreDispatchAndUncertainEvidence(t *testin
 				},
 			}
 			peerResult := startCopyOutcomePeer(peerConn, test.closeAfterCommand)
-			status, text, _, dispatched, commandErr := (&Client{}).doCopyCommandResponse(
-				context.Background(), sess, test.command,
+			status, text, _, dispatched, commandErr := (&Client{}).doTransferCommandResponse(
+				context.Background(), sess, test.command, "COPY",
 			)
 			if commandErr == nil {
-				t.Fatal("doCopyCommandResponse() error = nil, want an injected failure")
+				t.Fatal("doTransferCommandResponse() error = nil, want an injected failure")
 			}
-			evidence, classifiedErr := copyCommandError(copyEvidenceForTest(), status, text, dispatched, commandErr)
+			evidence, classifiedErr := transferCommandError(copyEvidenceForTest(), status, text, dispatched, commandErr)
 			_ = wire.Close()
 			peer := <-peerResult
 			if peer.err != nil {

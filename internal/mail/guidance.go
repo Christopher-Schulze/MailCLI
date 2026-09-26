@@ -87,7 +87,7 @@ func GuidanceForError(command string, err error) OperationGuidance {
 	}
 	var mutation *transport.MutationOutcomeError
 	if errors.As(err, &mutation) &&
-		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY") {
+		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY" || mutation.Evidence.Command == "MOVE") {
 		return guidanceForMutationUnknown(err)
 	}
 	if command == "messages.get" && code == "not_found" {
@@ -326,12 +326,12 @@ func guidanceForMutationUnknown(err error) OperationGuidance {
 		if outcome.Evidence.HasPartialEffects() {
 			guidance.EffectCertainty = EffectPartial
 		} else if outcome.Evidence.StoreRejectedOrNotStarted() ||
-			(outcome.Evidence.Command == "COPY" &&
+			((outcome.Evidence.Command == "COPY" || outcome.Evidence.Command == "MOVE") &&
 				(outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted ||
 					outcome.Evidence.Outcome == transport.MutationOutcomeRejected)) {
 			guidance.EffectCertainty = EffectNone
 		}
-		if outcome.Evidence.Command == "COPY" && outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted &&
+		if (outcome.Evidence.Command == "COPY" || outcome.Evidence.Command == "MOVE") && outcome.Evidence.Outcome == transport.MutationOutcomeNotStarted &&
 			!outcome.Evidence.HasPartialEffects() {
 			if isInputErrorCode(guidanceErrorCode(err)) || transport.IsConfigurationFailure(err) {
 				guidance.Retryability, guidance.Recovery.Action = RetryUserInputRequired, RecoveryCorrect
