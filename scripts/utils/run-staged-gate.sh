@@ -39,25 +39,6 @@ HARNESS="${PRODUCT_ROOT}/scripts/tests/test.sh"
 grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${HARNESS}" ||
   fail 'Staged gate harness marker was removed'
 
-# Export tests still need private task context until the approved TASK 509
-# retirement. Copy only canonical Markdown into this disposable owner-only tree.
-if [[ -f "${PRODUCT_ROOT}/scripts/utils/export-task-history.sh" &&
-  ( "${GATE_TIER}" == full || " ${SELECTED_CASES[*]} " == *' scripts/tests/test-task-history-export.sh '* ) ]]; then
-  [[ -f "${SOURCE_ROOT}/docs/tasks.md" && ! -L "${SOURCE_ROOT}/docs/tasks.md" ]] ||
-    fail 'Private task context is missing'
-  mkdir -p "${PRODUCT_ROOT}/docs/tasks/done"
-  cp "${SOURCE_ROOT}/docs/tasks.md" "${PRODUCT_ROOT}/docs/tasks.md"
-  chmod 600 "${PRODUCT_ROOT}/docs/tasks.md"
-  while IFS= read -r -d '' PATH_NAME; do
-    RELATIVE_PATH="${PATH_NAME#"${SOURCE_ROOT}/"}"
-    [[ "${RELATIVE_PATH}" =~ ^docs/tasks/(done/)?[0-9]{3}-[a-z0-9-]+\.md$ &&
-      ! -L "${PATH_NAME}" ]] || fail 'Noncanonical private task context'
-    cp "${PATH_NAME}" "${PRODUCT_ROOT}/${RELATIVE_PATH}"
-    chmod 600 "${PRODUCT_ROOT}/${RELATIVE_PATH}"
-  done < <(find "${SOURCE_ROOT}/docs/tasks" -type f -name '*.md' -print0)
-  # Fixtures may ignore tasks only in their primary repository's local exclude.
-  printf '/docs/tasks.md\n/docs/tasks/\n' >>"${PRODUCT_ROOT}/.git/info/exclude"
-fi
 
 read_manifest() {
   local ROOT="$1"

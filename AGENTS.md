@@ -5,9 +5,10 @@ Read the `Development workflow` section of `docs/documentation.md` before changi
 ## Task and write authority
 
 - Treat `docs/tasks.md` and `docs/tasks/` as the private local task control plane when present. Do not stage or publish them.
-- Use one writer in the primary worktree. Before the first write, acquire an exact TASK/path lease with `scripts/utils/manage-write-lease.sh acquire`; stop on a dirty worktree or existing lease. Never steal or expire a stale lease.
-- For tracked work, stage only leased paths, run `review TOKEN` and `gate TOKEN`, then commit the gated patch with a `TASK NNN:` subject and run `release TOKEN`. Mark implementation done only after the commit exists and the full gate passes.
-- For an explicitly authorized private-only TASK, verify the deliverable, exact path changes, unchanged HEAD/tracked status, and owner-only task-history snapshot. Run `private-proof TOKEN SNAPSHOT EXACT_CHANGED_PATH...` before `abort TOKEN`; compare their path-change receipts. `abort` alone does not prove completion.
+- Use one writer in the primary worktree. Before tracked or build-asset writes, acquire an exact TASK/path lease with `scripts/utils/manage-write-lease.sh acquire`; stop on a dirty worktree or existing lease. Never steal or expire a stale lease. Plain ignored task edits need no lease or snapshot ritual.
+- For tracked work, stage only leased paths, run `review TOKEN` and the relevant registered `gate TOKEN --checks PATH...`, then commit the gated patch with its exact `TASK NNN:` subject and run `release TOKEN`. Mark implementation done only after its acceptance, appropriate checks, documentation and commit exist. Record targeted evidence separately from deferred full verification.
+- During the owner-authorized queue execution, run race, vulnerability and the complete suite once at the end of the integrated queue. Never count a targeted receipt as full proof or rerun broad gates per task.
+- Close private-only documentation work by verifying its actual deliverable and updating the board/detail; genuinely move completed details to `docs/tasks/done/`. Do not create a second task repository, snapshot, proof receipt or empty product commit. Existing backups remain untouched.
 - A lease never authorizes a push, tag, GitHub release, external action, or destructive cleanup.
 
 ## Release authority

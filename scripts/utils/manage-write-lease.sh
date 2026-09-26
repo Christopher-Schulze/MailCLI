@@ -12,7 +12,6 @@ usage() {
     '  manage-write-lease.sh review TOKEN' \
     '  manage-write-lease.sh gate TOKEN [--checks REGISTERED_PATH...]' \
     '  manage-write-lease.sh release TOKEN' \
-    '  manage-write-lease.sh private-proof TOKEN SNAPSHOT PATH [PATH...]' \
     '  manage-write-lease.sh abort TOKEN'
 }
 
@@ -38,7 +37,8 @@ lease_file() {
 
 remove_lease_files() {
   local NAME
-  for NAME in task owner pid token acquired_at baseline_head baseline_status \
+  # Old keys are cleanup-only until the in-flight pre-migration lease closes.
+  for NAME in task owner owner_session pid token acquired_at baseline_head baseline_status \
     allowed_paths allowed_fingerprints private_task_fingerprints \
     ignored_asset_fingerprints \
     reviewed_digest reviewed_patch_sha256 \
@@ -90,27 +90,6 @@ path_is_allowed() {
   grep -Fxq -- "$1" "$(lease_file allowed_paths)"
 }
 
-private_task_snapshot() {
-  local ABSOLUTE_PATH
-  local RELATIVE_PATH
-  local FINGERPRINT
-  FINGERPRINT="$(fingerprint_path docs/tasks.md)" || fail "Could not fingerprint task board"
-  printf 'docs/tasks.md\t%s\n' "${FINGERPRINT}"
-  FINGERPRINT="$(fingerprint_path docs/tasks)" || fail "Could not fingerprint task directory"
-  if [[ "${FINGERPRINT}" == directory ]]; then
-    FINGERPRINT=unsupported
-  fi
-  printf 'docs/tasks\t%s\n' "${FINGERPRINT}"
-  [[ -d "${MAILCLI_ROOT}/docs/tasks" ]] || return 0
-  while IFS= read -r -d '' ABSOLUTE_PATH; do
-    RELATIVE_PATH="${ABSOLUTE_PATH#"${MAILCLI_ROOT}/"}"
-    [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
-      fail "Private task path contains tabs or newlines"
-    FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
-      fail "Could not fingerprint private task path"
-    printf '%s\t%s\n' "${RELATIVE_PATH}" "${FINGERPRINT}"
-  done < <(find "${MAILCLI_ROOT}/docs/tasks" -mindepth 1 ! -type d -print0)
-}
 
 require_snapshot_path() {
   local RELATIVE_PATH="$1"
@@ -125,7 +104,7 @@ ignored_asset_snapshot() {
   git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard -z |
     while IFS= read -r -d '' RELATIVE_PATH; do
       case "${RELATIVE_PATH}" in
-        docs/tasks.md | docs/tasks/*) continue ;;
+        docs/tasks.md | docs/tasks | docs/tasks/*) continue ;;
       esac
       require_snapshot_path "${RELATIVE_PATH}"
       FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
@@ -138,11 +117,13 @@ ignored_asset_snapshot() {
   git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard --directory -z |
     while IFS= read -r -d '' RELATIVE_PATH; do
       RELATIVE_PATH="${RELATIVE_PATH%/}"
+      case "${RELATIVE_PATH}" in docs/tasks | docs/tasks/*) continue ;; esac
       [[ -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" &&
         ! -L "${MAILCLI_ROOT}/${RELATIVE_PATH}" ]] || continue
       find "${MAILCLI_ROOT}/${RELATIVE_PATH}" -type d -print0 |
         while IFS= read -r -d '' ABSOLUTE_PATH; do
           RELATIVE_PATH="${ABSOLUTE_PATH#"${MAILCLI_ROOT}/"}"
+          case "${RELATIVE_PATH}" in docs/tasks | docs/tasks/*) continue ;; esac
           require_snapshot_path "${RELATIVE_PATH}"
           FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
             fail "Could not fingerprint ignored directory"
@@ -151,29 +132,6 @@ ignored_asset_snapshot() {
     done || fail "Could not inventory ignored directory roots"
 }
 
-verify_private_task_scope() {
-  local BASELINE
-  local CURRENT
-  local DIFF_STATUS
-  local OUT_OF_SCOPE
-  BASELINE="$(lease_file private_task_fingerprints)"
-  [[ -f "${BASELINE}" ]] || fail "Private task baseline is missing"
-  CURRENT="$(private_task_snapshot | LC_ALL=C sort)"
-  if OUT_OF_SCOPE="$(diff -u \
-    <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
-      "$(lease_file allowed_paths)" "${BASELINE}") \
-    <(printf '%s\n' "${CURRENT}" |
-      awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
-        "$(lease_file allowed_paths)" -))"; then
-    return 0
-  else
-    DIFF_STATUS=$?
-  fi
-  [[ "${DIFF_STATUS}" -eq 1 ]] || fail "Could not compare private task files"
-  printf 'Private task path changed outside the lease allowlist:\n%s\n' \
-    "${OUT_OF_SCOPE}" >&2
-  return 1
-}
 
 verify_ignored_asset_scope() {
   local BASELINE
@@ -197,7 +155,9 @@ verify_ignored_asset_scope() {
   CURRENT="$(ignored_asset_snapshot | LC_ALL=C sort)" ||
     fail "Could not inventory ignored assets"
   if OUT_OF_SCOPE="$(diff -u \
-    <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
+    <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next }
+      $1 == "docs/tasks.md" || $1 == "docs/tasks" || index($1, "docs/tasks/") == 1 { next }
+      !($1 in allowed)' \
       "$(lease_file allowed_paths)" "${BASELINE}") \
     <(printf '%s\n' "${CURRENT}" |
       awk -F '\t' 'NR == FNR { allowed[$0] = 1; next } !($1 in allowed)' \
@@ -239,31 +199,6 @@ report_allowed_path_changes() {
   done <"$(lease_file allowed_fingerprints)"
 }
 
-source_task_manifest() {
-  local RELATIVE_PATH
-  local DIGEST
-  [[ -f "${MAILCLI_ROOT}/docs/tasks.md" &&
-    ! -L "${MAILCLI_ROOT}/docs/tasks.md" ]] || fail "Task board is not a regular file"
-  [[ -d "${MAILCLI_ROOT}/docs/tasks" &&
-    ! -L "${MAILCLI_ROOT}/docs/tasks" ]] || fail "Task directory is not a real directory"
-  [[ -z "$(find "${MAILCLI_ROOT}/docs/tasks" ! -type d ! -type f -print -quit)" ]] ||
-    fail "Task history contains an unsupported path"
-  [[ -z "$(find "${MAILCLI_ROOT}/docs/tasks" -type f ! -name '*.md' -print -quit)" ]] ||
-    fail "Task history contains a non-Markdown file"
-  {
-    printf '%s\n' docs/tasks.md
-    find "${MAILCLI_ROOT}/docs/tasks" -type f -name '*.md' -print |
-      sed "s#^${MAILCLI_ROOT}/##"
-  } | LC_ALL=C sort | while IFS= read -r RELATIVE_PATH; do
-    [[ "${RELATIVE_PATH}" == docs/tasks.md ||
-      "${RELATIVE_PATH}" =~ ^docs/tasks/(done/)?[0-9]{3}-[a-z0-9-]+\.md$ ]] ||
-      fail "Invalid task history path: ${RELATIVE_PATH}"
-    DIGEST="$(shasum -a 256 "${MAILCLI_ROOT}/${RELATIVE_PATH}" | awk '{print $1}')" ||
-      fail "Could not hash task history path: ${RELATIVE_PATH}"
-    [[ "${DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid task history hash"
-    printf '%s\t%s\n' "${DIGEST}" "${RELATIVE_PATH}"
-  done
-}
 
 staged_patch_digest() {
   local BASELINE_HEAD
@@ -289,6 +224,10 @@ validate_allowed_path() {
   esac
   [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
     fail "Allowed path must not contain tabs or newlines"
+  if [[ -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" && ! -L "${MAILCLI_ROOT}/${RELATIVE_PATH}" &&
+    -n "$(git -C "${MAILCLI_ROOT}" ls-files -- ":(literal)${RELATIVE_PATH}/")" ]]; then
+    fail "Lease paths must name tracked files, not a tracked directory: ${RELATIVE_PATH}"
+  fi
 }
 
 normalize_task_ids() {
@@ -360,16 +299,16 @@ acquire_lease() {
   umask 077
   validate_task_group "${TASK_ID}"
 
-  git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all >"$(lease_file baseline_status)"
-  if [[ -s "$(lease_file baseline_status)" ]]; then
+  local BASELINE_STATUS
+  BASELINE_STATUS="$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)"
+  if [[ -n "${BASELINE_STATUS}" ]]; then
     printf 'Worktree must be clean before acquiring a write lease:\n' >&2
-    sed -n '1,200p' "$(lease_file baseline_status)" >&2
+    printf '%s\n' "${BASELINE_STATUS}" >&2
     exit 1
   fi
 
   printf '%s\n' "${TASK_ID}" >"$(lease_file task)"
-  printf '%s\n' "${OWNER}" >"$(lease_file owner)"
-  printf '%s\n' "$$" >"$(lease_file pid)"
+  printf '%s\n' "${OWNER}" >"$(lease_file owner_session)"
   printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$(lease_file acquired_at)"
   git -C "${MAILCLI_ROOT}" rev-parse HEAD >"$(lease_file baseline_head)"
   printf '%s\n' "$@" | LC_ALL=C sort -u >"$(lease_file allowed_paths)"
@@ -379,12 +318,11 @@ acquire_lease() {
       fail "Could not fingerprint allowed path"
     printf '%s\t%s\n' "${FINGERPRINT}" "${RELATIVE_PATH}"
   done <"$(lease_file allowed_paths)" >"$(lease_file allowed_fingerprints)"
-  private_task_snapshot | LC_ALL=C sort >"$(lease_file private_task_fingerprints)"
   ignored_asset_snapshot | LC_ALL=C sort >"$(lease_file ignored_asset_fingerprints)"
 
   local TOKEN
-  TOKEN="$(printf '%s:%s:%s:%s' "${TASK_ID}" "${OWNER}" "$$" "${RANDOM}" |
-    shasum -a 256 | awk '{print $1}')"
+  TOKEN="$(od -v -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+  [[ "${TOKEN}" =~ ^[0-9a-f]{64}$ ]] || fail 'Could not read 32 random token bytes'
   printf '%s\n' "${TOKEN}" >"$(lease_file token)"
   ACQUIRE_COMPLETE=true
   trap - EXIT
@@ -400,9 +338,12 @@ status_lease() {
   fi
   local NAME
   printf 'write_lease=active\n'
-  for NAME in task owner pid acquired_at baseline_head; do
+  for NAME in task owner_session acquired_at baseline_head; do
     if [[ -f "$(lease_file "${NAME}")" ]]; then
       printf '%s=%s\n' "${NAME}" "$(<"$(lease_file "${NAME}")")"
+    elif [[ "${NAME}" == owner_session && -f "$(lease_file owner)" ]]; then
+      # The already-owned migration lease still carries the same stable owner.
+      printf 'owner_session=%s\n' "$(<"$(lease_file owner)")"
     else
       printf '%s=missing\n' "${NAME}"
     fi
@@ -414,7 +355,6 @@ verify_staged_scope() {
   local RELATIVE_PATH
   local UNAUTHORIZED=false
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
-  verify_private_task_scope
   verify_ignored_asset_scope
   : >"$(lease_file changed_paths)"
   git -C "${MAILCLI_ROOT}" diff --cached --name-only "${BASELINE_HEAD}" -- |
@@ -464,7 +404,6 @@ review_lease() {
   PATCH_DIGEST="$(staged_patch_digest)"
   printf '%s\n' "${REVIEWED_DIGEST}" >"$(lease_file reviewed_digest)"
   printf '%s\n' "${PATCH_DIGEST}" >"$(lease_file reviewed_patch_sha256)"
-  printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$(lease_file reviewed_at)"
   printf 'reviewed_paths:\n'
   sed 's/^/  /' "$(lease_file changed_paths)"
   git -C "${MAILCLI_ROOT}" diff --cached --stat "${BASELINE_HEAD}" --
@@ -572,8 +511,6 @@ gate_lease() {
   rm -rf -- "${HARNESS_DIR}"
   trap - EXIT
   printf '%s\n' "${CURRENT_PATCH_DIGEST}" >"$(lease_file gate_patch_sha256)"
-  printf '%s\n' "${BASELINE_HEAD}" >"$(lease_file gate_head)"
-  printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$(lease_file gate_at)"
   if [[ "${GATE_TIER}" == full ]]; then printf 'full_gate=passed\n';
   else printf 'targeted_gate=passed\nfull_gate=deferred\n'; fi
   printf 'gated_patch_sha256=%s\n' "${CURRENT_PATCH_DIGEST}"
@@ -582,7 +519,6 @@ gate_lease() {
 release_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
-  verify_private_task_scope
   verify_ignored_asset_scope
   [[ -f "$(lease_file gate_patch_sha256)" ]] ||
     fail "No successful gate evidence exists for this lease"
@@ -623,149 +559,10 @@ release_lease() {
   printf 'task_commit=%s\n' "${CURRENT_HEAD}"
 }
 
-private_proof_lease() {
-  [[ "$#" -ge 4 ]] || fail "private-proof requires a token, snapshot, and expected changed paths"
-  local TOKEN="$1"
-  local SNAPSHOT_DIRECTORY="$2"
-  shift 2
-  require_token "${TOKEN}"
-  [[ -f "$(lease_file ignored_asset_fingerprints)" ]] ||
-    fail "Private closure requires an ignored-asset baseline"
-  verify_private_task_scope
-  verify_ignored_asset_scope
-
-  local TASK_ID
-  local BASELINE_HEAD
-  TASK_ID="$(<"$(lease_file task)")"
-  BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
-  [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" ]] ||
-    fail "HEAD changed during private closure"
-  [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
-    fail "Tracked worktree is not clean for private closure"
-
-  local EXPECTED_PATHS
-  local UNIQUE_PATHS
-  local RELATIVE_PATH
-  EXPECTED_PATHS="$(printf '%s\n' "$@" | LC_ALL=C sort)"
-  UNIQUE_PATHS="$(printf '%s\n' "$@" | LC_ALL=C sort -u)"
-  [[ "${EXPECTED_PATHS}" == "${UNIQUE_PATHS}" ]] || fail "Expected paths contain duplicates"
-  while IFS= read -r RELATIVE_PATH; do
-    validate_allowed_path "${RELATIVE_PATH}"
-    path_is_allowed "${RELATIVE_PATH}" ||
-      fail "Expected private path is outside the lease: ${RELATIVE_PATH}"
-  done <<<"${EXPECTED_PATHS}"
-
-  local CHANGE_ROWS
-  local ACTUAL_PATHS
-  CHANGE_ROWS="$(report_allowed_path_changes)" || fail "Could not compare allowed paths"
-  [[ -n "${CHANGE_ROWS}" ]] || fail "No private path changed"
-  ACTUAL_PATHS="$(printf '%s\n' "${CHANGE_ROWS}" | cut -f 2 | LC_ALL=C sort)"
-  [[ "${ACTUAL_PATHS}" == "${EXPECTED_PATHS}" ]] ||
-    fail "Changed paths differ from the expected private deliverable"
-
-  local DONE_LINE
-  local DETAIL_PATH
-  local SOURCE_PATH
-  DONE_LINE="$(grep -E "^- \\[x\\] ${TASK_ID} .+ -> tasks/done/${TASK_ID}-[a-z0-9-]+\\.md$" \
-    "${MAILCLI_ROOT}/docs/tasks.md" || true)"
-  [[ -n "${DONE_LINE}" && "${DONE_LINE}" != *$'\n'* ]] ||
-    fail "Task board lacks one canonical Done entry"
-  [[ "$(grep -Ec "^- \\[[^]]\\] ${TASK_ID} " "${MAILCLI_ROOT}/docs/tasks.md")" -eq 1 ]] ||
-    fail "Task board contains duplicate task entries"
-  DETAIL_PATH="docs/${DONE_LINE##* -> }"
-  SOURCE_PATH="docs/tasks/${DETAIL_PATH##*/}"
-  [[ -f "${MAILCLI_ROOT}/${DETAIL_PATH}" &&
-    ! -L "${MAILCLI_ROOT}/${DETAIL_PATH}" &&
-    ! -e "${MAILCLI_ROOT}/${SOURCE_PATH}" &&
-    ! -L "${MAILCLI_ROOT}/${SOURCE_PATH}" ]] ||
-    fail "Task detail was not archived by a true path move"
-  for RELATIVE_PATH in docs/tasks.md "${SOURCE_PATH}" "${DETAIL_PATH}"; do
-    grep -Fxq -- "${RELATIVE_PATH}" <<<"${EXPECTED_PATHS}" ||
-      fail "Private closure path is missing from expected changes: ${RELATIVE_PATH}"
-  done
-  local CHANGE_LABEL
-  local BEFORE_FINGERPRINT
-  local AFTER_FINGERPRINT
-  local MOVE_DESTINATION
-  local DESTINATION_CHANGE
-  while IFS=$'\t' read -r CHANGE_LABEL RELATIVE_PATH \
-    BEFORE_FINGERPRINT AFTER_FINGERPRINT; do
-    [[ "${RELATIVE_PATH}" != "${SOURCE_PATH}" &&
-      "${RELATIVE_PATH}" =~ ^docs/tasks/[0-9]{3}-[a-z0-9-]+\.md$ &&
-      "${AFTER_FINGERPRINT}" == absent ]] || continue
-    MOVE_DESTINATION="docs/tasks/done/${RELATIVE_PATH##*/}"
-    DESTINATION_CHANGE="$(printf '%s\n' "${CHANGE_ROWS}" |
-      awk -F '\t' -v target="${MOVE_DESTINATION}" \
-        '$2 == target { print $3 "\t" $4 }')"
-    [[ "${BEFORE_FINGERPRINT}" == file:* &&
-      "${DESTINATION_CHANGE}" == $'absent\t'"${BEFORE_FINGERPRINT}" ]] ||
-      fail "Archived task move changed content or lost its destination: ${RELATIVE_PATH}"
-  done <<<"${CHANGE_ROWS}"
-  grep -Eq "^# TASK ${TASK_ID}: .+$" "${MAILCLI_ROOT}/${DETAIL_PATH}" ||
-    fail "Task detail heading does not match its board ID"
-  for RELATIVE_PATH in Why Acceptance Sub-Tasks Notes Deviations; do
-    grep -Fxq "## ${RELATIVE_PATH}" "${MAILCLI_ROOT}/${DETAIL_PATH}" ||
-      fail "Task detail is missing section: ${RELATIVE_PATH}"
-  done
-  awk '/^## Sub-Tasks$/ { inside=1; next }
-       /^## / && inside { exit }
-       inside && /^- \[x\] / { complete++ }
-       inside && /^- \[[^x]\] / { incomplete=1 }
-       END { exit !(complete > 0 && !incomplete) }' \
-    "${MAILCLI_ROOT}/${DETAIL_PATH}" || fail "Task detail has unfinished sub-tasks"
-
-  [[ "${SNAPSHOT_DIRECTORY}" == /* &&
-    "${SNAPSHOT_DIRECTORY}" != *$'\n'* &&
-    "${SNAPSHOT_DIRECTORY}" != *$'\t'* ]] || fail "Snapshot path must be absolute and one line"
-  "${MAILCLI_ROOT}/scripts/utils/export-task-history.sh" verify \
-    "${SNAPSHOT_DIRECTORY}" >/dev/null || fail "Task snapshot is invalid"
-  SNAPSHOT_DIRECTORY="$(cd "${SNAPSHOT_DIRECTORY}" && pwd -P)"
-  [[ "${SNAPSHOT_DIRECTORY}" != "${MAILCLI_ROOT}" &&
-    "${SNAPSHOT_DIRECTORY}" != "${MAILCLI_ROOT}/"* ]] ||
-    fail "Private closure snapshot must be outside the repository"
-  local SOURCE_MANIFEST
-  local SNAPSHOT_MANIFEST
-  SOURCE_MANIFEST="$(source_task_manifest)" || fail "Could not inventory current task history"
-  SNAPSHOT_MANIFEST="$(<"${SNAPSHOT_DIRECTORY}/MANIFEST.sha256")"
-  [[ "${SOURCE_MANIFEST}" == "${SNAPSHOT_MANIFEST}" ]] ||
-    fail "Task snapshot is stale or has the wrong source scope"
-
-  verify_private_task_scope
-  verify_ignored_asset_scope
-  [[ "$(source_task_manifest)" == "${SOURCE_MANIFEST}" ]] ||
-    fail "Task history changed during private proof"
-  [[ "$(report_allowed_path_changes)" == "${CHANGE_ROWS}" ]] ||
-    fail "Allowed path identities changed during private proof"
-  [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" &&
-    -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
-    fail "Git state changed during private proof"
-
-  local RECEIPT_PATH="${SNAPSHOT_DIRECTORY}.task-${TASK_ID}.receipt"
-  [[ ! -e "${RECEIPT_PATH}" && ! -L "${RECEIPT_PATH}" ]] ||
-    fail "Private closure receipt already exists"
-  local RECEIPT_TEMP
-  RECEIPT_TEMP="$(mktemp "${RECEIPT_PATH}.tmp.XXXXXX")" ||
-    fail "Could not allocate private closure receipt"
-  trap 'rm -f -- "${RECEIPT_TEMP}"' EXIT
-  chmod 600 "${RECEIPT_TEMP}"
-  {
-    printf 'private_closure=verified\ntask=%s\nowner=%s\nhead=%s\n' \
-      "${TASK_ID}" "$(<"$(lease_file owner)")" "${BASELINE_HEAD}"
-    printf 'snapshot=%s\nmanifest_sha256=%s\n' "${SNAPSHOT_DIRECTORY}" \
-      "$(shasum -a 256 "${SNAPSHOT_DIRECTORY}/MANIFEST.sha256" | awk '{print $1}')"
-    printf '%s\n' "${CHANGE_ROWS}"
-  } >"${RECEIPT_TEMP}"
-  ln "${RECEIPT_TEMP}" "${RECEIPT_PATH}" || fail "Could not publish private closure receipt"
-  rm -f -- "${RECEIPT_TEMP}"
-  trap - EXIT
-  cat "${RECEIPT_PATH}"
-  printf 'private_receipt_path=%s\n' "${RECEIPT_PATH}"
-}
 
 abort_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
-  verify_private_task_scope
   verify_ignored_asset_scope
   local BASELINE_HEAD
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
@@ -796,10 +593,6 @@ case "${COMMAND}" in
   review | release | abort)
     [[ "$#" -eq 2 ]] || fail "${COMMAND} requires exactly one lease token"
     "${COMMAND}_lease" "$2"
-    ;;
-  private-proof)
-    shift
-    private_proof_lease "$@"
     ;;
   *)
     usage >&2

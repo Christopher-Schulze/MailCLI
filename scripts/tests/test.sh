@@ -10,9 +10,7 @@ SHELL_TESTS=(
   scripts/tests/test-bootstrap.sh
   scripts/tests/test-install-local.sh
   scripts/tests/test-skill-drift.sh
-  scripts/tests/test-task-history-export.sh
   scripts/tests/test-write-coordination.sh
-  scripts/tests/test-private-closure.sh
   scripts/tests/test-task-ci-report.sh
   scripts/tests/test-commit-authority.sh
   scripts/tests/test-release-authority.sh
@@ -200,9 +198,7 @@ if [[ "${1:-}" != --core-only ]]; then
 fi
 run_core_checks
 [[ "${1:-}" != --core-only ]] || exit 0
-run_shell_test scripts/tests/test-task-history-export.sh
 run_shell_test scripts/tests/test-write-coordination.sh
-run_shell_test scripts/tests/test-private-closure.sh
 run_shell_test scripts/tests/test-task-ci-report.sh
 run_shell_test scripts/tests/test-commit-authority.sh
 run_shell_test scripts/tests/test-release-authority.sh
