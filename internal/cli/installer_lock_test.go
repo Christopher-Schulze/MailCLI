@@ -252,6 +252,13 @@ func TestInstallerRejectsUnsafeLockFiles(t *testing.T) {
 			if err := os.WriteFile(outside, []byte("untouched"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chmod(outside, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			original, statErr := os.Lstat(outside)
+			if statErr != nil || !original.Mode().IsRegular() || original.Mode().Perm() != 0o644 {
+				t.Fatalf("unsafe-lock fixture mode = %v, error = %v", original, statErr)
+			}
 			var err error
 			switch kind {
 			case "symlink":
@@ -280,8 +287,9 @@ func TestInstallerRejectsUnsafeLockFiles(t *testing.T) {
 			}
 			finishInstallerTestProcess(t, startInstallerTestProcess(t, fixture), false)
 			contents, err := os.ReadFile(outside)
-			info, statErr := os.Stat(outside)
-			if err != nil || statErr != nil || string(contents) != "untouched" || info.Mode().Perm() != 0o644 {
+			info, statErr := os.Lstat(outside)
+			if err != nil || statErr != nil || string(contents) != "untouched" ||
+				!os.SameFile(original, info) || info.Mode().Perm() != 0o644 {
 				t.Fatalf("unsafe lock changed unrelated file: %q, %v, %v", contents, err, statErr)
 			}
 		})

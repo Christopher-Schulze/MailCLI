@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -24,11 +26,13 @@ type legacyAttachmentGateway struct {
 }
 
 func (g *attachmentGateway) SaveAttachmentTo(_ context.Context, _ string, _ string, path string) error {
-	return os.WriteFile(path, g.content, 0o644)
+	_, err := writeAttachmentPermissionFixture(path, g.content)
+	return err
 }
 
 func (g *legacyAttachmentGateway) SaveAttachmentTo(_ context.Context, _ string, _ string, path string) error {
-	return os.WriteFile(path, g.content, 0o644)
+	_, err := writeAttachmentPermissionFixture(path, g.content)
+	return err
 }
 
 func (g *attachmentGateway) SaveAttachmentToWithEvidence(
@@ -40,14 +44,11 @@ func (g *attachmentGateway) SaveAttachmentToWithEvidence(
 	if g.saveErr != nil {
 		return AttachmentEvidence{}, g.saveErr
 	}
-	if err := os.WriteFile(path, g.content, 0o644); err != nil {
-		return AttachmentEvidence{}, err
-	}
-	digest := sha256.Sum256(g.content)
-	identity, err := os.Lstat(path)
+	identity, err := writeAttachmentPermissionFixture(path, g.content)
 	if err != nil {
 		return AttachmentEvidence{}, err
 	}
+	digest := sha256.Sum256(g.content)
 	if g.afterEvidence != nil {
 		if err := g.afterEvidence(path); err != nil {
 			return AttachmentEvidence{}, err
@@ -137,6 +138,7 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeInspection(t *testing.T) 
 	output := filepath.Join(directory, "report.pdf")
 	moved := output + ".original"
 	replacement := []byte("replacement")
+	var replacementIdentity os.FileInfo
 	setAttachmentPublicationHook(t, func(stage string, path string) error {
 		if stage != "before-inspect" {
 			return nil
@@ -144,7 +146,9 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeInspection(t *testing.T) 
 		if err := os.Rename(path, moved); err != nil {
 			return err
 		}
-		return os.WriteFile(path, replacement, 0o644)
+		var err error
+		replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+		return err
 	})
 
 	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
@@ -156,7 +160,7 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeInspection(t *testing.T) 
 		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
 	}
 	assertUnknownAttachmentSaveOutcome(t, saved, err)
-	assertAttachmentFile(t, output, replacement, 0o644)
+	assertAttachmentFile(t, output, replacement, 0o644, replacementIdentity)
 }
 
 func TestSaveAttachmentPreservesOutputReplacementBeforeChmod(t *testing.T) {
@@ -164,6 +168,7 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeChmod(t *testing.T) {
 	output := filepath.Join(directory, "report.pdf")
 	moved := output + ".original"
 	replacement := []byte("replacement")
+	var replacementIdentity os.FileInfo
 	setAttachmentPublicationHook(t, func(stage string, path string) error {
 		if stage != "before-chmod" {
 			return nil
@@ -171,7 +176,9 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeChmod(t *testing.T) {
 		if err := os.Rename(path, moved); err != nil {
 			return err
 		}
-		return os.WriteFile(path, replacement, 0o644)
+		var err error
+		replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+		return err
 	})
 
 	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
@@ -182,13 +189,14 @@ func TestSaveAttachmentPreservesOutputReplacementBeforeChmod(t *testing.T) {
 	if errorCode(err) != "attachment_changed" {
 		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
 	}
-	assertAttachmentFile(t, output, replacement, 0o644)
+	assertAttachmentFile(t, output, replacement, 0o644, replacementIdentity)
 }
 
 func TestSaveAttachmentPreservesReplacementDuringCleanup(t *testing.T) {
 	directory := t.TempDir()
 	output := filepath.Join(directory, "report.pdf")
 	replacement := []byte("replacement")
+	var replacementIdentity os.FileInfo
 	inspectErr := errors.New("inspect failed")
 	setAttachmentPublicationHook(t, func(stage string, path string) error {
 		switch stage {
@@ -202,7 +210,9 @@ func TestSaveAttachmentPreservesReplacementDuringCleanup(t *testing.T) {
 			if err := os.Rename(path, moved); err != nil {
 				return err
 			}
-			return os.WriteFile(path, replacement, 0o644)
+			var err error
+			replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+			return err
 		default:
 			return nil
 		}
@@ -217,13 +227,14 @@ func TestSaveAttachmentPreservesReplacementDuringCleanup(t *testing.T) {
 		t.Fatalf("SaveAttachment() error = %v, want inspect and attachment_changed errors", err)
 	}
 	assertUnknownAttachmentSaveOutcome(t, saved, err)
-	assertAttachmentFile(t, output, replacement, 0o644)
+	assertAttachmentFile(t, output, replacement, 0o644, replacementIdentity)
 }
 
 func TestSaveAttachmentRechecksRetainedOutputDuringCleanup(t *testing.T) {
 	directory := t.TempDir()
 	output := filepath.Join(directory, "report.pdf")
 	replacement := []byte("replacement")
+	var replacementIdentity os.FileInfo
 	setAttachmentPublicationHook(t, func(stage string, path string) error {
 		if stage != "before-cleanup" || path != output {
 			return nil
@@ -231,7 +242,9 @@ func TestSaveAttachmentRechecksRetainedOutputDuringCleanup(t *testing.T) {
 		if err := os.Rename(path, path+".original"); err != nil {
 			return err
 		}
-		return os.WriteFile(path, replacement, 0o644)
+		var err error
+		replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+		return err
 	})
 
 	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
@@ -243,7 +256,7 @@ func TestSaveAttachmentRechecksRetainedOutputDuringCleanup(t *testing.T) {
 		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
 	}
 	assertUnknownAttachmentSaveOutcome(t, saved, err)
-	assertAttachmentFile(t, output, replacement, 0o644)
+	assertAttachmentFile(t, output, replacement, 0o644, replacementIdentity)
 }
 
 func assertUnknownAttachmentSaveOutcome(t *testing.T, saved SavedAttachment, err error) {
@@ -331,12 +344,15 @@ func TestSaveAttachmentRejectsEvidenceAfterTemporaryReplacement(t *testing.T) {
 	directory := t.TempDir()
 	output := filepath.Join(directory, "report.pdf")
 	replacement := []byte("changed!")
+	var replacementIdentity os.FileInfo
 	gateway := &attachmentGateway{content: []byte("original")}
 	gateway.afterEvidence = func(path string) error {
 		if err := os.Rename(path, path+".original"); err != nil {
 			return err
 		}
-		return os.WriteFile(path, replacement, 0o644)
+		var err error
+		replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+		return err
 	}
 
 	_, err := NewService(gateway).SaveAttachment(
@@ -356,6 +372,7 @@ func TestSaveAttachmentRejectsEvidenceAfterTemporaryReplacement(t *testing.T) {
 		candidate := filepath.Join(directory, entry.Name())
 		content, candidateErr := os.ReadFile(candidate)
 		if candidateErr == nil && string(content) == string(replacement) {
+			assertAttachmentFile(t, candidate, replacement, 0o644, replacementIdentity)
 			found = true
 			break
 		}
@@ -376,8 +393,8 @@ func TestSaveAttachmentRejectsUnprivatePublishedFile(t *testing.T) {
 			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
 		},
 	)
-	if err == nil {
-		t.Fatal("SaveAttachment() error = nil, want permission verification failure")
+	if err == nil || !strings.Contains(err.Error(), "saved attachment permissions are not private") {
+		t.Fatalf("SaveAttachment() error = %v, want permission verification failure", err)
 	}
 	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
 		t.Fatalf("unprivate output survived cleanup: %v", statErr)
@@ -447,6 +464,7 @@ func TestSaveAttachmentPreservesTemporaryReplacement(t *testing.T) {
 	directory := t.TempDir()
 	output := filepath.Join(directory, "report.pdf")
 	replacement := []byte("replacement")
+	var replacementIdentity os.FileInfo
 	setAttachmentPublicationHook(t, func(stage string, path string) error {
 		if stage != "after-link-temporary" {
 			return nil
@@ -454,7 +472,9 @@ func TestSaveAttachmentPreservesTemporaryReplacement(t *testing.T) {
 		if err := os.Rename(path, path+".original"); err != nil {
 			return err
 		}
-		return os.WriteFile(path, replacement, 0o644)
+		var err error
+		replacementIdentity, err = writeAttachmentPermissionFixture(path, replacement)
+		return err
 	})
 
 	_, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
@@ -478,6 +498,7 @@ func TestSaveAttachmentPreservesTemporaryReplacement(t *testing.T) {
 		candidate := filepath.Join(directory, entry.Name())
 		candidateContent, candidateErr := os.ReadFile(candidate)
 		if candidateErr == nil && string(candidateContent) == string(replacement) {
+			assertAttachmentFile(t, candidate, replacement, 0o644, replacementIdentity)
 			found = true
 			break
 		}
@@ -494,7 +515,24 @@ func setAttachmentPublicationHook(t *testing.T, hook func(string, string) error)
 	t.Cleanup(func() { attachmentPublicationHook = previous })
 }
 
-func assertAttachmentFile(t *testing.T, path string, want []byte, mode os.FileMode) {
+func writeAttachmentPermissionFixture(path string, content []byte) (os.FileInfo, error) {
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+		return nil, fmt.Errorf("attachment fixture %q must be a regular file with mode 0644, got %v", path, info.Mode())
+	}
+	return info, nil
+}
+
+func assertAttachmentFile(t *testing.T, path string, want []byte, mode os.FileMode, identity ...os.FileInfo) {
 	t.Helper()
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -509,6 +547,9 @@ func assertAttachmentFile(t *testing.T, path string, want []byte, mode os.FileMo
 	}
 	if info.Mode().Perm() != mode.Perm() {
 		t.Fatalf("mode at %q = %o, want %o", path, info.Mode().Perm(), mode.Perm())
+	}
+	if len(identity) > 0 && (identity[0] == nil || !os.SameFile(identity[0], info)) {
+		t.Fatalf("identity at %q changed", path)
 	}
 }
 

@@ -113,6 +113,13 @@ func TestMutationLockPreflightRejectsUnsafeSetupWithRemedy(t *testing.T) {
 			if err := os.WriteFile(foreign, []byte("retained"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chmod(foreign, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			original, statErr := os.Lstat(foreign)
+			if statErr != nil || !original.Mode().IsRegular() || original.Mode().Perm() != 0o644 {
+				t.Fatalf("foreign fixture mode = %v, error = %v", original, statErr)
+			}
 			if kind == "directory occupied" {
 				dir = foreign
 			} else if kind == "lock symlink" {
@@ -132,7 +139,8 @@ func TestMutationLockPreflightRejectsUnsafeSetupWithRemedy(t *testing.T) {
 			}
 			payload, err := os.ReadFile(foreign)
 			info, statErr := os.Lstat(foreign)
-			if err != nil || statErr != nil || string(payload) != "retained" || info.Mode().Perm() != 0o644 {
+			if err != nil || statErr != nil || string(payload) != "retained" ||
+				!os.SameFile(original, info) || info.Mode().Perm() != 0o644 {
 				t.Fatalf("foreign object changed: %v, %v", err, statErr)
 			}
 		})
