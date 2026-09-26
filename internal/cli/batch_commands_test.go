@@ -144,7 +144,12 @@ func TestBatchCommandSerializerOverflowReturnsBoundedEvidence(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v; output = %q", err, stdout.String())
 	}
 	if response.OK || response.Error == nil || response.Error.Code != "output_too_large" ||
-		response.Error.Guidance == nil || response.Error.Guidance.ReplayAllowed ||
+		response.Error.Guidance == nil || !response.Error.Guidance.ReplayAllowed ||
+		response.Error.Guidance.EffectCertainty != mail.EffectNone ||
+		response.Error.Guidance.Retryability != mail.RetryUserInputRequired ||
+		response.Error.Guidance.Recovery.Action != mail.RecoveryCorrect ||
+		!strings.Contains(response.Error.Guidance.Recovery.Instruction, "fields") ||
+		!strings.Contains(response.Error.Guidance.Recovery.Instruction, "--max-bytes") ||
 		response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != 1 ||
 		response.Data.BatchResult.Items[0].ID != "large-metadata" ||
 		response.Data.BatchResult.Items[0].State != mail.BatchItemCompleted ||
@@ -152,6 +157,18 @@ func TestBatchCommandSerializerOverflowReturnsBoundedEvidence(t *testing.T) {
 		t.Fatalf("bounded overflow response = %+v", response)
 	}
 	assertOutputSizeEvidence(t, response, int64(completeOutput.Len()), 1024, string(outputSizeExact))
+
+	var replayOutput, replayStderr bytes.Buffer
+	replayGateway := &projectionGateway{message: message}
+	replayCode := Run(context.Background(), mail.NewService(replayGateway),
+		[]string{"batch", "--input", inputPath, "--max-bytes", "8192", "--json"},
+		&replayOutput, &replayStderr)
+	var replay envelope
+	if replayCode != 0 || replayStderr.Len() != 0 || json.Unmarshal(replayOutput.Bytes(), &replay) != nil ||
+		!replay.OK || replay.Data.BatchResult == nil || replayGateway.getCalls != 1 {
+		t.Fatalf("corrected read replay: code=%d calls=%d stderr=%q output=%q",
+			replayCode, replayGateway.getCalls, replayStderr.String(), replayOutput.String())
+	}
 }
 
 func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
@@ -185,8 +202,10 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v; output bytes = %d", err, stdout.Len())
 	}
 	if response.OK || response.Error == nil || response.Error.Code != "output_too_large" ||
-		response.Error.Guidance == nil || response.Error.Guidance.ReplayAllowed ||
-		response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != itemCount ||
+		response.Error.Guidance == nil || !response.Error.Guidance.ReplayAllowed ||
+		response.Error.Guidance.EffectCertainty != mail.EffectNone ||
+		response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != maximumBatchReadOverflowItems ||
+		response.Data.BatchResult.Total != itemCount ||
 		response.Data.BatchResult.Completed != itemCount || gateway.getCalls != itemCount {
 		t.Fatalf("100-item overflow response = %+v", response)
 	}
@@ -200,6 +219,56 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 		if item.ID != fmt.Sprintf("item-%03d", index) || item.State != mail.BatchItemCompleted || item.Message != nil {
 			t.Fatalf("item %d = %+v", index, item)
 		}
+	}
+}
+
+func TestBatchCommandMutationOverflowPreservesCompletedEffects(t *testing.T) {
+	read := true
+	request := mail.BatchRequest{
+		Operation: mail.BatchOperationMark,
+		Items: []mail.BatchItem{
+			{ID: "completed", Ref: "msg_ref", Read: &read},
+			{ID: "failed", Ref: "other_ref", Read: &read},
+		},
+	}
+	completedState := mail.MessageSummary{
+		Ref: "msg_ref",
+		ServerTruth: &mail.ServerMutationEvidence{
+			OperationID: "operation-1", Outcome: mail.ServerMutationOutcomeCompleted,
+			Command: "STORE", ServerResponse: "OK", Mailbox: "INBOX", UID: 7,
+			ExpectedUIDValidity: 8, UIDValidity: 8, FlagsState: mail.MessageServerStateObserved,
+			FlagsSource: "FETCH", ActualFlags: []string{"\\Seen"},
+		},
+	}
+	result := mail.BatchResult{
+		Operation: mail.BatchOperationMark, Total: 2, Completed: 1, Failed: 1,
+		Items: []mail.BatchItemResult{
+			{ID: "completed", State: mail.BatchItemCompleted, MessageState: &completedState},
+			{ID: "failed", State: mail.BatchItemFailed, Error: &mail.BatchItemError{
+				Code: "operation_failed", Message: strings.Repeat("failure detail ", 512),
+			}},
+		},
+	}
+	var stdout bytes.Buffer
+	if code := writeBatchJSON(&stdout, result, request, 4096); code != 1 || stdout.Len() > 4096 {
+		t.Fatalf("writeBatchJSON() code=%d output bytes=%d", code, stdout.Len())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error=%v output=%q", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "output_too_large" ||
+		response.Error.Guidance == nil || response.Error.Guidance.EffectCertainty != mail.EffectPartial ||
+		response.Error.Guidance.ReplayAllowed || response.Error.Guidance.Retryability != mail.RetryObserveRequired ||
+		response.Data.BatchResult == nil || response.Data.BatchResult.Completed != 1 ||
+		response.Data.BatchResult.Failed != 1 || len(response.Data.BatchResult.Items) != 2 {
+		t.Fatalf("mutation overflow response = %+v", response)
+	}
+	completed := response.Data.BatchResult.Items[0]
+	if completed.ID != "completed" || completed.State != mail.BatchItemCompleted || completed.MessageState == nil ||
+		completed.MessageState.ServerTruth == nil || completed.MessageState.ServerTruth.OperationID != "operation-1" ||
+		completed.MessageState.ServerTruth.Outcome != mail.ServerMutationOutcomeCompleted {
+		t.Fatalf("completed mutation evidence = %+v", completed)
 	}
 }
 

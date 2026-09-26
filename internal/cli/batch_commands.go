@@ -14,6 +14,7 @@ import (
 )
 
 const batchTimeout = 15 * time.Minute
+const maximumBatchReadOverflowItems = 10
 
 func runBatch(
 	ctx context.Context,
@@ -195,7 +196,18 @@ func batchOutputFailureEnvelope(result mail.BatchResult, data responseData, err 
 		Retryability: mail.RetryObserveRequired, ReplayAllowed: false,
 		Recovery: mail.RecoveryGuidance{Action: mail.RecoveryInspect},
 	}
-	if result.Operation != mail.BatchOperationRead {
+	if result.Operation == mail.BatchOperationRead {
+		guidance.Retryability = mail.RetryUserInputRequired
+		guidance.ReplayAllowed = true
+		guidance.Recovery = mail.RecoveryGuidance{
+			Action:      mail.RecoveryCorrect,
+			Instruction: "Narrow the requested read view or fields, or raise --max-bytes, then replay this same read batch.",
+		}
+		if data.serialization != nil && data.serialization.batch != nil &&
+			len(data.serialization.batch.Items) > maximumBatchReadOverflowItems {
+			data.serialization.batch.Items = data.serialization.batch.Items[:maximumBatchReadOverflowItems]
+		}
+	} else {
 		switch {
 		case result.Uncertain > 0:
 			guidance.EffectCertainty = mail.EffectUnknown
@@ -252,7 +264,11 @@ func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error
 		return &commandError{code: "serialization_failed", message: "could not validate batch output budget"}
 	}
 	if int64(max(len(serializerPayload), len(contentPayload))) > maxBytes {
-		return &commandError{code: "invalid_argument", message: "--max-bytes is too small to retain every batch item ID and status; no batch operation was started"}
+		message := "--max-bytes is too small to retain every batch item ID and status; no batch operation was started"
+		if request.Operation == mail.BatchOperationRead {
+			message = "--max-bytes is too small to retain bounded read-batch overflow evidence; no batch operation was started"
+		}
+		return &commandError{code: "invalid_argument", message: message}
 	}
 	return nil
 }
