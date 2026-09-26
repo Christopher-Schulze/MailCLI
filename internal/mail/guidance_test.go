@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -212,7 +214,7 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: transport.CodeIMAPCanceled, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: transport.CodeIMAPDisconnected, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: transport.CodeIMAPTimeout, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
-		{code: transport.CodeIMAPFetchFailed, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{code: transport.CodeIMAPFetchFailed, phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "operation_canceled", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: "draft_operation_canceled", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: "operation_timeout", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
@@ -229,6 +231,7 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: "account_binding_provider_mismatch", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "same supported provider"},
 		{code: "account_binding_version_unsupported", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "preserve the binding file"},
 		{code: "account_binding_unavailable", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "preserve the file contents"},
+		{code: "account_binding_stale", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "enabled account"},
 		{code: "mail_automation_denied", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Privacy & Security > Automation"},
 		{code: "mail_not_running", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Open Mail.app"},
 		{code: "mail_recovery_required", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Quit and reopen Mail.app"},
@@ -318,6 +321,38 @@ func TestAccessGatePreflightGuidanceProvesNoEffectForMutations(t *testing.T) {
 				t.Fatalf("access-gate guidance = %+v", guidance)
 			}
 		})
+	}
+}
+
+func TestDraftStateReadPreservesPermissionCause(t *testing.T) {
+	root := t.TempDir()
+	service := NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Permission", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, draft.Ref+".json")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err = service.GetDraft(draft.Ref)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("draft permission cause lost: %v", err)
+	}
+	if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), "delete") {
+		t.Fatalf("unsafe permission diagnostic: %v", err)
+	}
+	guidance := GuidanceForError("drafts.inspect", err)
+	if guidance.Phase != OperationPhaseRead || guidance.EffectCertainty != EffectNone || guidance.ReplayAllowed ||
+		guidance.Retryability != RetryUserInputRequired || guidance.Recovery.Action != RecoveryCorrect || guidance.Recovery.Instruction == "" {
+		t.Fatalf("wrapped permission guidance = %+v", guidance)
 	}
 }
 

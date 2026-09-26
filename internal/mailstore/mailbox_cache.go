@@ -42,7 +42,7 @@ func readMailboxCache(
 	defer closeMailboxCache(&resultErr, file)
 	opened, err := file.Stat()
 	if err != nil {
-		return mailboxCache{}, operationError("invalid_mailbox_cache", fmt.Sprintf("inspect opened mailbox cache: %v", err))
+		return mailboxCache{}, operationErrorWithCause("invalid_mailbox_cache", "cannot inspect opened mailbox cache", err)
 	}
 	if !os.SameFile(expected, opened) || expected.Size() != opened.Size() {
 		return mailboxCache{}, operationError("invalid_mailbox_cache", "mailbox cache changed while opening")
@@ -53,7 +53,7 @@ func readMailboxCache(
 		if errors.As(err, &typed) && typed.Code == "mailbox_cache_malformed" {
 			return mailboxCache{}, typed
 		}
-		return mailboxCache{}, operationError("invalid_mailbox_cache", err.Error())
+		return mailboxCache{}, operationErrorWithCause("invalid_mailbox_cache", "cannot read mailbox cache", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return mailboxCache{}, err
@@ -65,7 +65,8 @@ func closeMailboxCache(resultErr *error, file *os.File) {
 	if err := file.Close(); err != nil {
 		var typed *Error
 		if errors.As(*resultErr, &typed) {
-			typed.Message += "; close mailbox cache: " + err.Error()
+			typed.Message += "; cannot close mailbox cache"
+			typed.Err = errors.Join(typed.Err, err)
 			return
 		}
 		*resultErr = errors.Join(*resultErr, fmt.Errorf("close mailbox cache: %w", err))

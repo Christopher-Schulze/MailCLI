@@ -92,6 +92,7 @@ type OperationError struct {
 	Code     string
 	Message  string
 	DraftRef string
+	Err      error
 }
 
 func NewService(gateway Gateway) *Service {
@@ -132,6 +133,10 @@ func (e *OperationError) Error() string {
 
 func (e *OperationError) ErrorCode() string {
 	return e.Code
+}
+
+func (e *OperationError) Unwrap() error {
+	return e.Err
 }
 
 func (s *Service) Probe(ctx context.Context, live bool) DiagnosticReport {

@@ -3,11 +3,15 @@ package imapclient
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -115,5 +119,76 @@ func TestWrapDialErrorClassifiesAndPreservesCause(t *testing.T) {
 				t.Fatalf("wrapDialError() error = %v, want cause %v", err, test.err)
 			}
 		})
+	}
+}
+
+func TestLoopbackTLSReadRecoveryRequiresVerificationCorrection(t *testing.T) {
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, otherMboxes: []string{"INBOX"}})
+	certificate, err := x509.ParseCertificate(srv.cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := x509.NewCertPool()
+	trusted.AddCert(certificate)
+	for _, test := range []struct {
+		name     string
+		roots    *x509.CertPool
+		hostname string
+		failure  bool
+	}{
+		{name: "untrusted certificate", roots: x509.NewCertPool(), hostname: "localhost", failure: true},
+		{name: "wrong hostname", roots: trusted, hostname: "private-host.invalid", failure: true},
+		{name: "verified peer", roots: trusted, hostname: "localhost"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, cfg := newFakeClient(t, srv)
+			client.TLSConfig = &tls.Config{RootCAs: test.roots, ServerName: test.hostname}
+			defer func() {
+				if err := client.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			boxes, err := client.ListMailboxes(ctx, cfg)
+			if !test.failure {
+				if err != nil || len(boxes) != 1 {
+					t.Fatalf("verified loopback peer = %v, %v", boxes, err)
+				}
+				return
+			}
+			var verification *tls.CertificateVerificationError
+			if transport.ErrorCode(err) != transport.CodeIMAPConnectFailed || !errors.As(err, &verification) ||
+				!transport.IsConfigurationFailure(err) || transport.IsTransientReadFailure(err) {
+				t.Fatalf("real TLS failure classification = %v", err)
+			}
+			guidance := mail.GuidanceForError("mailboxes.list", err)
+			if guidance.Phase != mail.OperationPhaseRead || guidance.EffectCertainty != mail.EffectNone ||
+				guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed ||
+				guidance.Recovery.Action != mail.RecoveryCorrect || !strings.Contains(guidance.Recovery.Instruction, "certificate trust") {
+				t.Fatalf("real TLS read guidance = %+v", guidance)
+			}
+			uncertain := &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Err: err}
+			if transport.IsConfigurationFailure(uncertain) || transport.IsTransientReadFailure(uncertain) {
+				t.Fatal("TLS verification cause erased outcome uncertainty")
+			}
+		})
+	}
+	client, cfg := newFakeClient(t, srv)
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = client.ListMailboxes(ctx, cfg)
+	if transport.ErrorCode(err) != transport.CodeIMAPConnectFailed || !transport.IsTransientReadFailure(err) || transport.IsConfigurationFailure(err) {
+		t.Fatalf("refused loopback connection = %v", err)
+	}
+	guidance := mail.GuidanceForError("mailboxes.list", err)
+	if guidance.Retryability != mail.RetrySafe || !guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryRetry {
+		t.Fatalf("refused connection guidance = %+v", guidance)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

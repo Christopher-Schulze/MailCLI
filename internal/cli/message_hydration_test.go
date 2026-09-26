@@ -3,11 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/transport"
 )
 
 type hydrationMessageGateway struct {
@@ -128,3 +132,72 @@ type testCodedError struct {
 
 func (e *testCodedError) Error() string     { return e.message }
 func (e *testCodedError) ErrorCode() string { return e.code }
+
+func TestHydrationEnvelopePreservesCausePolicyAndSanitizesDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		retry  mail.Retryability
+		action mail.RecoveryAction
+		effect mail.EffectCertainty
+	}{
+		{name: "TLS verification", err: &transport.TransportError{Code: transport.CodeIMAPConnectFailed,
+			Err: &tls.CertificateVerificationError{Err: errors.New("private-host.invalid certificate secret-token")}},
+			retry: mail.RetryUserInputRequired, action: mail.RecoveryCorrect, effect: mail.EffectNone},
+		{name: "invalid source", err: &transport.TransportError{Code: transport.CodeIMAPFetchFailed},
+			retry: mail.RetryTerminal, action: mail.RecoveryInspect, effect: mail.EffectNone},
+		{name: "FETCH disconnect", err: &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Err: io.EOF},
+			retry: mail.RetrySafe, action: mail.RecoveryRetry, effect: mail.EffectNone},
+		{name: "uncertain outcome", err: &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown,
+			Err: &transport.TransportError{Code: transport.CodeIMAPConnectFailed,
+				Err: &tls.CertificateVerificationError{Err: errors.New("secret-token")}}},
+			retry: mail.RetryObserveRequired, action: mail.RecoveryObserve, effect: mail.EffectUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := failedHydrationMessage()
+			message.Hydration.Remote = &mail.HydrationCause{Code: transport.ErrorCode(test.err), Message: "IMAP hydration failed"}
+			message.Hydration.Remediation = "Inspect the IMAP configuration before retrying."
+			wrapped := hydrationCommandError(message.Hydration, test.err)
+			if !errors.Is(wrapped, test.err) {
+				t.Fatal("hydration command discarded its original cause")
+			}
+			for _, command := range []string{"messages.get", "drafts.open"} {
+				var stdout, stderr bytes.Buffer
+				if code := failMessageRead(command, true, message, test.err, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
+					t.Fatalf("failure code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				var response envelope
+				if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				guidance := response.Error.Guidance
+				if response.OK || response.Error.Code != transport.ErrorCode(test.err) || guidance == nil ||
+					guidance.Retryability != test.retry || guidance.Recovery.Action != test.action ||
+					guidance.EffectCertainty != test.effect || guidance.ReplayAllowed != (test.retry == mail.RetrySafe) ||
+					(test.retry == mail.RetryUserInputRequired && guidance.Recovery.Instruction == "") {
+					t.Fatalf("hydration policy = %+v", response.Error)
+				}
+				if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "private-host.invalid") {
+					t.Fatalf("raw cause leaked: %s", stdout.String())
+				}
+				if test.name == "TLS verification" || test.name == "uncertain outcome" {
+					stdout.Reset()
+					if code := failCommand(command, true, test.err, &stdout, &stderr); code != 1 ||
+						strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "private-host.invalid") {
+						t.Fatalf("direct JSON exposed raw TLS cause: code=%d %s", code, stdout.String())
+					}
+					if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+						t.Fatal(err)
+					}
+					if response.Error.Code != transport.ErrorCode(test.err) || response.Error.Guidance.Retryability != test.retry || response.Error.Guidance.EffectCertainty != test.effect {
+						t.Fatalf("direct TLS policy changed: %+v", response.Error)
+					}
+					if code := failCommand(command, false, test.err, &stdout, &stderr); code != 1 || strings.Contains(stderr.String(), "secret-token") {
+						t.Fatalf("human failure exposed TLS cause: code=%d %s", code, stderr.String())
+					}
+					stderr.Reset()
+				}
+			}
+		})
+	}
+}

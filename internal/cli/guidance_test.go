@@ -277,6 +277,44 @@ func TestReadTimeoutRemainsReplayable(t *testing.T) {
 	}
 }
 
+func TestDraftInspectPermissionEnvelopePreservesCorrectiveRecovery(t *testing.T) {
+	root := t.TempDir()
+	service := mail.NewServiceWithDraftRoot(nil, root)
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		To: []mail.Recipient{{Address: "recipient@example.com"}}, Subject: "Permission", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, draft.Ref+".json")
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), service, []string{"drafts", "inspect", "--ref", draft.Ref, "--json"}, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
+		t.Fatalf("permission read code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "draft_state_error" || response.Error.Guidance == nil {
+		t.Fatalf("permission envelope = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseRead || guidance.EffectCertainty != mail.EffectNone ||
+		guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryCorrect || guidance.Recovery.Instruction == "" ||
+		strings.Contains(stdout.String(), root) {
+		t.Fatalf("permission envelope policy or sanitation = %s", stdout.String())
+	}
+}
+
 func TestHydrationReadContextAllowsBoundedTransferAndCallerCancellation(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
@@ -589,6 +627,13 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			phase: mail.OperationPhaseSubmission, effect: mail.EffectUnknown,
 			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
 			recoveryCmd: "accounts.list", recoveryArgs: []string{"--json"},
+		},
+		{
+			name: "stale read account binding", command: "messages.get", code: "account_binding_stale",
+			err:   &mail.OperationError{Code: "account_binding_stale", Message: "stale binding"},
+			phase: mail.OperationPhaseRead, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+			instructionContains: "enabled account",
 		},
 		{
 			name: "Mail recovery requires user action", command: "drafts.handoff", code: "mail_recovery_required",

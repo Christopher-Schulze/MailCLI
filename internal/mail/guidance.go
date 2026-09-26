@@ -130,6 +130,9 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForReadCorrection("Correct the missing or stale reference before retrying this read.")
 	}
 	if !effectfulCommand(command) {
+		if code == transport.CodeIMAPFetchFailed && !transport.IsTransientReadFailure(err) {
+			return guidanceForTerminalRead()
+		}
 		if guidance, matched := guidanceForKnownReadError(code); matched {
 			return guidance
 		}
@@ -259,6 +262,9 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case transport.IsConfigurationFailure(err):
 		if !effectfulCommand(command) {
+			if transport.IsTLSVerificationFailure(err) {
+				return guidanceForReadCorrection("Correct the IMAP certificate trust or configured hostname before retrying this read; do not disable TLS verification.")
+			}
 			return guidanceForReadCorrection("Correct the account credentials or IMAP security configuration before retrying this read.")
 		}
 		return guidanceForInput()
@@ -344,6 +350,8 @@ func guidanceForReadAccessError(code string) (string, bool) {
 		return "Use a MailCLI build that supports the existing account-binding version; preserve the binding file and retry with that build.", true
 	case "account_binding_unavailable":
 		return "Correct access to the existing account-binding file or its parent directory, then retry the read; preserve the file contents.", true
+	case "account_binding_stale":
+		return "Inspect `mailcli accounts list --json`, then correct the binding to an enabled account through `mailcli send setup` before retrying this read; preserve existing binding data.", true
 	case "mail_automation_denied":
 		return "Allow the calling app to control Mail in System Settings > Privacy & Security > Automation, then retry the read.", true
 	case "mail_not_running":

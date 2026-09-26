@@ -94,6 +94,35 @@ func TestLoadMailboxCacheBoundsUseTypedMalformedError(t *testing.T) {
 	}
 }
 
+func TestMailboxCachePermissionCauseSurvivesCatalog(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	path := filepath.Join(store.versionRoot, testAccountID, ".mboxCache.plist")
+	if err := os.WriteFile(path, []byte(nestedMailboxCacheXML(1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{})
+	if errorCodeForTest(err) != "mailbox_catalog_incomplete" || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("catalog permission cause lost: %v", err)
+	}
+	if strings.Contains(err.Error(), store.versionRoot) {
+		t.Fatalf("catalog exposed private path: %v", err)
+	}
+	guidance := mail.GuidanceForError("mailboxes.list", err)
+	if guidance.Phase != mail.OperationPhaseRead || guidance.EffectCertainty != mail.EffectNone || guidance.ReplayAllowed ||
+		guidance.Retryability != mail.RetryUserInputRequired || guidance.Recovery.Action != mail.RecoveryCorrect || guidance.Recovery.Instruction == "" {
+		t.Fatalf("catalog permission guidance = %+v", guidance)
+	}
+}
+
 func TestParseMailboxCacheXML(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -166,7 +166,7 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		requiredBytes = &value
 	}
 	return &errorData{
-		Code: code, Message: err.Error(), Guidance: &guidance,
+		Code: code, Message: publicFailureMessage(err), Guidance: &guidance,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
 		Limit: limit, ObservedAtLeast: observedAtLeast,
 	}
@@ -200,7 +200,7 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 			}
 		}
 	}
-	if errorCode(err) == "account_binding_stale" {
+	if errorCode(err) == "account_binding_stale" && guidance.Phase != mail.OperationPhaseRead {
 		guidance.Recovery = mail.RecoveryGuidance{
 			Action: mail.RecoveryObserve, Command: "accounts.list", Args: []string{"--json"},
 		}
@@ -240,7 +240,7 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 			}
 		}
 	}
-	if message := data.Message; message != nil && message.Hydration != nil {
+	if message := data.Message; message != nil && message.Hydration != nil && guidance.EffectCertainty == mail.EffectNone {
 		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseHydration, mail.EffectNone
 		if message.Summary.Ref != "" && (guidance.Recovery.Action == mail.RecoveryRetry || guidance.Recovery.Action == mail.RecoveryCorrect) &&
 			(command == "messages.get" || command == "drafts.open") {

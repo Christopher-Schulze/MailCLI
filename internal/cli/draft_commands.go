@@ -30,6 +30,7 @@ const (
 type commandError struct {
 	code    string
 	message string
+	cause   error
 }
 
 func (e *commandError) Error() string {
@@ -38,6 +39,10 @@ func (e *commandError) Error() string {
 
 func (e *commandError) ErrorCode() string {
 	return e.code
+}
+
+func (e *commandError) Unwrap() error {
+	return e.cause
 }
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

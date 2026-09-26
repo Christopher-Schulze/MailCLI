@@ -2,8 +2,10 @@ package mailstore
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -604,6 +606,7 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 		fetchErr       error
 		wantCode       string
 		wantState      mail.HydrationState
+		wantRetry      mail.Retryability
 		cancelCaller   bool
 		wantNoMutation bool
 	}{
@@ -612,17 +615,20 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "AUTHENTICATIONFAILED secret-token"},
 			wantCode:  transport.CodeIMAPAuthFailed,
 			wantState: mail.HydrationStateFailed,
+			wantRetry: mail.RetryUserInputRequired,
 		},
 		{
 			name:      "size limit",
 			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPRawSourceTooLarge, Message: "announced 128 MiB"},
 			wantCode:  transport.CodeIMAPRawSourceTooLarge,
 			wantState: mail.HydrationStateFailed,
+			wantRetry: mail.RetryTerminal,
 		},
 		{
 			name:         "canceled",
 			wantCode:     operationCanceledCode,
 			wantState:    mail.HydrationStateCanceled,
+			wantRetry:    mail.RetrySafe,
 			cancelCaller: true,
 		},
 		{
@@ -630,7 +636,30 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			fetchErr:       context.DeadlineExceeded,
 			wantCode:       operationTimeoutCode,
 			wantState:      mail.HydrationStateFailed,
+			wantRetry:      mail.RetrySafe,
 			wantNoMutation: true,
+		},
+		{
+			name: "TLS verification",
+			fetchErr: &transport.TransportError{Code: transport.CodeIMAPConnectFailed, Message: "connect failed",
+				Err: &tls.CertificateVerificationError{Err: errors.New("private-host secret-token")}},
+			wantCode:  transport.CodeIMAPConnectFailed,
+			wantState: mail.HydrationStateFailed,
+			wantRetry: mail.RetryUserInputRequired,
+		},
+		{
+			name:      "invalid source",
+			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "invalid bounded source"},
+			wantCode:  transport.CodeIMAPFetchFailed,
+			wantState: mail.HydrationStateFailed,
+			wantRetry: mail.RetryTerminal,
+		},
+		{
+			name:      "network FETCH",
+			fetchErr:  &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "FETCH failed", Err: io.EOF},
+			wantCode:  transport.CodeIMAPFetchFailed,
+			wantState: mail.HydrationStateFailed,
+			wantRetry: mail.RetrySafe,
 		},
 	}
 	for _, test := range tests {
@@ -684,6 +713,13 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			if !errors.As(err, &combined) {
 				t.Fatalf("GetMessage() error type = %T, want hydrationError", err)
 			}
+			if test.fetchErr != nil && !errors.Is(err, test.fetchErr) {
+				t.Fatalf("GetMessage() lost remote cause: %v", err)
+			}
+			guidance := mail.GuidanceForError("messages.get", err)
+			if guidance.Retryability != test.wantRetry || guidance.ReplayAllowed != (test.wantRetry == mail.RetrySafe) {
+				t.Fatalf("GetMessage() guidance = %+v, want retryability %s", guidance, test.wantRetry)
+			}
 			if message.Hydration == nil || message.Hydration.State != test.wantState ||
 				message.Hydration.AttemptedSource != "imap" || message.Hydration.Local == nil ||
 				message.Hydration.Local.Code != "raw_source_partial" || message.Hydration.Remote == nil ||
@@ -692,6 +728,18 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			}
 			if strings.Contains(message.Hydration.Remote.Message, "secret-token") {
 				t.Fatalf("hydration diagnostic leaked protocol authentication text: %+v", message.Hydration.Remote)
+			}
+			if test.name == "TLS verification" {
+				if strings.Contains(err.Error(), "private-host") || strings.Contains(err.Error(), "secret-token") ||
+					strings.Contains(message.Hydration.Remote.Message, "private-host") {
+					t.Fatalf("TLS hydration leaked certificate details: error=%v, diagnostic=%+v", err, message.Hydration)
+				}
+				if guidance.Recovery.Action != mail.RecoveryCorrect ||
+					!strings.Contains(message.Hydration.Remediation, "certificate trust") ||
+					!strings.Contains(message.Hydration.Remediation, "hostname") ||
+					!strings.Contains(message.Hydration.Remediation, "do not disable TLS verification") {
+					t.Fatalf("TLS hydration lacks corrective recovery: guidance=%+v, diagnostic=%+v", guidance, message.Hydration)
+				}
 			}
 			if test.wantNoMutation && !strings.Contains(message.Hydration.Remote.Message, "no external mutation was attempted") {
 				t.Fatalf("timeout diagnostic lacks read-only effect: %+v", message.Hydration.Remote)

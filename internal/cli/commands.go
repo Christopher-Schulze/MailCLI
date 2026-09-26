@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -435,7 +436,7 @@ func failMessageRead(
 	}
 	if message.Hydration == nil {
 		if !jsonOutput {
-			writeLine(stderr, oneLine(err.Error()))
+			writeLine(stderr, oneLine(publicFailureMessage(err)))
 			return commandExitCode(err)
 		}
 		if jsonOutput && output.target == projectionTargetMessage {
@@ -489,7 +490,21 @@ func hydrationCommandError(diagnostic *mail.HydrationDiagnostic, fallback error)
 			message += "; " + diagnostic.Remediation
 		}
 	}
-	return &commandError{code: code, message: message}
+	if transport.IsSubmissionOutcomeUnknown(fallback) || transport.IsMutationOutcomeUnknown(fallback) || transport.IsMirrorOutcomeUncertain(fallback) {
+		code = transport.ErrorCode(fallback)
+	}
+	return &commandError{code: code, message: message, cause: fallback}
+}
+
+func publicFailureMessage(err error) string {
+	if transport.IsTLSVerificationFailure(err) {
+		return "IMAP TLS certificate verification failed; correct certificate trust or the configured hostname before retrying"
+	}
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return "operation failed with an IMAP TLS verification cause; inspect retained outcome evidence and correct TLS configuration before retrying"
+	}
+	return err.Error()
 }
 
 func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -677,7 +692,7 @@ func failCommandWithData(
 	stderr io.Writer,
 ) int {
 	if !jsonOutput {
-		writeLine(stderr, err)
+		writeLine(stderr, publicFailureMessage(err))
 		return commandExitCode(err)
 	}
 	writeJSON(stdout, envelope{

@@ -3,6 +3,7 @@ package transport
 import (
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 )
 
@@ -26,14 +27,14 @@ func TestFailureClassificationPredicates(t *testing.T) {
 		{
 			name:      "IsTransientReadFailure",
 			predicate: IsTransientReadFailure,
-			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed},
-			negative:  []string{CodeSMTPTimeout, CodeSMTPTransferTimeout, CodeIMAPFlagsOutcomeUnknown},
+			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout},
+			negative:  []string{CodeSMTPTimeout, CodeSMTPTransferTimeout, CodeIMAPFlagsOutcomeUnknown, CodeIMAPFetchFailed},
 		},
 		{
 			name:      "IsTransientTransportFailure",
 			predicate: IsTransientTransportFailure,
-			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed, CodeSMTPTimeout, CodeSMTPTransferTimeout},
-			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeSMTPSourceInvalid, CodeIMAPMessageNotFound},
+			positive:  []string{CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeSMTPTimeout, CodeSMTPTransferTimeout},
+			negative:  []string{CodeSMTPRejected, CodeSMTPDataIncomplete, CodeSMTPSourceInvalid, CodeIMAPMessageNotFound, CodeIMAPFetchFailed},
 		},
 		{
 			name:      "IsRejectedSubmission",
@@ -178,6 +179,34 @@ func TestClassificationPrefersOutcomeUncertainty(t *testing.T) {
 	outcomeErr.Err = codedErr(CodeIMAPAmbiguousMailbox)
 	if IsAmbiguousMailbox(outcomeErr) || !IsMutationOutcomeUnknown(outcomeErr) {
 		t.Fatal("mutation uncertainty must outrank wrapped mailbox ambiguity")
+	}
+}
+
+func TestFetchRetryRequiresNetworkCause(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+		retry bool
+	}{
+		{name: "invalid source"},
+		{name: "server rejection", cause: errors.New("FETCH rejected")},
+		{name: "disconnect", cause: io.EOF, retry: true},
+		{name: "truncated response", cause: io.ErrUnexpectedEOF, retry: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := fmt.Errorf("hydration: %w", &TransportError{Code: CodeIMAPFetchFailed, Err: test.cause})
+			if IsTransientReadFailure(err) != test.retry || IsTransientTransportFailure(err) != test.retry {
+				t.Fatalf("FETCH retry = read %t / transport %t, want %t", IsTransientReadFailure(err), IsTransientTransportFailure(err), test.retry)
+			}
+			uncertain := errors.Join(err, codedErr(CodeIMAPMoveOutcomeUnknown))
+			if IsTransientReadFailure(uncertain) || IsTransientTransportFailure(uncertain) {
+				t.Fatal("FETCH network cause erased mutation uncertainty")
+			}
+			invalid := errors.Join(&TransportError{Code: CodeIMAPFetchFailed}, io.EOF)
+			if IsTransientReadFailure(invalid) || IsTransientTransportFailure(invalid) {
+				t.Fatal("source cleanup error made an invalid FETCH source replayable")
+			}
+		})
 	}
 }
 

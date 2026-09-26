@@ -1,5 +1,12 @@
 package transport
 
+import (
+	"crypto/tls"
+	"errors"
+	"io"
+	"net"
+)
+
 // Failure classification at the transport boundary.
 //
 // The predicates in this file translate wire-level error codes into the
@@ -16,24 +23,44 @@ func IsTimeout(err error) bool {
 }
 
 // IsTransientReadFailure reports an IMAP-side transient failure that is safe
-// to retry unchanged: connect, cancellation, disconnect, timeout, or fetch failure.
+// to retry unchanged: non-TLS-verification connect failures, cancellation,
+// disconnect, timeout, or FETCH failures with a preserved network cause.
 func IsTransientReadFailure(err error) bool {
 	switch ErrorCode(err) {
-	case CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed:
+	case CodeIMAPConnectFailed:
+		return !IsTLSVerificationFailure(err)
+	case CodeIMAPFetchFailed:
+		var fetch *TransportError
+		if !errors.As(err, &fetch) || fetch.Code != CodeIMAPFetchFailed {
+			return false
+		}
+		var network net.Error
+		return errors.As(fetch.Err, &network) || errors.Is(fetch.Err, io.EOF) ||
+			errors.Is(fetch.Err, io.ErrUnexpectedEOF) || errors.Is(fetch.Err, net.ErrClosed)
+	case CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout:
 		return true
 	}
 	return false
 }
 
 // IsTransientTransportFailure reports any IMAP connect, cancellation,
-// disconnect, timeout, or fetch failure and SMTP timeout.
+// disconnect, timeout, or network-caused FETCH failure and SMTP timeout.
 func IsTransientTransportFailure(err error) bool {
 	switch ErrorCode(err) {
-	case CodeIMAPConnectFailed, CodeIMAPCanceled, CodeIMAPDisconnected, CodeIMAPTimeout, CodeIMAPFetchFailed,
-		CodeSMTPTimeout, CodeSMTPTransferTimeout:
+	case CodeSMTPTimeout, CodeSMTPTransferTimeout:
 		return true
 	}
-	return false
+	return IsTransientReadFailure(err)
+}
+
+// IsTLSVerificationFailure reports a failed IMAP certificate or hostname check.
+// Outcome uncertainty takes precedence over the wrapped verification cause.
+func IsTLSVerificationFailure(err error) bool {
+	if ErrorCode(err) != CodeIMAPConnectFailed {
+		return false
+	}
+	var verification *tls.CertificateVerificationError
+	return errors.As(err, &verification)
 }
 
 // IsRejectedSubmission reports a definitive server rejection of the
@@ -136,6 +163,9 @@ func IsResourceLimitExceeded(err error) bool {
 // authentication, missing credentials, TLS, an unsupported provider, or
 // unsupported UTF8 usage.
 func IsConfigurationFailure(err error) bool {
+	if IsTLSVerificationFailure(err) {
+		return true
+	}
 	switch ErrorCode(err) {
 	case CodeSMTPAuthFailed, CodeSMTPCredentialsMissing, CodeIMAPAuthFailed,
 		CodeSMTPTLSFailed, CodeUnsupportedProvider, CodeSMTPUTF8Unsupported:

@@ -38,18 +38,25 @@ func messageHydrationDiagnostic(
 		state = mail.HydrationStateCanceled
 	}
 	local := hydrationCause(incompleteMessageCause(message), false)
+	remediation := hydrationRemediation(state, hydrationErrorCode(remote))
+	if transport.IsTLSVerificationFailure(remote) {
+		remediation = "correct the IMAP certificate trust or configured hostname before retrying; do not disable TLS verification"
+	}
 	return &mail.HydrationDiagnostic{
 		State:           state,
 		AttemptedSource: "imap",
 		Local:           local,
 		Remote:          hydrationCause(remote, true),
-		Remediation:     hydrationRemediation(state, hydrationErrorCode(remote)),
+		Remediation:     remediation,
 	}
 }
 
 func typedHydrationFailure(err error) error {
 	if err == nil {
 		return err
+	}
+	if transport.IsTLSVerificationFailure(err) {
+		return operationErrorWithCause(transport.ErrorCode(err), "IMAP TLS certificate verification failed", err)
 	}
 	if code := nestedErrorCode(err); code == operationCanceledCode || code == operationTimeoutCode {
 		return err
@@ -77,6 +84,9 @@ func hydrationCause(err error, remote bool) *mail.HydrationCause {
 	message := ""
 	if remote {
 		message = safeRemoteHydrationMessage(code)
+		if transport.IsTLSVerificationFailure(err) {
+			message = "IMAP TLS certificate verification failed"
+		}
 	} else {
 		var typed *Error
 		if errors.As(err, &typed) {

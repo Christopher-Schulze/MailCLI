@@ -91,8 +91,15 @@ func wrapDraftStateError(root, ref string, err error) error {
 	if errors.As(err, &operation) && operation.Code == "not_found" {
 		return err
 	}
+	if errors.Is(err, os.ErrPermission) {
+		return &OperationError{
+			Code: "draft_state_error", Message: "cannot read draft state; correct file permissions or grant Full Disk Access before retrying",
+			DraftRef: ref, Err: err,
+		}
+	}
 	return &OperationError{
 		Code: "draft_state_error",
+		Err:  err,
 		Message: fmt.Sprintf(
 			"draft %s has invalid state in %s: %v; delete the corrupt state file or discard the draft",
 			ref, filepath.Base(filepath.Join(root, ref+".json")), err,
