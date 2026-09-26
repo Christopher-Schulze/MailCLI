@@ -7,7 +7,7 @@ MAILCLI_ROOT="${MAILCLI_WRITE_ROOT:-${SCRIPT_ROOT}}"
 usage() {
   printf '%s\n' \
     'Usage:' \
-    '  manage-write-lease.sh acquire TASK_ID OWNER PATH [PATH...]' \
+    '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN' \
     '  manage-write-lease.sh gate TOKEN' \
@@ -290,6 +290,49 @@ validate_allowed_path() {
     fail "Allowed path must not contain tabs or newlines"
 }
 
+normalize_task_ids() {
+  local PROVIDED_IDS="$1"
+  local SORTED_IDS
+  local UNIQUE_IDS
+  local TASK_IDS
+  [[ "${PROVIDED_IDS}" =~ ^[0-9]{3}(,[0-9]{3})*$ ]] ||
+    fail "TASK IDs must be comma-separated three-digit IDs"
+  IFS=',' read -r -a TASK_IDS <<<"${PROVIDED_IDS}"
+  SORTED_IDS="$(printf '%s\n' "${TASK_IDS[@]}" | LC_ALL=C sort)"
+  UNIQUE_IDS="$(printf '%s\n' "${TASK_IDS[@]}" | LC_ALL=C sort -u)"
+  [[ "${SORTED_IDS}" == "${UNIQUE_IDS}" ]] || fail "TASK IDs contain duplicates"
+  printf '%s\n' "${SORTED_IDS}" | paste -sd ',' -
+}
+
+validate_task_group() {
+  local TASK_IDS="$1"
+  local TASK_ID
+  local MATCH_COUNT
+  local ENTRY_COUNT
+  local BOARD_ENTRY
+  local DETAIL_PATH
+  local BOARD_PATH="${MAILCLI_ROOT}/docs/tasks.md"
+  [[ "${TASK_IDS}" == *,* ]] || return 0
+  [[ -f "${BOARD_PATH}" && ! -L "${BOARD_PATH}" ]] ||
+    fail "A grouped lease requires the local task board"
+  while IFS= read -r TASK_ID; do
+    MATCH_COUNT="$(grep -Ec \
+      "^- \\[[ ~]\\] ${TASK_ID} .+ -> tasks/${TASK_ID}-[a-z0-9-]+\\.md$" \
+      "${BOARD_PATH}" || true)"
+    [[ "${MATCH_COUNT}" == 1 ]] ||
+      fail "Grouped TASK ${TASK_ID} must have one open local board entry"
+    ENTRY_COUNT="$(grep -Ec "^- \\[[^]]\\] ${TASK_ID} " "${BOARD_PATH}" || true)"
+    [[ "${ENTRY_COUNT}" == 1 ]] || fail "Grouped TASK ${TASK_ID} has duplicate board entries"
+    BOARD_ENTRY="$(grep -E \
+      "^- \\[[ ~]\\] ${TASK_ID} .+ -> tasks/${TASK_ID}-[a-z0-9-]+\\.md$" "${BOARD_PATH}")"
+    DETAIL_PATH="${MAILCLI_ROOT}/docs/${BOARD_ENTRY##* -> }"
+    [[ -f "${DETAIL_PATH}" && ! -L "${DETAIL_PATH}" ]] ||
+      fail "Grouped TASK ${TASK_ID} lacks a regular detail file"
+    grep -Eq "^# TASK ${TASK_ID}: .+$" "${DETAIL_PATH}" ||
+      fail "Grouped TASK ${TASK_ID} detail has the wrong ID"
+  done < <(printf '%s\n' "${TASK_IDS}" | tr ',' '\n')
+}
+
 acquire_lease() {
   [[ "$#" -ge 3 ]] || {
     usage >&2
@@ -298,7 +341,7 @@ acquire_lease() {
   local TASK_ID="$1"
   local OWNER="$2"
   shift 2
-  [[ "${TASK_ID}" =~ ^[0-9]{3}$ ]] || fail "TASK_ID must be exactly three digits"
+  TASK_ID="$(normalize_task_ids "${TASK_ID}")"
   [[ -n "${OWNER}" && "${OWNER}" != *$'\n'* ]] || fail "OWNER must be one line"
   local RELATIVE_PATH
   for RELATIVE_PATH in "$@"; do
@@ -314,6 +357,7 @@ acquire_lease() {
   local ACQUIRE_COMPLETE=false
   trap 'if [[ "${ACQUIRE_COMPLETE}" != true ]]; then remove_lease_files; fi' EXIT
   umask 077
+  validate_task_group "${TASK_ID}"
 
   git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all >"$(lease_file baseline_status)"
   if [[ -s "$(lease_file baseline_status)" ]]; then
@@ -504,6 +548,7 @@ release_lease() {
   local CURRENT_HEAD
   local PARENT_HEAD
   local COMMIT_SUBJECT
+  local SUBJECT_PREFIX
   local COMMITTED_PATCH_DIGEST
   local GATED_PATCH_DIGEST
   local RELATIVE_PATH
@@ -514,8 +559,10 @@ release_lease() {
   [[ "${PARENT_HEAD}" == "${BASELINE_HEAD}" ]] ||
     fail "Lease requires exactly one TASK commit whose parent is the acquired HEAD"
   COMMIT_SUBJECT="$(git -C "${MAILCLI_ROOT}" log -1 --format=%s "${CURRENT_HEAD}")"
-  [[ "${COMMIT_SUBJECT}" == "TASK ${TASK_ID}: "* ]] ||
-    fail "Commit subject must start with TASK ${TASK_ID}:"
+  SUBJECT_PREFIX="TASK ${TASK_ID//,/, }: "
+  [[ "${COMMIT_SUBJECT}" == "${SUBJECT_PREFIX}"* &&
+    "${COMMIT_SUBJECT}" != "${SUBJECT_PREFIX}" ]] ||
+    fail "Commit subject must start with ${SUBJECT_PREFIX}and describe the change"
   while IFS= read -r RELATIVE_PATH; do
     path_is_allowed "${RELATIVE_PATH}" ||
       fail "Committed path is outside the lease allowlist: ${RELATIVE_PATH}"

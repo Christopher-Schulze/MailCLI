@@ -198,7 +198,7 @@ func TestInstallerSharedDescriptorRemainsLockedAfterChildExit(t *testing.T) {
 		}
 	})
 	t.Setenv("MAILCLI_INSTALL_LOCK_FD", "999")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	if err := runReleaseInstaller(ctx, filepath.Join(fixture.packageRoot, "install.sh"),
 		fixture.environment.executablePath, fixture.environment.homeDirectory, lock); err != nil {

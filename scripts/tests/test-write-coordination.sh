@@ -315,4 +315,109 @@ MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
   "${LEASE_TOOL}" release "${HARNESS_TOKEN}" >/dev/null
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
 
-printf 'Write coordination passed: one writer, tracked and ignored asset scope, bounded directory cleanup, failure-preserving gate, baseline-bound harness, and tested commit identity\n'
+printf '%s\n' \
+  '# MailCLI Tasks' \
+  '## Active' \
+  '## Queue' \
+  '- [ ] 174 First fixture -> tasks/174-detail.md' \
+  '- [ ] 175 Second fixture -> tasks/175-second.md' \
+  '## Blocked' \
+  '## Done' >"${TEST_REPOSITORY}/docs/tasks.md"
+printf '# TASK 174: First fixture\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+printf '# TASK 175: Second fixture\n' >"${TEST_REPOSITORY}/docs/tasks/175-second.md"
+
+for INVALID_IDS in '174,174' '174,' ',174' '17,175' '174, 175' '174,999'; do
+  if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+    "${LEASE_TOOL}" acquire "${INVALID_IDS}" group-owner tracked.txt >/dev/null 2>&1; then
+    printf 'Acquire accepted invalid or unapproved group: %s\n' "${INVALID_IDS}" >&2
+    exit 1
+  fi
+  [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+done
+
+expect_group_rejection() {
+  local EXPECTED_MESSAGE="$1"
+  local OUTPUT
+  if OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+    "${LEASE_TOOL}" acquire 174,175 group-owner tracked.txt 2>&1)"; then
+    printf 'Acquire accepted an invalid board/detail group\n' >&2
+    exit 1
+  fi
+  [[ "${OUTPUT}" == *"${EXPECTED_MESSAGE}"* ]]
+  [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+}
+cp "${TEST_REPOSITORY}/docs/tasks.md" "${TEST_ROOT}/group-board"
+printf '%s\n' '- [x] 175 Duplicate fixture -> tasks/done/175-second.md' >>"${TEST_REPOSITORY}/docs/tasks.md"
+expect_group_rejection 'Grouped TASK 175 has duplicate board entries'
+cp "${TEST_ROOT}/group-board" "${TEST_REPOSITORY}/docs/tasks.md"
+for CLOSED_STATE in '!' 'x'; do
+  sed "s/- \\[ \\] 175 /- [${CLOSED_STATE}] 175 /" \
+    "${TEST_ROOT}/group-board" >"${TEST_REPOSITORY}/docs/tasks.md"
+  expect_group_rejection 'Grouped TASK 175 must have one open local board entry'
+done
+cp "${TEST_ROOT}/group-board" "${TEST_REPOSITORY}/docs/tasks.md"
+mv "${TEST_REPOSITORY}/docs/tasks/175-second.md" "${TEST_ROOT}/group-detail"
+expect_group_rejection 'Grouped TASK 175 lacks a regular detail file'
+ln -s "${TEST_ROOT}/group-detail" "${TEST_REPOSITORY}/docs/tasks/175-second.md"
+expect_group_rejection 'Grouped TASK 175 lacks a regular detail file'
+rm "${TEST_REPOSITORY}/docs/tasks/175-second.md"
+printf '# TASK 176: Wrong member\n' >"${TEST_REPOSITORY}/docs/tasks/175-second.md"
+expect_group_rejection 'Grouped TASK 175 detail has the wrong ID'
+mv "${TEST_ROOT}/group-detail" "${TEST_REPOSITORY}/docs/tasks/175-second.md"
+
+# The preceding harness fixture deliberately writes an untracked sentinel when
+# executed. Seed a clean harness baseline for the independent grouping cases.
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"' \
+  'printf "group-harness\\n"' \
+  "exit \"\${MAILCLI_TEST_GATE_STATUS:-0}\"" >"${TEST_REPOSITORY}/scripts/tests/test.sh"
+stage_fixture_path scripts/tests/test.sh 100755
+GROUP_BASELINE_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
+GROUP_BASELINE="$(printf 'group baseline\n' |
+  git -C "${TEST_REPOSITORY}" commit-tree "${GROUP_BASELINE_TREE}" -p "${TASK_COMMIT}")"
+git -C "${TEST_REPOSITORY}" checkout -q --detach "${GROUP_BASELINE}"
+GROUP_ACQUIRE="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" acquire 175,174 group-owner tracked.txt other.txt)"
+GROUP_TOKEN="$(printf '%s\n' "${GROUP_ACQUIRE}" | sed -n 's/^write_lease_token=//p')"
+[[ "${GROUP_ACQUIRE}" == *'write_lease_task=174,175'* ]]
+printf 'group change\n' >"${TEST_REPOSITORY}/tracked.txt"
+printf 'other group change\n' >"${TEST_REPOSITORY}/other.txt"
+stage_fixture_path tracked.txt 100644
+stage_fixture_path other.txt 100644
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" review "${GROUP_TOKEN}" >/dev/null
+GROUP_GATE_STATUS=0
+MAILCLI_TEST_GATE_STATUS=23 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" gate "${GROUP_TOKEN}" >/dev/null 2>&1 || GROUP_GATE_STATUS=$?
+[[ "${GROUP_GATE_STATUS}" == 23 ]]
+[[ ! -e "${TEST_REPOSITORY}/.git/mailcli-write-lease/gate_patch_sha256" ]]
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" gate "${GROUP_TOKEN}" >/dev/null
+GROUP_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
+for BAD_SUBJECT in \
+  'TASK 174: missing member' \
+  'TASK 174, 175, 176: extra member' \
+  'TASK 174, 174, 175: duplicate member' \
+  'TASK 175, 174: wrong order' \
+  'TASK 174,175: noncanonical separator' \
+  'TASK 174, 175: '; do
+  BAD_COMMIT="$(printf '%s\n' "${BAD_SUBJECT}" |
+    git -C "${TEST_REPOSITORY}" commit-tree "${GROUP_TREE}" -p "${GROUP_BASELINE}")"
+  git -C "${TEST_REPOSITORY}" checkout -q --detach "${BAD_COMMIT}"
+  if RELEASE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+    "${LEASE_TOOL}" release "${GROUP_TOKEN}" 2>&1)"; then
+    printf 'Release accepted the wrong group subject: %s\n' "${BAD_SUBJECT}" >&2
+    exit 1
+  fi
+  [[ "${RELEASE_OUTPUT}" == *'Commit subject must start with TASK 174, 175:'* ]]
+  [[ -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+done
+GROUP_COMMIT="$(printf 'TASK 174, 175: grouped fixture\n' |
+  git -C "${TEST_REPOSITORY}" commit-tree "${GROUP_TREE}" -p "${GROUP_BASELINE}")"
+git -C "${TEST_REPOSITORY}" checkout -q --detach "${GROUP_COMMIT}"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" release "${GROUP_TOKEN}" >/dev/null
+[[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
+
+printf 'Write coordination passed: ownership, path and asset scope, failure-preserving gate, tested commit identity, and exact grouped TASK membership\n'
