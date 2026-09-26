@@ -11,6 +11,7 @@ SHELL_TESTS=(
   scripts/tests/test-install-local.sh
   scripts/tests/test-skill-drift.sh
   scripts/tests/test-write-coordination.sh
+  scripts/tests/test-worktree-coordination.sh
   scripts/tests/test-task-ci-report.sh
   scripts/tests/test-commit-authority.sh
   scripts/tests/test-release-authority.sh
@@ -194,6 +195,7 @@ fi
 run_core_checks
 [[ "${1:-}" != --core-only ]] || exit 0
 run_shell_test scripts/tests/test-write-coordination.sh
+run_shell_test scripts/tests/test-worktree-coordination.sh
 run_shell_test scripts/tests/test-task-ci-report.sh
 run_shell_test scripts/tests/test-commit-authority.sh
 run_shell_test scripts/tests/test-release-authority.sh

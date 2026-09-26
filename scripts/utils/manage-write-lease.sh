@@ -8,6 +8,9 @@ usage() {
   printf '%s\n' \
     'Usage:' \
     '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
+    '  manage-write-lease.sh start-worktree TASK_IDS OWNER EXPECTED_PRIMARY_HEAD DEST PATH [PATH...]' \
+    '  manage-write-lease.sh integrate TOKEN OWNER [EXTRA_PATH...]' \
+    '  manage-write-lease.sh register-current TOKEN  # TASK 511 bootstrap only' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN [--diff]' \
     '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH...]' \
@@ -31,6 +34,15 @@ GIT_ROOT="$(cd "${GIT_ROOT}" && pwd -P)"
 MAILCLI_ROOT="${GIT_ROOT}"
 GIT_DIRECTORY="$(git -C "${MAILCLI_ROOT}" rev-parse --absolute-git-dir)"
 LEASE_DIRECTORY="${GIT_DIRECTORY}/mailcli-write-lease"
+COMMON_DIRECTORY="$(git -C "${MAILCLI_ROOT}" rev-parse --path-format=absolute --git-common-dir)"
+COMMON_DIRECTORY="$(cd "${COMMON_DIRECTORY}" && pwd -P)"
+RESERVATIONS="${COMMON_DIRECTORY}/mailcli-write-reservations"
+REGISTRY_MUTEX="${COMMON_DIRECTORY}/mailcli-write-reservations.lock"
+WORKTREE_REFERENCE="${GIT_DIRECTORY}/mailcli-worktree-reference.json"
+PRIMARY_ROOT="$(git -C "${MAILCLI_ROOT}" worktree list --porcelain | sed -n '1s/^worktree //p')"
+PRIMARY_ROOT="$(cd "${PRIMARY_ROOT}" && pwd -P)"
+TASK_ROOT="${MAILCLI_ROOT}"
+INTEGRATION_TOKEN=''
 
 lease_file() {
   printf '%s/%s\n' "${LEASE_DIRECTORY}" "$1"
@@ -61,7 +73,117 @@ require_token() {
   EXPECTED_TOKEN="$(<"$(lease_file token)")"
   [[ -n "${PROVIDED_TOKEN}" && "${PROVIDED_TOKEN}" == "${EXPECTED_TOKEN}" ]] ||
     fail "Write lease token does not match the active owner"
+  verify_worker_context
+  verify_reservation "${PROVIDED_TOKEN}" writing
 }
+
+verify_worker_context() {
+  [[ "${MAILCLI_ROOT}" != "${PRIMARY_ROOT}" ]] || return 0
+  [[ -f "${WORKTREE_REFERENCE}" && ! -L "${WORKTREE_REFERENCE}" ]] || fail 'Linked worktree requires source-bound owner instructions'
+  jq -e --arg primary "${PRIMARY_ROOT}" --arg worker "${MAILCLI_ROOT}" '
+    .schema == 1 and .primary == $primary and .worker == $worker and
+    (.base | type == "string" and test("^[0-9a-f]{40}$")) and
+    (.tasks | type == "string" and test("^[0-9]{3}(,[0-9]{3})*$")) and
+    (.tree | type == "string" and test("^[0-9a-f]{40}$")) and
+    (.paths | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)) and
+    (.contracts | type == "array" and length > 1) and
+    ([.contracts[].path] | length == (unique | length)) and
+    ([.contracts[] | select(.path == "AGENTS.local.md")] | length == 1) and
+    ([.contracts[] | select(.path != "AGENTS.local.md") | .path[11:14]] | sort) == (.tasks | split(",") | sort) and
+    all(.contracts[]; (.path == "AGENTS.local.md" or (.path | test("^docs/tasks/[0-9]{3}-[a-z0-9-]+\\.md$"))) and
+      (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))
+  ' "${WORKTREE_REFERENCE}" >/dev/null || fail 'Invalid worktree reference'
+  local PATH_NAME EXPECTED_DIGEST ROOT
+  while IFS=$'\t' read -r PATH_NAME EXPECTED_DIGEST; do
+    for ROOT in "${PRIMARY_ROOT}" "${MAILCLI_ROOT}"; do
+      [[ -f "${ROOT}/${PATH_NAME}" && ! -L "${ROOT}/${PATH_NAME}" ]] || fail 'Worktree contract file is missing or unsafe'
+      [[ "$(shasum -a 256 "${ROOT}/${PATH_NAME}" | awk '{print $1}')" == "${EXPECTED_DIGEST}" ]] || fail 'Worktree task contract or owner instructions changed'
+    done
+  done < <(jq -r '.contracts[] | [.path,.sha256] | @tsv' "${WORKTREE_REFERENCE}")
+  TASK_ROOT="${PRIMARY_ROOT}"
+}
+
+verify_reservation() {
+  local TOKEN="$1" STATE="$2" RECORD="${RESERVATIONS}/$1.json"
+  [[ "${TOKEN}" =~ ^[0-9a-f]{64}$ && -f "${RECORD}" && ! -L "${RECORD}" ]] || fail 'Shared reservation is missing or unsafe'
+  jq -e --arg token "${TOKEN}" --arg root "${MAILCLI_ROOT}" --arg state "${STATE}" \
+    --arg tasks "$(<"$(lease_file task)")" --arg owner "$(<"$(lease_file owner_session)")" \
+    --arg base "$(<"$(lease_file baseline_head)")" --rawfile paths "$(lease_file allowed_paths)" '
+    .schema == 1 and .token == $token and .root == $root and .state == $state and
+    .tasks == $tasks and .owner == $owner and .base == $base and
+    .paths == ($paths | split("\n") | map(select(length > 0)))
+  ' "${RECORD}" >/dev/null || fail 'Shared reservation differs from the exact local lease'
+}
+
+reserve_lease() (
+  local TOKEN="$1" REPLACE_TOKEN="${2:-}" RECORD OTHER_TASK TASK_ID LEFT RIGHT
+  [[ ! -L "${RESERVATIONS}" ]] || fail 'Shared reservation directory must not be a symlink'
+  mkdir "${REGISTRY_MUTEX}" 2>/dev/null || fail 'Shared reservation registry is busy; never steal its mutex'
+  trap 'rmdir "${REGISTRY_MUTEX}"' EXIT
+  umask 077
+  mkdir -p "${RESERVATIONS}"
+  shopt -s nullglob dotglob
+  local CASE_INSENSITIVE=false
+  [[ "$(git -C "${MAILCLI_ROOT}" config --get core.ignorecase || true)" != true ]] || CASE_INSENSITIVE=true
+  for RECORD in "${RESERVATIONS}/"*; do
+    [[ -f "${RECORD}" && ! -L "${RECORD}" && "${RECORD##*/}" =~ ^[0-9a-f]{64}\.json$ ]] || fail 'Incomplete shared reservation requires owner recovery'
+    jq -e --arg token "${RECORD##*/}" '.schema == 1 and (.token + ".json") == $token and (.token | test("^[0-9a-f]{64}$")) and
+      (.tasks | test("^[0-9]{3}(,[0-9]{3})*$")) and
+      (.root | type == "string") and (.state | IN("writing","ready-for-integration")) and
+      (.paths | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' \
+      "${RECORD}" >/dev/null || fail 'Incomplete shared reservation requires owner recovery'
+    [[ "${RECORD}" != "${RESERVATIONS}/${REPLACE_TOKEN}.json" ]] || continue
+    OTHER_TASK="$(jq -r '.tasks' "${RECORD}")"
+    while IFS= read -r TASK_ID; do
+      [[ ",${OTHER_TASK}," != *",${TASK_ID},"* ]] || fail "TASK ${TASK_ID} is already reserved"
+    done < <(tr ',' '\n' <"$(lease_file task)")
+    while IFS= read -r LEFT; do
+      while IFS= read -r RIGHT; do
+        if [[ "${CASE_INSENSITIVE}" == true ]]; then
+          LEFT="$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"${LEFT}")"
+          RIGHT="$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"${RIGHT}")"
+        fi
+        [[ "${LEFT}" != "${RIGHT}" && "${LEFT}" != "${RIGHT}/"* && "${RIGHT}" != "${LEFT}/"* ]] || fail "Path overlaps another reservation: ${LEFT}"
+      done < <(jq -r '.paths[]' "${RECORD}")
+    done <"$(lease_file allowed_paths)"
+  done
+  local CANDIDATE="${RESERVATIONS}/.candidate-${TOKEN}"
+  [[ ! -e "${CANDIDATE}" && ! -L "${CANDIDATE}" ]] || fail 'Reservation candidate already exists'
+  trap 'rm -f "${CANDIDATE}"; rmdir "${REGISTRY_MUTEX}"' EXIT
+  jq -n --arg token "${TOKEN}" --arg root "${MAILCLI_ROOT}" --arg owner "$(<"$(lease_file owner_session)")" \
+    --arg tasks "$(<"$(lease_file task)")" --arg base "$(<"$(lease_file baseline_head)")" \
+    --rawfile paths "$(lease_file allowed_paths)" '{schema:1,token:$token,root:$root,owner:$owner,tasks:$tasks,base:$base,
+      state:"writing",paths:($paths | split("\n") | map(select(length > 0)))}' >"${CANDIDATE}"
+  if [[ -n "${REPLACE_TOKEN}" ]]; then
+    [[ "${REPLACE_TOKEN}" == "${TOKEN}" ]] || fail 'Integration token mismatch'
+    [[ "$(jq -r '.state' "${RESERVATIONS}/${TOKEN}.json")" == ready-for-integration ]] || fail 'Worker has no completed integration handoff'
+    [[ ! -e "${GIT_DIRECTORY}/mailcli-integration-origin-${TOKEN}.json" && ! -L "${GIT_DIRECTORY}/mailcli-integration-origin-${TOKEN}.json" ]] || fail 'Integration origin already exists; recover it without overwriting'
+    mv "${RESERVATIONS}/${TOKEN}.json" "${GIT_DIRECTORY}/mailcli-integration-origin-${TOKEN}.json"
+  else
+    [[ ! -e "${RESERVATIONS}/${TOKEN}.json" ]] || fail 'Reservation token already exists'
+  fi
+  mv "${CANDIDATE}" "${RESERVATIONS}/${TOKEN}.json"
+)
+
+close_reservation() (
+  local TOKEN="$1" CURRENT_HEAD="${2:-}" RECORD="${RESERVATIONS}/$1.json"
+  mkdir "${REGISTRY_MUTEX}" 2>/dev/null || fail 'Shared reservation registry is busy; ownership is retained'
+  trap 'rmdir "${REGISTRY_MUTEX}"' EXIT
+  verify_reservation "${TOKEN}" writing
+  umask 077
+  if [[ -n "${CURRENT_HEAD}" && "${MAILCLI_ROOT}" != "${PRIMARY_ROOT}" ]]; then
+    local CANDIDATE="${RESERVATIONS}/.candidate-${TOKEN}"
+    [[ ! -e "${CANDIDATE}" && ! -L "${CANDIDATE}" ]] || fail 'Reservation candidate already exists'
+    [[ ! -e "${GIT_DIRECTORY}/mailcli-writing-origin-${TOKEN}.json" && ! -L "${GIT_DIRECTORY}/mailcli-writing-origin-${TOKEN}.json" ]] || fail 'Worker origin already exists; recover it without overwriting'
+    trap 'rm -f "${CANDIDATE}"; rmdir "${REGISTRY_MUTEX}"' EXIT
+    jq --arg head "${CURRENT_HEAD}" '.state = "ready-for-integration" | .commit = $head' "${RECORD}" >"${CANDIDATE}"
+    mv "${RECORD}" "${GIT_DIRECTORY}/mailcli-writing-origin-${TOKEN}.json"
+    mv "${CANDIDATE}" "${RECORD}"
+    printf 'integration_token=%s\nintegration_commit=%s\n' "${TOKEN}" "${CURRENT_HEAD}"
+  else
+    rm "${RECORD}"
+  fi
+)
 
 fingerprint_path() {
   local RELATIVE_PATH="$1"
@@ -212,6 +334,14 @@ validate_allowed_path() {
   esac
   [[ "${RELATIVE_PATH}" != *$'\n'* && "${RELATIVE_PATH}" != *$'\t'* ]] ||
     fail "Allowed path must not contain tabs or newlines"
+  local PARENT="${RELATIVE_PATH%/*}"
+  if [[ "${PARENT}" != "${RELATIVE_PATH}" ]]; then
+    while [[ "${PARENT}" != . ]]; do
+      [[ ! -L "${MAILCLI_ROOT}/${PARENT}" ]] || fail "Allowed path has a symlink parent: ${RELATIVE_PATH}"
+      [[ "${PARENT}" == */* ]] || break
+      PARENT="${PARENT%/*}"
+    done
+  fi
   if [[ -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" && ! -L "${MAILCLI_ROOT}/${RELATIVE_PATH}" &&
     -n "$(git -C "${MAILCLI_ROOT}" ls-files -- ":(literal)${RELATIVE_PATH}/")" ]]; then
     fail "Lease paths must name tracked files, not a tracked directory: ${RELATIVE_PATH}"
@@ -232,6 +362,97 @@ normalize_task_ids() {
   printf '%s\n' "${SORTED_IDS}" | paste -sd ',' -
 }
 
+register_current() {
+  local TOKEN="$1"
+  [[ "${MAILCLI_ROOT}" == "${PRIMARY_ROOT}" ]] || fail 'Bootstrap requires the primary worktree'
+  require_lease
+  [[ "${TOKEN}" == "$(<"$(lease_file token)")" && "$(<"$(lease_file task)")" == 511 &&
+    "$(<"$(lease_file baseline_head)")" == "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" ]] || fail 'Only the existing TASK 511 lease may bootstrap shared ownership'
+  [[ ! -e "${RESERVATIONS}/${TOKEN}.json" && ! -L "${RESERVATIONS}/${TOKEN}.json" ]] || fail 'Bootstrap reservation already exists'
+  reserve_lease "${TOKEN}"
+  verify_reservation "${TOKEN}" writing
+  printf 'shared_reservation=registered\n'
+}
+
+start_worktree() {
+  [[ "$#" -ge 5 ]] || fail 'start-worktree requires TASK IDs, owner, primary HEAD, destination and paths'
+  [[ "${MAILCLI_ROOT}" == "${PRIMARY_ROOT}" ]] || fail 'Start workers from the primary worktree'
+  local TASK_IDS OWNER EXPECTED_HEAD DEST PATH_NAME TASK_ID ENTRY WORKER_GIT CONTRACTS OUTPUT TOKEN
+  TASK_IDS="$(normalize_task_ids "$1")"; OWNER="$2"; EXPECTED_HEAD="$3"; DEST="$4"
+  shift 4
+  [[ "${EXPECTED_HEAD}" =~ ^[0-9a-f]{40}$ && "$(git -C "${PRIMARY_ROOT}" rev-parse HEAD)" == "${EXPECTED_HEAD}" ]] || fail 'Explicit primary HEAD is stale or invalid'
+  [[ -n "${OWNER}" && "${OWNER}" != *$'\n'* ]] || fail 'OWNER must be one line'
+  [[ "${DEST}" == /* && ! -e "${DEST}" && ! -L "${DEST}" && -d "$(dirname "${DEST}")" ]] || fail 'Worker destination must be an absent absolute path with an existing parent'
+  DEST="$(cd "$(dirname "${DEST}")" && pwd -P)/$(basename "${DEST}")"
+  [[ -z "$(git -C "${PRIMARY_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || fail 'Primary worktree must be clean before starting a worker'
+  validate_task_group "${TASK_IDS}" strict
+  for PATH_NAME in "$@"; do
+    validate_allowed_path "${PATH_NAME}"
+    case "${PATH_NAME}" in AGENTS.local.md|docs/tasks.md|docs/tasks|docs/tasks/*) fail 'Worker assignments cannot write the private task control plane' ;; esac
+  done
+  local -a CONTRACT_PATHS=(AGENTS.local.md)
+  while IFS= read -r TASK_ID; do
+    ENTRY="$(grep -E "^- \\[[ ~]\\] ${TASK_ID} .+ -> tasks/${TASK_ID}-[a-z0-9-]+\\.md$" "${PRIMARY_ROOT}/docs/tasks.md")"
+    CONTRACT_PATHS+=("docs/${ENTRY##* -> }")
+  done < <(tr ',' '\n' <<<"${TASK_IDS}")
+  CONTRACTS='[]'
+  for PATH_NAME in "${CONTRACT_PATHS[@]}"; do
+    validate_allowed_path "${PATH_NAME}"
+    [[ -f "${PRIMARY_ROOT}/${PATH_NAME}" && ! -L "${PRIMARY_ROOT}/${PATH_NAME}" ]] || fail "Missing regular worker contract: ${PATH_NAME}"
+    git -C "${PRIMARY_ROOT}" check-ignore -q -- "${PATH_NAME}" || fail "Worker contract must remain private: ${PATH_NAME}"
+    CONTRACTS="$(jq --arg path "${PATH_NAME}" --arg sha "$(shasum -a 256 "${PRIMARY_ROOT}/${PATH_NAME}" | awk '{print $1}')" '. + [{path:$path,sha256:$sha}]' <<<"${CONTRACTS}")"
+  done
+  git -C "${PRIMARY_ROOT}" worktree add --detach --lock --reason "MailCLI TASK ${TASK_IDS}: ${OWNER}" "${DEST}" "${EXPECTED_HEAD}"
+  [[ "$(git -C "${PRIMARY_ROOT}" rev-parse HEAD)" == "${EXPECTED_HEAD}" && "$(git -C "${DEST}" rev-parse HEAD)" == "${EXPECTED_HEAD}" ]] || fail 'Primary changed while starting the worker; preserve the worktree for recovery'
+  for PATH_NAME in "${CONTRACT_PATHS[@]}"; do
+    [[ ! -e "${DEST}/${PATH_NAME}" && ! -L "${DEST}/${PATH_NAME}" ]] || fail 'Worker contract destination already exists'
+    (MAILCLI_ROOT="${DEST}"; validate_allowed_path "${PATH_NAME}")
+    mkdir -p "$(dirname "${DEST}/${PATH_NAME}")"
+    cp "${PRIMARY_ROOT}/${PATH_NAME}" "${DEST}/${PATH_NAME}"
+    cmp -s "${PRIMARY_ROOT}/${PATH_NAME}" "${DEST}/${PATH_NAME}" || fail 'Worker contract copy differs'
+    chmod 400 "${DEST}/${PATH_NAME}"
+  done
+  WORKER_GIT="$(git -C "${DEST}" rev-parse --absolute-git-dir)"
+  [[ ! -e "${WORKER_GIT}/mailcli-worktree-reference.json" && ! -L "${WORKER_GIT}/mailcli-worktree-reference.json" ]] || fail 'Worker reference already exists'
+  (umask 077; printf '%s\n' "$@" | jq -Rn --arg primary "${PRIMARY_ROOT}" --arg worker "${DEST}" --arg base "${EXPECTED_HEAD}" --arg tree "$(git -C "${DEST}" rev-parse HEAD^{tree})" --arg tasks "${TASK_IDS}" --argjson contracts "${CONTRACTS}" '{schema:1,primary:$primary,worker:$worker,base:$base,tree:$tree,tasks:$tasks,contracts:$contracts,paths:[inputs]}' >"${WORKER_GIT}/mailcli-worktree-reference.json")
+  OUTPUT="$(MAILCLI_WRITE_ROOT="${DEST}" "${SCRIPT_ROOT}/scripts/utils/manage-write-lease.sh" acquire "${TASK_IDS}" "${OWNER}" "$@")" || fail 'Worker was created but not authorized; preserve it for recovery'
+  TOKEN="$(sed -n 's/^write_lease_token=//p' <<<"${OUTPUT}")"
+  if [[ "$(git -C "${PRIMARY_ROOT}" rev-parse HEAD)" != "${EXPECTED_HEAD}" ]]; then
+    MAILCLI_WRITE_ROOT="${DEST}" "${SCRIPT_ROOT}/scripts/utils/manage-write-lease.sh" abort "${TOKEN}"
+    fail 'Primary changed before worker authorization; restart from the current primary HEAD'
+  fi
+  printf 'worker_root=%s\n%s\n' "${DEST}" "${OUTPUT}"
+}
+
+integrate_worktree() {
+  [[ "$#" -ge 2 ]] || fail 'integrate requires a worker token and primary owner'
+  [[ "${MAILCLI_ROOT}" == "${PRIMARY_ROOT}" && ! -e "${LEASE_DIRECTORY}" ]] || fail 'Integration requires the primary worktree without an active lease'
+  local TOKEN="$1" OWNER="$2" RECORD COMMIT TASK_IDS
+  shift 2
+  [[ "${TOKEN}" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid integration token'
+  RECORD="${RESERVATIONS}/${TOKEN}.json"
+  [[ -f "${RECORD}" && ! -L "${RECORD}" ]] || fail 'Worker reservation is missing or unsafe'
+  jq -e --arg token "${TOKEN}" '.schema == 1 and .token == $token and .state == "ready-for-integration" and (.commit | test("^[0-9a-f]{40}$")) and (.tasks | test("^[0-9]{3}(,[0-9]{3})*$")) and (.paths | type == "array" and length > 0 and all(.[]; type == "string"))' "${RECORD}" >/dev/null || fail 'Worker handoff is incomplete'
+  COMMIT="$(jq -r '.commit' "${RECORD}")"
+  git -C "${PRIMARY_ROOT}" cat-file -e "${COMMIT}^{commit}" || fail 'Worker commit is unavailable'
+  local WORKER_ROOT WORKER_GIT ORIGIN
+  WORKER_ROOT="$(jq -r '.root' "${RECORD}")"
+  [[ -d "${WORKER_ROOT}" && "$(git -C "${WORKER_ROOT}" rev-parse HEAD)" == "${COMMIT}" &&
+    "$(git -C "${WORKER_ROOT}" rev-parse --path-format=absolute --git-common-dir)" == "${COMMON_DIRECTORY}" ]] || fail 'Worker handoff source changed or belongs to another repository'
+  WORKER_GIT="$(git -C "${WORKER_ROOT}" rev-parse --absolute-git-dir)"
+  ORIGIN="${WORKER_GIT}/mailcli-writing-origin-${TOKEN}.json"
+  [[ -f "${ORIGIN}" && ! -L "${ORIGIN}" ]] || fail 'Worker writing origin is unavailable'
+  jq -e --slurpfile origin "${ORIGIN}" 'del(.commit) | .state = "writing" | . == $origin[0]' "${RECORD}" >/dev/null || fail 'Worker handoff differs from its released ownership'
+  TASK_IDS="$(jq -r '.tasks' "${RECORD}")"
+  validate_task_group "${TASK_IDS}" strict
+  local -a PATHS=()
+  local PATH_NAME
+  while IFS= read -r PATH_NAME; do PATHS+=("${PATH_NAME}"); done < <(jq -r '.paths[]' "${RECORD}")
+  INTEGRATION_TOKEN="${TOKEN}"
+  acquire_lease "${TASK_IDS}" "${OWNER}" "${PATHS[@]}" "$@"
+  printf 'integration_commit=%s\nintegration_requires=fresh review and gate after cherry-pick --no-commit\n' "${COMMIT}"
+}
+
 validate_task_group() {
   local TASK_IDS="$1"
   local TASK_ID
@@ -239,8 +460,8 @@ validate_task_group() {
   local ENTRY_COUNT
   local BOARD_ENTRY
   local DETAIL_PATH
-  local BOARD_PATH="${MAILCLI_ROOT}/docs/tasks.md"
-  [[ "${TASK_IDS}" == *,* ]] || return 0
+  local BOARD_PATH="${TASK_ROOT}/docs/tasks.md"
+  [[ "${TASK_IDS}" == *,* || "${TASK_ROOT}" != "${MAILCLI_ROOT}" || "${2:-}" == strict ]] || return 0
   [[ -f "${BOARD_PATH}" && ! -L "${BOARD_PATH}" ]] ||
     fail "A grouped lease requires the local task board"
   while IFS= read -r TASK_ID; do
@@ -253,7 +474,7 @@ validate_task_group() {
     [[ "${ENTRY_COUNT}" == 1 ]] || fail "Grouped TASK ${TASK_ID} has duplicate board entries"
     BOARD_ENTRY="$(grep -E \
       "^- \\[[ ~]\\] ${TASK_ID} .+ -> tasks/${TASK_ID}-[a-z0-9-]+\\.md$" "${BOARD_PATH}")"
-    DETAIL_PATH="${MAILCLI_ROOT}/docs/${BOARD_ENTRY##* -> }"
+    DETAIL_PATH="${TASK_ROOT}/docs/${BOARD_ENTRY##* -> }"
     [[ -f "${DETAIL_PATH}" && ! -L "${DETAIL_PATH}" ]] ||
       fail "Grouped TASK ${TASK_ID} lacks a regular detail file"
     grep -Eq "^# TASK ${TASK_ID}: .+$" "${DETAIL_PATH}" ||
@@ -272,8 +493,18 @@ acquire_lease() {
   TASK_ID="$(normalize_task_ids "${TASK_ID}")"
   [[ -n "${OWNER}" && "${OWNER}" != *$'\n'* ]] || fail "OWNER must be one line"
   local RELATIVE_PATH
+  verify_worker_context
+  if [[ "${MAILCLI_ROOT}" != "${PRIMARY_ROOT}" ]]; then
+    [[ "${TASK_ID}" == "$(jq -r '.tasks' "${WORKTREE_REFERENCE}")" &&
+      "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "$(jq -r '.base' "${WORKTREE_REFERENCE}")" &&
+      "$(git -C "${PRIMARY_ROOT}" rev-parse HEAD)" == "$(jq -r '.base' "${WORKTREE_REFERENCE}")" ]] || fail 'Worker TASK set or primary integration base is stale'
+    [[ "$(printf '%s\n' "$@" | LC_ALL=C sort -u)" == "$(jq -r '.paths[]' "${WORKTREE_REFERENCE}" | LC_ALL=C sort -u)" ]] || fail 'Worker paths differ from its source-bound assignment'
+  fi
   for RELATIVE_PATH in "$@"; do
     validate_allowed_path "${RELATIVE_PATH}"
+    if [[ "${MAILCLI_ROOT}" != "${PRIMARY_ROOT}" ]]; then
+      case "${RELATIVE_PATH}" in AGENTS.local.md|docs/tasks.md|docs/tasks|docs/tasks/*) fail 'Workers cannot write the private task control plane' ;; esac
+    fi
   done
 
   if ! mkdir "${LEASE_DIRECTORY}" 2>/dev/null; then
@@ -283,7 +514,7 @@ acquire_lease() {
   fi
   chmod 700 "${LEASE_DIRECTORY}"
   local ACQUIRE_COMPLETE=false
-  trap 'if [[ "${ACQUIRE_COMPLETE}" != true ]]; then remove_lease_files; fi' EXIT
+  trap 'if [[ "${ACQUIRE_COMPLETE:-false}" != true && ! -f "${RESERVATIONS}/${TOKEN:-none}.json" ]]; then remove_lease_files; fi' EXIT
   umask 077
   validate_task_group "${TASK_ID}"
 
@@ -309,9 +540,10 @@ acquire_lease() {
   ignored_asset_snapshot | LC_ALL=C sort >"$(lease_file ignored_asset_fingerprints)"
 
   local TOKEN
-  TOKEN="$(od -v -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+  TOKEN="${INTEGRATION_TOKEN:-$(od -v -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')}"
   [[ "${TOKEN}" =~ ^[0-9a-f]{64}$ ]] || fail 'Could not read 32 random token bytes'
   printf '%s\n' "${TOKEN}" >"$(lease_file token)"
+  reserve_lease "${TOKEN}" "${INTEGRATION_TOKEN:-}"
   ACQUIRE_COMPLETE=true
   trap - EXIT
   printf 'write_lease_token=%s\n' "${TOKEN}"
@@ -550,6 +782,7 @@ release_lease() {
     fail "Worktree is not clean after the TASK commit"
   printf 'task_commit_subject=%s\n' "${COMMIT_SUBJECT}"
   git -C "${MAILCLI_ROOT}" diff --stat "${BASELINE_HEAD}" "${CURRENT_HEAD}" --
+  close_reservation "${TOKEN}" "${CURRENT_HEAD}"
   remove_lease_files
   printf 'write_lease=released\n'
   printf 'task_commit=%s\n' "${CURRENT_HEAD}"
@@ -567,12 +800,25 @@ abort_lease() {
   [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
     fail "Cannot abort a lease while worktree changes remain"
   report_allowed_path_changes
+  close_reservation "${TOKEN}"
   remove_lease_files
   printf 'write_lease=aborted\n'
 }
 
 COMMAND="${1:-}"
 case "${COMMAND}" in
+  start-worktree)
+    shift
+    start_worktree "$@"
+    ;;
+  integrate)
+    shift
+    integrate_worktree "$@"
+    ;;
+  register-current)
+    [[ "$#" -eq 2 ]] || fail 'register-current requires exactly one lease token'
+    register_current "$2"
+    ;;
   acquire)
     shift
     acquire_lease "$@"

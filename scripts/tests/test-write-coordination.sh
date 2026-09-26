@@ -125,6 +125,7 @@ prove_guard_failable() {
   local MUTANT_ROOT="${TEST_ROOT}/mutation-${MUTATION_NUMBER}"
   mkdir -p "${MUTANT_ROOT}/scripts/utils"
   cp -R "${TEST_REPOSITORY}/.git/mailcli-write-lease" "${MUTANT_ROOT}/saved-lease"
+  cp -R "${TEST_REPOSITORY}/.git/mailcli-write-reservations" "${MUTANT_ROOT}/saved-reservations"
   while IFS= read -r LINE || [[ -n "${LINE}" ]]; do
     if [[ "${LINE}" == *"fail \"${SOURCE_MESSAGE}\"" ]]; then
       printf '    :\n'
@@ -147,6 +148,8 @@ prove_guard_failable() {
   # Restore only this fixture's authority state, including absence of new proof.
   rm -rf "${TEST_REPOSITORY}/.git/mailcli-write-lease"
   cp -R "${MUTANT_ROOT}/saved-lease" "${TEST_REPOSITORY}/.git/mailcli-write-lease"
+  rm -rf "${TEST_REPOSITORY}/.git/mailcli-write-reservations"
+  cp -R "${MUTANT_ROOT}/saved-reservations" "${TEST_REPOSITORY}/.git/mailcli-write-reservations"
 }
 
 mkdir "${TEST_ROOT}/entropy-bin"

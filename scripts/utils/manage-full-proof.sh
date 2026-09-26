@@ -28,10 +28,17 @@ ROOT="$(cd "$2" && pwd -P)"
 cd "${ROOT}"
 export GOWORK=off
 GIT_DIRECTORY="$(git rev-parse --absolute-git-dir)"
+COMMON_DIRECTORY="$(git rev-parse --path-format=absolute --git-common-dir)"
 PROOF="${GIT_DIRECTORY}/mailcli-full-proof.json"
 PROOF_LOG="${GIT_DIRECTORY}/mailcli-full-proof.log"
 
 full_identity() {
+  [[ ! -e "${COMMON_DIRECTORY}/mailcli-write-reservations.lock" &&
+    ! -L "${COMMON_DIRECTORY}/mailcli-write-reservations" &&
+    -z "$(find "${COMMON_DIRECTORY}/mailcli-write-reservations" -mindepth 1 -maxdepth 1 -print 2>/dev/null)" ]] || {
+    printf 'Full proof requires no shared worker reservations or registry mutation\n' >&2
+    return 1
+  }
   [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || {
     printf 'Full proof requires a clean HEAD, index and worktree\n' >&2
     return 1
