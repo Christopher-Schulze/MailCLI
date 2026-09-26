@@ -33,6 +33,8 @@ type PruneTemporaryArtifact struct {
 
 type PruneDraftsResult struct {
 	DryRun                  bool                     `json:"dry_run"`
+	Revision                string                   `json:"revision,omitempty"`
+	Stable                  *bool                    `json:"stable,omitempty"`
 	Candidates              []PruneCandidate         `json:"candidates,omitempty"`
 	ExpiredReceipts         []string                 `json:"expired_receipts,omitempty"`
 	OrphanArtifacts         []string                 `json:"orphan_artifacts,omitempty"`
@@ -59,6 +61,7 @@ const (
 
 type draftPruneCandidateSelection struct {
 	candidates        []PruneCandidate
+	directoryIdentity os.FileInfo
 	directoryRevision string
 	entryVisits       int64
 	metadataBytes     int64
@@ -111,6 +114,9 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		return PruneDraftsResult{}, classifyDraftContextError(ctx, err, "prune")
 	}
 	result := PruneDraftsResult{DryRun: !request.Confirm, Candidates: selection.candidates}
+	if !request.Confirm {
+		result.Revision = selection.directoryRevision
+	}
 	receiptCandidates, err := listExpiredSendReceipts(root, time.Now().UTC())
 	if err != nil {
 		return result, err
@@ -125,9 +131,6 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 	}
 	if !request.Confirm {
 		if err := draftContextError(ctx, "prune"); err != nil {
-			return PruneDraftsResult{}, err
-		}
-		if err := verifyPruneDraftRevision(root, selection.directoryRevision); err != nil {
 			return PruneDraftsResult{}, err
 		}
 		result.ExpiredReceipts = receiptCandidates
@@ -145,6 +148,15 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 				return result, err
 			}
 		}
+		identity, err := os.Stat(root)
+		if err != nil {
+			return result, errors.Join(pruneDraftRevisionChangedError(), fmt.Errorf("inspect dry-run draft directory: %w", err))
+		}
+		if !os.SameFile(selection.directoryIdentity, identity) {
+			return result, pruneDraftRevisionChangedError()
+		}
+		stable := selection.directoryIdentity.ModTime().Equal(identity.ModTime())
+		result.Stable = &stable
 		return result, nil
 	}
 	if err := draftContextError(ctx, "prune"); err != nil {
@@ -218,6 +230,7 @@ func collectPruneCandidates(ctx context.Context, root string, cutoff time.Time) 
 	if err != nil {
 		return draftPruneCandidateSelection{}, fmt.Errorf("inspect draft directory: %w", err)
 	}
+	selection.directoryIdentity = identity
 	selection.directoryRevision, err = draftListRevision(root, identity)
 	if err != nil {
 		return draftPruneCandidateSelection{}, err

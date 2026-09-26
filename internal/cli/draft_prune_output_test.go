@@ -15,6 +15,64 @@ import (
 	"mailcli/internal/mail"
 )
 
+type pruneOutputBoundaryContext struct {
+	context.Context
+	checks int
+	action func()
+}
+
+func (c *pruneOutputBoundaryContext) Err() error {
+	c.checks++
+	if c.checks == 4 {
+		c.action()
+	}
+	return c.Context.Err()
+}
+
+func TestDraftPruneJSONIncludesDirectoryStability(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		t.Run(fmt.Sprint(change), func(t *testing.T) {
+			root := t.TempDir()
+			service := mail.NewServiceWithDraftRoot(nil, root)
+			request := mail.PruneDraftsRequest{OlderThan: 24 * time.Hour}
+			before, err := service.PruneDraftsContext(context.Background(), request)
+			if err != nil || before.Revision == "" || before.Stable == nil || !*before.Stable {
+				t.Fatalf("initial dry run = %+v, %v", before, err)
+			}
+			ctx := &pruneOutputBoundaryContext{Context: context.Background(), action: func() {
+				if !change {
+					return
+				}
+				if err := os.WriteFile(filepath.Join(root, "unrelated-marker"), []byte("retain"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				future := time.Now().Add(2 * time.Second)
+				if err := os.Chtimes(root, future, future); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			result, err := service.PruneDraftsContext(ctx, request)
+			if err != nil || ctx.checks < 4 || result.Revision != before.Revision || result.Stable == nil || *result.Stable == change {
+				t.Fatalf("reported dry run = %+v, %v after %d checks", result, err, ctx.checks)
+			}
+			var stdout bytes.Buffer
+			if code := writeSuccess(&stdout, "drafts.prune", responseData{PruneResult: &result}); code != 0 {
+				t.Fatalf("write prune envelope = %d: %s", code, &stdout)
+			}
+			var response envelope
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if !response.OK || response.Command != "drafts.prune" || response.Data.PruneResult == nil ||
+				response.Data.PruneResult.Revision != before.Revision || response.Data.PruneResult.Stable == nil ||
+				*response.Data.PruneResult.Stable == change ||
+				!strings.Contains(stdout.String(), fmt.Sprintf(`"stable":%t`, !change)) {
+				t.Fatalf("missing original revision or explicit stability: %s", &stdout)
+			}
+		})
+	}
+}
+
 func TestDraftPruneOrphanOutputMatchesEffects(t *testing.T) {
 	for _, confirm := range []bool{false, true} {
 		for _, jsonOutput := range []bool{false, true} {
@@ -66,6 +124,14 @@ func TestDraftPruneOrphanOutputMatchesEffects(t *testing.T) {
 						result := response.Data.PruneResult
 						if result == nil || response.OK != (wantCode == 0) || result.DryRun == confirm || stderr.Len() != 0 {
 							t.Fatalf("unexpected envelope: %s stderr=%s", &stdout, &stderr)
+						}
+						if confirm {
+							if result.Revision != "" || result.Stable != nil || strings.Contains(stdout.String(), `"revision"`) ||
+								strings.Contains(stdout.String(), `"stable"`) {
+								t.Fatalf("confirmed prune changed its response shape: %s", &stdout)
+							}
+						} else if result.Revision == "" || result.Stable == nil {
+							t.Fatalf("dry-run omitted revision or stability: %s", &stdout)
 						}
 						refs := result.OrphanArtifacts
 						if confirm {

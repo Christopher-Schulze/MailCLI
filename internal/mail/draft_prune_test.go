@@ -3,10 +3,12 @@ package mail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -454,6 +456,105 @@ func TestPruneCancellationDuringCandidateCollectionDoesNotDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(service.draftRoot, refs[0]+".json")); err != nil {
 		t.Fatalf("canceled prune removed the draft: %v", err)
+	}
+}
+
+func TestPruneDryRunReportsDirectoryStability(t *testing.T) {
+	for _, change := range []bool{false, true} {
+		t.Run(fmt.Sprint(change), func(t *testing.T) {
+			service, refs := createDraftListFixture(t, 1, 32)
+			ageDraftFile(t, service.draftRoot, refs[0], 40)
+			path := filepath.Join(service.draftRoot, refs[0]+".json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := os.Stat(service.draftRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision, err := draftListRevision(service.draftRoot, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(service.draftRoot, "unrelated-marker")
+			ctx := &draftListBoundaryContext{Context: context.Background(), trigger: 4, action: func() {
+				if !change {
+					return
+				}
+				if err := os.WriteFile(marker, []byte("retain marker"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				future := identity.ModTime().Add(2 * time.Second)
+				if err := os.Chtimes(service.draftRoot, future, future); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			result, err := service.PruneDraftsContext(ctx, PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour})
+			if err != nil || ctx.checks < ctx.trigger || !result.DryRun || result.Revision != revision ||
+				result.Stable == nil || *result.Stable == change || len(result.Candidates) != 1 || result.Candidates[0].Ref != refs[0] ||
+				len(result.Removed)+len(result.SweptLocks)+len(result.SweptArtifacts) != 0 {
+				t.Fatalf("dry-run result = %+v, %v; want original revision %s, stable=%t, no effects", result, err, revision, !change)
+			}
+			if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+				t.Fatalf("dry run changed draft: %q, %v", after, err)
+			}
+			if change {
+				if after, err := os.ReadFile(marker); err != nil || string(after) != "retain marker" {
+					t.Fatalf("dry run changed marker: %q, %v", after, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPruneDryRunRejectsDirectoryIdentityAndIOChanges(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+	}{
+		{name: "replaced"},
+		{name: "vanished", cause: os.ErrNotExist},
+		{name: "stat failure", cause: syscall.ELOOP},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			identity, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained := root + "-retained"
+			ctx := &draftListBoundaryContext{Context: context.Background(), trigger: 4, action: func() {
+				if err := os.Rename(root, retained); err != nil {
+					t.Fatal(err)
+				}
+				switch test.name {
+				case "replaced":
+					if err := os.Mkdir(root, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(root, identity.ModTime(), identity.ModTime()); err != nil {
+						t.Fatal(err)
+					}
+				case "stat failure":
+					if err := os.Symlink(filepath.Base(root), root); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}}
+			result, err := NewServiceWithDraftRoot(nil, root).PruneDraftsContext(ctx, PruneDraftsRequest{OlderThan: 24 * time.Hour})
+			if ctx.checks < ctx.trigger || errorCode(err) != "prune_state_changed" || result.Stable != nil ||
+				len(result.Removed)+len(result.SweptLocks)+len(result.SweptArtifacts) != 0 ||
+				(test.cause != nil && !errors.Is(err, test.cause)) {
+				t.Fatalf("unsafe dry run = %+v, %v after %d checks; want refusal with cause %v", result, err, ctx.checks, test.cause)
+			}
+			if current, err := os.Stat(retained); err != nil || !os.SameFile(identity, current) {
+				t.Fatalf("original directory changed: %v, %v", current, err)
+			}
+		})
 	}
 }
 
