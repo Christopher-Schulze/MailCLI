@@ -84,6 +84,12 @@ type OperationGuidance struct {
 // command and operation identity after this base classification.
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
+	if command == "drafts.adopt" {
+		var adoption *DraftAdoptionError
+		if errors.As(err, &adoption) {
+			return guidanceForDraftAdoption(adoption)
+		}
+	}
 	if guidance, matched := guidanceForAccessGatePreflight(command, code); matched {
 		return guidance
 	}
@@ -338,6 +344,23 @@ func guidanceForKnownReadError(code string) (OperationGuidance, bool) {
 	return OperationGuidance{}, false
 }
 
+func guidanceForDraftAdoption(adoption *DraftAdoptionError) OperationGuidance {
+	if adoption.PublicationStarted || adoption.StagingRetained {
+		return OperationGuidance{
+			Phase: OperationPhaseExecution, EffectCertainty: EffectUnknown,
+			Retryability: RetryObserveRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{
+				Action: RecoveryInspect, Command: "drafts.list", Args: []string{"--json"},
+				Instruction: "Do not replay adoption. Inspect the draft list for the new local reference; if it exists, run drafts inspect --ref REF --json. Preserve and inspect any retained staging artifacts.",
+			},
+		}
+	}
+	if adoption.ErrorCode() == "adopt_source_incomplete" {
+		return guidanceForReadCorrection("Open the source draft in Mail.app to materialize its full content, then retry adoption.")
+	}
+	return GuidanceForError("drafts.open", adoption.Err)
+}
+
 func guidanceForReadAccessError(code string) (string, bool) {
 	switch code {
 	case "mail_store_preferences_invalid":
@@ -537,7 +560,7 @@ func isInputErrorCode(code string) bool {
 func effectfulCommand(command string) bool {
 	switch command {
 	case "batch", "update", "attachments.save", "attachment_save", "send.setup", "sync",
-		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save",
+		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.adopt",
 		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move",
 		"messages.copy", "messages.delete":

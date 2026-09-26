@@ -387,6 +387,24 @@ func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
 	}
 }
 
+func TestNonReadCapabilitiesUseEffectfulFailureGuidance(t *testing.T) {
+	for _, contract := range commandContracts {
+		if contract.effectClass == "read" {
+			continue
+		}
+		t.Run(contract.ID, func(t *testing.T) {
+			guidance := mail.GuidanceForError(contract.ID, &mail.OperationError{
+				Code: "operation_timeout", Message: "injected unclassified timeout",
+			})
+			if guidance.EffectCertainty != mail.EffectUnknown ||
+				guidance.Retryability != mail.RetryObserveRequired || guidance.ReplayAllowed ||
+				guidance.Recovery.Action != mail.RecoveryInspect {
+				t.Fatalf("%s failure guidance = %+v", contract.ID, guidance)
+			}
+		})
+	}
+}
+
 func TestCapabilitiesNeedNoMailService(t *testing.T) {
 	for _, args := range [][]string{{"capabilities"}, {"capabilities", "--json"}, {"--json", "capabilities"}} {
 		if RequiresMailService(args) {

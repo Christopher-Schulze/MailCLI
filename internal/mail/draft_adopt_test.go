@@ -242,6 +242,13 @@ func TestAdoptStoreDraftMissing(t *testing.T) {
 	if !errors.As(err, &operation) || operation.Code != "not_found" {
 		t.Fatalf("AdoptStoreDraft() missing draft error = %v", err)
 	}
+	var outcome *DraftAdoptionError
+	if !errors.As(err, &outcome) || outcome.PublicationStarted || outcome.StagingRetained || outcome.Ref != "" {
+		t.Fatalf("AdoptStoreDraft() missing draft boundary = %+v", outcome)
+	}
+	if strings.Contains(err.Error(), "inspect retained artifacts") {
+		t.Fatalf("pre-publication error claims retained artifacts: %v", err)
+	}
 }
 
 func TestAdoptStoreDraftIncompleteSource(t *testing.T) {

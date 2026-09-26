@@ -335,6 +335,67 @@ func TestGuidanceForNotFoundRequiresFreshInputForReads(t *testing.T) {
 	}
 }
 
+func TestGuidanceForDraftAdoptionTracksPublicationBoundary(t *testing.T) {
+	tests := []struct {
+		name          string
+		adoption      *DraftAdoptionError
+		phase         OperationPhase
+		effect        EffectCertainty
+		retryability  Retryability
+		replayAllowed bool
+		recovery      RecoveryAction
+		command       string
+		args          []string
+	}{
+		{
+			name:     "missing source before publication",
+			adoption: &DraftAdoptionError{Err: &OperationError{Code: "not_found", Message: "source draft missing"}},
+			phase:    OperationPhaseRead, effect: EffectNone, retryability: RetryUserInputRequired,
+			recovery: RecoveryCorrect,
+		},
+		{
+			name:     "incomplete source needs materialization",
+			adoption: &DraftAdoptionError{Err: &OperationError{Code: "adopt_source_incomplete", Message: "source content incomplete"}},
+			phase:    OperationPhaseRead, effect: EffectNone, retryability: RetryUserInputRequired,
+			recovery: RecoveryCorrect,
+		},
+		{
+			name:     "transient source read before publication",
+			adoption: &DraftAdoptionError{Err: &OperationError{Code: "operation_timeout", Message: "source read timed out"}},
+			phase:    OperationPhaseRead, effect: EffectNone, retryability: RetrySafe,
+			replayAllowed: true, recovery: RecoveryRetry,
+		},
+		{
+			name:     "retained staging blocks replay",
+			adoption: &DraftAdoptionError{Ref: "draft_adopted", StagingPath: "/tmp/staging", StagingRetained: true, Err: errors.New("cleanup failed")},
+			phase:    OperationPhaseExecution, effect: EffectUnknown, retryability: RetryObserveRequired,
+			recovery: RecoveryInspect, command: "drafts.list", args: []string{"--json"},
+		},
+		{
+			name:     "publication blocks replay even for not found cause",
+			adoption: &DraftAdoptionError{Ref: "draft_adopted", PublicationStarted: true, Err: &OperationError{Code: "not_found", Message: "post-publication failure"}},
+			phase:    OperationPhaseExecution, effect: EffectUnknown, retryability: RetryObserveRequired,
+			recovery: RecoveryInspect, command: "drafts.list", args: []string{"--json"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := GuidanceForError("drafts.adopt", test.adoption)
+			if got.Phase != test.phase || got.EffectCertainty != test.effect ||
+				got.Retryability != test.retryability || got.ReplayAllowed != test.replayAllowed ||
+				got.Recovery.Action != test.recovery || got.Recovery.Command != test.command ||
+				!reflect.DeepEqual(got.Recovery.Args, test.args) {
+				t.Fatalf("GuidanceForError(drafts.adopt) = %+v", got)
+			}
+			if test.name == "incomplete source needs materialization" &&
+				!strings.Contains(got.Recovery.Instruction, "Open the source draft in Mail.app") {
+				t.Fatalf("incomplete-source instruction = %q", got.Recovery.Instruction)
+			}
+		})
+	}
+}
+
 func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 	tests := []struct {
 		command             string

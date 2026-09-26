@@ -412,7 +412,32 @@ func TestDraftsAdoptMissingStoreDraftFails(t *testing.T) {
 	code := runDrafts(context.Background(), service, []string{
 		"adopt", "--message", "msg_missing", "--json",
 	}, &stdout, &stderr)
-	if code == 0 || !strings.Contains(stdout.String(), `"code":"not_found"`) {
+	if code == 0 || stderr.Len() != 0 {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v, stdout = %q", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "not_found" || response.Error.Guidance == nil {
+		t.Fatalf("missing-source response = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.EffectCertainty != mail.EffectNone || guidance.Retryability != mail.RetryUserInputRequired ||
+		guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryCorrect {
+		t.Fatalf("missing-source guidance = %+v", guidance)
+	}
+}
+
+func TestDraftsAdoptPublishedFailureGuidanceInspectsDraftList(t *testing.T) {
+	guidance := guidanceForResponse("drafts.adopt", responseData{}, &mail.DraftAdoptionError{
+		Ref: "draft_adopted", PublicationStarted: true, StagingRetained: true,
+		Err: errors.New("directory sync failed"),
+	})
+	if guidance.EffectCertainty != mail.EffectUnknown || guidance.Retryability != mail.RetryObserveRequired ||
+		guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryInspect ||
+		guidance.Recovery.Command != "drafts.list" || !equalStrings(guidance.Recovery.Args, []string{"--json"}) ||
+		!strings.Contains(guidance.Recovery.Instruction, "drafts inspect --ref REF --json") {
+		t.Fatalf("published-adoption guidance = %+v", guidance)
 	}
 }

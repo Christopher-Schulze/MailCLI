@@ -22,6 +22,12 @@ func (s *Service) AdoptStoreDraft(ctx context.Context, ref string) (result Draft
 	if strings.TrimSpace(ref) == "" {
 		return Draft{}, validationError("draft message ref is required")
 	}
+	var draftRef string
+	var stage *adoptionStaging
+	publicationStarted := false
+	defer func() {
+		resultErr = finishDraftAdoption(stage, draftRef, publicationStarted, resultErr)
+	}()
 	if err := draftContextError(ctx, "adopt"); err != nil {
 		return Draft{}, err
 	}
@@ -53,7 +59,7 @@ func (s *Service) AdoptStoreDraft(ctx context.Context, ref string) (result Draft
 	if err != nil {
 		return Draft{}, err
 	}
-	draftRef, err := newDraftReference()
+	draftRef, err = newDraftReference()
 	if err != nil {
 		return Draft{}, err
 	}
@@ -61,11 +67,6 @@ func (s *Service) AdoptStoreDraft(ctx context.Context, ref string) (result Draft
 	if err != nil || !rootIdentity.IsDir() {
 		return Draft{}, errors.Join(errors.New("inspect adoption draft directory"), err)
 	}
-	var stage *adoptionStaging
-	publicationStarted := false
-	defer func() {
-		resultErr = finishDraftAdoption(stage, draftRef, publicationStarted, resultErr)
-	}()
 	paths := make([]string, 0, len(message.Attachments))
 	if len(message.Attachments) > 0 {
 		stage, err = newAdoptionStaging(root, draftRef, rootIdentity)
@@ -168,7 +169,13 @@ type DraftAdoptionError struct {
 }
 
 func (e *DraftAdoptionError) Error() string {
-	return fmt.Sprintf("adopt %s failed (publication_started=%t, staging_retained=%t, staging=%s): %v; inspect retained artifacts before retrying", e.Ref, e.PublicationStarted, e.StagingRetained, e.StagingPath, e.Err)
+	if e.PublicationStarted || e.StagingRetained {
+		return fmt.Sprintf("adopt %s failed (publication_started=%t, staging_retained=%t, staging=%s): %v; inspect retained artifacts before retrying", e.Ref, e.PublicationStarted, e.StagingRetained, e.StagingPath, e.Err)
+	}
+	if e.Ref == "" {
+		return fmt.Sprintf("adopt store draft failed before publication: %v", e.Err)
+	}
+	return fmt.Sprintf("adopt %s failed before publication: %v", e.Ref, e.Err)
 }
 
 func (e *DraftAdoptionError) Unwrap() error { return e.Err }
