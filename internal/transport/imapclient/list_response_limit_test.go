@@ -3,13 +3,16 @@ package imapclient
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -141,6 +144,54 @@ func TestDoListCountsLiteralPayloadTowardCumulativeWireLimit(t *testing.T) {
 	requireListLimitExceeded(t, mailboxes, err, dirty, "cumulative response bytes")
 }
 
+func TestListOverflowGuidanceAtReadAndMutationResolution(t *testing.T) {
+	for _, command := range []string{"mailboxes.list", "messages.delete"} {
+		t.Run(command, func(t *testing.T) {
+			server := newFakeServer(t, fakeServerConfig{
+				authOK:       true,
+				listResponse: []byte(strings.Repeat("* OK ignored\r\n", MaxListOperationResponseLines+1)),
+			})
+			client, config := newFakeClient(t, server)
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("close IMAP client: %v", err)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var err error
+			phase := mail.OperationPhaseRead
+			if command == "mailboxes.list" {
+				var boxes []transport.MailboxInfo
+				boxes, err = client.ListMailboxes(ctx, config)
+				if boxes != nil {
+					t.Fatalf("overflow returned partial mailboxes: %+v", boxes)
+				}
+			} else {
+				phase = mail.OperationPhaseMutation
+				var evidence transport.MutationEvidence
+				evidence, err = client.DeleteMessage(ctx, config, "INBOX", 42, 12345)
+				if !reflect.DeepEqual(evidence, transport.MutationEvidence{}) {
+					t.Fatalf("overflow started a mutation: %+v", evidence)
+				}
+			}
+			if !transport.IsResourceLimitExceeded(err) {
+				t.Fatalf("lookup error = %v, want resource overflow", err)
+			}
+			guidance := mail.GuidanceForError(command, err)
+			if guidance.Phase != phase || guidance.EffectCertainty != mail.EffectNone ||
+				guidance.Retryability != mail.RetryTerminal || guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryInspect {
+				t.Fatalf("overflow guidance = %+v", guidance)
+			}
+			for _, dispatched := range server.Commands() {
+				if dispatched == "SELECT" || strings.HasPrefix(dispatched, "UID ") || dispatched == "APPEND" {
+					t.Fatalf("overflow dispatched %q", dispatched)
+				}
+			}
+		})
+	}
+}
+
 func runListResponse(
 	t *testing.T,
 	writeResponse func(*bufio.Writer) error,
@@ -222,6 +273,18 @@ func requireListLimitExceeded(
 	}
 	if !strings.Contains(err.Error(), resource+" limit exceeded") {
 		t.Fatalf("error does not identify exceeded %s bound: %v", resource, err)
+	}
+	wantLimit := MaxListOperationResponseBytes
+	switch resource {
+	case "untagged logical response lines":
+		wantLimit = int64(MaxListOperationResponseLines)
+	case "parsed mailboxes":
+		wantLimit = int64(MaxListOperationMailboxes)
+	}
+	var overflow *transport.TransportError
+	if !errors.As(err, &overflow) || overflow.Limit == nil || overflow.Limit.Name != resource ||
+		overflow.Limit.Value != wantLimit || overflow.ObservedAtLeast != wantLimit+1 {
+		t.Fatalf("limit evidence = %+v, want %s bound %d and lower bound %d", overflow, resource, wantLimit, wantLimit+1)
 	}
 	if mailboxes != nil {
 		t.Fatalf("resource-limit error returned %d partial mailboxes", len(mailboxes))

@@ -127,6 +127,11 @@ func IsSourceTooLarge(err error) bool {
 	return ErrorCode(err) == CodeIMAPRawSourceTooLarge
 }
 
+// IsResourceLimitExceeded reports a bounded IMAP response overflow.
+func IsResourceLimitExceeded(err error) bool {
+	return ErrorCode(err) == CodeIMAPResourceLimitExceeded
+}
+
 // IsConfigurationFailure reports a caller-correctable configuration problem:
 // authentication, missing credentials, TLS, an unsupported provider, or
 // unsupported UTF8 usage.

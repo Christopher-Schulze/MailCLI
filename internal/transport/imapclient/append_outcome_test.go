@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/transport"
 )
 
@@ -29,6 +30,8 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 		rejection string
 		wantCode  string
 		wantText  string
+		limitName string
+		limit     int64
 	}{
 		{name: "EXISTS", lines: []string{"* 3 EXISTS"}},
 		{name: "ALERT", lines: []string{"* OK [ALERT] maintenance"}},
@@ -36,9 +39,9 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 		{name: "byte boundary", lines: []string{byteBoundary}},
 		{name: "NO", lines: []string{"* 3 EXISTS"}, rejection: "NO [OVERQUOTA] quota exceeded", wantCode: transport.CodeIMAPAppendFailed, wantText: "[OVERQUOTA] quota exceeded"},
 		{name: "BAD", rejection: "BAD invalid literal", wantCode: transport.CodeIMAPAppendFailed, wantText: "invalid literal"},
-		{name: "line flood", lines: append(append([]string(nil), lineBoundary...), "* 3 EXISTS"), wantCode: transport.CodeIMAPResourceLimitExceeded},
-		{name: "byte flood", lines: []string{byteBoundary + "x"}, wantCode: transport.CodeIMAPResourceLimitExceeded},
-		{name: "oversized line", lines: []string{"* OK " + strings.Repeat("x", maxIMAPResponseLineBytes)}, wantCode: transport.CodeIMAPResourceLimitExceeded},
+		{name: "line flood", lines: append(append([]string(nil), lineBoundary...), "* 3 EXISTS"), wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation untagged responses", limit: maxAppendContinuationLines},
+		{name: "byte flood", lines: []string{byteBoundary + "x"}, wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation response bytes", limit: maxAppendContinuationBytes},
+		{name: "oversized line", lines: []string{"* OK " + strings.Repeat("x", maxIMAPResponseLineBytes)}, wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation response bytes", limit: maxAppendContinuationBytes},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +60,18 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 			}
 			if test.wantText != "" && !strings.Contains(err.Error(), test.wantText) {
 				t.Fatalf("APPEND error = %v, want server text %q", err, test.wantText)
+			}
+			if test.limitName != "" {
+				var overflow *transport.TransportError
+				if !errors.As(err, &overflow) || overflow.Limit == nil || overflow.Limit.Name != test.limitName ||
+					overflow.Limit.Value != test.limit || overflow.ObservedAtLeast != test.limit+1 {
+					t.Fatalf("APPEND limit evidence = %+v, want %s bound %d", overflow, test.limitName, test.limit)
+				}
+				guidance := mail.GuidanceForError("drafts.reconcile", err)
+				if guidance.EffectCertainty != mail.EffectNone || guidance.Retryability != mail.RetryTerminal ||
+					guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryInspect {
+					t.Fatalf("pre-dispatch APPEND guidance = %+v", guidance)
+				}
 			}
 			called, _, _, data := srv.AppendRecord()
 			if test.wantCode != "" {

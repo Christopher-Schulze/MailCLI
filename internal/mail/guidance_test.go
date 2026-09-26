@@ -1,6 +1,8 @@
 package mail
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -103,6 +105,41 @@ func TestGuidanceForProtocolFailuresBeforeTerminators(t *testing.T) {
 				got.Retryability != test.retryability || got.ReplayAllowed != test.replayAllowed ||
 				got.Recovery.Action != test.recovery {
 				t.Fatalf("GuidanceForError(%q, %s) = %+v", test.command, test.code, got)
+			}
+		})
+	}
+}
+
+func TestResourceLimitGuidancePreservesDispatchUncertainty(t *testing.T) {
+	resource := &transport.TransportError{
+		Code: transport.CodeIMAPResourceLimitExceeded, Message: "bounded response exceeded",
+		Limit: &transport.ResourceLimit{Name: "untagged logical response lines", Value: 10000}, ObservedAtLeast: 10001,
+	}
+	for _, command := range []string{"mailboxes.list", "messages.delete", "drafts.reconcile", BatchOperationMark} {
+		t.Run(command, func(t *testing.T) {
+			guidance := GuidanceForError(command, fmt.Errorf("lookup failed: %w", resource))
+			if guidance.EffectCertainty != EffectNone || guidance.Retryability != RetryTerminal ||
+				guidance.ReplayAllowed || guidance.Recovery.Action != RecoveryInspect {
+				t.Fatalf("resource guidance = %+v", guidance)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name    string
+		command string
+		err     error
+		effect  EffectCertainty
+	}{
+		{name: "SMTP", command: "drafts.send", err: &transport.SubmissionError{Stage: "reply", Err: resource}, effect: EffectUnknown},
+		{name: "APPEND", command: "drafts.reconcile", err: errors.Join(resource, &transport.TransportError{Code: transport.CodeIMAPAppendOutcomeUnknown}), effect: EffectPartial},
+		{name: "MOVE", command: "messages.move", err: &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Evidence: transport.MutationEvidence{Command: "MOVE"}, Err: resource}, effect: EffectUnknown},
+		{name: "partial STORE", command: "messages.mark", err: &transport.MutationOutcomeError{Code: transport.CodeIMAPFlagsPartial, Evidence: transport.MutationEvidence{Command: "STORE", Outcome: transport.MutationOutcomePartial}, Err: resource}, effect: EffectPartial},
+		{name: "composite batch", command: "batch", err: resource, effect: EffectUnknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			guidance := GuidanceForError(test.command, test.err)
+			if guidance.EffectCertainty != test.effect || guidance.Retryability != RetryObserveRequired || guidance.ReplayAllowed {
+				t.Fatalf("resource cause erased dispatch evidence: %+v", guidance)
 			}
 		})
 	}

@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +214,58 @@ func TestRawSourceLimitGuidanceStopsRetry(t *testing.T) {
 	if guidance.Retryability != mail.RetryTerminal || guidance.ReplayAllowed ||
 		guidance.Recovery.Action != mail.RecoveryInspect {
 		t.Fatalf("raw source limit guidance = %+v", guidance)
+	}
+}
+
+func TestResourceLimitErrorEnvelopeRetainsBoundAndCertainty(t *testing.T) {
+	resource := &transport.TransportError{
+		Code: transport.CodeIMAPResourceLimitExceeded, Message: "IMAP response exceeded its bound",
+		Limit: &transport.ResourceLimit{Name: "cumulative response bytes", Value: 32 << 20}, ObservedAtLeast: (32 << 20) + 1,
+	}
+	for _, test := range []struct {
+		name      string
+		command   string
+		data      responseData
+		err       error
+		effect    mail.EffectCertainty
+		retry     mail.Retryability
+		wantLimit bool
+	}{
+		{name: "read", command: "mailboxes.list", err: fmt.Errorf("lookup: %w", resource), effect: mail.EffectNone, retry: mail.RetryTerminal, wantLimit: true},
+		{name: "mutation resolution", command: "messages.delete", err: resource, effect: mail.EffectNone, retry: mail.RetryTerminal, wantLimit: true},
+		{name: "APPEND pre-dispatch", command: "drafts.reconcile", err: resource, effect: mail.EffectNone, retry: mail.RetryTerminal, wantLimit: true},
+		{name: "SMTP already accepted", command: "drafts.send", err: resource, data: responseData{SendResult: &mail.SendResult{AttemptID: "attempt", Outcome: mail.SendOutcomeMirrorPending, SubmissionAccepted: true}}, effect: mail.EffectPartial, retry: mail.RetryObserveRequired, wantLimit: true},
+		{name: "APPEND unknown", command: "drafts.reconcile", err: errors.Join(resource, &transport.TransportError{Code: transport.CodeIMAPAppendOutcomeUnknown}), effect: mail.EffectPartial, retry: mail.RetryObserveRequired},
+		{name: "ordinary failure", command: "messages.get", err: &transport.TransportError{Code: transport.CodeIMAPTimeout}, effect: mail.EffectNone, retry: mail.RetrySafe},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if code := writeJSON(&output, envelope{SchemaVersion: schemaVersion, Command: test.command, Error: newErrorData(test.command, test.data, test.err)}); code != 0 {
+				t.Fatalf("write failure envelope: %d", code)
+			}
+			var response envelope
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			failure := response.Error
+			if failure == nil || failure.Guidance == nil || failure.Code != transport.ErrorCode(test.err) ||
+				failure.Guidance.EffectCertainty != test.effect || failure.Guidance.Retryability != test.retry ||
+				failure.Guidance.ReplayAllowed != (test.retry == mail.RetrySafe) {
+				t.Fatalf("failure certainty = %+v", failure)
+			}
+			if test.wantLimit {
+				if failure.Limit == nil || *failure.Limit != *resource.Limit || failure.ObservedAtLeast == nil ||
+					*failure.ObservedAtLeast != resource.ObservedAtLeast {
+					t.Fatalf("limit evidence missing: %s", output.String())
+				}
+				if test.effect == mail.EffectNone && failure.Guidance.Recovery.Action != mail.RecoveryInspect {
+					t.Fatalf("overflow recovery = %+v", failure.Guidance)
+				}
+			} else if failure.Limit != nil || failure.ObservedAtLeast != nil ||
+				strings.Contains(output.String(), `"observed_at_least"`) || strings.Contains(output.String(), `"limit"`) {
+				t.Fatalf("unrelated failure received resource evidence: %s", output.String())
+			}
+		})
 	}
 }
 

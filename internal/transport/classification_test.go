@@ -120,6 +120,12 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			negative:  []string{CodeIMAPFetchFailed},
 		},
 		{
+			name:      "IsResourceLimitExceeded",
+			predicate: IsResourceLimitExceeded,
+			positive:  []string{CodeIMAPResourceLimitExceeded},
+			negative:  []string{CodeIMAPResponseMalformed, CodeIMAPFetchFailed, CodeIMAPAppendOutcomeUnknown},
+		},
+		{
 			name:      "IsConfigurationFailure",
 			predicate: IsConfigurationFailure,
 			positive:  []string{CodeSMTPAuthFailed, CodeSMTPCredentialsMissing, CodeIMAPAuthFailed, CodeSMTPTLSFailed, CodeUnsupportedProvider, CodeSMTPUTF8Unsupported},
@@ -147,6 +153,13 @@ func TestFailureClassificationPredicates(t *testing.T) {
 }
 
 func TestClassificationPrefersOutcomeUncertainty(t *testing.T) {
+	resource := codedErr(CodeIMAPResourceLimitExceeded)
+	for _, code := range []string{CodeSMTPSubmissionUnknown, CodeIMAPAppendOutcomeUnknown, CodeIMAPMoveOutcomeUnknown, CodeIMAPFlagsPartial} {
+		joined := errors.Join(resource, codedErr(code))
+		if IsResourceLimitExceeded(joined) || ErrorCode(joined) != code {
+			t.Fatalf("resource limit erased %s uncertainty: %v", code, joined)
+		}
+	}
 	submission := &SubmissionError{Stage: "final reply", Err: codedErr(CodeSMTPSourceInvalid)}
 	if IsSMTPSourceInvalid(submission) || !IsSubmissionOutcomeUnknown(submission) {
 		t.Fatal("submission uncertainty must outrank a wrapped source-integrity error")

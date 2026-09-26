@@ -106,6 +106,20 @@ func GuidanceForError(command string, err error) OperationGuidance {
 			},
 		}
 	}
+	if command != "batch" && transport.IsResourceLimitExceeded(err) {
+		phase := OperationPhaseRead
+		if effectfulCommand(command) {
+			phase = defaultPhase(command)
+		}
+		if isMailboxMutationCommand(command) {
+			phase = OperationPhaseMutation
+		}
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone,
+			Retryability: RetryTerminal, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryInspect},
+		}
+	}
 	if !effectfulCommand(command) && errors.Is(err, fs.ErrPermission) {
 		return guidanceForReadCorrection("Grant Full Disk Access to the calling app, or correct the file permissions before retrying this read.")
 	}

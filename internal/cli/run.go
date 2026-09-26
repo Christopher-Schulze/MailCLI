@@ -101,11 +101,17 @@ type errorData struct {
 	Guidance              *mail.OperationGuidance     `json:"guidance"`
 	ValidSubcommands      []string                    `json:"valid_subcommands,omitempty"`
 	RequiredBytes         *int64                      `json:"required_bytes,omitempty"`
+	Limit                 *transport.ResourceLimit    `json:"limit,omitempty"`
+	ObservedAtLeast       *int64                      `json:"observed_at_least,omitempty"`
 	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
 	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
+	code := errorCode(err)
+	if code == transport.CodeIMAPResourceLimitExceeded {
+		code = transport.ErrorCode(err)
+	}
 	guidance := guidanceForResponse(command, data, err)
 	if command == "send.setup" {
 		guidance = sendSetupErrorGuidance(guidance, data, err)
@@ -147,14 +153,22 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		}
 	}
 	var requiredBytes *int64
+	var limit *transport.ResourceLimit
+	var observedAtLeast *int64
+	var resourceError *transport.TransportError
+	if transport.IsResourceLimitExceeded(err) && errors.As(err, &resourceError) && resourceError.Limit != nil {
+		limit = resourceError.Limit
+		observedAtLeast = &resourceError.ObservedAtLeast
+	}
 	var budgetError interface{ RequiredBytes() int64 }
 	if errorCode(err) == "search_budget_too_small" && errors.As(err, &budgetError) {
 		value := budgetError.RequiredBytes()
 		requiredBytes = &value
 	}
 	return &errorData{
-		Code: errorCode(err), Message: err.Error(), Guidance: &guidance,
+		Code: code, Message: err.Error(), Guidance: &guidance,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
+		Limit: limit, ObservedAtLeast: observedAtLeast,
 	}
 }
 

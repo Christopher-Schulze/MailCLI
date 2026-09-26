@@ -71,8 +71,10 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 func listResponseLimitExceeded(sess *session, resource string, limit int64) *transport.TransportError {
 	sess.dirty = true
 	return &transport.TransportError{
-		Code:    transport.CodeIMAPResourceLimitExceeded,
-		Message: fmt.Sprintf("IMAP LIST %s limit exceeded (%d)", resource, limit),
+		Code:            transport.CodeIMAPResourceLimitExceeded,
+		Message:         fmt.Sprintf("IMAP LIST %s limit exceeded (%d)", resource, limit),
+		Limit:           &transport.ResourceLimit{Name: resource, Value: limit},
+		ObservedAtLeast: limit + 1,
 	}
 }
 
@@ -216,8 +218,10 @@ func (c *Client) readAppendContinuation(ctx context.Context, sess *session, tag 
 		if errors.As(err, &malformed) || wireBytes > maxAppendContinuationBytes-responseBytes {
 			sess.dirty = true
 			return &transport.TransportError{
-				Code:    transport.CodeIMAPResourceLimitExceeded,
-				Message: "IMAP APPEND continuation response exceeds 64 KiB",
+				Code:            transport.CodeIMAPResourceLimitExceeded,
+				Message:         "IMAP APPEND continuation response exceeds 64 KiB",
+				Limit:           &transport.ResourceLimit{Name: "APPEND continuation response bytes", Value: maxAppendContinuationBytes},
+				ObservedAtLeast: maxAppendContinuationBytes + 1,
 			}
 		}
 		if err != nil {
@@ -234,8 +238,10 @@ func (c *Client) readAppendContinuation(ctx context.Context, sess *session, tag 
 			}
 			sess.dirty = true
 			return &transport.TransportError{
-				Code:    transport.CodeIMAPResourceLimitExceeded,
-				Message: "IMAP APPEND continuation exceeds 100 untagged responses",
+				Code:            transport.CodeIMAPResourceLimitExceeded,
+				Message:         "IMAP APPEND continuation exceeds 100 untagged responses",
+				Limit:           &transport.ResourceLimit{Name: "APPEND continuation untagged responses", Value: maxAppendContinuationLines},
+				ObservedAtLeast: int64(responseLines),
 			}
 		}
 		if strings.HasPrefix(line, tag+" ") {

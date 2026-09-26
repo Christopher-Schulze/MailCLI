@@ -7,9 +7,17 @@ import (
 
 // TransportError is the typed error for all send-transport failures.
 type TransportError struct {
-	Code    string
-	Message string
-	Err     error
+	Code            string
+	Message         string
+	Err             error
+	Limit           *ResourceLimit
+	ObservedAtLeast int64
+}
+
+// ResourceLimit identifies the operation bound exceeded by an IMAP response.
+type ResourceLimit struct {
+	Name  string `json:"name"`
+	Value int64  `json:"value"`
 }
 
 // SubmissionError marks a failure after SMTP accepted the DATA command. The
@@ -155,7 +163,7 @@ const (
 	CodeIMAPRawSourceTooLarge    = "raw_source_too_large"
 	CodeLocalOnlyMailbox         = "local_only_mailbox"
 	CodeMessageAlreadyTrashed    = "message_already_trashed"
-)
 
-// CodeIMAPResourceLimitExceeded marks an IMAP response beyond an operation bound.
-const CodeIMAPResourceLimitExceeded = "imap_resource_limit_exceeded"
+	// CodeIMAPResourceLimitExceeded marks a response beyond an operation bound.
+	CodeIMAPResourceLimitExceeded = "imap_resource_limit_exceeded"
+)
