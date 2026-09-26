@@ -35,10 +35,117 @@ func schemaForCommand(id string) json.RawMessage {
 	prefix := []byte(`{"id":"` + id + `@v1"`)
 	for _, line := range bytes.Split(schemaPayload(), []byte{'\n'}) {
 		if bytes.HasPrefix(line, prefix) {
-			return json.RawMessage(append([]byte(nil), line...))
+			schema, err := augmentProjectionSchema(id, line)
+			if err != nil {
+				return nil
+			}
+			return schema
 		}
 	}
 	return emptyCommandSchema(id)
+}
+
+func projectionTargetForCommand(id string) (projectionTarget, bool) {
+	switch id {
+	case "messages.get", "drafts.open":
+		return projectionTargetMessage, true
+	case "drafts.create", "drafts.edit", "drafts.adopt", "drafts.inspect", "drafts.update", "messages.reply", "messages.forward":
+		return projectionTargetDraft, true
+	case "attachments.list":
+		return projectionTargetAttachment, true
+	case "messages.raw":
+		return projectionTargetRaw, true
+	case "drafts.list":
+		return projectionTargetDraftList, true
+	case "messages.list":
+		return projectionTargetListPage, true
+	case "messages.search", "messages.filter":
+		return projectionTargetSearchPage, true
+	default:
+		return "", false
+	}
+}
+
+// Only projection enums are derived in memory; canonical schema metadata stays
+// intact and the stored schema source remains unchanged.
+func augmentProjectionSchema(id string, source json.RawMessage) (json.RawMessage, error) {
+	target, projected := projectionTargetForCommand(id)
+	if !projected && id != "batch" {
+		return append(json.RawMessage(nil), source...), nil
+	}
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(source, &schema); err != nil {
+		return nil, fmt.Errorf("decode projection schema: %w", err)
+	}
+	if projected {
+		fields, err := projectionSchemaFields(schema["flags"], "--fields", target)
+		if err != nil {
+			return nil, err
+		}
+		schema["flags"] = fields
+	} else {
+		input, err := augmentBatchProjectionSchema(schema["json_input"])
+		if err != nil {
+			return nil, err
+		}
+		schema["json_input"] = input
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("encode projection schema: %w", err)
+	}
+	return encoded, nil
+}
+
+func augmentBatchProjectionSchema(source json.RawMessage) (json.RawMessage, error) {
+	var input map[string]json.RawMessage
+	if err := json.Unmarshal(source, &input); err != nil {
+		return nil, fmt.Errorf("decode batch projection schema: %w", err)
+	}
+	fields, err := projectionSchemaFields(input["item_fields"], "fields", projectionTargetMessage)
+	if err != nil {
+		return nil, err
+	}
+	input["item_fields"] = fields
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode batch projection schema: %w", err)
+	}
+	return encoded, nil
+}
+
+func projectionSchemaFields(source json.RawMessage, name string, target projectionTarget) (json.RawMessage, error) {
+	var fields []map[string]json.RawMessage
+	if err := json.Unmarshal(source, &fields); err != nil {
+		return nil, fmt.Errorf("decode projection fields: %w", err)
+	}
+	found := false
+	for _, field := range fields {
+		var fieldName string
+		if err := json.Unmarshal(field["name"], &fieldName); err != nil {
+			return nil, fmt.Errorf("decode projection field name: %w", err)
+		}
+		if fieldName != name {
+			continue
+		}
+		if found {
+			return nil, fmt.Errorf("duplicate projection field %s", name)
+		}
+		values, err := json.Marshal(projectionFieldNames(target))
+		if err != nil {
+			return nil, fmt.Errorf("encode projection values: %w", err)
+		}
+		field["values"] = values
+		found = true
+	}
+	if !found {
+		return nil, fmt.Errorf("missing projection field %s", name)
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode projection fields: %w", err)
+	}
+	return encoded, nil
 }
 
 func emptyCommandSchema(id string) json.RawMessage {

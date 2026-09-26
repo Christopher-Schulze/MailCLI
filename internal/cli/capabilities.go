@@ -111,6 +111,9 @@ type outputProjectionCapability struct {
 	DraftFields               []string `json:"draft_fields"`
 	AttachmentFields          []string `json:"attachment_fields"`
 	RawFields                 []string `json:"raw_fields"`
+	DraftListFields           []string `json:"draft_list_fields"`
+	ListPageFields            []string `json:"list_page_fields"`
+	SearchPageFields          []string `json:"search_page_fields"`
 	MessageDefaultView        string   `json:"message_default_view"`
 	DraftDefaultView          string   `json:"draft_default_view"`
 	AttachmentDefaultView     string   `json:"attachment_default_view"`
@@ -187,6 +190,9 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 				DraftFields:               projectionFieldNames(projectionTargetDraft),
 				AttachmentFields:          projectionFieldNames(projectionTargetAttachment),
 				RawFields:                 projectionFieldNames(projectionTargetRaw),
+				DraftListFields:           projectionFieldNames(projectionTargetDraftList),
+				ListPageFields:            projectionFieldNames(projectionTargetListPage),
+				SearchPageFields:          projectionFieldNames(projectionTargetSearchPage),
 				MessageDefaultView:        defaultMessageOutputView,
 				DraftDefaultView:          defaultDraftOutputView,
 				AttachmentDefaultView:     outputViewMetadata,
@@ -297,17 +303,24 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 		}
 		manifest := capabilitiesForCommands(selected)
-		return writeCapabilities(stdout, *jsonOutput, manifest)
+		return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 	}
 	selectionCommand, selectionFamily, err := resolveCapabilityScope(*command, *family, *scope)
 	if err != nil {
 		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 	}
 	manifest := capabilitiesForScope(selectionCommand, selectionFamily)
-	return writeCapabilities(stdout, *jsonOutput, manifest)
+	return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 }
 
-func writeCapabilities(stdout io.Writer, jsonOutput bool, manifest capabilityManifest) int {
+func writeCapabilities(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest) int {
+	for _, command := range manifest.Commands {
+		if !json.Valid(command.Schema) {
+			return failCommand("capabilities", jsonOutput, &commandError{
+				code: "capability_schema_invalid", message: "command projection schema is invalid",
+			}, stdout, stderr)
+		}
+	}
 	if jsonOutput {
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,

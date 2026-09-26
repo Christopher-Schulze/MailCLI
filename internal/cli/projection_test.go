@@ -143,6 +143,78 @@ func TestProjectionFieldsAreExplicitAndCanonical(t *testing.T) {
 	}
 }
 
+func TestProjectionRegistriesValidateAllSevenTargets(t *testing.T) {
+	for _, target := range []projectionTarget{
+		projectionTargetMessage, projectionTargetDraft, projectionTargetAttachment,
+		projectionTargetRaw, projectionTargetDraftList, projectionTargetListPage, projectionTargetSearchPage,
+	} {
+		t.Run(string(target), func(t *testing.T) {
+			registry := projectionRegistry(target)
+			names := projectionFieldNames(target)
+			seen := make(map[string]bool)
+			for _, name := range names {
+				if seen[name] {
+					t.Fatalf("duplicate registry field %q", name)
+				}
+				seen[name] = true
+				fields, err := parseProjectionFields(target, name)
+				if err != nil || len(fields) != 1 {
+					t.Fatalf("published field %q rejected: %v", name, err)
+				}
+				if name != "all" && requiredProjectionField(target, name, false) != slices.Contains(registry.core, name) {
+					t.Fatalf("core policy differs for %q", name)
+				}
+			}
+			if !seen["all"] || len(names) != len(registry.core)+len(registry.optional)+1 {
+				t.Fatalf("incomplete registry: %+v", names)
+			}
+			for _, value := range []string{"", "unknown", names[0] + "," + names[0], "all," + names[0]} {
+				if _, err := parseProjectionFields(target, value); err == nil {
+					t.Fatalf("invalid selector %q accepted", value)
+				}
+			}
+		})
+	}
+}
+
+func TestMessageAndRawAllFieldsMatchFullViews(t *testing.T) {
+	for _, command := range []string{"get", "raw"} {
+		t.Run(command, func(t *testing.T) {
+			args := []string{"messages", command, "--ref", "msg_ref", "--json"}
+			fullCode, full, fullErr := runProjectionCommand(t, &projectionGateway{message: projectionMessage(), raw: "raw bytes"}, append(args, "--view", "full")...)
+			allCode, all, allErr := runProjectionCommand(t, &projectionGateway{message: projectionMessage(), raw: "raw bytes"}, append(args, "--fields", "all")...)
+			var fullEnvelope, allEnvelope envelope
+			if err := json.Unmarshal([]byte(full), &fullEnvelope); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(all), &allEnvelope); err != nil {
+				t.Fatal(err)
+			}
+			fullEnvelope.Data.Projection, allEnvelope.Data.Projection = nil, nil
+			fullData, fullMarshal := json.Marshal(fullEnvelope.Data)
+			allData, allMarshal := json.Marshal(allEnvelope.Data)
+			if fullCode != 0 || allCode != 0 || fullErr != "" || allErr != "" || fullMarshal != nil || allMarshal != nil || !bytes.Equal(fullData, allData) {
+				t.Fatalf("all changed full data: full=%s all=%s", full, all)
+			}
+		})
+	}
+}
+
+func TestBatchReadFieldsUseMessageRegistry(t *testing.T) {
+	for _, field := range projectionFieldNames(projectionTargetMessage) {
+		fields := []string{field}
+		options, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, defaultJSONOutputBytes)
+		if err != nil || options.target != projectionTargetMessage || !options.fieldsProvided || !options.includes(field) {
+			t.Fatalf("batch field %q differs from message parser: options=%+v error=%v", field, options, err)
+		}
+	}
+	for _, fields := range [][]string{{"unknown"}, {"all", "content"}, {"content", "content"}, {"summary,content"}} {
+		if _, err := batchReadOutputOptions(mail.BatchItem{Fields: &fields}, defaultJSONOutputBytes); err == nil {
+			t.Fatalf("invalid batch field selector accepted: %v", fields)
+		}
+	}
+}
+
 func TestRawProjectionAcceptsItsPublishedField(t *testing.T) {
 	gateway := &projectionGateway{raw: "raw bytes"}
 	code, output, stderr := runProjectionCommand(t, gateway,
@@ -168,6 +240,9 @@ func TestProjectionCapabilityPublishesSchemasAndLimits(t *testing.T) {
 		!slices.Equal(projection.DraftFields, projectionFieldNames(projectionTargetDraft)) ||
 		!slices.Equal(projection.AttachmentFields, projectionFieldNames(projectionTargetAttachment)) ||
 		!slices.Equal(projection.RawFields, projectionFieldNames(projectionTargetRaw)) ||
+		!slices.Equal(projection.DraftListFields, projectionFieldNames(projectionTargetDraftList)) ||
+		!slices.Equal(projection.ListPageFields, projectionFieldNames(projectionTargetListPage)) ||
+		!slices.Equal(projection.SearchPageFields, projectionFieldNames(projectionTargetSearchPage)) ||
 		!slices.Equal(projection.ExportCommands, []string{"messages.get", "messages.raw", "drafts.inspect"}) {
 		t.Fatalf("output projection schema = %+v", projection)
 	}
@@ -251,6 +326,7 @@ func TestDraftProjectionViewsAndExport(t *testing.T) {
 		{name: "metadata", args: []string{"--ref", draft.Ref, "--json"}, want: `"view":"metadata"`, forbidden: []string{`"body":`, `"body_source"`, `"body_html"`}},
 		{name: "plain", args: []string{"--ref", draft.Ref, "--view", "plain", "--json"}, want: `"body":"canonical body"`, forbidden: []string{`"body_source"`, `"body_html"`}},
 		{name: "full", args: []string{"--ref", draft.Ref, "--view", "full", "--json"}, want: `"body":"canonical body"`, forbidden: nil},
+		{name: "all", args: []string{"--ref", draft.Ref, "--fields", "all", "--json"}, want: `"body":"canonical body"`, forbidden: nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

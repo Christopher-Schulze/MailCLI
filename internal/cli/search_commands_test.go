@@ -300,6 +300,7 @@ func pageProjectionFixture() (mail.MessagePage, mail.SearchPage) {
 			Read: index%2 == 0, Flagged: index%3 == 0, Junk: index%7 == 0, Deleted: index%11 == 0,
 			Size: 4096 + int64(index), AttachmentCount: index % 3, ConversationID: int64(index + 1),
 			StalenessNote: strings.Repeat("summary metadata retained for later inspection; ", 3),
+			ServerTruth:   &mail.ServerMutationEvidence{Command: "STORE", UID: uint32(index + 1), UIDValidity: 7},
 		}
 		listPage.Messages[index] = message
 		searchPage.Messages[index] = mail.SearchMessage{Summary: message, Snippet: strings.Repeat("matching phrase in message context; ", 3)}
@@ -439,6 +440,24 @@ func TestPageFieldValidationPrecedesReads(t *testing.T) {
 	}
 }
 
+func TestPageFieldsSelectExistingConversationAndSemanticMetadata(t *testing.T) {
+	for _, command := range []string{"list", "filter", "search"} {
+		t.Run(command, func(t *testing.T) {
+			gateway := newPageProjectionGateway()
+			gateway.listPage.NextCursor, gateway.searchPage.NextCursor = "", ""
+			code, output, stderr := runPageProjectionCommand(gateway, pageProjectionArgs(command, "conversation_id,server_truth,staleness_note"))
+			page := pageFromEnvelope(t, output)
+			if code != 0 || stderr != "" || bytes.Contains(page, []byte(`"next_cursor"`)) ||
+				!bytes.Contains(page, []byte(`"conversation_id":1`)) ||
+				!bytes.Contains(page, []byte(`"server_truth":{"command":"STORE"`)) ||
+				!bytes.Contains(page, []byte(`"staleness_note":"summary metadata`)) ||
+				bytes.Contains(page, []byte(`"subject"`)) {
+				t.Fatalf("selected page metadata: code=%d stderr=%q page=%s", code, stderr, page)
+			}
+		})
+	}
+}
+
 func TestProjectedPagesKeepEmptyAndPartialMessageFields(t *testing.T) {
 	for _, messages := range [][]mail.MessageSummary{nil, {}} {
 		gateway := newPageProjectionGateway()
@@ -490,7 +509,7 @@ func TestProjectedPagePaginationPassesTheReturnedCursor(t *testing.T) {
 		secondCode != 0 || secondStderr != "" || gateway.listCalls != 2 ||
 		len(gateway.listRequests) != 2 || gateway.listRequests[1].Cursor != first.NextCursor ||
 		!bytes.Contains(secondPage, []byte(`"ref":"second"`)) ||
-		!bytes.Contains(secondPage, []byte(`"next_cursor":""`)) {
+		bytes.Contains(secondPage, []byte(`"next_cursor"`)) {
 		t.Fatalf("pagination: first=%s second=%s calls=%d requests=%+v", firstOutput, secondOutput, gateway.listCalls, gateway.listRequests)
 	}
 }
@@ -525,7 +544,7 @@ func TestProjectedSearchPaginationPassesTheReturnedCursor(t *testing.T) {
 	if firstCode != 0 || firstStderr != "" || first.NextCursor != cursor || secondCode != 0 || secondStderr != "" ||
 		gateway.searchCalls != 2 || len(gateway.searchQueries) != 2 || gateway.searchQueries[1].Cursor == nil ||
 		gateway.searchQueries[1].Cursor.RowID != 1 || !bytes.Contains(secondPage, []byte(`"ref":"second"`)) ||
-		!bytes.Contains(secondPage, []byte(`"next_cursor":""`)) {
+		bytes.Contains(secondPage, []byte(`"next_cursor"`)) {
 		t.Fatalf("search pagination: first=%s second=%s queries=%+v", firstOutput, secondOutput, gateway.searchQueries)
 	}
 }

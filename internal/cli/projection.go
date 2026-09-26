@@ -175,12 +175,12 @@ type attachmentProjection struct {
 
 type messageListPageProjection struct {
 	Messages   []messagePageItemProjection `json:"messages"`
-	NextCursor string                      `json:"next_cursor"`
+	NextCursor string                      `json:"next_cursor,omitempty"`
 }
 
 type searchPageProjection struct {
 	Messages   []searchPageMessageProjection `json:"messages"`
-	NextCursor string                        `json:"next_cursor"`
+	NextCursor string                        `json:"next_cursor,omitempty"`
 	Coverage   mail.SearchCoverage           `json:"coverage"`
 }
 
@@ -190,19 +190,22 @@ type searchPageMessageProjection struct {
 }
 
 type messagePageItemProjection struct {
-	Ref             string  `json:"ref"`
-	MailboxRef      string  `json:"mailbox_ref"`
-	MessageID       *string `json:"message_id,omitempty"`
-	Subject         *string `json:"subject,omitempty"`
-	Sender          *string `json:"sender,omitempty"`
-	DateReceived    *string `json:"date_received,omitempty"`
-	DateSent        *string `json:"date_sent,omitempty"`
-	Read            *bool   `json:"read,omitempty"`
-	Flagged         *bool   `json:"flagged,omitempty"`
-	Junk            *bool   `json:"junk,omitempty"`
-	Deleted         *bool   `json:"deleted,omitempty"`
-	Size            *int64  `json:"size,omitempty"`
-	AttachmentCount *int    `json:"attachment_count,omitempty"`
+	Ref             string                       `json:"ref"`
+	MailboxRef      string                       `json:"mailbox_ref"`
+	MessageID       *string                      `json:"message_id,omitempty"`
+	Subject         *string                      `json:"subject,omitempty"`
+	Sender          *string                      `json:"sender,omitempty"`
+	DateReceived    *string                      `json:"date_received,omitempty"`
+	DateSent        *string                      `json:"date_sent,omitempty"`
+	Read            *bool                        `json:"read,omitempty"`
+	Flagged         *bool                        `json:"flagged,omitempty"`
+	Junk            *bool                        `json:"junk,omitempty"`
+	Deleted         *bool                        `json:"deleted,omitempty"`
+	Size            *int64                       `json:"size,omitempty"`
+	AttachmentCount *int                         `json:"attachment_count,omitempty"`
+	ConversationID  *int64                       `json:"conversation_id,omitempty"`
+	ServerTruth     *mail.ServerMutationEvidence `json:"server_truth,omitempty"`
+	StalenessNote   *string                      `json:"staleness_note,omitempty"`
 }
 
 type outputTooLargeError struct {
@@ -377,18 +380,14 @@ func parseProjectionFields(target projectionTarget, value string) (map[string]st
 		}
 		fields[field] = struct{}{}
 	}
+	if _, all := fields["all"]; all && len(fields) > 1 {
+		return nil, &commandError{code: "invalid_argument", message: "all cannot be combined with other fields"}
+	}
 	return fields, nil
 }
 
 func parsePageProjectionFields(target projectionTarget, value string) (map[string]struct{}, error) {
-	fields, err := parseProjectionFields(target, value)
-	if err != nil {
-		return nil, err
-	}
-	if _, all := fields["all"]; all && len(fields) > 1 {
-		return nil, &commandError{code: "invalid_argument", message: "all cannot be combined with other page fields"}
-	}
-	return fields, nil
+	return parseProjectionFields(target, value)
 }
 
 func pageProjectionOptions(
@@ -512,35 +511,44 @@ func projectBatchItem(
 	return projected, nil
 }
 
-func projectionFieldNames(target projectionTarget) []string {
+type projectionFieldRegistry struct {
+	core     []string
+	optional []string
+}
+
+func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 	switch target {
 	case projectionTargetMessage:
-		return []string{"summary", "reply_to", "to", "cc", "bcc", "headers", "content", "content_source", "content_complete", "missing_parts", "hydration", "attachments"}
+		return projectionFieldRegistry{core: []string{"summary", "content_source", "content_complete", "missing_parts", "hydration"},
+			optional: []string{"reply_to", "to", "cc", "bcc", "headers", "content", "attachments"}}
 	case projectionTargetDraft:
-		return []string{"ref", "revision", "kind", "account_ref", "source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "subject", "body", "body_format", "body_source", "body_html", "content_diagnostics", "attachments", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt"}
+		return projectionFieldRegistry{core: []string{"ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt"},
+			optional: []string{"source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "body", "body_source", "body_html", "content_diagnostics", "attachments"}}
 	case projectionTargetAttachment:
-		return []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}
+		return projectionFieldRegistry{optional: []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}}
 	case projectionTargetRaw:
-		return []string{"raw_source"}
+		return projectionFieldRegistry{optional: []string{"raw_source"}}
 	case projectionTargetDraftList:
-		return []string{
-			"account_ref", "age_days", "attachment_count", "body_format", "cc", "created_at", "ever_sent",
-			"from", "handoff_attempt", "kind", "ref", "save_attempt", "send_attempt", "state_error",
-			"subject", "to", "updated_at",
-		}
+		return projectionFieldRegistry{core: []string{"ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error"},
+			optional: []string{"age_days", "created_at", "updated_at"}}
 	case projectionTargetListPage:
-		return []string{
-			"all", "attachment_count", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id",
-			"read", "sender", "size", "subject",
-		}
+		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref"},
+			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "staleness_note", "subject"}}
 	case projectionTargetSearchPage:
-		return []string{
-			"all", "attachment_count", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id",
-			"read", "sender", "size", "snippet", "subject",
-		}
+		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref"},
+			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "snippet", "staleness_note", "subject"}}
 	default:
+		return projectionFieldRegistry{}
+	}
+}
+
+func projectionFieldNames(target projectionTarget) []string {
+	registry := projectionRegistry(target)
+	if len(registry.core)+len(registry.optional) == 0 {
 		return nil
 	}
+	fields := append(slices.Clone(registry.core), registry.optional...)
+	return append(fields, "all")
 }
 
 func projectMessageListPage(page mail.MessagePage, fields map[string]struct{}) *json.RawMessage {
@@ -611,6 +619,15 @@ func projectMessageSummary(message mail.MessageSummary, fields map[string]struct
 	if _, include := fields["attachment_count"]; include {
 		projected.AttachmentCount = &message.AttachmentCount
 	}
+	if _, include := fields["conversation_id"]; include {
+		projected.ConversationID = &message.ConversationID
+	}
+	if _, include := fields["server_truth"]; include {
+		projected.ServerTruth = message.ServerTruth
+	}
+	if _, include := fields["staleness_note"]; include {
+		projected.StalenessNote = &message.StalenessNote
+	}
 	return projected
 }
 
@@ -658,6 +675,9 @@ func messageStateProjectionField(field string) bool {
 //go:noinline
 func (o outputOptions) includes(field string) bool {
 	if o.fieldsProvided {
+		if _, all := o.fields["all"]; all {
+			return true
+		}
 		_, ok := o.fields[field]
 		return ok
 	}
@@ -677,6 +697,9 @@ func projectionFields(target projectionTarget, options outputOptions, contentRet
 	names := projectionFieldNames(target)
 	fields := make([]string, 0, len(names))
 	for _, field := range names {
+		if field == "all" {
+			continue
+		}
 		if messageStateProjectionField(field) && !messageStateProjectionRequired(options, contentRetained) {
 			continue
 		}
@@ -693,22 +716,8 @@ func projectionFields(target projectionTarget, options outputOptions, contentRet
 
 //go:noinline
 func requiredProjectionField(target projectionTarget, field string, contentRetained bool) bool {
-	switch target {
-	case projectionTargetMessage:
-		return field == "summary" || field == "content_source" || field == "content_complete" ||
-			field == "missing_parts" || field == "hydration" || (contentRetained && field == "content")
-	case projectionTargetDraft:
-		switch field {
-		case "ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt":
-			return true
-		}
-	case projectionTargetDraftList:
-		switch field {
-		case "ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error":
-			return true
-		}
-	}
-	return false
+	return slices.Contains(projectionRegistry(target).core, field) ||
+		target == projectionTargetMessage && contentRetained && field == "content"
 }
 
 func messageProjectionFor(message mail.Message, options outputOptions, retainContent bool) *messageProjection {

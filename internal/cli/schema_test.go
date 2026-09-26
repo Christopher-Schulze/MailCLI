@@ -69,9 +69,115 @@ func TestCanonicalCommandSchemasMatchRuntimePayload(t *testing.T) {
 		if err := json.Compact(&compact, canonical); err != nil {
 			t.Fatalf("compact %s: %v", path, err)
 		}
-		if runtime := schemaForCommand(contract.ID); !bytes.Equal(compact.Bytes(), runtime) {
+		canonicalMetadata := projectionSchemaMetadata(t, contract.ID, compact.Bytes())
+		runtimeMetadata := projectionSchemaMetadata(t, contract.ID, schemaForCommand(contract.ID))
+		if !bytes.Equal(canonicalMetadata, runtimeMetadata) {
 			t.Fatalf("%s runtime schema differs from canonical file", contract.ID)
 		}
+	}
+}
+
+// Strip only the registry-owned enum, keeping every other canonical property.
+func projectionSchemaMetadata(t *testing.T, id string, source json.RawMessage) []byte {
+	t.Helper()
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(source, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if _, projected := projectionTargetForCommand(id); projected {
+		schema["flags"] = projectionFieldMetadata(t, schema["flags"], "--fields")
+	}
+	if id == "batch" {
+		var input map[string]json.RawMessage
+		if err := json.Unmarshal(schema["json_input"], &input); err != nil {
+			t.Fatal(err)
+		}
+		input["item_fields"] = projectionFieldMetadata(t, input["item_fields"], "fields")
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		schema["json_input"] = encoded
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func projectionFieldMetadata(t *testing.T, source json.RawMessage, name string) json.RawMessage {
+	t.Helper()
+	var fields []map[string]json.RawMessage
+	if err := json.Unmarshal(source, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range fields {
+		var fieldName string
+		if err := json.Unmarshal(field["name"], &fieldName); err != nil {
+			t.Fatal(err)
+		}
+		if fieldName == name {
+			delete(field, "values")
+		}
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
+func TestEveryProjectionSchemaEnumMatchesItsTargetRegistry(t *testing.T) {
+	seen := make(map[projectionTarget]bool)
+	for _, contract := range commandContracts {
+		if !commandIsPublished(contract) {
+			continue
+		}
+		schema := decodeTestCommandSchema(t, schemaForCommand(contract.ID))
+		for _, field := range schema.Flags {
+			if field.Name != "--fields" {
+				continue
+			}
+			target, found := projectionTargetForCommand(contract.ID)
+			if !found || field.ValueType != "field_list" || !reflect.DeepEqual(field.Values, projectionFieldNames(target)) {
+				t.Fatalf("%s field enum = %+v, target = %q", contract.ID, field, target)
+			}
+			seen[target] = true
+		}
+	}
+	if len(seen) != 7 {
+		t.Fatalf("schemas cover %d projection targets, want seven", len(seen))
+	}
+	batch := decodeTestCommandSchema(t, schemaForCommand("batch"))
+	fields := jsonFieldByName(batch.JSONInput.ItemFields, "fields")
+	if fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) {
+		t.Fatalf("batch field enum = %+v", fields)
+	}
+}
+
+func TestProjectionSchemaAugmentationPreservesMetadataAndRejectsMissingFields(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		invalid      bool
+	}{
+		{name: "metadata", source: `{"id":"messages.get@v1","extra":{"preserved":true},"flags":[{"name":"--fields","value_type":"field_list","description":"kept","extra":[1,2]}]}`},
+		{name: "missing", source: `{"flags":[]}`, invalid: true},
+		{name: "duplicate", source: `{"flags":[{"name":"--fields"},{"name":"--fields"}]}`, invalid: true},
+		{name: "invalid", source: `{`, invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := augmentProjectionSchema("messages.get", json.RawMessage(test.source))
+			if test.invalid {
+				if err == nil || got != nil {
+					t.Fatalf("invalid schema accepted: %s, error=%v", got, err)
+				}
+				return
+			}
+			if err != nil || !bytes.Equal(projectionSchemaMetadata(t, "messages.get", got), projectionSchemaMetadata(t, "messages.get", json.RawMessage(test.source))) {
+				t.Fatalf("schema metadata changed: %s, error=%v", got, err)
+			}
+		})
 	}
 }
 

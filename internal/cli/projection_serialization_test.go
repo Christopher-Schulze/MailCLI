@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -90,6 +92,187 @@ func TestFinalizationRetainsTypedValidation(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestProjectionSerializedKeysMatchEveryRegistry(t *testing.T) {
+	for _, target := range []projectionTarget{
+		projectionTargetMessage, projectionTargetDraft, projectionTargetAttachment,
+		projectionTargetRaw, projectionTargetDraftList, projectionTargetListPage, projectionTargetSearchPage,
+	} {
+		t.Run(string(target), func(t *testing.T) {
+			registry := projectionRegistry(target)
+			for _, selected := range projectionFieldNames(target) {
+				fields, err := parseProjectionFields(target, selected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual := serializedRegistryFixture(t, target, fields)
+				want := slices.Clone(registry.core)
+				if selected == "all" {
+					want = append(want, registry.optional...)
+				} else if !slices.Contains(want, selected) {
+					want = append(want, selected)
+				}
+				// A healthy draft summary never invents a corrupt-state diagnostic.
+				if target == projectionTargetDraftList {
+					want = slices.DeleteFunc(want, func(field string) bool { return field == "state_error" })
+				}
+				sort.Strings(want)
+				keys := make([]string, 0, len(actual))
+				for key := range actual {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				if !slices.Equal(keys, want) {
+					t.Fatalf("%s fields=%q keys=%v want=%v", target, selected, keys, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultProjectionKeysPreserveTargetPolicies(t *testing.T) {
+	for _, target := range []projectionTarget{
+		projectionTargetMessage, projectionTargetDraft, projectionTargetAttachment,
+		projectionTargetRaw, projectionTargetDraftList, projectionTargetListPage, projectionTargetSearchPage,
+	} {
+		t.Run(string(target), func(t *testing.T) {
+			registry := projectionRegistry(target)
+			want := append(slices.Clone(registry.core), registry.optional...)
+			want = slices.DeleteFunc(want, func(field string) bool {
+				return target == projectionTargetMessage && (field == "content" || field == "headers") ||
+					target == projectionTargetDraft && (field == "body_source" || field == "body_html") ||
+					target == projectionTargetDraftList && field == "state_error"
+			})
+			actual := serializedRegistryFixture(t, target, nil)
+			keys := make([]string, 0, len(actual))
+			for key := range actual {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			sort.Strings(want)
+			if !slices.Equal(keys, want) {
+				t.Fatalf("default %s keys=%v want=%v", target, keys, want)
+			}
+		})
+	}
+}
+
+func TestDraftListRegistryKeepsCorruptStateEvidence(t *testing.T) {
+	for _, field := range []string{"all", "age_days", "ref"} {
+		fields, err := parseProjectionFields(projectionTargetDraftList, field)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := draftListEntry{DraftSummary: mail.DraftSummary{Ref: "retained", StateError: "invalid retained state"}}
+		encoded, err := json.Marshal(draftListEntryProjectionFor(entry, outputOptions{fields: fields, fieldsProvided: true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var actual map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &actual); err != nil {
+			t.Fatal(err)
+		}
+		if len(actual) != 2 || string(actual["ref"]) != `"retained"` || string(actual["state_error"]) != `"invalid retained state"` {
+			t.Fatalf("corrupt summary lost bounded evidence: %s", encoded)
+		}
+	}
+}
+
+func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map[string]struct{}) map[string]json.RawMessage {
+	t.Helper()
+	message := projectionMessage()
+	message.Hydration = &mail.HydrationDiagnostic{State: mail.HydrationStateFailed}
+	message.Summary.MailboxRef, message.Summary.DateReceived, message.Summary.DateSent = "mailbox", "received", "sent"
+	message.Summary.ConversationID, message.Summary.StalenessNote = 7, "retained metadata"
+	message.Summary.ServerTruth = &mail.ServerMutationEvidence{Command: "STORE", UID: 3, UIDValidity: 5}
+	if target == projectionTargetListPage || target == projectionTargetSearchPage {
+		return serializedPageRegistryFixture(t, target, message.Summary, fields)
+	}
+	encoded, err := encodedRegistryFixture(target, message, registryFixtureOptions(target, fields))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	delete(result, "projection")
+	return result
+}
+
+func registryFixtureOptions(target projectionTarget, fields map[string]struct{}) outputOptions {
+	options := outputOptions{target: target, view: "custom", fields: fields, fieldsProvided: fields != nil}
+	if fields == nil {
+		options.view = outputViewFull
+		if target == projectionTargetMessage || target == projectionTargetAttachment {
+			options.view = outputViewMetadata
+		}
+		if target == projectionTargetDraft {
+			options.view = outputViewPlain
+		}
+	}
+	return options
+}
+
+func encodedRegistryFixture(target projectionTarget, message mail.Message, options outputOptions) ([]byte, error) {
+	switch target {
+	case projectionTargetMessage:
+		return json.Marshal(messageProjectionFor(message, options, false))
+	case projectionTargetDraft:
+		draft := mail.Draft{Ref: "draft", SendAttempt: &mail.SendAttempt{}, SaveAttempt: &mail.DraftSaveAttempt{}, HandoffAttempt: &mail.HandoffAttempt{}}
+		return json.Marshal(draftProjectionFor(draft, options))
+	case projectionTargetAttachment:
+		mime := "text/plain"
+		return json.Marshal(attachmentProjections([]mail.Attachment{{MIMEType: &mime}}, options)[0])
+	case projectionTargetRaw:
+		raw := "raw bytes"
+		data := projectedRawData(responseData{RawSource: &raw}, options, false)
+		return data.MarshalJSON()
+	case projectionTargetDraftList:
+		entry := draftListEntry{DraftSummary: mail.DraftSummary{
+			Ref: "draft", AccountRef: "account", Subject: "subject", From: "sender", SendAttempt: &mail.DraftSendAttemptSummary{},
+			SaveAttempt: &mail.DraftSaveAttemptSummary{}, HandoffAttempt: &mail.DraftHandoffAttemptSummary{},
+		}}
+		if !options.fieldsProvided {
+			return json.Marshal(entry)
+		}
+		return json.Marshal(draftListEntryProjectionFor(entry, options))
+	default:
+		return nil, fmt.Errorf("uncovered projection target %q", target)
+	}
+}
+
+func serializedPageRegistryFixture(t *testing.T, target projectionTarget, summary mail.MessageSummary, fields map[string]struct{}) map[string]json.RawMessage {
+	t.Helper()
+	if fields == nil {
+		fields = map[string]struct{}{"all": {}}
+	}
+	if target == projectionTargetListPage {
+		page := projectMessageListPage(mail.MessagePage{Messages: []mail.MessageSummary{summary}}, fields)
+		var value struct {
+			Messages []map[string]json.RawMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(*page, &value); err != nil {
+			t.Fatal(err)
+		}
+		return value.Messages[0]
+	}
+	page := projectSearchPage(mail.SearchPage{Messages: []mail.SearchMessage{{Summary: summary, Snippet: "snippet"}}}, fields)
+	var value struct {
+		Messages []struct {
+			Summary map[string]json.RawMessage `json:"summary"`
+			Snippet json.RawMessage            `json:"snippet"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(*page, &value); err != nil {
+		t.Fatal(err)
+	}
+	result := value.Messages[0].Summary
+	if value.Messages[0].Snippet != nil {
+		result["snippet"] = value.Messages[0].Snippet
+	}
+	return result
 }
 
 // This frozen pre-optimization serializer is a differential oracle for typed
