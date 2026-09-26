@@ -10,7 +10,7 @@ usage() {
     '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN' \
-    '  manage-write-lease.sh gate TOKEN' \
+    '  manage-write-lease.sh gate TOKEN [--checks REGISTERED_PATH...]' \
     '  manage-write-lease.sh release TOKEN' \
     '  manage-write-lease.sh private-proof TOKEN SNAPSHOT PATH [PATH...]' \
     '  manage-write-lease.sh abort TOKEN'
@@ -42,7 +42,8 @@ remove_lease_files() {
     allowed_paths allowed_fingerprints private_task_fingerprints \
     ignored_asset_fingerprints \
     reviewed_digest reviewed_patch_sha256 \
-    reviewed_at gate_patch_sha256 gate_head gate_at changed_paths; do
+    reviewed_at gate_patch_sha256 gate_head gate_at gate_index_tree \
+    gate_harness gate_tier gate_shell_receipts changed_paths; do
     rm -f "${LEASE_DIRECTORY}/${NAME}"
   done
   rmdir "${LEASE_DIRECTORY}" 2>/dev/null || true
@@ -473,6 +474,12 @@ review_lease() {
 
 gate_lease() {
   local TOKEN="$1"
+  shift
+  local GATE_TIER=full
+  if [[ "$#" -gt 0 ]]; then
+    [[ "$#" -ge 2 && "$1" == --checks ]] || fail 'Gate selection requires --checks and registered paths'
+    GATE_TIER=targeted
+  fi
   require_token "${TOKEN}"
   [[ -f "$(lease_file reviewed_digest)" ]] || fail "Review the staged TASK patch before the full gate"
   local BASELINE_HEAD
@@ -489,12 +496,34 @@ gate_lease() {
   [[ "${CURRENT_PATCH_DIGEST}" == "$(<"$(lease_file reviewed_patch_sha256)")" ]] ||
     fail "Staged patch changed after review; review the patch again"
 
-  rm -f "$(lease_file gate_patch_sha256)" "$(lease_file gate_head)" "$(lease_file gate_at)"
+  rm -f "$(lease_file gate_patch_sha256)" "$(lease_file gate_head)" "$(lease_file gate_at)" \
+    "$(lease_file gate_index_tree)" "$(lease_file gate_harness)" "$(lease_file gate_tier)" "$(lease_file gate_shell_receipts)"
   local GATE_STATUS=0
   local HARNESS_DIR
   local HARNESS_SCRIPT
   local HARNESS_CAPABLE=true
+  local INDEX_TREE
+  local BASELINE_ORCHESTRATOR
+  local GATE_HARNESS_MODE=baseline_bootstrap
+  INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
+  BASELINE_ORCHESTRATOR="$(git -C "${MAILCLI_ROOT}" show "${BASELINE_HEAD}:scripts/tests/test.sh")"
   HARNESS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-gate-harness.XXXXXX")"
+  trap 'rm -rf -- "${HARNESS_DIR}"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' <<<"${BASELINE_ORCHESTRATOR}"; then
+    git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils/run-staged-gate.sh |
+      tar -x -C "${HARNESS_DIR}"
+    "${HARNESS_DIR}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
+      "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
+      tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
+    GATE_HARNESS_MODE="$(sed -n 's/^gate_harness=//p' "${HARNESS_DIR}/gate-output")"
+  elif [[ "${GATE_TIER}" == targeted ]]; then
+    "${MAILCLI_ROOT}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
+      "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
+      tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
+    GATE_HARNESS_MODE=staged_bootstrap_targeted
+  else
   if ! git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |
     tar -x -C "${HARNESS_DIR}"; then
     rm -rf "${HARNESS_DIR}"
@@ -510,15 +539,18 @@ gate_lease() {
     -x "${HARNESS_DIR}/scripts/tests/test.sh" ]]; then
     MAILCLI_ROOT="${MAILCLI_ROOT}" \
       "${HARNESS_DIR}/scripts/tests/test.sh" || GATE_STATUS=$?
-    rm -rf "${HARNESS_DIR}"
-    printf 'gate_harness=baseline\n'
+    printf 'gate_harness=baseline_bootstrap\n'
   else
     rm -rf "${HARNESS_DIR}"
     printf 'gate_harness=worktree_transitional\n' >&2
     "${MAILCLI_ROOT}/scripts/tests/test.sh" || GATE_STATUS=$?
   fi
+  fi
+  trap - INT TERM
   if [[ "${GATE_STATUS}" -ne 0 ]]; then
-    printf 'Full gate failed with status %s; commit proof was not recorded\n' "${GATE_STATUS}" >&2
+    printf '%s gate failed with status %s; commit proof was not recorded\n' "${GATE_TIER}" "${GATE_STATUS}" >&2
+    rm -rf -- "${HARNESS_DIR}"
+    trap - EXIT
     return "${GATE_STATUS}"
   fi
 
@@ -529,10 +561,21 @@ gate_lease() {
     fail "Allowed file content changed while the full gate was running"
   [[ "$(staged_patch_digest)" == "${CURRENT_PATCH_DIGEST}" ]] ||
     fail "Staged patch changed while the full gate was running"
+  [[ "$(git -C "${MAILCLI_ROOT}" write-tree)" == "${INDEX_TREE}" ]] ||
+    fail "Index tree changed while the full gate was running"
+  printf '%s\n' "${INDEX_TREE}" >"$(lease_file gate_index_tree)"
+  printf '%s\n' "${GATE_HARNESS_MODE}" >"$(lease_file gate_harness)"
+  printf '%s\n' "${GATE_TIER}" >"$(lease_file gate_tier)"
+  if [[ -f "${HARNESS_DIR}/gate-output" ]]; then
+    sed -n 's/^shell_test_receipt=//p' "${HARNESS_DIR}/gate-output" >"$(lease_file gate_shell_receipts)"
+  fi
+  rm -rf -- "${HARNESS_DIR}"
+  trap - EXIT
   printf '%s\n' "${CURRENT_PATCH_DIGEST}" >"$(lease_file gate_patch_sha256)"
   printf '%s\n' "${BASELINE_HEAD}" >"$(lease_file gate_head)"
   printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$(lease_file gate_at)"
-  printf 'full_gate=passed\n'
+  if [[ "${GATE_TIER}" == full ]]; then printf 'full_gate=passed\n';
+  else printf 'targeted_gate=passed\nfull_gate=deferred\n'; fi
   printf 'gated_patch_sha256=%s\n' "${CURRENT_PATCH_DIGEST}"
 }
 
@@ -542,7 +585,7 @@ release_lease() {
   verify_private_task_scope
   verify_ignored_asset_scope
   [[ -f "$(lease_file gate_patch_sha256)" ]] ||
-    fail "No successful full-gate evidence exists for this lease"
+    fail "No successful gate evidence exists for this lease"
   local TASK_ID
   local BASELINE_HEAD
   local CURRENT_HEAD
@@ -745,7 +788,12 @@ case "${COMMAND}" in
     [[ "$#" -eq 1 ]] || fail "status accepts no additional arguments"
     status_lease
     ;;
-  review | gate | release | abort)
+  gate)
+    [[ "$#" -ge 2 ]] || fail 'gate requires a lease token'
+    shift
+    gate_lease "$@"
+    ;;
+  review | release | abort)
     [[ "$#" -eq 2 ]] || fail "${COMMAND} requires exactly one lease token"
     "${COMMAND}_lease" "$2"
     ;;

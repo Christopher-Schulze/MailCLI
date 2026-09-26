@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Executed from the lease baseline, never from the staged patch itself.
+[[ "$#" -eq 4 || ( "$#" -ge 6 && "$5" == --checks ) ]] || {
+  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--checks REGISTERED_PATH...]\n' >&2; exit 2;
+}
+SOURCE_ROOT="$1"
+BASELINE_HEAD="$2"
+INDEX_TREE="$3"
+TASK_IDS="$4"
+shift 4
+GATE_TIER=full
+SELECTED_CASES=()
+if [[ "${1:-}" == --checks ]]; then GATE_TIER=targeted; shift; SELECTED_CASES=("$@"); fi
+for VARIABLE in $(git rev-parse --local-env-vars); do unset "${VARIABLE}"; done
+unset MAILCLI_WRITE_ROOT MAILCLI_GATE_RECEIPTS
+umask 077
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-staged-gate.XXXXXX")"
+trap 'rm -rf -- "${TEST_ROOT}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+PRODUCT_ROOT="${TEST_ROOT}/product"
+BASELINE_ROOT="${TEST_ROOT}/baseline"
+RECEIPTS="${TEST_ROOT}/receipts"
+: >"${RECEIPTS}"
+
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+git clone -q --shared --no-checkout --no-tags "${SOURCE_ROOT}" "${PRODUCT_ROOT}"
+git -C "${PRODUCT_ROOT}" checkout -q --detach "${BASELINE_HEAD}"
+git -C "${PRODUCT_ROOT}" read-tree --reset -u "${INDEX_TREE}"
+PRODUCT_REFS_BEFORE="$(git -C "${PRODUCT_ROOT}" for-each-ref --format='%(refname) %(objectname)')"
+mkdir "${BASELINE_ROOT}"
+git -C "${SOURCE_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |
+  tar -x -C "${BASELINE_ROOT}"
+HARNESS="${PRODUCT_ROOT}/scripts/tests/test.sh"
+[[ -f "${HARNESS}" && ! -L "${HARNESS}" && -x "${HARNESS}" ]] ||
+  fail 'Staged gate orchestrator must remain a regular executable file'
+grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${HARNESS}" ||
+  fail 'Staged gate harness marker was removed'
+
+# Export tests still need private task context until the approved TASK 509
+# retirement. Copy only canonical Markdown into this disposable owner-only tree.
+if [[ -f "${PRODUCT_ROOT}/scripts/utils/export-task-history.sh" &&
+  ( "${GATE_TIER}" == full || " ${SELECTED_CASES[*]} " == *' scripts/tests/test-task-history-export.sh '* ) ]]; then
+  [[ -f "${SOURCE_ROOT}/docs/tasks.md" && ! -L "${SOURCE_ROOT}/docs/tasks.md" ]] ||
+    fail 'Private task context is missing'
+  mkdir -p "${PRODUCT_ROOT}/docs/tasks/done"
+  cp "${SOURCE_ROOT}/docs/tasks.md" "${PRODUCT_ROOT}/docs/tasks.md"
+  chmod 600 "${PRODUCT_ROOT}/docs/tasks.md"
+  while IFS= read -r -d '' PATH_NAME; do
+    RELATIVE_PATH="${PATH_NAME#"${SOURCE_ROOT}/"}"
+    [[ "${RELATIVE_PATH}" =~ ^docs/tasks/(done/)?[0-9]{3}-[a-z0-9-]+\.md$ &&
+      ! -L "${PATH_NAME}" ]] || fail 'Noncanonical private task context'
+    cp "${PATH_NAME}" "${PRODUCT_ROOT}/${RELATIVE_PATH}"
+    chmod 600 "${PRODUCT_ROOT}/${RELATIVE_PATH}"
+  done < <(find "${SOURCE_ROOT}/docs/tasks" -type f -name '*.md' -print0)
+  # Fixtures may ignore tasks only in their primary repository's local exclude.
+  printf '/docs/tasks.md\n/docs/tasks/\n' >>"${PRODUCT_ROOT}/.git/info/exclude"
+fi
+
+read_manifest() {
+  local ROOT="$1"
+  local OPTION="$2"
+  local DESTINATION="$3"
+  MAILCLI_ROOT="${PRODUCT_ROOT}" "${ROOT}/scripts/tests/test.sh" "${OPTION}" >"${DESTINATION}"
+  local CASE_PATH
+  while IFS= read -r CASE_PATH; do
+    [[ "${CASE_PATH}" =~ ^scripts/tests/test-[a-z0-9-]+\.sh$ ]] ||
+      fail "Noncanonical shell test registration: ${CASE_PATH}"
+    [[ -f "${ROOT}/${CASE_PATH}" && ! -L "${ROOT}/${CASE_PATH}" && -x "${ROOT}/${CASE_PATH}" ]] ||
+      fail "Registered shell test is not a regular executable: ${CASE_PATH}"
+  done <"${DESTINATION}"
+  [[ -z "$(LC_ALL=C sort "${DESTINATION}" | uniq -d)" ]] ||
+    fail 'Duplicate shell test registration'
+}
+BASELINE_MARKER=false
+if grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${BASELINE_ROOT}/scripts/tests/test.sh"; then
+  BASELINE_MARKER=true
+  read_manifest "${BASELINE_ROOT}" --list-shell-tests "${TEST_ROOT}/baseline-cases"
+  read_manifest "${BASELINE_ROOT}" --list-live-shell-tests "${TEST_ROOT}/baseline-live"
+else
+  [[ "${GATE_TIER}" == targeted ]] || fail 'Bootstrap requires explicit targeted checks'
+  git -C "${SOURCE_ROOT}" ls-tree -r --name-only "${BASELINE_HEAD}" scripts/tests |
+    awk '/^scripts\/tests\/test-.*\.sh$/ && $0 != "scripts/tests/test-live-responsiveness.sh"' >"${TEST_ROOT}/baseline-cases"
+  printf 'scripts/tests/test-live-responsiveness.sh\n' >"${TEST_ROOT}/baseline-live"
+fi
+read_manifest "${PRODUCT_ROOT}" --list-shell-tests "${TEST_ROOT}/staged-cases"
+read_manifest "${PRODUCT_ROOT}" --list-live-shell-tests "${TEST_ROOT}/staged-live"
+cat "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/staged-live" |
+  LC_ALL=C sort >"${TEST_ROOT}/registered"
+[[ -z "$(uniq -d "${TEST_ROOT}/registered")" ]] || fail 'Shell test registered in multiple modes'
+git -C "${PRODUCT_ROOT}" ls-files scripts/tests |
+  awk '/^scripts\/tests\/test-.*\.sh$/' |
+  LC_ALL=C sort >"${TEST_ROOT}/inventory"
+while IFS= read -r CASE_PATH; do
+  [[ "${CASE_PATH}" =~ ^scripts/tests/test-[a-z0-9-]+\.sh$ ]] ||
+    fail "Noncanonical shell test filename: ${CASE_PATH}"
+done <"${TEST_ROOT}/inventory"
+diff -u "${TEST_ROOT}/inventory" "${TEST_ROOT}/registered" ||
+  fail 'Every staged shell test must be registered, including opt-in live cases'
+
+retired_case() {
+  local CASE_PATH="$1"
+  case ",${TASK_IDS}," in *,509,*) ;; *) return 1 ;; esac
+  case "${CASE_PATH}" in
+    scripts/tests/test-private-closure.sh | scripts/tests/test-task-history-export.sh) ;;
+    *) return 1 ;;
+  esac
+  [[ ! -e "${PRODUCT_ROOT}/${CASE_PATH}" &&
+    ! -e "${PRODUCT_ROOT}/scripts/utils/export-task-history.sh" ]] || return 1
+  ! grep -Eq '^(private_task_snapshot|verify_private_task_scope|source_task_manifest|private_proof_lease)\(\)|private-proof' \
+    "${PRODUCT_ROOT}/scripts/utils/manage-write-lease.sh"
+}
+
+# Ordinary cases cannot silently become opt-in live cases; retained live cases
+# must keep their explicit registration. Only the named obsolete feature retires.
+while IFS= read -r CASE_PATH; do
+  if ! grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-cases"; then
+    retired_case "${CASE_PATH}" || fail "Baseline shell test removed or made opt-in: ${CASE_PATH}"
+    printf 'retired_shell_test=%s\n' "${CASE_PATH}"
+  fi
+done <"${TEST_ROOT}/baseline-cases"
+while IFS= read -r CASE_PATH; do
+  grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-live" ||
+    fail "Baseline live test registration removed: ${CASE_PATH}"
+done <"${TEST_ROOT}/baseline-live"
+
+cp "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/executed-cases"
+if [[ "${GATE_TIER}" == targeted ]]; then
+  printf '%s\n' "${SELECTED_CASES[@]}" >"${TEST_ROOT}/executed-cases"
+  [[ -z "$(LC_ALL=C sort "${TEST_ROOT}/executed-cases" | uniq -d)" ]] || fail 'Duplicate selected check'
+  while IFS= read -r CASE_PATH; do
+    grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-cases" || fail "Unregistered selected check: ${CASE_PATH}"
+  done <"${TEST_ROOT}/executed-cases"
+  MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}" --checks "${SELECTED_CASES[@]}"
+else
+  MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}"
+fi
+: >"${TEST_ROOT}/expected-receipts"
+if [[ "${GATE_TIER}" == full ]]; then
+  CORE_HASH="$(MAILCLI_ROOT="${PRODUCT_ROOT}" "${HARNESS}" --core-source | shasum -a 256 | awk '{print $1}')"
+  printf '%s\tcore-checks\n' "${CORE_HASH}" >>"${TEST_ROOT}/expected-receipts"
+fi
+while IFS= read -r CASE_PATH; do
+  CASE_HASH="$(shasum -a 256 "${PRODUCT_ROOT}/${CASE_PATH}" | awk '{print $1}')"
+  printf '%s\t%s\n' "${CASE_HASH}" "${CASE_PATH}" >>"${TEST_ROOT}/expected-receipts"
+done <"${TEST_ROOT}/executed-cases"
+LC_ALL=C sort "${RECEIPTS}" >"${TEST_ROOT}/actual-receipts"
+LC_ALL=C sort "${TEST_ROOT}/expected-receipts" >"${TEST_ROOT}/sorted-expected"
+diff -u "${TEST_ROOT}/sorted-expected" "${TEST_ROOT}/actual-receipts" ||
+  fail 'Staged harness did not execute every registered shell test exactly once'
+
+HARNESS_MODE=staged
+if [[ "${GATE_TIER}" == full ]]; then
+  BASELINE_CORE_HASH="$(MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/scripts/tests/test.sh" --core-source | shasum -a 256 | awk '{print $1}')"
+fi
+if [[ "${GATE_TIER}" == full && "${BASELINE_CORE_HASH}" != "${CORE_HASH}" ]]; then
+  MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/scripts/tests/test.sh" --core-only
+  HARNESS_MODE=staged+baseline
+fi
+while IFS= read -r CASE_PATH; do
+  retired_case "${CASE_PATH}" && continue
+  if [[ "${GATE_TIER}" == targeted ]] && ! grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/executed-cases"; then continue; fi
+  BASELINE_HASH="$(shasum -a 256 "${BASELINE_ROOT}/${CASE_PATH}" | awk '{print $1}')"
+  if ! grep -Fxq "${BASELINE_HASH}"$'\t'"${CASE_PATH}" "${RECEIPTS}"; then
+    printf 'baseline_shell_test=%s\n' "${CASE_PATH}"
+    MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/${CASE_PATH}"
+    HARNESS_MODE=staged+baseline
+  fi
+done <"${TEST_ROOT}/baseline-cases"
+[[ "$(git -C "${PRODUCT_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" &&
+  "$(git -C "${PRODUCT_ROOT}" write-tree)" == "${INDEX_TREE}" ]] ||
+  fail 'Isolated gate HEAD or index changed during verification'
+git -C "${PRODUCT_ROOT}" diff --quiet || fail 'Isolated gate product bytes changed during verification'
+[[ -z "$(git -C "${PRODUCT_ROOT}" ls-files -v | grep -E '^[a-zS] ' || true)" ]] ||
+  fail 'Isolated gate changed tracked index verification flags'
+[[ -z "$(git -C "${PRODUCT_ROOT}" ls-files --others --exclude-standard)" ]] ||
+  fail 'Isolated gate left nonignored product files'
+[[ "$(git -C "${PRODUCT_ROOT}" for-each-ref --format='%(refname) %(objectname)')" == "${PRODUCT_REFS_BEFORE}" ]] ||
+  fail 'Isolated gate changed branch, remote-tracking or tag refs'
+printf 'gate_harness=%s\ngate_index_tree=%s\n' "${HARNESS_MODE}" "${INDEX_TREE}"
+printf 'gate_tier=%s\n' "${GATE_TIER}"
+sed 's/^/shell_test_receipt=/' "${TEST_ROOT}/actual-receipts"

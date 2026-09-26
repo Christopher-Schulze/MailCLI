@@ -72,16 +72,6 @@ mkdir -p "${TEST_REPOSITORY}/ignored/nested" "${TEST_REPOSITORY}/ignored/empty"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 printf 'nested\n' >"${TEST_REPOSITORY}/ignored/nested/keep.txt"
 
-expect_private_scope_failure() {
-  local COMMAND="$1"
-  local OWNER_TOKEN="$2"
-  if MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
-    "${LEASE_TOOL}" "${COMMAND}" "${OWNER_TOKEN}" >/dev/null 2>&1; then
-    printf '%s accepted an out-of-scope ignored task change\n' "${COMMAND}" >&2
-    exit 1
-  fi
-}
-
 expect_ignored_scope_failure() {
   local COMMAND="$1"
   local OWNER_TOKEN="$2"
@@ -152,20 +142,6 @@ printf 'other\n' >"${TEST_REPOSITORY}/other.txt"
 stage_fixture_path other.txt 100644
 printf 'changed\n' >"${TEST_REPOSITORY}/tracked.txt"
 stage_fixture_path tracked.txt 100644
-printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-expect_private_scope_failure review "${TOKEN}"
-printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-printf 'added\n' >"${TEST_REPOSITORY}/docs/tasks/175-added.md"
-expect_private_scope_failure review "${TOKEN}"
-rm "${TEST_REPOSITORY}/docs/tasks/175-added.md"
-rm "${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-expect_private_scope_failure review "${TOKEN}"
-printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-mv "${TEST_REPOSITORY}/docs/tasks/174-detail.md" \
-  "${TEST_REPOSITORY}/docs/tasks/174-moved.md"
-expect_private_scope_failure review "${TOKEN}"
-mv "${TEST_REPOSITORY}/docs/tasks/174-moved.md" \
-  "${TEST_REPOSITORY}/docs/tasks/174-detail.md"
 printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 expect_ignored_scope_failure review "${TOKEN}"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
@@ -189,10 +165,6 @@ MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
 printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 expect_ignored_scope_failure gate "${TOKEN}"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
-printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-expect_private_scope_failure gate "${TOKEN}"
-printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-
 GATE_STATUS=0
 MAILCLI_TEST_GATE_STATUS=23 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
   "${LEASE_TOOL}" gate "${TOKEN}" >/dev/null 2>&1 || GATE_STATUS=$?
@@ -214,9 +186,6 @@ git -C "${TEST_REPOSITORY}" checkout -q --detach "${TASK_COMMIT}"
 printf 'changed\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 expect_ignored_scope_failure release "${TOKEN}"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
-printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-expect_private_scope_failure release "${TOKEN}"
-printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
   "${LEASE_TOOL}" release "${TOKEN}" >/dev/null
 [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-lease" ]]
@@ -262,17 +231,6 @@ printf '%s\n' "${CLEANUP_ABORT_OUTPUT}" |
   grep -Fq $'allowed_path_change\tignored/nested\tdirectory\tabsent'
 printf '%s\n' "${CLEANUP_ABORT_OUTPUT}" |
   grep -Eq $'allowed_path_change\tignored/nested/keep.txt\tfile:[0-9a-f]{64}\tabsent'
-
-PRIVATE_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
-  "${LEASE_TOOL}" acquire 175 private-owner docs/tasks.md)"
-PRIVATE_TOKEN="$(printf '%s\n' "${PRIVATE_ACQUIRE_OUTPUT}" |
-  sed -n 's/^write_lease_token=//p')"
-printf 'detail changed\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-expect_private_scope_failure abort "${PRIVATE_TOKEN}"
-printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-printf 'board allowed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
-MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
-  "${LEASE_TOOL}" abort "${PRIVATE_TOKEN}" >/dev/null
 
 HARNESS_ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
   "${LEASE_TOOL}" acquire 176 harness-writer scripts/tests/test.sh)"

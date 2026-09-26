@@ -9,6 +9,7 @@ BACKUP_ROOT="${TEST_ROOT}/backups"
 LEASE_TOOL="${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 EXPORT_TOOL="${TEST_REPOSITORY}/scripts/utils/export-task-history.sh"
 mkdir -p "${TEST_REPOSITORY}/scripts/utils" \
+  "${TEST_REPOSITORY}/scripts/tests" \
   "${TEST_REPOSITORY}/docs/tasks/done" \
   "${TEST_REPOSITORY}/ignored/tree" "${BACKUP_ROOT}"
 chmod 700 "${BACKUP_ROOT}"
@@ -20,8 +21,12 @@ git -C "${TEST_REPOSITORY}" init -q -b main
 git -C "${TEST_REPOSITORY}" config user.name "MailCLI Test"
 git -C "${TEST_REPOSITORY}" config user.email "mailcli-test@example.invalid"
 printf 'tracked baseline\n' >"${TEST_REPOSITORY}/tracked.txt"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"' \
+  'exit 0' >"${TEST_REPOSITORY}/scripts/tests/test.sh"
+chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
 for RELATIVE_PATH in tracked.txt scripts/utils/manage-write-lease.sh \
-  scripts/utils/export-task-history.sh; do
+  scripts/utils/export-task-history.sh scripts/tests/test.sh; do
   BLOB="$(git -C "${TEST_REPOSITORY}" hash-object -w \
     "${TEST_REPOSITORY}/${RELATIVE_PATH}")"
   MODE=100644
@@ -160,5 +165,59 @@ diff -u \
 [[ "$(git -C "${TEST_REPOSITORY}" rev-parse HEAD)" == "${INITIAL_COMMIT}" ]]
 [[ -z "$(git -C "${TEST_REPOSITORY}" status --porcelain=v1 --untracked-files=all)" ]]
 "${EXPORT_TOOL}" verify "${FRESH_SNAPSHOT}" >/dev/null
+
+# These assertions belong to the private-proof feature, rather than the retained
+# product/asset coordination suite. TASK 509 may retire only this whole feature.
+expect_private_scope_failure() {
+  local COMMAND="$1"
+  local OWNER_TOKEN="$2"
+  local OUTPUT
+  if OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+    "${LEASE_TOOL}" "${COMMAND}" "${OWNER_TOKEN}" 2>&1)"; then
+    printf '%s accepted an out-of-scope ignored task change\n' "${COMMAND}" >&2
+    exit 1
+  fi
+  [[ "${OUTPUT}" == *'Private task path changed outside the lease allowlist'* ]]
+}
+ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" acquire 176 scope-owner tracked.txt)"
+TOKEN="$(printf '%s\n' "${ACQUIRE_OUTPUT}" | sed -n 's/^write_lease_token=//p')"
+printf 'tracked scope change\n' >"${TEST_REPOSITORY}/tracked.txt"
+BLOB="$(git -C "${TEST_REPOSITORY}" hash-object -w "${TEST_REPOSITORY}/tracked.txt")"
+git -C "${TEST_REPOSITORY}" update-index --cacheinfo "100644,${BLOB},tracked.txt"
+cp "${TEST_REPOSITORY}/docs/tasks.md" "${TEST_ROOT}/scope-board"
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure review "${TOKEN}"
+cp "${TEST_ROOT}/scope-board" "${TEST_REPOSITORY}/docs/tasks.md"
+printf 'added\n' >"${TEST_REPOSITORY}/docs/tasks/177-added.md"
+expect_private_scope_failure review "${TOKEN}"
+rm "${TEST_REPOSITORY}/docs/tasks/177-added.md"
+mv "${TEST_REPOSITORY}/docs/tasks/176-next.md" "${TEST_ROOT}/scope-detail"
+expect_private_scope_failure review "${TOKEN}"
+mv "${TEST_ROOT}/scope-detail" "${TEST_REPOSITORY}/docs/tasks/176-moved.md"
+expect_private_scope_failure review "${TOKEN}"
+mv "${TEST_REPOSITORY}/docs/tasks/176-moved.md" "${TEST_REPOSITORY}/docs/tasks/176-next.md"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" "${LEASE_TOOL}" review "${TOKEN}" >/dev/null
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure gate "${TOKEN}"
+cp "${TEST_ROOT}/scope-board" "${TEST_REPOSITORY}/docs/tasks.md"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" "${LEASE_TOOL}" gate "${TOKEN}" >/dev/null
+SCOPE_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
+SCOPE_COMMIT="$(printf 'TASK 176: private scope fixture\n' |
+  git -C "${TEST_REPOSITORY}" commit-tree "${SCOPE_TREE}" -p "${INITIAL_COMMIT}")"
+git -C "${TEST_REPOSITORY}" checkout -q --detach "${SCOPE_COMMIT}"
+printf 'board changed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+expect_private_scope_failure release "${TOKEN}"
+cp "${TEST_ROOT}/scope-board" "${TEST_REPOSITORY}/docs/tasks.md"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" "${LEASE_TOOL}" release "${TOKEN}" >/dev/null
+ACQUIRE_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" \
+  "${LEASE_TOOL}" acquire 176 private-owner docs/tasks.md)"
+TOKEN="$(printf '%s\n' "${ACQUIRE_OUTPUT}" | sed -n 's/^write_lease_token=//p')"
+cp "${TEST_REPOSITORY}/docs/tasks/176-next.md" "${TEST_ROOT}/scope-detail"
+printf 'detail changed\n' >"${TEST_REPOSITORY}/docs/tasks/176-next.md"
+expect_private_scope_failure abort "${TOKEN}"
+cp "${TEST_ROOT}/scope-detail" "${TEST_REPOSITORY}/docs/tasks/176-next.md"
+printf 'board allowed\n' >"${TEST_REPOSITORY}/docs/tasks.md"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY}" "${LEASE_TOOL}" abort "${TOKEN}" >/dev/null
 
 printf 'Private closure passed: exact move and cleanup scope, fresh owner-only snapshot, durable receipt, and independent abort comparison\n'

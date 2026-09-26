@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 MAILCLI_ROOT="${MAILCLI_ROOT:-${SCRIPT_BASE}}"
-DRIFT_REPORT="${SCRIPT_BASE}/scripts/tests/report-skill-drift.sh"
+DRIFT_REPORT="${MAILCLI_ROOT}/scripts/tests/report-skill-drift.sh"
 REPOSITORY_SKILL="${MAILCLI_ROOT}/skills/mailcli"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-skill-drift-test.XXXXXX")"
 PACKAGE_ROOT="${TEST_ROOT}/package"
