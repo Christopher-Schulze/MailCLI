@@ -99,16 +99,17 @@ func searchResponsePage(page *mail.SearchPage) *json.RawMessage {
 }
 
 type errorData struct {
-	Code                  string                      `json:"code"`
-	Message               string                      `json:"message"`
-	Guidance              *mail.OperationGuidance     `json:"guidance"`
-	ValidSubcommands      []string                    `json:"valid_subcommands,omitempty"`
-	RequiredBytes         *int64                      `json:"required_bytes,omitempty"`
-	Limit                 *transport.ResourceLimit    `json:"limit,omitempty"`
-	ObservedAtLeast       *int64                      `json:"observed_at_least,omitempty"`
-	DraftRevisionConflict *mail.DraftRevisionConflict `json:"draft_revision_conflict,omitempty"`
-	DraftEditor           *draftEditorEvidence        `json:"draft_editor,omitempty"`
-	outputSize            *outputSizeEvidence         `json:"-"`
+	Code                  string                          `json:"code"`
+	Message               string                          `json:"message"`
+	Guidance              *mail.OperationGuidance         `json:"guidance"`
+	ValidSubcommands      []string                        `json:"valid_subcommands,omitempty"`
+	RequiredBytes         *int64                          `json:"required_bytes,omitempty"`
+	Limit                 *transport.ResourceLimit        `json:"limit,omitempty"`
+	ObservedAtLeast       *int64                          `json:"observed_at_least,omitempty"`
+	DraftRevisionConflict *mail.DraftRevisionConflict     `json:"draft_revision_conflict,omitempty"`
+	DraftEditor           *draftEditorEvidence            `json:"draft_editor,omitempty"`
+	UnclaimedSpool        *mail.UnclaimedSpoolObservation `json:"unclaimed_spool,omitempty"`
+	outputSize            *outputSizeEvidence             `json:"-"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
@@ -175,15 +176,35 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		evidence := oversized.sizeEvidence()
 		outputSize = &evidence
 	}
+	var unclaimedSpool *mail.UnclaimedSpoolObservation
+	var operation *mail.OperationError
+	if errors.As(err, &operation) {
+		unclaimedSpool = operation.UnclaimedSpool
+	}
 	return &errorData{
 		Code: code, Message: publicFailureMessage(err), Guidance: &guidance,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
-		Limit: limit, ObservedAtLeast: observedAtLeast, outputSize: outputSize,
+		Limit: limit, ObservedAtLeast: observedAtLeast, UnclaimedSpool: unclaimedSpool,
+		outputSize: outputSize,
 	}
 }
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if command == "drafts.send" {
+		var operation *mail.OperationError
+		if errors.As(err, &operation) && operation.DraftRef != "" && operation.UnclaimedSpool != nil {
+			guidance = mail.OperationGuidance{
+				Phase: mail.OperationPhaseExecution, EffectCertainty: mail.EffectNone,
+				Retryability: mail.RetryUserInputRequired, ReplayAllowed: false,
+				Recovery: mail.RecoveryGuidance{
+					Action: mail.RecoveryInspect, Command: "drafts.inspect",
+					Args:        []string{"--ref", operation.DraftRef, "--json"},
+					Instruction: "SMTP was not contacted. Inspect this draft and confirm that no send claim remains. Remove only the reported path after confirming the draft lock is free and its current type, owner UID, and mode still match this observation. If it is a symlink, unlink only the link and never its target; then retry the send explicitly.",
+				},
+			}
+		}
+	}
 	if command == "drafts.send" && transport.IsSMTPSourceInvalid(err) && data.draftRef != "" {
 		guidance.Recovery = mail.RecoveryGuidance{
 			Action: mail.RecoveryInspect, Command: "drafts.inspect",

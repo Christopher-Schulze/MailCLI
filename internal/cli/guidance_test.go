@@ -123,6 +123,147 @@ func TestDraftSendSourceInvalidGuidanceInspectsRetainedDraft(t *testing.T) {
 	}
 }
 
+func TestDraftSendForeignSpoolGuidanceCarriesNoFollowEvidence(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	submitter := &cliSubmitter{}
+	service := mail.NewServiceWithTransport(nil, root, mail.SendTransport{
+		Submitter: submitter, Mirror: &cliMirror{}, Credentials: cliCredentials{},
+	})
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Foreign spool", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	foreignPath := filepath.Join(t.TempDir(), "foreign-spool")
+	foreignBytes := []byte("preserve this target")
+	if err := os.WriteFile(foreignPath, foreignBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile(foreign spool) error = %v", err)
+	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	if err := os.Symlink(foreignPath, spoolPath); err != nil {
+		t.Fatalf("Symlink(spool) error = %v", err)
+	}
+	linkBefore, err := os.Lstat(spoolPath)
+	if err != nil {
+		t.Fatalf("Lstat(spool before send) error = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDraftSend(context.Background(), service,
+		[]string{"--ref", draft.Ref, "--expected-revision", draft.Revision, "--confirm", "--json"},
+		&stdout, &stderr,
+	)
+	if code != 1 || stderr.Len() != 0 || submitter.calls != 0 {
+		t.Fatalf("send code=%d SMTP calls=%d stdout=%q stderr=%q", code, submitter.calls, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "send_recovery_spool_changed" ||
+		response.Error.UnclaimedSpool == nil || response.Error.Guidance == nil {
+		t.Fatalf("foreign-spool response = %+v", response)
+	}
+	observation := response.Error.UnclaimedSpool
+	if observation.Path != spoolPath || !filepath.IsAbs(observation.Path) ||
+		observation.ObjectType != "symlink" || observation.OwnerUID != uint32(os.Geteuid()) ||
+		observation.Mode != fmt.Sprintf("%04o", linkBefore.Mode().Perm()) {
+		t.Fatalf("unclaimed spool evidence = %+v", observation)
+	}
+	guidance := response.Error.Guidance
+	if guidance.EffectCertainty != mail.EffectNone || guidance.Retryability != mail.RetryUserInputRequired ||
+		guidance.ReplayAllowed || guidance.Recovery.Action != mail.RecoveryInspect ||
+		guidance.Recovery.Command != "drafts.inspect" ||
+		!equalStrings(guidance.Recovery.Args, []string{"--ref", draft.Ref, "--json"}) {
+		t.Fatalf("foreign-spool guidance = %+v", guidance)
+	}
+	instruction := strings.ToLower(guidance.Recovery.Instruction)
+	for _, required := range []string{"smtp was not contacted", "lock is free", "send claim", "symlink", "never its target"} {
+		if !strings.Contains(instruction, required) {
+			t.Errorf("recovery instruction %q omits %q", guidance.Recovery.Instruction, required)
+		}
+	}
+	linkAfter, err := os.Lstat(spoolPath)
+	if err != nil || !os.SameFile(linkBefore, linkAfter) {
+		t.Fatalf("send changed foreign spool link identity: info=%v error=%v", linkAfter, err)
+	}
+	linkTarget, err := os.Readlink(spoolPath)
+	if err != nil || linkTarget != foreignPath {
+		t.Fatalf("send changed foreign spool link target = %q, error = %v", linkTarget, err)
+	}
+	after, err := os.ReadFile(foreignPath)
+	if err != nil || !bytes.Equal(after, foreignBytes) {
+		t.Fatalf("send changed foreign target bytes = %q, error = %v", after, err)
+	}
+}
+
+func TestDraftReconcileForeignAcceptedSpoolKeepsReconciliationGuidance(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "drafts")
+	service := newTransportTestService(root, mirrorFailure())
+	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
+		From: "sender@icloud.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
+		Subject: "Accepted spool", Body: "Body",
+	}})
+	if err != nil {
+		t.Fatalf("CreateDraft() error = %v", err)
+	}
+	first, err := service.SendDraft(context.Background(), mail.SendDraftRequest{
+		Ref: draft.Ref, ExpectedRevision: draft.Revision,
+	})
+	if errorCode(err) != transport.CodeIMAPAppendFailed || first.AttemptID == "" ||
+		first.Outcome != mail.SendOutcomeMirrorPending || !first.DraftRetained {
+		t.Fatalf("SendDraft() = %+v, error = %v, want retained accepted mirror", first, err)
+	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	foreignPath := filepath.Join(t.TempDir(), "accepted-spool-target")
+	foreignBytes := []byte("accepted bytes stay untouched")
+	if err := os.WriteFile(foreignPath, foreignBytes, 0o600); err != nil {
+		t.Fatalf("WriteFile(foreign target) error = %v", err)
+	}
+	if err := os.Remove(spoolPath); err != nil {
+		t.Fatalf("Remove(accepted spool) error = %v", err)
+	}
+	if err := os.Symlink(foreignPath, spoolPath); err != nil {
+		t.Fatalf("Symlink(accepted spool) error = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDraftReconcile(context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 {
+		t.Fatalf("reconcile code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.Error == nil || response.Error.Code != "send_recovery_spool_changed" ||
+		response.Error.UnclaimedSpool != nil || response.Error.Guidance == nil || response.Data.SendResult == nil {
+		t.Fatalf("accepted-spool response = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseMirror || guidance.EffectCertainty != mail.EffectPartial ||
+		guidance.Retryability != mail.RetryObserveRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryReconcile || guidance.Recovery.Command != "drafts.reconcile" ||
+		guidance.Recovery.OperationID != first.AttemptID ||
+		!equalStrings(guidance.Recovery.Args, []string{"--ref", draft.Ref, "--json"}) {
+		t.Fatalf("accepted-spool guidance = %+v", guidance)
+	}
+	instruction := strings.ToLower(guidance.Recovery.Instruction)
+	if strings.Contains(instruction, "remove") || strings.Contains(instruction, "delete") || strings.Contains(instruction, "unlink") {
+		t.Fatalf("accepted-spool guidance recommends deletion: %q", guidance.Recovery.Instruction)
+	}
+	linkTarget, err := os.Readlink(spoolPath)
+	if err != nil || linkTarget != foreignPath {
+		t.Fatalf("reconcile changed accepted spool link = %q, error = %v", linkTarget, err)
+	}
+	after, err := os.ReadFile(foreignPath)
+	if err != nil || !bytes.Equal(after, foreignBytes) {
+		t.Fatalf("reconcile changed accepted target bytes = %q, error = %v", after, err)
+	}
+}
+
 func TestHandoffUnknownGuidanceKeepsRecoveryWithoutAttachments(t *testing.T) {
 	result := draftHandoffResult{
 		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeUnknown,

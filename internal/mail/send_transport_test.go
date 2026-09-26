@@ -1266,26 +1266,46 @@ func TestReconcileMirrorPendingReplaysDurableSpoolAfterRestart(t *testing.T) {
 func TestReconcileMirrorPendingBlocksMissingOrCorruptSpool(t *testing.T) {
 	tests := []struct {
 		name     string
-		mutate   func(*testing.T, string)
+		mutate   func(*testing.T, string) string
 		wantCode string
 	}{
 		{
 			name: "missing",
-			mutate: func(t *testing.T, path string) {
+			mutate: func(t *testing.T, path string) string {
 				t.Helper()
 				if err := os.Remove(path); err != nil {
 					t.Fatalf("Remove(spool) error = %v", err)
 				}
+				return ""
 			},
 			wantCode: "send_recovery_spool_missing",
 		},
 		{
 			name: "corrupt",
-			mutate: func(t *testing.T, path string) {
+			mutate: func(t *testing.T, path string) string {
 				t.Helper()
 				if err := os.WriteFile(path, []byte("corrupt spool"), 0o600); err != nil {
 					t.Fatalf("WriteFile(spool) error = %v", err)
 				}
+				return ""
+			},
+			wantCode: "send_recovery_spool_changed",
+		},
+		{
+			name: "foreign symlink",
+			mutate: func(t *testing.T, path string) string {
+				t.Helper()
+				target := path + ".foreign"
+				if err := os.WriteFile(target, []byte("foreign accepted bytes"), 0o600); err != nil {
+					t.Fatalf("WriteFile(foreign target) error = %v", err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove(spool) error = %v", err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("Symlink(spool) error = %v", err)
+				}
+				return target
 			},
 			wantCode: "send_recovery_spool_changed",
 		},
@@ -1314,15 +1334,36 @@ func TestReconcileMirrorPendingBlocksMissingOrCorruptSpool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("acceptedMessageSpoolPath() error = %v", err)
 			}
-			test.mutate(t, spoolPath)
+			foreignPath := test.mutate(t, spoolPath)
+			var foreignBytes []byte
+			if foreignPath != "" {
+				foreignBytes, err = os.ReadFile(foreignPath)
+				if err != nil {
+					t.Fatalf("ReadFile(foreign target) error = %v", err)
+				}
+			}
 			mirrorCalls := mirror.calls
 
 			result, err := service.ReconcileDraft(context.Background(), draft.Ref)
 			if errorCode(err) != test.wantCode || result.Outcome != SendOutcomeMirrorPending || !result.DraftRetained {
 				t.Fatalf("ReconcileDraft() = %+v, error = %v, want %s", result, err, test.wantCode)
 			}
+			var operation *OperationError
+			if !errors.As(err, &operation) || operation.UnclaimedSpool != nil {
+				t.Fatalf("accepted-spool failure exposed unclaimed evidence: %+v, error = %v", operation, err)
+			}
 			if mirror.calls != mirrorCalls {
 				t.Fatalf("mirror calls = %d, want %d after blocked recovery", mirror.calls, mirrorCalls)
+			}
+			if foreignPath != "" {
+				linkTarget, readErr := os.Readlink(spoolPath)
+				if readErr != nil || linkTarget != foreignPath {
+					t.Fatalf("accepted spool symlink = %q, error = %v", linkTarget, readErr)
+				}
+				after, readErr := os.ReadFile(foreignPath)
+				if readErr != nil || !bytes.Equal(foreignBytes, after) {
+					t.Fatalf("accepted foreign target changed: read error = %v", readErr)
+				}
 			}
 			retained, getErr := service.GetDraft(draft.Ref)
 			if getErr != nil || retained.SendAttempt == nil || retained.SendAttempt.Outcome != SendOutcomeMirrorPending {
@@ -1607,14 +1648,35 @@ func TestSendDraftPreservesAmbiguousSpoolAndPruneSkipsIt(t *testing.T) {
 	if err := os.Symlink(foreignPath, spoolPath); err != nil {
 		t.Fatalf("Symlink(spool) error = %v", err)
 	}
+	linkInfo, err := os.Lstat(spoolPath)
+	if err != nil {
+		t.Fatalf("Lstat(spool before send) error = %v", err)
+	}
 
-	_, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+	_, err = service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
 	if errorCode(err) != "send_recovery_spool_changed" || submitter.calls != 0 || mirror.calls != 0 {
 		t.Fatalf("SendDraft() error = %v, submitter/mirror = %d/%d", err, submitter.calls, mirror.calls)
+	}
+	var operation *OperationError
+	if !errors.As(err, &operation) || operation.DraftRef != draft.Ref || operation.UnclaimedSpool == nil {
+		t.Fatalf("SendDraft() operation = %+v, want unclaimed spool observation", operation)
+	}
+	observation := operation.UnclaimedSpool
+	if observation.Path != spoolPath || !filepath.IsAbs(observation.Path) ||
+		observation.ObjectType != "symlink" || observation.OwnerUID != uint32(os.Geteuid()) ||
+		observation.Mode != fmt.Sprintf("%04o", linkInfo.Mode().Perm()) {
+		t.Fatalf("unclaimed spool observation = %+v", observation)
+	}
+	if attempt, readErr := readSendAttempt(root, draft.Ref); readErr != nil || attempt != nil {
+		t.Fatalf("send claim after pre-submit refusal = %+v, error = %v", attempt, readErr)
 	}
 	linkTarget, err := os.Readlink(spoolPath)
 	if err != nil || linkTarget != foreignPath {
 		t.Fatalf("ambiguous spool link = %q, error = %v", linkTarget, err)
+	}
+	beforeTarget, err := os.ReadFile(foreignPath)
+	if err != nil || !bytes.Equal(beforeTarget, []byte("unverified")) {
+		t.Fatalf("foreign target changed by send refusal: bytes = %q, error = %v", beforeTarget, err)
 	}
 	pruned, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
 	if err != nil || len(pruned.SweptArtifacts) != 0 {
@@ -1623,6 +1685,10 @@ func TestSendDraftPreservesAmbiguousSpoolAndPruneSkipsIt(t *testing.T) {
 	linkTarget, err = os.Readlink(spoolPath)
 	if err != nil || linkTarget != foreignPath {
 		t.Fatalf("prune changed ambiguous spool link = %q, error = %v", linkTarget, err)
+	}
+	afterTarget, err := os.ReadFile(foreignPath)
+	if err != nil || !bytes.Equal(afterTarget, []byte("unverified")) {
+		t.Fatalf("foreign target changed by prune: bytes = %q, error = %v", afterTarget, err)
 	}
 }
 

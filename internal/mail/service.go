@@ -89,10 +89,19 @@ type ValidationError struct {
 }
 
 type OperationError struct {
-	Code     string
-	Message  string
-	DraftRef string
-	Err      error
+	Code           string
+	Message        string
+	DraftRef       string
+	UnclaimedSpool *UnclaimedSpoolObservation
+	Err            error
+}
+
+// UnclaimedSpoolObservation records no-follow metadata for an unclaimed send spool.
+type UnclaimedSpoolObservation struct {
+	Path       string `json:"path"`
+	ObjectType string `json:"object_type"`
+	OwnerUID   uint32 `json:"owner_uid"`
+	Mode       string `json:"mode"`
 }
 
 func NewService(gateway Gateway) *Service {
