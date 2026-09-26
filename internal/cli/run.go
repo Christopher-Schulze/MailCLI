@@ -108,17 +108,7 @@ type errorData struct {
 func newErrorData(command string, data responseData, err error) *errorData {
 	guidance := guidanceForResponse(command, data, err)
 	if command == "send.setup" {
-		if len(data.PartialEffects) == 0 {
-			guidance.EffectCertainty = mail.EffectNone
-		} else {
-			guidance = mail.OperationGuidance{
-				Phase: mail.OperationPhaseExecution, EffectCertainty: mail.EffectPartial,
-				Retryability: mail.RetryObserveRequired,
-				Recovery: mail.RecoveryGuidance{
-					Action: mail.RecoveryObserve, Command: "accounts.list", Args: []string{"--json"},
-				},
-			}
-		}
+		guidance = sendSetupErrorGuidance(guidance, data, err)
 	}
 	if command == "update" {
 		result := data.UpdateResult

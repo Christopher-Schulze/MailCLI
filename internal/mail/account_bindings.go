@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,8 +62,9 @@ type AccountBindingUpdate func(AccountBindingFile) (AccountBindingFile, error)
 type AccountBindingPublicationStatus string
 
 const (
-	AccountBindingPublicationNone    AccountBindingPublicationStatus = "none"
-	AccountBindingPublicationUnknown AccountBindingPublicationStatus = "unknown"
+	AccountBindingPublicationNone     AccountBindingPublicationStatus = "none"
+	AccountBindingPublicationUnknown  AccountBindingPublicationStatus = "unknown"
+	AccountBindingPublicationComplete AccountBindingPublicationStatus = "complete"
 )
 
 // AccountBindingStore persists explicit account identity bindings.
@@ -96,8 +98,8 @@ func (e *AccountBindingError) ErrorCode() string { return e.Code }
 // this error. Errors before rename have no published binding; errors after
 // rename are conservatively uncertain until the directory sync succeeds.
 func (e *AccountBindingError) BindingPublicationStatus() AccountBindingPublicationStatus {
-	if e.publicationStatus == AccountBindingPublicationUnknown {
-		return AccountBindingPublicationUnknown
+	if e.publicationStatus == AccountBindingPublicationUnknown || e.publicationStatus == AccountBindingPublicationComplete {
+		return e.publicationStatus
 	}
 	return AccountBindingPublicationNone
 }
@@ -596,18 +598,27 @@ func (s *fileAccountBindingStore) UpdateAccountBindings(ctx context.Context, upd
 		return err
 	}
 	defer func() {
-		if releaseErr := lease.release(); releaseErr != nil {
-			publicationStatus := AccountBindingPublicationUnknown
-			if result != nil {
-				publicationStatus = accountBindingPublicationStatus(result)
-			}
-			result = errors.Join(result, &AccountBindingError{
-				Code: "account_binding_unavailable", Message: "release account-binding lock", Err: releaseErr,
-				publicationStatus: publicationStatus,
-			})
-		}
+		result = finishAccountBindingUpdate(result, lease.release())
 	}()
-	return updateAccountBindingsLocked(ctx, lease, filepath.Base(path), update, s.publicationHook)
+	return updateAccountBindingsLocked(ctx, lease.draftLease, filepath.Base(path), update, s.publicationHook)
+}
+
+type accountBindingReleaseError struct{ *AccountBindingError }
+
+func (*accountBindingReleaseError) BindingLockReleaseFailed() bool { return true }
+
+func finishAccountBindingUpdate(result error, releaseErr error) error {
+	if releaseErr == nil {
+		return result
+	}
+	status := AccountBindingPublicationComplete
+	if result != nil {
+		status = accountBindingPublicationStatus(result)
+	}
+	return errors.Join(result, &accountBindingReleaseError{&AccountBindingError{
+		Code: "account_binding_unavailable", Message: "warning: account-binding lock release failed", Err: releaseErr,
+		publicationStatus: status,
+	}})
 }
 
 func accountBindingPublicationStatus(err error) AccountBindingPublicationStatus {
@@ -620,18 +631,117 @@ func accountBindingPublicationStatus(err error) AccountBindingPublicationStatus 
 	return AccountBindingPublicationNone
 }
 
-func acquireAccountBindingLease(ctx context.Context, path string) (*draftLease, error) {
+func acquireAccountBindingLease(ctx context.Context, path string) (*accountBindingLease, error) {
+	lockContext, cancel := context.WithTimeout(ctx, accountBindingLockWait)
+	defer cancel()
+	return acquireAccountBindingLeaseWithContext(lockContext, path)
+}
+
+type accountBindingLease struct {
+	*draftLease
+	bindingLock *os.File
+	once        sync.Once
+	releaseErr  error
+}
+
+func (l *accountBindingLease) release() error {
+	l.once.Do(func() {
+		l.releaseErr = errors.Join(syscall.Flock(int(l.bindingLock.Fd()), syscall.LOCK_UN), l.bindingLock.Close(), l.draftLease.release())
+	})
+	return l.releaseErr
+}
+
+func accountBindingLockName(name string) string {
+	if name == "account-bindings.json" {
+		return "account-bindings.lock"
+	}
+	digest := sha256.Sum256([]byte(name))
+	return "account-bindings-" + hex.EncodeToString(digest[:]) + ".lock"
+}
+
+func acquireAccountBindingLeaseWithContext(ctx context.Context, path string) (*accountBindingLease, error) {
 	lockReference, err := accountBindingLockReference(path)
 	if err != nil {
 		return nil, &AccountBindingError{Code: "account_binding_unavailable", Message: "resolve account-binding lock identity", Err: err}
 	}
-	lockContext, cancel := context.WithTimeout(ctx, accountBindingLockWait)
-	defer cancel()
-	lease, err := acquireDraftLease(lockContext, filepath.Dir(path), lockReference)
+	// Always acquire legacy before new; retain both inodes for existing waiters.
+	lease, err := acquireDraftLease(ctx, filepath.Dir(path), lockReference)
 	if err != nil {
 		return nil, accountBindingLeaseError(err)
 	}
-	return lease, nil
+	lock, err := openAccountBindingLock(lease.storage, accountBindingLockName(filepath.Base(path)))
+	if err != nil {
+		return nil, accountBindingLeaseError(errors.Join(err, lease.release()))
+	}
+	if err := waitAccountBindingLock(ctx, lock); err != nil {
+		return nil, accountBindingLeaseError(errors.Join(err, lock.Close(), lease.release()))
+	}
+	result := &accountBindingLease{draftLease: lease, bindingLock: lock}
+	info, err := lock.Stat()
+	if err == nil {
+		err = errors.Join(verifyAccountBindingDirectory(lease.storage.rootName, lease.lock.directory), verifyAccountBindingFileIdentity(lease.storage, accountBindingLockName(filepath.Base(path)), info))
+	}
+	if err != nil {
+		return nil, errors.Join(err, result.release())
+	}
+	return result, nil
+}
+
+func openAccountBindingLock(storage *draftStorage, name string) (*os.File, error) {
+	var before os.FileInfo
+	file, err := storage.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		before, err = storage.lstat(name)
+		if err != nil || !before.Mode().IsRegular() {
+			return nil, &AccountBindingError{Code: "account_binding_unsafe", Message: "account-binding lock is not a regular file", Err: err}
+		}
+		file, err = storage.root.OpenFile(name, os.O_RDWR, 0)
+	}
+	if err != nil {
+		if file != nil {
+			err = errors.Join(err, file.Close())
+		}
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err == nil && before != nil && !os.SameFile(before, info) {
+		err = &AccountBindingError{Code: "account_binding_changed", Message: "account-binding lock changed while opening"}
+	}
+	if err == nil {
+		err = verifyAccountBindingFileIdentity(storage, name, info)
+	}
+	if err == nil {
+		err = file.Chmod(0o600)
+	}
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
+}
+
+func waitAccountBindingLock(ctx context.Context, file *os.File) error {
+	ticker := time.NewTicker(draftLockPoll)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, syscall.Flock(int(file.Fd()), syscall.LOCK_UN))
+			}
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func updateAccountBindingsLocked(
@@ -779,6 +889,10 @@ func accountBindingBusyError(err error) error {
 }
 
 func accountBindingLeaseError(err error) error {
+	var binding *AccountBindingError
+	if errors.As(err, &binding) {
+		return err
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return accountBindingBusyError(err)
 	}

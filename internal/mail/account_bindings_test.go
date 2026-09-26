@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -342,6 +343,16 @@ func TestAccountBindingTemporaryOwnerPreservesPausedOtherWriter(t *testing.T) {
 	if err != nil || !bytes.Equal(payload, published) {
 		t.Fatalf("published binding differs from paused bytes: %v", err)
 	}
+	for _, basename := range []string{"first.json", "second.json"} {
+		name := fmt.Sprintf("account-bindings-%x.lock", sha256.Sum256([]byte(basename)))
+		info, err := os.Lstat(filepath.Join(directory, name))
+		if err != nil || info.Mode() != 0o600 {
+			t.Fatalf("owner-qualified lock %s: %v", name, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(directory, "account-bindings.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("custom owners created a shared lock: %v", err)
+	}
 }
 
 func TestAccountBindingTemporarySweepPreservesUnsafeObjects(t *testing.T) {
@@ -573,11 +584,15 @@ func TestAccountBindingUpdatesSerializeIndependentProcesses(t *testing.T) {
 }
 
 func runSerializedAccountBindingWriters(t *testing.T, path string, test accountBindingWriterCase) {
+	runSerializedAccountBindingWriterModes(t, path, test, false, false)
+}
+
+func runSerializedAccountBindingWriterModes(t *testing.T, path string, test accountBindingWriterCase, firstLegacy, secondLegacy bool) {
 	t.Helper()
-	first := startAccountBindingProcess(t, path, test.firstID, test.firstAlias, true)
+	first := startAccountBindingProcessMode(t, path, test.firstID, test.firstAlias, true, firstLegacy)
 	readAccountBindingProcessLine(t, first.output, "MAILCLI_BINDING_ATTEMPT")
 	readAccountBindingProcessLine(t, first.output, "MAILCLI_BINDING_CALLBACK")
-	second := startAccountBindingProcess(t, path, test.secondID, test.secondAlias, false)
+	second := startAccountBindingProcessMode(t, path, test.secondID, test.secondAlias, false, secondLegacy)
 	readAccountBindingProcessLine(t, second.output, "MAILCLI_BINDING_ATTEMPT")
 	readAccountBindingProcessLine(t, second.output, "MAILCLI_BINDING_BLOCKED")
 	secondCallback := nextAccountBindingProcessLine(second.output)
@@ -826,7 +841,20 @@ func TestAccountBindingStoreProcessHelper(t *testing.T) {
 	baseContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ctx := &accountBindingProcessWaitContext{Context: baseContext, t: t}
-	lease, err := acquireDraftLease(ctx, filepath.Dir(path), lockReference)
+	var lease *draftLease
+	var release func() error
+	if os.Getenv("MAILCLI_ACCOUNT_BINDING_LEGACY") == "1" {
+		lease, err = acquireDraftLease(ctx, filepath.Dir(path), lockReference)
+		if err == nil {
+			release = lease.release
+		}
+	} else {
+		var bindingLease *accountBindingLease
+		bindingLease, err = acquireAccountBindingLeaseWithContext(ctx, path)
+		if err == nil {
+			lease, release = bindingLease.draftLease, bindingLease.release
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +870,7 @@ func TestAccountBindingStoreProcessHelper(t *testing.T) {
 		}
 		return mergeProcessAccountBinding(document, accountID, alias)
 	}, nil)
-	err = errors.Join(err, lease.release())
+	err = finishAccountBindingUpdate(err, release())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,12 +906,16 @@ type accountBindingProcess struct {
 	waited  bool
 }
 
-func startAccountBindingProcess(t *testing.T, path string, accountID string, alias string, hold bool) *accountBindingProcess {
+func startAccountBindingProcessMode(t *testing.T, path string, accountID string, alias string, hold, legacy bool) *accountBindingProcess {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestAccountBindingStoreProcessHelper$", "-test.v")
 	holdValue := "0"
 	if hold {
 		holdValue = "1"
+	}
+	legacyValue := "0"
+	if legacy {
+		legacyValue = "1"
 	}
 	environment := make([]string, 0, len(os.Environ())+5)
 	for _, entry := range os.Environ() {
@@ -897,6 +929,7 @@ func startAccountBindingProcess(t *testing.T, path string, accountID string, ali
 		"MAILCLI_ACCOUNT_BINDING_ID="+accountID,
 		"MAILCLI_ACCOUNT_BINDING_ALIAS="+alias,
 		"MAILCLI_ACCOUNT_BINDING_HOLD="+holdValue,
+		"MAILCLI_ACCOUNT_BINDING_LEGACY="+legacyValue,
 	)
 	input, err := command.StdinPipe()
 	if err != nil {
@@ -915,6 +948,151 @@ func startAccountBindingProcess(t *testing.T, path string, accountID string, ali
 	}
 	t.Cleanup(process.stop)
 	return process
+}
+
+func TestAccountBindingMixedVersionWritersPreserveLockInodes(t *testing.T) {
+	for _, firstLegacy := range []bool{true, false} {
+		t.Run(fmt.Sprintf("legacy first %t", firstLegacy), func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "account-bindings.json")
+			store := NewAccountBindingStore(path)
+			if err := store.UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil }); err != nil {
+				t.Fatal(err)
+			}
+			legacy, err := accountBindingLockReference(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := []string{legacy + ".lock", "account-bindings.lock"}
+			before := make([]os.FileInfo, len(names))
+			for index, name := range names {
+				before[index], err = os.Lstat(filepath.Join(root, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			test := accountBindingWriterCase{firstID: "ACCOUNT-A", firstAlias: "a@icloud.com", secondID: "ACCOUNT-B", secondAlias: "b@icloud.com", wantIDs: []string{"ACCOUNT-A", "ACCOUNT-B"}}
+			runSerializedAccountBindingWriterModes(t, path, test, firstLegacy, !firstLegacy)
+			assertAccountBindingWriterResult(t, path, test)
+			drafts := filepath.Join(root, "drafts")
+			if err := os.Mkdir(drafts, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewServiceWithDraftRoot(nil, drafts).PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true}); err != nil {
+				t.Fatal(err)
+			}
+			for index, name := range names {
+				after, err := os.Lstat(filepath.Join(root, name))
+				payload, readErr := os.ReadFile(filepath.Join(root, name))
+				if err != nil || readErr != nil || !os.SameFile(before[index], after) || len(payload) != 0 {
+					t.Fatalf("binding lock %s changed: %v, %v", name, err, readErr)
+				}
+			}
+		})
+	}
+}
+
+func TestAccountBindingNewLockBlocksAndPreservesUnsafePaths(t *testing.T) {
+	for _, kind := range []string{"held", "symlink", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "account-bindings.json")
+			lockPath := filepath.Join(root, "account-bindings.lock")
+			outside := filepath.Join(t.TempDir(), "foreign")
+			if err := os.WriteFile(outside, []byte("foreign bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "held":
+				file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					if err := file.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
+				if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(outside, lockPath); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(lockPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			called := false
+			err = NewAccountBindingStore(path).UpdateAccountBindings(ctx, func(document AccountBindingFile) (AccountBindingFile, error) { called = true; return document, nil })
+			want := "account_binding_unsafe"
+			if kind == "held" {
+				want = "account_binding_busy"
+			}
+			if errorCodeForBindingTest(err) != want || called {
+				t.Fatalf("lock refusal = %v, callback=%t", err, called)
+			}
+			after, err := os.Lstat(lockPath)
+			payload, readErr := os.ReadFile(outside)
+			if err != nil || readErr != nil || !os.SameFile(before, after) || string(payload) != "foreign bytes" {
+				t.Fatalf("lock or foreign bytes changed: %v, %v", err, readErr)
+			}
+		})
+	}
+}
+
+func TestAccountBindingReleaseFailureRetainsPublishedStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "account-bindings.json")
+	lease, err := acquireAccountBindingLease(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			if err := lease.release(); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	result := updateAccountBindingsLocked(context.Background(), lease.draftLease, filepath.Base(path), func(document AccountBindingFile) (AccountBindingFile, error) {
+		document.Bindings = append(document.Bindings, AccountBinding{AccountID: "ACCOUNT-A", SenderAliases: []string{"a@icloud.com"}, CredentialAccount: "login@icloud.com"})
+		return document, nil
+	}, nil)
+	if result != nil {
+		t.Fatal(result)
+	}
+	if err := lease.bindingLock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	releaseErr := lease.release()
+	released = true
+	err = finishAccountBindingUpdate(result, releaseErr)
+	assertAccountBindingPublicationStatus(t, err, AccountBindingPublicationComplete)
+	var release interface{ BindingLockReleaseFailed() bool }
+	if !errors.As(err, &release) || !release.BindingLockReleaseFailed() || !strings.Contains(err.Error(), "warning:") {
+		t.Fatalf("missing release warning: %v", err)
+	}
+	document, err := NewAccountBindingStore(path).LoadAccountBindings()
+	if err != nil || len(document.Bindings) != 1 || document.Bindings[0].AccountID != "ACCOUNT-A" {
+		t.Fatalf("published binding lost: %+v, %v", document, err)
+	}
+	for _, status := range []AccountBindingPublicationStatus{AccountBindingPublicationNone, AccountBindingPublicationUnknown} {
+		publicationErr := &AccountBindingError{Code: "account_binding_unavailable", Message: "publication failed", publicationStatus: status}
+		combined := finishAccountBindingUpdate(publicationErr, releaseErr)
+		assertAccountBindingPublicationStatus(t, combined, status)
+		if !errors.Is(combined, publicationErr) || !errors.As(combined, &release) {
+			t.Fatalf("publication/release failure lost: %v", combined)
+		}
+	}
 }
 
 func readAccountBindingProcessLine(t *testing.T, output *bufio.Reader, want string) {

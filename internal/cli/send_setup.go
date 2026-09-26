@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"io"
 	stdmail "net/mail"
 	"strings"
@@ -109,7 +110,15 @@ func runSendSetup(
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	hostFlags := *smtpHost != "" || *smtpPort != 0 || *imapHost != "" || *imapPort != 0
+	hostFlags, credentialFlag := false, false
+	flags.Visit(func(value *flag.Flag) {
+		switch value.Name {
+		case "smtp-host", "smtp-port", "imap-host", "imap-port":
+			hostFlags = true
+		case "credential-account":
+			credentialFlag = true
+		}
+	})
 	parsed, err := stdmail.ParseAddress(strings.TrimSpace(*from))
 	if err != nil || parsed.Address == "" {
 		return failCommand(
@@ -158,7 +167,7 @@ func runSendSetup(
 	if bindingFound && strings.TrimSpace(*credentialAccount) == "" {
 		credential = existingBinding.CredentialAccount
 	}
-	if strings.TrimSpace(*credentialAccount) != "" {
+	if credentialFlag {
 		credentialParsed, err := stdmail.ParseAddress(strings.TrimSpace(*credentialAccount))
 		if err != nil || credentialParsed.Address == "" {
 			return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "send setup requires a valid --credential-account <email>"}, stdout, stderr)
@@ -199,6 +208,9 @@ func runSendSetup(
 	if err := credentials.Store(credential, password); err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}
+	if invalidateCredentials != nil {
+		invalidateCredentials(credential)
+	}
 	if stableAccountID != "" {
 		var hosts *bindingHosts
 		if hostFlags {
@@ -207,14 +219,12 @@ func runSendSetup(
 				imapHost: *imapHost, imapPort: *imapPort,
 			}
 		}
-		if err := upsertSendBinding(ctx, bindings, stableAccountID, account, credential, hosts); err != nil {
+		decision := sendBindingDecision{snapshot: existingBinding, found: bindingFound, credentialExplicit: credentialFlag}
+		if err := upsertSendBinding(ctx, bindings, stableAccountID, account, credential, hosts, decision); err != nil {
 			return failSendSetupBindingUpdate(
 				*jsonOutput, err, sendSetupBindingPublicationStatus(err), stdout, stderr,
 			)
 		}
-	}
-	if invalidateCredentials != nil {
-		invalidateCredentials(credential)
 	}
 	return writeSendSetupResult(stdout, "send.setup", *jsonOutput, sendSetupResult{
 		Account: account, AccountRef: *accountRef, CredentialAccount: credential, Action: "stored",
@@ -231,24 +241,35 @@ type bindingHosts struct {
 	imapPort int
 }
 
-func upsertSendBinding(ctx context.Context, store mail.AccountBindingStore, accountID, alias, credential string, hosts *bindingHosts) error {
+type sendBindingDecision struct {
+	snapshot           mail.AccountBinding
+	found              bool
+	credentialExplicit bool
+}
+
+func upsertSendBinding(ctx context.Context, store mail.AccountBindingStore, accountID, alias, credential string, hosts *bindingHosts, decision sendBindingDecision) error {
 	if store == nil {
 		return &commandError{code: "account_binding_unavailable", message: "account binding store is unavailable"}
 	}
 	return store.UpdateAccountBindings(ctx, func(document mail.AccountBindingFile) (mail.AccountBindingFile, error) {
-		return mergeSendBinding(document, accountID, alias, credential, hosts)
+		return mergeSendBinding(document, accountID, alias, credential, hosts, decision)
 	})
 }
 
-func mergeSendBinding(document mail.AccountBindingFile, accountID string, alias string, credential string, hosts *bindingHosts) (mail.AccountBindingFile, error) {
+func mergeSendBinding(document mail.AccountBindingFile, accountID string, alias string, credential string, hosts *bindingHosts, decision sendBindingDecision) (mail.AccountBindingFile, error) {
 	binding, found, err := mail.FindAccountBinding(document, accountID)
 	if err != nil {
 		return mail.AccountBindingFile{}, err
 	}
+	if sendBindingImplicitFieldsChanged(binding, found, hosts, decision) {
+		return mail.AccountBindingFile{}, &mail.AccountBindingError{Code: "account_binding_changed", Message: "implicit account-binding fields changed during password entry; inspect accounts list --json and rerun send setup"}
+	}
 	if !found {
 		binding = mail.AccountBinding{AccountID: accountID, SenderAliases: []string{alias}, CredentialAccount: credential}
 	} else {
-		binding.CredentialAccount = credential
+		if decision.credentialExplicit {
+			binding.CredentialAccount = credential
+		}
 		known := false
 		for _, value := range binding.SenderAliases {
 			if strings.EqualFold(value, alias) {
@@ -276,13 +297,43 @@ func mergeSendBinding(document mail.AccountBindingFile, accountID string, alias 
 	return document, nil
 }
 
+func sendBindingImplicitFieldsChanged(binding mail.AccountBinding, found bool, hosts *bindingHosts, decision sendBindingDecision) bool {
+	if !decision.credentialExplicit || hosts == nil {
+		if found != decision.found {
+			return true
+		}
+	}
+	if !decision.credentialExplicit && binding.CredentialAccount != decision.snapshot.CredentialAccount {
+		return true
+	}
+	return hosts == nil && (binding.SMTPHost != decision.snapshot.SMTPHost || binding.SMTPPort != decision.snapshot.SMTPPort ||
+		binding.IMAPHost != decision.snapshot.IMAPHost || binding.IMAPPort != decision.snapshot.IMAPPort)
+}
+
+func sendSetupErrorGuidance(guidance mail.OperationGuidance, data responseData, err error) mail.OperationGuidance {
+	if len(data.PartialEffects) == 0 {
+		guidance.EffectCertainty = mail.EffectNone
+		return guidance
+	}
+	retryability := mail.RetryObserveRequired
+	if errorCode(err) == "account_binding_changed" {
+		retryability = mail.RetryUserInputRequired
+	}
+	return mail.OperationGuidance{
+		Phase: mail.OperationPhaseExecution, EffectCertainty: mail.EffectPartial, Retryability: retryability,
+		Recovery: mail.RecoveryGuidance{Action: mail.RecoveryObserve, Command: "accounts.list", Args: []string{"--json"}},
+	}
+}
+
 func sendSetupBindingPublicationStatus(err error) mail.AccountBindingPublicationStatus {
 	var publication interface {
 		BindingPublicationStatus() mail.AccountBindingPublicationStatus
 	}
-	if errors.As(err, &publication) &&
-		publication.BindingPublicationStatus() == mail.AccountBindingPublicationUnknown {
-		return mail.AccountBindingPublicationUnknown
+	if errors.As(err, &publication) {
+		status := publication.BindingPublicationStatus()
+		if status == mail.AccountBindingPublicationUnknown || status == mail.AccountBindingPublicationComplete {
+			return status
+		}
 	}
 	return mail.AccountBindingPublicationNone
 }
@@ -298,11 +349,18 @@ func failSendSetupBindingUpdate(
 		{Step: "keychain_store", Status: "complete"},
 		{Step: "binding_publish", Status: bindingStatus},
 	}
+	var release interface{ BindingLockReleaseFailed() bool }
+	if errors.As(err, &release) && release.BindingLockReleaseFailed() {
+		effects = append(effects, sendSetupPartialEffect{Step: "lock_release", Status: "failed"})
+	}
 	if jsonOutput {
 		return failCommandWithData("send.setup", true, responseData{PartialEffects: effects}, err, stdout, stderr)
 	}
 	writeLine(stderr, err)
 	writeFormat(stderr, "partial effects: keychain_store: complete; binding_publish: %s\n", bindingStatus)
+	if len(effects) == 3 {
+		writeLine(stderr, "warning: lock_release: failed; the binding publication status is unchanged")
+	}
 	writeLine(stderr, "recovery: run `mailcli accounts list --json` to observe the binding, then make an explicit send setup decision. MailCLI will not retry or roll back the Keychain credential automatically.")
 	return commandExitCode(err)
 }

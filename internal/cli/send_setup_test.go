@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -38,8 +43,9 @@ func (e *setupBindingPublicationError) BindingPublicationStatus() mail.AccountBi
 }
 
 type setupBindingPublicationFaultStore struct {
-	store  mail.AccountBindingStore
-	status mail.AccountBindingPublicationStatus
+	store        mail.AccountBindingStore
+	status       mail.AccountBindingPublicationStatus
+	beforeUpdate func()
 }
 
 func (s *setupBindingPublicationFaultStore) LoadAccountBindings() (mail.AccountBindingFile, error) {
@@ -50,6 +56,9 @@ func (s *setupBindingPublicationFaultStore) UpdateAccountBindings(
 	ctx context.Context,
 	update mail.AccountBindingUpdate,
 ) error {
+	if s.beforeUpdate != nil {
+		s.beforeUpdate()
+	}
 	if s.status == mail.AccountBindingPublicationUnknown {
 		if err := s.store.UpdateAccountBindings(ctx, update); err != nil {
 			return err
@@ -691,5 +700,273 @@ func TestSendUnknownSubcommandFails(t *testing.T) {
 	t.Cleanup(func() { sendSetupCredentials = previous })
 	if code := runSend([]string{"missing"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("runSend() code = %d", code)
+	}
+}
+
+func TestSendSetupMergeRejectsChangedImplicitFields(t *testing.T) {
+	base := mail.AccountBinding{AccountID: "ACCOUNT-1", SenderAliases: []string{"old@icloud.com"}, CredentialAccount: "old@icloud.com", SMTPHost: "smtp.example.com", SMTPPort: 587, IMAPHost: "imap.example.com", IMAPPort: 993}
+	for _, test := range []struct {
+		name               string
+		change             func(*mail.AccountBinding)
+		explicitCredential bool
+		hosts              *bindingHosts
+		wantConflict       bool
+	}{
+		{"unchanged", func(*mail.AccountBinding) {}, false, nil, false},
+		{"credential changed", func(b *mail.AccountBinding) { b.CredentialAccount = "new@icloud.com" }, false, nil, true},
+		{"smtp changed", func(b *mail.AccountBinding) { b.SMTPHost = "smtp.new.example.com" }, false, nil, true},
+		{"imap port changed", func(b *mail.AccountBinding) { b.IMAPPort = 143 }, true, nil, true},
+		{"explicit credential wins", func(b *mail.AccountBinding) { b.CredentialAccount = "new@icloud.com" }, true, nil, false},
+		{"explicit hosts win", func(b *mail.AccountBinding) { b.SMTPHost = "smtp.new.example.com" }, false, &bindingHosts{smtpHost: "smtp.explicit.example.com", smtpPort: 587, imapHost: "imap.explicit.example.com", imapPort: 993}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			locked := base
+			test.change(&locked)
+			document := mail.AccountBindingFile{Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{locked}}
+			merged, err := mergeSendBinding(document, base.AccountID, "alias@icloud.com", "explicit@icloud.com", test.hosts, sendBindingDecision{snapshot: base, found: true, credentialExplicit: test.explicitCredential})
+			if test.wantConflict {
+				if errorCode(err) != "account_binding_changed" {
+					t.Fatalf("merge error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := merged.Bindings[0]
+			wantCredential := locked.CredentialAccount
+			if test.explicitCredential {
+				wantCredential = "explicit@icloud.com"
+			}
+			if binding.CredentialAccount != wantCredential || !reflect.DeepEqual(binding.SenderAliases, []string{"old@icloud.com", "alias@icloud.com"}) {
+				t.Fatalf("merge = %+v", binding)
+			}
+			if test.hosts == nil {
+				if binding.SMTPHost != locked.SMTPHost || binding.SMTPPort != locked.SMTPPort || binding.IMAPHost != locked.IMAPHost || binding.IMAPPort != locked.IMAPPort {
+					t.Fatalf("locked hosts changed: %+v", binding)
+				}
+			} else if binding.SMTPHost != test.hosts.smtpHost || binding.SMTPPort != test.hosts.smtpPort || binding.IMAPHost != test.hosts.imapHost || binding.IMAPPort != test.hosts.imapPort {
+				t.Fatalf("explicit hosts lost: %+v", binding)
+			}
+		})
+	}
+	for _, found := range []bool{false, true} {
+		document := mail.AccountBindingFile{Version: mail.AccountBindingVersion}
+		if found {
+			document.Bindings = []mail.AccountBinding{base}
+		}
+		_, err := mergeSendBinding(document, base.AccountID, "alias@icloud.com", "old@icloud.com", nil, sendBindingDecision{snapshot: base, found: !found})
+		if errorCode(err) != "account_binding_changed" {
+			t.Fatalf("presence changed found=%t: %v", found, err)
+		}
+	}
+}
+
+func TestSendSetupConflictGuidanceRequiresExplicitDecision(t *testing.T) {
+	err := &mail.AccountBindingError{Code: "account_binding_changed", Message: "binding changed"}
+	guidance := sendSetupErrorGuidance(mail.GuidanceForError("send.setup", err), responseData{PartialEffects: []sendSetupPartialEffect{{Step: "keychain_store", Status: "complete"}, {Step: "binding_publish", Status: "none"}}}, err)
+	if guidance.EffectCertainty != mail.EffectPartial || guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed || guidance.Recovery.Command != "accounts.list" || !reflect.DeepEqual(guidance.Recovery.Args, []string{"--json"}) {
+		t.Fatalf("conflict guidance = %+v", guidance)
+	}
+}
+
+func TestSendSetupInvalidatesBeforeBindingPublication(t *testing.T) {
+	for _, storeFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("store fails %t", storeFails), func(t *testing.T) {
+			_, bindings, _, accountRef := seedSetupBinding(t, []string{"alice@icloud.com"})
+			credentials := newStubSetupCredentials()
+			if storeFails {
+				credentials.storeErr = errors.New("store failed")
+			}
+			previousCredentials, previousStdin := sendSetupCredentials, sendSetupStdin
+			sendSetupCredentials = func() transport.CredentialStore { return credentials }
+			sendSetupStdin = strings.NewReader("new-secret\n")
+			t.Cleanup(func() { sendSetupCredentials, sendSetupStdin = previousCredentials, previousStdin })
+			calls := 0
+			var stdout, stderr bytes.Buffer
+			code := runSendWithBindings([]string{"setup", "--from", "alice@icloud.com", "--account", accountRef, "--json"}, &stdout, &stderr, func(account string) {
+				calls++
+				if account != "login@icloud.com" || credentials.stored[account] != "new-secret" {
+					t.Fatalf("wrong invalidation boundary for %s", account)
+				}
+			}, &setupBindingPublicationFaultStore{store: bindings, status: mail.AccountBindingPublicationNone, beforeUpdate: func() {
+				if calls != 1 {
+					t.Fatalf("publication began before invalidation: %d", calls)
+				}
+			}})
+			wantCalls := 1
+			if storeFails {
+				wantCalls = 0
+			}
+			if code != 1 || calls != wantCalls {
+				t.Fatalf("code=%d invalidations=%d output=%s", code, calls, stdout.String())
+			}
+		})
+	}
+}
+
+type setupLockReleaseError struct{ setupBindingPublicationError }
+
+func (*setupLockReleaseError) BindingLockReleaseFailed() bool { return true }
+
+func TestSendSetupLockReleaseReportsCompletedPublication(t *testing.T) {
+	err := &setupLockReleaseError{setupBindingPublicationError{status: mail.AccountBindingPublicationComplete}}
+	for _, jsonOutput := range []bool{true, false} {
+		var stdout, stderr bytes.Buffer
+		status := sendSetupBindingPublicationStatus(err)
+		if status != mail.AccountBindingPublicationComplete {
+			t.Fatalf("publish status = %s", status)
+		}
+		if code := failSendSetupBindingUpdate(jsonOutput, err, status, &stdout, &stderr); code != 1 {
+			t.Fatalf("exit = %d", code)
+		}
+		if !jsonOutput {
+			if !strings.Contains(stderr.String(), "binding_publish: complete") || !strings.Contains(stderr.String(), "warning: lock_release: failed") {
+				t.Fatalf("warning = %s", stderr.String())
+			}
+			continue
+		}
+		var output struct {
+			Data struct {
+				PartialEffects []sendSetupPartialEffect `json:"partial_effects"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+			t.Fatal(err)
+		}
+		want := []sendSetupPartialEffect{{Step: "keychain_store", Status: "complete"}, {Step: "binding_publish", Status: "complete"}, {Step: "lock_release", Status: "failed"}}
+		if !reflect.DeepEqual(output.Data.PartialEffects, want) {
+			t.Fatalf("effects = %+v", output.Data.PartialEffects)
+		}
+	}
+}
+
+type setupProcessPromptReader struct{ announced bool }
+
+func (r *setupProcessPromptReader) Read(payload []byte) (int, error) {
+	if !r.announced {
+		r.announced = true
+		if _, err := fmt.Fprintln(os.Stdout, "MAILCLI_SETUP_PROMPT"); err != nil {
+			return 0, err
+		}
+	}
+	return os.Stdin.Read(payload)
+}
+
+func TestSendSetupConcurrentProcessHelper(t *testing.T) {
+	role := os.Getenv("MAILCLI_SETUP_PROCESS_ROLE")
+	if role == "" {
+		return
+	}
+	store := mail.NewAccountBindingStore(os.Getenv("MAILCLI_SETUP_PROCESS_PATH"))
+	if role == "update" {
+		if err := store.UpdateAccountBindings(context.Background(), func(document mail.AccountBindingFile) (mail.AccountBindingFile, error) {
+			document.Bindings[0].CredentialAccount = "new@icloud.com"
+			return document, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	credentials := newStubSetupCredentials()
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = &setupProcessPromptReader{}
+	accountRef, err := mailref.EncodeAccount("ACCOUNT-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := runSendWithBindings([]string{"setup", "--from", "alice@icloud.com", "--account", accountRef, "--json"}, os.Stdout, os.Stderr, nil, store)
+	if code != 1 || credentials.stored["login@icloud.com"] != "new-secret" {
+		t.Fatalf("setup code=%d credentials=%+v", code, credentials.stored)
+	}
+}
+
+func TestSendSetupConcurrentCredentialChangePreservesOtherProcess(t *testing.T) {
+	path, store, _, _ := seedSetupBinding(t, []string{"alice@icloud.com"})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSendSetupConcurrentProcessHelper$", "-test.v")
+	command.Env = append(os.Environ(), "MAILCLI_SETUP_PROCESS_ROLE=setup", "MAILCLI_SETUP_PROCESS_PATH="+path)
+	input, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	t.Cleanup(func() {
+		cancel()
+		if !finished {
+			if err := command.Wait(); err == nil {
+				t.Error("abandoned setup helper exited successfully")
+			}
+		}
+	})
+	reader := bufio.NewReader(output)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("prompt handshake: %v stderr=%s", err, stderr.String())
+		}
+		if strings.TrimSpace(line) == "MAILCLI_SETUP_PROMPT" {
+			break
+		}
+	}
+	writer := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSendSetupConcurrentProcessHelper$", "-test.v")
+	writer.Env = append(os.Environ(), "MAILCLI_SETUP_PROCESS_ROLE=update", "MAILCLI_SETUP_PROCESS_PATH="+path)
+	if output, err := writer.CombinedOutput(); err != nil {
+		t.Fatalf("concurrent writer: %v, %s", err, output)
+	}
+	if _, err := io.WriteString(input, "new-secret\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Error struct {
+			Code     string                 `json:"code"`
+			Guidance mail.OperationGuidance `json:"guidance"`
+		} `json:"error"`
+		Data struct {
+			PartialEffects []sendSetupPartialEffect `json:"partial_effects"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(line), &response); err != nil {
+		t.Fatalf("setup output: %v, %s", err, line)
+	}
+	want := []sendSetupPartialEffect{{Step: "keychain_store", Status: "complete"}, {Step: "binding_publish", Status: "none"}}
+	if response.Error.Code != "account_binding_changed" || !reflect.DeepEqual(response.Data.PartialEffects, want) {
+		t.Fatalf("conflict response = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseExecution || guidance.EffectCertainty != mail.EffectPartial ||
+		guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryObserve || guidance.Recovery.Command != "accounts.list" ||
+		!reflect.DeepEqual(guidance.Recovery.Args, []string{"--json"}) {
+		t.Fatalf("concurrent setup guidance = %+v", guidance)
+	}
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		t.Fatal(err)
+	}
+	err = command.Wait()
+	finished = true
+	if err != nil {
+		t.Fatalf("setup process: %v stderr=%s", err, stderr.String())
+	}
+	document, err := store.LoadAccountBindings()
+	if err != nil || document.Bindings[0].CredentialAccount != "new@icloud.com" {
+		t.Fatalf("concurrent binding overwritten: %+v, %v", document, err)
 	}
 }
