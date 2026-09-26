@@ -43,6 +43,7 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 git clone -q --shared --no-checkout --no-tags "${SOURCE_ROOT}" "${PRODUCT_ROOT}"
 git -C "${PRODUCT_ROOT}" checkout -q --detach "${BASELINE_HEAD}"
 git -C "${PRODUCT_ROOT}" read-tree --reset -u "${INDEX_TREE}"
+cd "${PRODUCT_ROOT}"
 PRODUCT_REFS_BEFORE="$(git -C "${PRODUCT_ROOT}" for-each-ref --format='%(refname) %(objectname)')"
 mkdir "${BASELINE_ROOT}"
 git -C "${SOURCE_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |

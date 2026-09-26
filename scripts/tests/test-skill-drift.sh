@@ -26,11 +26,9 @@ trap cleanup_test_root EXIT
   printf 'Repository skill is missing: %s\n' "${REPOSITORY_SKILL}" >&2
   exit 1
 }
-BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
-export MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}"
-if [[ ! -x "${BUILD_OUTPUT}" ]]; then
+BUILD_OUTPUT="${TEST_ROOT}/build/mailcli"
+MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}" \
   "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
-fi
 
 mkdir -p "${PACKAGE_ROOT}/bin" "${PACKAGE_ROOT}/skills" "${GLOBAL_SKILL%/*}"
 cp "${BUILD_OUTPUT}" "${PACKAGE_ROOT}/bin/mailcli"

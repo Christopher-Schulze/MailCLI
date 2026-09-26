@@ -45,5 +45,22 @@ for CASE in errcheck govet staticcheck; do
   [[ "${STATUS}" != 0 ]]
   grep -q "(${CASE})" "${TEST_ROOT}/lint.log"
 done
+reject_repository_binary_write() {
+  grep -En '^[[:space:]]*((cp|mv|rm|mkdir|go build|printf|cat)[[:space:]].*\$\{MAILCLI_ROOT\}/bin|((export[[:space:]]+)?BUILD_OUTPUT|PREEXISTING_BINARY)=.*\$\{MAILCLI_ROOT\}/bin)' "$@"
+}
+if reject_repository_binary_write "${ROOT}/scripts/tests/"*.sh; then
+  printf 'Tests must not write or alias the repository binary\n' >&2
+  exit 1
+fi
+for MUTANT in \
+  'go build -o "${MAILCLI_ROOT}/bin/mailcli" ./cmd/mailcli' \
+  'BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"' \
+  'PREEXISTING_BINARY="${MAILCLI_ROOT}/bin/mailcli"'; do
+  printf '%s\n' "${MUTANT}" >"${TEST_ROOT}/binary-write.sh"
+  reject_repository_binary_write "${TEST_ROOT}/binary-write.sh" >/dev/null
+done
+grep -Fq 'go build -mod=readonly -o "${MAILCLI_BUILD_OUTPUT}" ./cmd/mailcli' "${ROOT}/scripts/tests/test.sh"
+grep -Fq 'MAILCLI_BINARY="${MAILCLI_BUILD_OUTPUT}" run_shell_test scripts/tests/test-live-responsiveness.sh' "${ROOT}/scripts/tests/test.sh"
+grep -Fqx 'BUILD_OUTPUT="${TEST_ROOT}/build/mailcli"' "${ROOT}/scripts/tests/test-skill-drift.sh"
 go test -vet=off -count=1 "${ROOT}/internal/cli" -run '^TestCIRunnerDocumentationMatchesWorkflow$'
 printf 'Verification policy passed: exact toolchain, real lint diagnostics, fail-closed scanner classification\n'

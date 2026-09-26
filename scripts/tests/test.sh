@@ -228,9 +228,9 @@ else
   printf 'Skipping live Keychain gate (set MAILCLI_KEYCHAIN_LIVE=1 to enable)\n'
 fi
 if [[ "${MAILCLI_LIVE_RESPONSIVENESS:-}" == "1" ]]; then
-  printf 'MAILCLI_LIVE_RESPONSIVENESS=1: building bin/mailcli for the Mail responsiveness gate\n'
-  go build -o "${MAILCLI_ROOT}/bin/mailcli" ./cmd/mailcli
-  run_shell_test scripts/tests/test-live-responsiveness.sh
+  printf 'MAILCLI_LIVE_RESPONSIVENESS=1: building an isolated binary for the Mail responsiveness gate\n'
+  go build -mod=readonly -o "${MAILCLI_BUILD_OUTPUT}" ./cmd/mailcli
+  MAILCLI_BINARY="${MAILCLI_BUILD_OUTPUT}" run_shell_test scripts/tests/test-live-responsiveness.sh
 else
   printf 'Skipping live Mail responsiveness gate (set MAILCLI_LIVE_RESPONSIVENESS=1 to enable)\n'
 fi
