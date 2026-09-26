@@ -69,7 +69,7 @@ func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer
 	if source.partial {
 		return operationError(
 			"raw_source_partial",
-			"the local EMLX source is partial; exact raw source requires a targeted Mail.app fallback",
+			"the local EMLX source is partial; exact raw source requires a complete message source",
 		)
 	}
 	if source.length < 0 || source.length > mail.MaximumRawSourceBytes {

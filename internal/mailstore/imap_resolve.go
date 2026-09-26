@@ -196,7 +196,7 @@ func (c *Client) resolveImapTargetWithOptions(
 			return target, &transport.TransportError{
 				Code: transport.CodeIMAPAmbiguousMessageID,
 				Message: fmt.Sprintf(
-					"message ID %s matched %d messages in mailbox %s; refusing mutation because the target is ambiguous; resolve the duplicate messages and rerun the command",
+					"message ID %s matched %d messages in mailbox %s; refusing identity resolution because the message is ambiguous; resolve the duplicate messages and rerun the command",
 					target.messageID, matchCount, imapBox,
 				),
 			}

@@ -135,7 +135,7 @@ func TestStoreWriteRawSourceRejectsPartialSourceBeforeOutput(t *testing.T) {
 	var output strings.Builder
 	err = store.WriteRawSource(context.Background(), ref, &output)
 	if errorCodeForTest(err) != "raw_source_partial" || output.Len() != 0 ||
-		!strings.Contains(err.Error(), "targeted Mail.app fallback") {
+		!strings.Contains(err.Error(), "complete message source") || strings.Contains(err.Error(), "Mail.app fallback") {
 		t.Fatalf("WriteRawSource() error = %v, output bytes = %d", err, output.Len())
 	}
 }

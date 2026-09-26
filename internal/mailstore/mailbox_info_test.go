@@ -201,7 +201,7 @@ func TestClientHydratesMissingSourceThroughBoundedMetadataResolver(t *testing.T)
 	}
 }
 
-func TestClientRejectsAmbiguousMetadataIdentity(t *testing.T) {
+func TestClientPropagatesAmbiguousMetadataIdentityError(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "metadata-ambiguous@gmail.com")
@@ -232,11 +232,37 @@ func TestClientRejectsAmbiguousMetadataIdentity(t *testing.T) {
 	client := &Client{store: store, send: mail.SendTransport{
 		Imap: resolver, Credentials: stubCredentials{"metadata-ambiguous@gmail.com": "secret"},
 	}}
-	if _, err := client.resolveImapTarget(context.Background(), messageRef); transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID {
-		t.Fatalf("resolveImapTarget() error = %v, want %s", err, transport.CodeIMAPAmbiguousMessageID)
+	if _, err := client.resolveImapTarget(context.Background(), messageRef); transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID ||
+		strings.Contains(err.Error(), "refusing mutation") {
+		t.Fatalf("resolveImapTarget() error = %v, want propagated read-safe %s error", err, transport.CodeIMAPAmbiguousMessageID)
 	}
 	if resolver.fetchCalls != 0 {
 		t.Fatalf("FetchMessage calls = %d, want 0 for ambiguous metadata", resolver.fetchCalls)
+	}
+}
+
+func TestClientRejectsAmbiguousMessageIDDuringReadIdentityResolution(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "search-ambiguous@gmail.com")
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	messageRef := messageRefWithExpectedID(t,
+		messageRefWithSubject(t, page.Messages, "Status Update"), "<status@example.com>")
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}}, searchMatches: 2,
+	}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap: fakeImap, Credentials: stubCredentials{"search-ambiguous@gmail.com": "secret"},
+	}}
+	if _, err := client.resolveImapTarget(context.Background(), messageRef); transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID ||
+		!strings.Contains(err.Error(), "refusing identity resolution") || strings.Contains(err.Error(), "refusing mutation") {
+		t.Fatalf("resolveImapTarget() error = %v, want read-safe %s wording", err, transport.CodeIMAPAmbiguousMessageID)
+	}
+	if fakeImap.searchCalls != 1 {
+		t.Fatalf("SearchUID calls = %d, want one metadata identity search", fakeImap.searchCalls)
 	}
 }
 

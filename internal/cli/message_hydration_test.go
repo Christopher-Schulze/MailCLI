@@ -135,11 +135,12 @@ func (e *testCodedError) ErrorCode() string { return e.code }
 
 func TestHydrationEnvelopePreservesCausePolicyAndSanitizesDiagnostics(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		err    error
-		retry  mail.Retryability
-		action mail.RecoveryAction
-		effect mail.EffectCertainty
+		name                string
+		err                 error
+		retry               mail.Retryability
+		action              mail.RecoveryAction
+		effect              mail.EffectCertainty
+		instructionContains string
 	}{
 		{name: "TLS verification", err: &transport.TransportError{Code: transport.CodeIMAPConnectFailed,
 			Err: &tls.CertificateVerificationError{Err: errors.New("private-host.invalid certificate secret-token")}},
@@ -148,6 +149,10 @@ func TestHydrationEnvelopePreservesCausePolicyAndSanitizesDiagnostics(t *testing
 			retry: mail.RetryTerminal, action: mail.RecoveryInspect, effect: mail.EffectNone},
 		{name: "FETCH disconnect", err: &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Err: io.EOF},
 			retry: mail.RetrySafe, action: mail.RecoveryRetry, effect: mail.EffectNone},
+		{name: "unknown UID identity", err: &transport.TransportError{Code: transport.CodeIMAPMessageUIDUnknown,
+			Message: "no independently verified IMAP UID is available"},
+			retry: mail.RetryUserInputRequired, action: mail.RecoveryCorrect, effect: mail.EffectNone,
+			instructionContains: "verified mailbox UID"},
 		{name: "uncertain outcome", err: &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown,
 			Err: &transport.TransportError{Code: transport.CodeIMAPConnectFailed,
 				Err: &tls.CertificateVerificationError{Err: errors.New("secret-token")}}},
@@ -174,8 +179,19 @@ func TestHydrationEnvelopePreservesCausePolicyAndSanitizesDiagnostics(t *testing
 				if response.OK || response.Error.Code != transport.ErrorCode(test.err) || guidance == nil ||
 					guidance.Retryability != test.retry || guidance.Recovery.Action != test.action ||
 					guidance.EffectCertainty != test.effect || guidance.ReplayAllowed != (test.retry == mail.RetrySafe) ||
-					(test.retry == mail.RetryUserInputRequired && guidance.Recovery.Instruction == "") {
+					(test.retry == mail.RetryUserInputRequired && guidance.Recovery.Instruction == "") ||
+					(test.instructionContains != "" && !strings.Contains(guidance.Recovery.Instruction, test.instructionContains)) {
 					t.Fatalf("hydration policy = %+v", response.Error)
+				}
+				if test.name == "unknown UID identity" {
+					argument := "--ref"
+					if command == "drafts.open" {
+						argument = "--message"
+					}
+					if guidance.Phase != mail.OperationPhaseHydration || guidance.Recovery.Command != command ||
+						!equalStrings(guidance.Recovery.Args, []string{argument, "msg_ref", "--json"}) {
+						t.Fatalf("hydration identity recovery = %+v", guidance)
+					}
 				}
 				if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "private-host.invalid") {
 					t.Fatalf("raw cause leaked: %s", stdout.String())

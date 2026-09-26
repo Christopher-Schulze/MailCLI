@@ -130,6 +130,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForReadCorrection("Correct the missing or stale reference before retrying this read.")
 	}
 	if !effectfulCommand(command) {
+		switch code {
+		case "mail_busy", "mail_automation_timeout", "mail_process_changed":
+			return guidanceForRead()
+		case "invalid_request":
+			// The bridge uses this for malformed internal request envelopes too,
+			// so a supported read cannot safely treat it as caller input.
+			return guidanceForUnknownRead()
+		}
 		if code == transport.CodeIMAPFetchFailed && !transport.IsTransientReadFailure(err) {
 			return guidanceForTerminalRead()
 		}
@@ -348,6 +356,8 @@ func guidanceForReadAccessError(code string) (string, bool) {
 		return "Configure the sender alias and credential account for the same supported provider, then retry the read.", true
 	case "account_binding_version_unsupported":
 		return "Use a MailCLI build that supports the existing account-binding version; preserve the binding file and retry with that build.", true
+	case "account_reference_version_unsupported":
+		return "Use a MailCLI build that supports the account-reference version in the local catalog; preserve the catalog entry and retry with that build.", true
 	case "account_binding_unavailable":
 		return "Correct access to the existing account-binding file or its parent directory, then retry the read; preserve the file contents.", true
 	case "account_binding_stale":
@@ -365,6 +375,12 @@ func guidanceForReadAccessError(code string) (string, bool) {
 
 func guidanceForReadSourceError(code string) (string, bool) {
 	switch code {
+	case "invalid_reference":
+		return "Use a current opaque reference emitted by the matching MailCLI listing command; do not edit the reference manually.", true
+	case "ambiguous_reference":
+		return "Refresh the account or mailbox listing, resolve any duplicate account IDs or mailbox names in Mail.app, then retry with a current reference that selects one target.", true
+	case "stale_cursor":
+		return "Restart this Mail.app listing without the stale --cursor value, then continue with the fresh next_cursor returned by the first page.", true
 	case "content_unavailable":
 		return "A consumed send receipt has no draft body to export; remove `--export` and inspect the retained receipt metadata instead.", true
 	case "content_incomplete":
@@ -380,6 +396,12 @@ func guidanceForReadSourceError(code string) (string, bool) {
 		return "Correct the mailbox or message reference, then retry this read.", true
 	case "message_source_missing":
 		return "Open Mail once and allow it to download this message, then retry the read.", true
+	case "raw_source_partial":
+		return "Make a complete source available in Mail.app or through the configured targeted IMAP read, then retry; use only a verified complete source.", true
+	case transport.CodeIMAPMessageUIDUnknown:
+		return "Refresh the local Mail catalog or provide a fresh Message-ID-backed reference with a verified mailbox UID, then retry this read.", true
+	case transport.CodeIMAPAmbiguousMessageID:
+		return "Resolve the ambiguous message matches in the target mailbox, or obtain a fresh reference with a uniquely verified UID and UIDVALIDITY, then retry.", true
 	case "search_count_limit_exceeded":
 		return "Narrow the search or deliberately raise its candidate limit before retrying.", true
 	case "ambiguous_attachment":
@@ -392,9 +414,10 @@ func guidanceForReadSourceError(code string) (string, bool) {
 func isTerminalReadError(code string) bool {
 	switch code {
 	case "account_catalog_incomplete", "attachment_resource_limit", "ambiguous_mail_store_generation",
-		"ambiguous_message_source", "imap_flag_read_unsupported", "invalid_emlx", "invalid_mailbox_cache",
+		"account_reference_corrupt", "account_reference_invalid", "ambiguous_message_source",
+		"content_export_changed", "imap_flag_read_unsupported", "invalid_emlx", "invalid_mailbox_cache",
 		"invalid_message_source", "mail_store_not_read_only", "mailbox_cache_malformed",
-		"mailbox_catalog_incomplete", "mailbox_info_malformed", "mime_resource_limit",
+		"mail_store_path_mismatch", "mailbox_catalog_incomplete", "mailbox_info_malformed", "mime_resource_limit",
 		"raw_source_too_large", "store_changed", "unsafe_message_source", "unsupported_mail_store_schema",
 		"search_unavailable", "draft_state_error", "send_receipt_invalid", transport.CodeIMAPMessageUIDMismatch,
 		transport.CodeIMAPResponseMalformed, transport.CodeIMAPUIDValidityUnknown:

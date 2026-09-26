@@ -202,6 +202,7 @@ func TestGuidanceForNotFoundRequiresFreshInputForReads(t *testing.T) {
 
 func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 	tests := []struct {
+		command             string
 		code                string
 		phase               OperationPhase
 		retryability        Retryability
@@ -214,6 +215,9 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: transport.CodeIMAPCanceled, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: transport.CodeIMAPDisconnected, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: transport.CodeIMAPTimeout, phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{command: "doctor", code: "mail_automation_timeout", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{command: "doctor", code: "mail_busy", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
+		{command: "messages.list", code: "mail_process_changed", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: transport.CodeIMAPFetchFailed, phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "operation_canceled", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
 		{code: "draft_operation_canceled", phase: OperationPhaseRead, retryability: RetrySafe, replayAllowed: true, recovery: RecoveryRetry},
@@ -230,16 +234,23 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: "account_binding_host_invalid", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "host and port"},
 		{code: "account_binding_provider_mismatch", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "same supported provider"},
 		{code: "account_binding_version_unsupported", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "preserve the binding file"},
+		{code: "account_reference_version_unsupported", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "supports the account-reference version"},
 		{code: "account_binding_unavailable", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "preserve the file contents"},
 		{code: "account_binding_stale", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "enabled account"},
 		{code: "mail_automation_denied", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Privacy & Security > Automation"},
 		{code: "mail_not_running", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Open Mail.app"},
 		{code: "mail_recovery_required", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Quit and reopen Mail.app"},
 		{code: transport.CodeIMAPAuthFailed, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
+		{code: "ambiguous_reference", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "current reference"},
+		{code: "stale_cursor", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "fresh next_cursor"},
 		{code: "ambiguous_attachment", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
 		{code: "search_count_limit_exceeded", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
+		{code: "invalid_reference", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "opaque reference"},
 		{code: "stale_reference", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
 		{code: "message_source_missing", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
+		{code: "raw_source_partial", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "complete source"},
+		{code: transport.CodeIMAPMessageUIDUnknown, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "verified mailbox UID"},
+		{code: transport.CodeIMAPAmbiguousMessageID, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "ambiguous message matches"},
 		{code: "content_unavailable", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "remove `--export`"},
 		{code: "content_incomplete", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "finish downloading this message"},
 		{code: "local_only_mailbox", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "local store"},
@@ -248,6 +259,26 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: transport.CodeIMAPMailboxNotFound, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
 		{code: transport.CodeIMAPMessageNotFound, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
 		{code: transport.CodeIMAPAmbiguousMailbox, phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true},
+		{code: transport.CodeIMAPMutationFailed, command: "messages.get", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: transport.CodeIMAPSentMailboxNotFound, command: "messages.get", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_error", command: "messages.list", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "bridge_cleanup_failed", command: "messages.list", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_automation_failed", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_access_gate_failed", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_app_unavailable", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_scripting_unavailable", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "osascript_unavailable", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "environment_unhealthy", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "operation_failed", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "invalid_request", command: "messages.list", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "mail_access_gate_corrupt", command: "doctor", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Quit Mail.app"},
+		{code: "mail_access_gate_unsafe", command: "doctor", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect, instruction: true, instructionContains: "No Mail.app action was dispatched"},
+		{code: "unsupported_platform", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "unsupported_architecture", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "account_reference_corrupt", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
+		{code: "account_reference_invalid", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
+		{code: "mail_store_path_mismatch", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
+		{code: "content_export_changed", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "unsupported_mail_store_schema", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "ambiguous_mail_store_generation", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "unsafe_message_source", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
@@ -278,7 +309,11 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.code, func(t *testing.T) {
-			got := GuidanceForError("messages.get", &transport.TransportError{Code: test.code, Message: "injected read failure"})
+			command := test.command
+			if command == "" {
+				command = "messages.get"
+			}
+			got := GuidanceForError(command, &transport.TransportError{Code: test.code, Message: "injected read failure"})
 			if got.Phase != test.phase || got.EffectCertainty != EffectNone ||
 				got.Retryability != test.retryability || got.ReplayAllowed != test.replayAllowed ||
 				got.Recovery.Action != test.recovery || (got.Recovery.Instruction != "") != test.instruction ||
@@ -395,14 +430,18 @@ func TestGuidanceForAmbiguousMailboxMutationRequiresCorrection(t *testing.T) {
 		})
 	}
 
-	uncertain := &transport.MutationOutcomeError{
-		Code:     transport.CodeIMAPMoveOutcomeUnknown,
-		Evidence: transport.MutationEvidence{Command: "MOVE", OperationID: "op_1"},
-		Err:      ambiguous,
-	}
-	got := GuidanceForError("messages.move", uncertain)
-	if got.EffectCertainty != EffectUnknown || got.Retryability != RetryObserveRequired ||
-		got.ReplayAllowed || got.Recovery.Action == RecoveryCorrect {
-		t.Fatalf("wrapped uncertain mutation guidance = %+v; mailbox ambiguity must not erase outcome uncertainty", got)
+	for _, cause := range []error{ambiguous, &transport.TransportError{
+		Code: transport.CodeIMAPAmbiguousMessageID, Message: "duplicate message IDs",
+	}} {
+		uncertain := &transport.MutationOutcomeError{
+			Code:     transport.CodeIMAPMoveOutcomeUnknown,
+			Evidence: transport.MutationEvidence{Command: "MOVE", OperationID: "op_1"},
+			Err:      cause,
+		}
+		got := GuidanceForError("messages.move", uncertain)
+		if got.EffectCertainty != EffectUnknown || got.Retryability != RetryObserveRequired ||
+			got.ReplayAllowed || got.Recovery.Action == RecoveryCorrect {
+			t.Fatalf("wrapped uncertain mutation guidance = %+v for cause %v; identity correction must not erase outcome uncertainty", got, cause)
+		}
 	}
 }
