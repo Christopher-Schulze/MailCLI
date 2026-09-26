@@ -303,6 +303,38 @@ func TestRealMailStoreMissingMessageGetEmitsCorrectRecovery(t *testing.T) {
 	}
 }
 
+func TestUnavailableMailStoreMessageGetEmitsUserRecovery(t *testing.T) {
+	ctx := context.Background()
+	mailRoot := filepath.Join(t.TempDir(), "Library", "Mail")
+	client := mailstore.NewClient(ctx, nil, mailstore.Config{MailRoot: mailRoot}, mail.SendTransport{})
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close unavailable Mail-store client: %v", err)
+		}
+	})
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(ctx, mail.NewService(client), []string{"messages", "get", "--ref", "missing", "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 {
+		t.Fatalf("Run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.OK || response.Command != "messages.get" || response.Error == nil ||
+		response.Error.Code != "mail_store_unavailable" || response.Error.Guidance == nil {
+		t.Fatalf("unavailable-store envelope = %+v", response)
+	}
+	guidance := response.Error.Guidance
+	if guidance.Phase != mail.OperationPhaseRead || guidance.EffectCertainty != mail.EffectNone ||
+		guidance.Retryability != mail.RetryUserInputRequired || guidance.ReplayAllowed ||
+		guidance.Recovery.Action != mail.RecoveryCorrect || guidance.Recovery.Instruction !=
+		"Grant Full Disk Access to the calling app, or open Mail once to create its local store, then retry the read." {
+		t.Fatalf("unavailable-store guidance = %+v", guidance)
+	}
+}
+
 func createNotFoundRecoveryStore(t *testing.T, storeUUID, accountID string) mailstore.Config {
 	t.Helper()
 	mailRoot := t.TempDir()

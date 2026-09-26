@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"strconv"
 	"strings"
 
@@ -58,13 +59,15 @@ const (
 	RecoveryNone      RecoveryAction = "none"
 )
 
-// RecoveryGuidance contains only supported command arguments or a durable
-// operation identity. It never carries credentials or raw protocol secrets.
+// RecoveryGuidance contains supported command arguments, a concrete user
+// instruction, or a durable operation identity. It never carries credentials
+// or raw protocol secrets.
 type RecoveryGuidance struct {
 	Action      RecoveryAction `json:"action"`
 	Command     string         `json:"command,omitempty"`
 	Args        []string       `json:"args,omitempty"`
 	OperationID string         `json:"operation_id,omitempty"`
+	Instruction string         `json:"instruction,omitempty"`
 }
 
 // OperationGuidance is the machine-readable retry and recovery contract.
@@ -90,11 +93,18 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY" || mutation.Evidence.Command == "MOVE") {
 		return guidanceForMutationUnknown(err)
 	}
+	if !effectfulCommand(command) && errors.Is(err, fs.ErrPermission) {
+		return guidanceForReadCorrection("Grant Full Disk Access to the calling app, or correct the file permissions before retrying this read.")
+	}
 	if command == "messages.get" && code == "not_found" {
-		return OperationGuidance{
-			Phase: OperationPhaseRead, EffectCertainty: EffectNone,
-			Retryability: RetryUserInputRequired, ReplayAllowed: false,
-			Recovery: RecoveryGuidance{Action: RecoveryCorrect},
+		return guidanceForReadCorrection("Obtain a fresh valid message reference before retrying this read.")
+	}
+	if code == "not_found" && !effectfulCommand(command) {
+		return guidanceForReadCorrection("Correct the missing or stale reference before retrying this read.")
+	}
+	if !effectfulCommand(command) {
+		if guidance, matched := guidanceForKnownReadError(code); matched {
+			return guidance
 		}
 	}
 	if code == "search_budget_too_small" {
@@ -177,11 +187,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 			}
 		}
 		return guidanceForUnknown(defaultPhase(command))
-	case code == "operation_canceled" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
+	case code == "operation_canceled" || code == "draft_operation_canceled" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
 		if effectfulCommand(command) {
 			return guidanceForUnknown(defaultPhase(command))
 		}
-		return guidanceForRead()
+		if code == "operation_canceled" || code == "draft_operation_canceled" || code == "operation_timeout" || transport.IsTransientReadFailure(err) {
+			return guidanceForRead()
+		}
+		return guidanceForUnknownRead()
 	case transport.IsRejectedSubmission(err):
 		return guidanceForSMTPRejection(err)
 	case transport.IsSubmissionOutcomeUnknown(err):
@@ -218,12 +231,116 @@ func GuidanceForError(command string, err error) OperationGuidance {
 	case code == "content_export_too_large":
 		return OperationGuidance{Phase: OperationPhaseExecution, EffectCertainty: EffectNone, Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect}}
 	case transport.IsConfigurationFailure(err):
+		if !effectfulCommand(command) {
+			return guidanceForReadCorrection("Correct the account credentials or IMAP security configuration before retrying this read.")
+		}
 		return guidanceForInput()
 	}
 	if effectfulCommand(command) {
 		return guidanceForUnknown(defaultPhase(command))
 	}
-	return guidanceForRead()
+	return guidanceForUnknownRead()
+}
+
+func isMailStoreAvailabilityError(code string) bool {
+	return code == "mail_store_unavailable" || code == "mail_store_preferences_unavailable" ||
+		code == "safe_mailbox_listing_unavailable" || code == "safe_search_unavailable"
+}
+
+func guidanceForKnownReadError(code string) (OperationGuidance, bool) {
+	if isMailStoreAvailabilityError(code) {
+		return guidanceForReadCorrection("Grant Full Disk Access to the calling app, or open Mail once to create its local store, then retry the read."), true
+	}
+	if instruction, matched := guidanceForReadAccessError(code); matched {
+		return guidanceForReadCorrection(instruction), true
+	}
+	if instruction, matched := guidanceForReadSourceError(code); matched {
+		return guidanceForReadCorrection(instruction), true
+	}
+	if isTerminalReadError(code) {
+		return guidanceForTerminalRead(), true
+	}
+	return OperationGuidance{}, false
+}
+
+func guidanceForReadAccessError(code string) (string, bool) {
+	switch code {
+	case "mail_store_preferences_invalid":
+		return "Open Mail.app and restore a valid local store configuration before retrying this read.", true
+	case "account_disabled":
+		return "Enable this account in Mail.app, then retry the read.", true
+	case "account_degraded":
+		return "Inspect `mailcli accounts list --json` for the account's degraded reason and remediation, correct the account in Mail.app, then retry the read.", true
+	case "account_identity_missing":
+		return "Configure the account's verified sender identity and credentials with `mailcli send setup`, then retry the read.", true
+	case "account_binding_invalid":
+		return "Restore a valid account binding or correct it through the supported `mailcli send setup` flow; preserve existing binding data and do not replace it with guessed values.", true
+	case "account_binding_host_invalid":
+		return "Correct the account binding's host and port values to satisfy the existing MailCLI endpoint rules, then retry the read.", true
+	case "account_binding_provider_mismatch":
+		return "Configure the sender alias and credential account for the same supported provider, then retry the read.", true
+	case "account_binding_version_unsupported":
+		return "Use a MailCLI build that supports the existing account-binding version; preserve the binding file and retry with that build.", true
+	case "account_binding_unavailable":
+		return "Correct access to the existing account-binding file or its parent directory, then retry the read; preserve the file contents.", true
+	case "mail_automation_denied":
+		return "Allow the calling app to control Mail in System Settings > Privacy & Security > Automation, then retry the read.", true
+	case "mail_not_running":
+		return "Open Mail.app and allow its account catalog to finish loading, then retry the read.", true
+	case "mail_recovery_required":
+		return "Quit and reopen Mail.app to resolve its retained operation state, then retry this read; inspect any prior effectful operation before replaying it.", true
+	default:
+		return "", false
+	}
+}
+
+func guidanceForReadSourceError(code string) (string, bool) {
+	switch code {
+	case "content_unavailable":
+		return "A consumed send receipt has no draft body to export; remove `--export` and inspect the retained receipt metadata instead.", true
+	case "content_incomplete":
+		return "Open Mail.app and let it finish downloading this message, then retry the export after the message reports complete content.", true
+	case "local_only_mailbox":
+		return "Read this message from Mail.app's local store, or choose a server-backed mailbox before retrying IMAP hydration.", true
+	case "store_bound_reference_required":
+		return "Resolve a current store-bound message reference from this Mail store, then retry the read.", true
+	case "mailbox_uidvalidity_changed":
+		return "Resolve a fresh message reference after Mail.app synchronizes the changed mailbox identity, then retry the read.", true
+	case "stale_reference", transport.CodeIMAPMailboxNotFound, transport.CodeIMAPMessageNotFound,
+		transport.CodeIMAPAmbiguousMailbox:
+		return "Correct the mailbox or message reference, then retry this read.", true
+	case "message_source_missing":
+		return "Open Mail once and allow it to download this message, then retry the read.", true
+	case "search_count_limit_exceeded":
+		return "Narrow the search or deliberately raise its candidate limit before retrying.", true
+	case "ambiguous_attachment":
+		return "Choose an attachment identifier that resolves to one attachment before retrying.", true
+	default:
+		return "", false
+	}
+}
+
+func isTerminalReadError(code string) bool {
+	switch code {
+	case "account_catalog_incomplete", "attachment_resource_limit", "ambiguous_mail_store_generation",
+		"ambiguous_message_source", "imap_flag_read_unsupported", "invalid_emlx", "invalid_mailbox_cache",
+		"invalid_message_source", "mail_store_not_read_only", "mailbox_cache_malformed",
+		"mailbox_catalog_incomplete", "mailbox_info_malformed", "mime_resource_limit",
+		"raw_source_too_large", "store_changed", "unsafe_message_source", "unsupported_mail_store_schema",
+		"search_unavailable", "draft_state_error", "send_receipt_invalid", transport.CodeIMAPMessageUIDMismatch,
+		transport.CodeIMAPResponseMalformed, transport.CodeIMAPUIDValidityUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func guidanceForTerminalRead() OperationGuidance {
+	return OperationGuidance{
+		Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+		Retryability: RetryTerminal, ReplayAllowed: false,
+		Recovery: RecoveryGuidance{Action: RecoveryInspect},
+	}
 }
 
 func guidanceForAttachmentSaveOutcome(outcome *AttachmentSaveOutcomeError, code string) OperationGuidance {
@@ -306,6 +423,22 @@ func guidanceForInput() OperationGuidance {
 
 func guidanceForRead() OperationGuidance {
 	return OperationGuidance{Phase: OperationPhaseRead, EffectCertainty: EffectNone, Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry}}
+}
+
+func guidanceForReadCorrection(instruction string) OperationGuidance {
+	return OperationGuidance{
+		Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+		Retryability: RetryUserInputRequired, ReplayAllowed: false,
+		Recovery: RecoveryGuidance{Action: RecoveryCorrect, Instruction: instruction},
+	}
+}
+
+func guidanceForUnknownRead() OperationGuidance {
+	return OperationGuidance{
+		Phase: OperationPhaseRead, EffectCertainty: EffectNone,
+		Retryability: RetryObserveRequired, ReplayAllowed: false,
+		Recovery: RecoveryGuidance{Action: RecoveryInspect},
+	}
 }
 
 func guidanceForUnknown(phase OperationPhase) OperationGuidance {
