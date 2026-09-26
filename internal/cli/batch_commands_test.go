@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
 )
 
 func TestBatchCommandJSONPreservesOrderedResults(t *testing.T) {
@@ -348,11 +349,10 @@ func TestBatchCapabilitiesExposeLimitsAndOperations(t *testing.T) {
 }
 
 func TestBatchCommandMoveWithMailboxField(t *testing.T) {
-	inputPath := filepath.Join(t.TempDir(), "batch.json")
-	payload := []byte(`{"operation":"move","items":[{"id":"one","ref":"msg_ref","mailbox":"archive"}]}`)
-	if err := os.WriteFile(inputPath, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	inputPath := writeBatchInput(t, mail.BatchRequest{
+		Operation: mail.BatchOperationMove,
+		Items:     []mail.BatchItem{{ID: "one", Ref: batchCommandMessageRef(t), Mailbox: "archive"}},
+	})
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), newTestService(), []string{"batch", "--input", inputPath, "--json"}, &stdout, &stderr)
@@ -375,10 +375,11 @@ func TestBatchCommandMoveWithMailboxField(t *testing.T) {
 }
 
 func TestBatchCommandMarkPreservesMutationEvidence(t *testing.T) {
-	inputPath := filepath.Join(t.TempDir(), "batch.json")
-	if err := os.WriteFile(inputPath, []byte(`{"operation":"mark","items":[{"id":"mark","ref":"msg_ref","read":true}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	read := true
+	inputPath := writeBatchInput(t, mail.BatchRequest{
+		Operation: mail.BatchOperationMark,
+		Items:     []mail.BatchItem{{ID: "mark", Ref: batchCommandMessageRef(t), Read: &read}},
+	})
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), newTestService(), []string{"batch", "--input", inputPath, "--json"}, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 {
@@ -493,11 +494,10 @@ func TestBatchCommandDeleteRequiresConfirm(t *testing.T) {
 }
 
 func TestBatchCommandDeleteWithConfirmCompletes(t *testing.T) {
-	inputPath := filepath.Join(t.TempDir(), "batch.json")
-	payload := []byte(`{"operation":"delete","items":[{"id":"one","ref":"msg_ref"}]}`)
-	if err := os.WriteFile(inputPath, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	inputPath := writeBatchInput(t, mail.BatchRequest{
+		Operation: mail.BatchOperationDelete,
+		Items:     []mail.BatchItem{{ID: "one", Ref: batchCommandMessageRef(t)}},
+	})
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(context.Background(), newTestService(), []string{"batch", "--input", inputPath, "--confirm", "--json"}, &stdout, &stderr)
@@ -536,4 +536,16 @@ func TestBatchCommandConfirmRejectedForOtherOperations(t *testing.T) {
 	if response.OK || response.Error == nil || response.Error.Code != "invalid_argument" {
 		t.Fatalf("response = %+v", response)
 	}
+}
+
+func batchCommandMessageRef(t *testing.T) string {
+	t.Helper()
+	ref, err := mailref.EncodeMessage(mailref.Message{
+		AccountID: "account", MailboxPath: []string{"Inbox"}, LibraryID: "1",
+		ExpectedStoreUUID: "store", ExpectedStoreMailboxID: 1, ExpectedStoreMessageID: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
 }

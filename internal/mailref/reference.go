@@ -560,12 +560,23 @@ func DecodeTokenPayload(prefix string, value string) ([]byte, error) {
 	if len(encoded) > maxEncoded {
 		return nil, fmt.Errorf("%s token exceeds %d bytes", kind, MaxCompactPayloadBytes)
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	payload, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("decode %s token: %w", kind, err)
+		return nil, &invalidReferenceError{err: fmt.Errorf("decode %s token: %w", kind, err)}
+	}
+	if base64.RawURLEncoding.EncodeToString(payload) != encoded {
+		return nil, &invalidReferenceError{err: fmt.Errorf("noncanonical %s token encoding", kind)}
 	}
 	if len(payload) > MaxCompactPayloadBytes {
 		return nil, fmt.Errorf("%s token exceeds %d bytes", kind, MaxCompactPayloadBytes)
 	}
 	return payload, nil
 }
+
+type invalidReferenceError struct {
+	err error
+}
+
+func (e *invalidReferenceError) Error() string     { return e.err.Error() }
+func (e *invalidReferenceError) Unwrap() error     { return e.err }
+func (e *invalidReferenceError) ErrorCode() string { return "invalid_reference" }

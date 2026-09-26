@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -190,7 +191,7 @@ func TestExecuteBatchRejectsDuplicateMutationIDsAndDestinationsBeforeEffects(t *
 	service := NewService(gateway)
 	if _, err := service.ExecuteBatch(context.Background(), BatchRequest{
 		Operation: BatchOperationMark,
-		Items:     []BatchItem{{ID: "same", Ref: "one", Read: boolPointer(true)}, {ID: "same", Ref: "two", Read: boolPointer(false)}},
+		Items:     []BatchItem{{ID: "same", Ref: batchTestMessageRef(t, "one"), Read: boolPointer(true)}, {ID: "same", Ref: batchTestMessageRef(t, "two"), Read: boolPointer(false)}},
 	}); err == nil {
 		t.Fatal("duplicate mark IDs were accepted")
 	}
@@ -258,6 +259,13 @@ func TestExecuteBatchRejectsConflictingMessageRefsBeforeDispatch(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			for index := range test.request.Items {
+				test.request.Items[index].Ref = batchTestMessageRef(t, test.request.Items[index].Ref)
+				if test.request.Items[index].Mailbox != "" {
+					test.request.Items[index].Mailbox = batchTestMailboxRef(t, test.request.Items[index].Mailbox)
+				}
+			}
+			test.ref = batchTestMessageRef(t, test.ref)
 			gateway := &batchGateway{
 				gatewayStub: &gatewayStub{}, markSummary: MessageSummary{Ref: "completed-mark"},
 			}
@@ -289,7 +297,7 @@ func TestExecuteBatchRejectsConflictingMessageRefsBeforeDispatch(t *testing.T) {
 
 func TestExecuteBatchAllowsIndependentMutationRefsInInputOrder(t *testing.T) {
 	const concurrency = 1
-	refs := []string{"ref-z", "ref-a", "ref-middle"}
+	refs := []string{batchTestMessageRef(t, "ref-z"), batchTestMessageRef(t, "ref-a"), batchTestMessageRef(t, "ref-middle")}
 	ids := []string{"item-z", "item-a", "item-middle"}
 	for _, operation := range []BatchOperation{BatchOperationMark, BatchOperationMove, BatchOperationDelete} {
 		t.Run(operation, func(t *testing.T) {
@@ -341,9 +349,9 @@ func TestExecuteBatchAllowsIndependentMutationRefsInInputOrder(t *testing.T) {
 
 func TestExecuteBatchCopyAllowsDistinctDestinationsInInputOrder(t *testing.T) {
 	items := []BatchItem{
-		{ID: "copy-z", Ref: "shared-ref", Mailbox: "archive"},
-		{ID: "copy-a", Ref: "shared-ref", Mailbox: "sent"},
-		{ID: "copy-middle", Ref: "other-ref", Mailbox: "archive"},
+		{ID: "copy-z", Ref: batchTestMessageRef(t, "shared-ref"), Mailbox: batchTestMailboxRef(t, "archive")},
+		{ID: "copy-a", Ref: batchTestMessageRef(t, "shared-ref"), Mailbox: batchTestMailboxRef(t, "sent")},
+		{ID: "copy-middle", Ref: batchTestMessageRef(t, "other-ref"), Mailbox: batchTestMailboxRef(t, "archive")},
 	}
 	gateway := &batchGateway{gatewayStub: &gatewayStub{}}
 	result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
@@ -381,7 +389,7 @@ func TestExecuteBatchAttachmentAndMarkSuccess(t *testing.T) {
 	}
 	mark, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
 		Operation: BatchOperationMark,
-		Items:     []BatchItem{{ID: "mark", Ref: "message", Read: boolPointer(true)}},
+		Items:     []BatchItem{{ID: "mark", Ref: batchTestMessageRef(t, "message"), Read: boolPointer(true)}},
 	})
 	if err != nil || !mark.Complete() || mark.Items[0].MessageState == nil || mark.Items[0].MessageState.Ref != "mark-ref" {
 		t.Fatalf("mark result = %+v, error = %v", mark, err)
@@ -488,6 +496,7 @@ func assertBatchAttachmentSaveTarget(t *testing.T, certainty EffectCertainty, ou
 
 func TestExecuteBatchMarkCancellationDistinguishesUncertainAndUnstarted(t *testing.T) {
 	started := make(chan struct{})
+	first, second := batchTestMessageRef(t, "one"), batchTestMessageRef(t, "two")
 	gateway := &batchGateway{gatewayStub: &gatewayStub{}, started: started}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -497,8 +506,8 @@ func TestExecuteBatchMarkCancellationDistinguishesUncertainAndUnstarted(t *testi
 			Operation:   BatchOperationMark,
 			Concurrency: 1,
 			Items: []BatchItem{
-				{ID: "active", Ref: "one", Read: boolPointer(true)},
-				{ID: "queued", Ref: "two", Read: boolPointer(true)},
+				{ID: "active", Ref: first, Read: boolPointer(true)},
+				{ID: "queued", Ref: second, Read: boolPointer(true)},
 			},
 		})
 		resultCh <- result
@@ -521,12 +530,12 @@ func TestExecuteBatchMoveMixedOutcomes(t *testing.T) {
 	gateway := &batchGateway{
 		gatewayStub: &gatewayStub{},
 		transferResults: map[string]MessageSummary{
-			"ok":      {Ref: "ok"},
-			"unknown": {Ref: "unknown", ServerTruth: &ServerMutationEvidence{Outcome: ServerMutationOutcomeUnknown}},
+			batchTestMessageRef(t, "ok"):      {Ref: "ok"},
+			batchTestMessageRef(t, "unknown"): {Ref: "unknown", ServerTruth: &ServerMutationEvidence{Outcome: ServerMutationOutcomeUnknown}},
 		},
 		transferErrs: map[string]error{
-			"rejected": &transport.TransportError{Code: transport.CodeIMAPMutationFailed, Message: "mailbox rejected"},
-			"unknown": &transport.MutationOutcomeError{
+			batchTestMessageRef(t, "rejected"): &transport.TransportError{Code: transport.CodeIMAPMutationFailed, Message: "mailbox rejected"},
+			batchTestMessageRef(t, "unknown"): &transport.MutationOutcomeError{
 				Code:    transport.CodeIMAPMoveOutcomeUnknown,
 				Message: "expunge answer lost",
 			},
@@ -536,9 +545,9 @@ func TestExecuteBatchMoveMixedOutcomes(t *testing.T) {
 		Operation:   BatchOperationMove,
 		Concurrency: 2,
 		Items: []BatchItem{
-			{ID: "first", Ref: "ok", Mailbox: "archive"},
-			{ID: "second", Ref: "rejected", Mailbox: "archive"},
-			{ID: "third", Ref: "unknown", Mailbox: "archive", AllowDraftMutation: true},
+			{ID: "first", Ref: batchTestMessageRef(t, "ok"), Mailbox: "archive"},
+			{ID: "second", Ref: batchTestMessageRef(t, "rejected"), Mailbox: "archive"},
+			{ID: "third", Ref: batchTestMessageRef(t, "unknown"), Mailbox: "archive", AllowDraftMutation: true},
 		},
 	})
 	if err != nil {
@@ -573,7 +582,7 @@ func TestExecuteBatchMoveMixedOutcomes(t *testing.T) {
 		if request.Copy || request.DestinationMailbox != "archive" {
 			t.Fatalf("move request = %+v", request)
 		}
-		if request.Ref == "unknown" && request.AllowDraftMutation {
+		if request.Ref == batchTestMessageRef(t, "unknown") && request.AllowDraftMutation {
 			draftForwarded = true
 		}
 	}
@@ -586,12 +595,12 @@ func TestExecuteBatchCopyForwardsCopyFlag(t *testing.T) {
 	gateway := &batchGateway{
 		gatewayStub: &gatewayStub{},
 		transferResults: map[string]MessageSummary{
-			"one": {Ref: "one"},
+			batchTestMessageRef(t, "one"): {Ref: "one"},
 		},
 	}
 	result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
 		Operation: BatchOperationCopy,
-		Items:     []BatchItem{{ID: "copy", Ref: "one", Mailbox: "archive"}},
+		Items:     []BatchItem{{ID: "copy", Ref: batchTestMessageRef(t, "one"), Mailbox: batchTestMailboxRef(t, "archive")}},
 	})
 	if err != nil || !result.Complete() {
 		t.Fatalf("copy result = %+v, error = %v", result, err)
@@ -608,11 +617,11 @@ func TestExecuteBatchDeleteMixedOutcomes(t *testing.T) {
 	gateway := &batchGateway{
 		gatewayStub: &gatewayStub{},
 		deleteResults: map[string]DeleteResult{
-			"ok":      {MessageRef: "ok", Deleted: true},
-			"unknown": {MessageRef: "unknown", ServerTruth: &ServerMutationEvidence{Outcome: ServerMutationOutcomeUnknown}},
+			batchTestMessageRef(t, "ok"):      {MessageRef: "ok", Deleted: true},
+			batchTestMessageRef(t, "unknown"): {MessageRef: "unknown", ServerTruth: &ServerMutationEvidence{Outcome: ServerMutationOutcomeUnknown}},
 		},
 		deleteErrs: map[string]error{
-			"unknown": &transport.MutationOutcomeError{
+			batchTestMessageRef(t, "unknown"): &transport.MutationOutcomeError{
 				Code:    transport.CodeIMAPMoveOutcomeUnknown,
 				Message: "expunge answer lost",
 			},
@@ -621,8 +630,8 @@ func TestExecuteBatchDeleteMixedOutcomes(t *testing.T) {
 	result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
 		Operation: BatchOperationDelete,
 		Items: []BatchItem{
-			{ID: "first", Ref: "ok"},
-			{ID: "second", Ref: "unknown", AllowDraftMutation: true},
+			{ID: "first", Ref: batchTestMessageRef(t, "ok")},
+			{ID: "second", Ref: batchTestMessageRef(t, "unknown"), AllowDraftMutation: true},
 		},
 	})
 	if err != nil {
@@ -649,8 +658,8 @@ func TestExecuteBatchDeleteMixedOutcomes(t *testing.T) {
 	for _, request := range gateway.deletes {
 		requestsByRef[request.Ref] = request
 	}
-	okRequest, hasOK := requestsByRef["ok"]
-	unknownRequest, hasUnknown := requestsByRef["unknown"]
+	okRequest, hasOK := requestsByRef[batchTestMessageRef(t, "ok")]
+	unknownRequest, hasUnknown := requestsByRef[batchTestMessageRef(t, "unknown")]
 	if len(requestsByRef) != 2 || !hasOK || okRequest.AllowDraftMutation ||
 		!hasUnknown || !unknownRequest.AllowDraftMutation {
 		t.Fatalf("delete requests = %+v", gateway.deletes)
@@ -685,4 +694,25 @@ func TestExecuteBatchMutationValidationRejectsStrayFieldsBeforeEffects(t *testin
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+func batchTestMessageRef(t *testing.T, id string) string {
+	t.Helper()
+	token, err := mailref.EncodeMessage(mailref.Message{
+		AccountID: "batch-account", MailboxPath: []string{"Inbox"}, LibraryID: id,
+		ExpectedStoreUUID: "batch-store", ExpectedStoreMailboxID: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func batchTestMailboxRef(t *testing.T, name string) string {
+	t.Helper()
+	token, err := mailref.EncodeMailbox("batch-account", []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }

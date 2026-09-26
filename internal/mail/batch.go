@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -225,10 +226,10 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 	}
 	ids := make(map[string]struct{}, len(request.Items))
 	destinations := make(map[string]string)
-	mutationSources := make(map[string]string)
+	mutationSources := make(map[mailref.MessageIdentity]string)
 	type copyDestination struct {
-		sourceRef string
-		mailbox   string
+		sourceRef mailref.MessageIdentity
+		mailbox   mailref.MailboxIdentity
 	}
 	copyDestinations := make(map[copyDestination]string)
 	for _, item := range request.Items {
@@ -296,14 +297,26 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 		}
 		switch request.Operation {
 		case BatchOperationMark, BatchOperationMove, BatchOperationDelete:
-			if prior, exists := mutationSources[item.Ref]; exists {
+			identity, err := mailref.MessageIdentityKey(item.Ref)
+			if err != nil {
+				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
+			}
+			if prior, exists := mutationSources[identity]; exists {
 				return 0, validationError(fmt.Sprintf(
 					"batch items %q and %q use the same source message ref", prior, item.ID,
 				))
 			}
-			mutationSources[item.Ref] = item.ID
+			mutationSources[identity] = item.ID
 		case BatchOperationCopy:
-			key := copyDestination{sourceRef: item.Ref, mailbox: item.Mailbox}
+			source, err := mailref.MessageIdentityKey(item.Ref)
+			if err != nil {
+				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
+			}
+			mailbox, err := mailref.MailboxIdentityKey(item.Mailbox)
+			if err != nil {
+				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid mailbox reference", item.ID)}
+			}
+			key := copyDestination{sourceRef: source, mailbox: mailbox}
 			if prior, exists := copyDestinations[key]; exists {
 				return 0, validationError(fmt.Sprintf(
 					"batch copy items %q and %q repeat the same source and destination", prior, item.ID,
