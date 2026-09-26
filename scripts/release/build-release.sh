@@ -4,11 +4,16 @@ set -euo pipefail
 MAILCLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
 check_go_toolchain "${MAILCLI_ROOT}"
-if [[ $# -lt 1 ]]; then
-  printf 'Usage: %s MAJOR.MINOR.PATCH\n' "$(basename "${BASH_SOURCE[0]}")" >&2
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != --discard-stale-staging ) ]]; then
+  printf 'Usage: %s MAJOR.MINOR.PATCH [--discard-stale-staging]\n' "$(basename "${BASH_SOURCE[0]}")" >&2
   exit 1
 fi
 VERSION="${1}"
+DISCARD_STALE_STAGING="${2:-}"
+SOURCE_COMMIT="$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)"
+GO_VERSION="$(go env GOVERSION)"
+STAGING_IDENTITY=''
+STAGING_ASSET_IDENTITIES=()
 RELEASE_DIRECTORY="${MAILCLI_RELEASE_DIRECTORY:-${MAILCLI_ROOT}/dist}"
 ARCHIVE_ROOT="mailcli_${VERSION}_darwin_arm64"
 ARCHIVE_NAME="${ARCHIVE_ROOT}.tar.gz"
@@ -45,14 +50,17 @@ validate_staging_manifest() {
     function valid_digest(value) {
       return length(value) == 64 && value ~ /^[0-9a-f]+$/
     }
+    NR == 1 { if (NF != 2 || $1 != "source_commit" || length($2) != 40 || $2 !~ /^[0-9a-f]+$/) valid = 0; next }
+    NR == 2 { if (NF != 2 || $1 != "go_version" || $2 !~ /^go[0-9]+\.[0-9]+\.[0-9]+$/) valid = 0; next }
+    NR == 3 { if (NF != 2 || $1 != "binary_sha256" || !valid_digest($2)) valid = 0; next }
     {
-      expected_name = NR == 1 ? archive_name : NR == 2 ? "SHA256SUMS" : NR == 3 ? "SHA256SUMS.sig" : ""
+      expected_name = NR == 4 ? archive_name : NR == 5 ? "SHA256SUMS" : NR == 6 ? "SHA256SUMS.sig" : ""
       if (NF != 2 || !valid_digest($1) || $2 != expected_name) {
         valid = 0
       }
     }
     END {
-      if (NR != 3 || !valid) {
+      if (NR != 6 || !valid) {
         exit 1
       }
     }
@@ -110,6 +118,7 @@ verify_signature() {
 
 verify_staged_assets() {
   local STAGED_FILE
+  STAGING_ASSET_IDENTITIES=()
   for STAGED_FILE in \
     "${STAGING_ARCHIVE}" "${STAGING_CHECKSUM}" "${STAGING_SIGNATURE}" \
     "${STAGING_MANIFEST}" "${STAGING_MANIFEST_SIGNATURE}"; do
@@ -117,6 +126,7 @@ verify_staged_assets() {
       printf 'Release staging is missing a regular asset: %s\n' "${STAGED_FILE}" >&2
       return 1
     fi
+    STAGING_ASSET_IDENTITIES+=("$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${STAGED_FILE}")")
   done
   if ! validate_staging_entries; then
     return 1
@@ -129,7 +139,7 @@ verify_staged_assets() {
     printf 'Release staging manifest signature verification failed: %s\n' "${STAGING_MANIFEST}" >&2
     return 1
   fi
-  if ! (cd "${STAGING_ROOT}" && shasum -a 256 -c "$(basename "${STAGING_MANIFEST}")"); then
+  if ! (cd "${STAGING_ROOT}" && awk 'NR > 3' STAGING-MANIFEST | shasum -a 256 -c -); then
     printf 'Release staging manifest does not match staged assets: %s\n' "${STAGING_ROOT}" >&2
     return 1
   fi
@@ -145,34 +155,46 @@ verify_staged_assets() {
     printf 'Release archive checksum verification failed: %s\n' "${STAGING_ARCHIVE}" >&2
     return 1
   fi
+  local BINARY_DIGEST
+  BINARY_DIGEST="$(tar -xOf "${STAGING_ARCHIVE}" "${ARCHIVE_ROOT}/bin/mailcli" | shasum -a 256)" || return 1
+  if [[ "${BINARY_DIGEST%% *}" != "$(awk 'NR == 3 { print $2 }' "${STAGING_MANIFEST}")" ]]; then
+    printf 'Release staging binary digest does not match its signed manifest\n' >&2
+    return 1
+  fi
+  verify_private_staging_directory || return 1
+  local INDEX=0
+  for STAGED_FILE in "${STAGED_FILES[@]}" "${STAGING_MANIFEST}" "${STAGING_MANIFEST_SIGNATURE}"; do
+    if [[ -L "${STAGED_FILE}" || "$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${STAGED_FILE}")" != "${STAGING_ASSET_IDENTITIES[INDEX]}" ]]; then
+      printf 'Release staging asset changed during verification: %s\n' "${STAGED_FILE}" >&2
+      return 1
+    fi
+    INDEX=$((INDEX + 1))
+  done
 }
 
-cleanup_stale_publication_files() {
+cleanup_stale_publication_files() (
   local CANDIDATE
-  local STAGED_FILE
-  local MATCHED
+  local IDENTITY
+  verify_private_staging_directory || return 1
+  cd -P "${STAGING_ROOT}" || return 1
+  [[ "$(stat -f '%d:%i:%u:%Lp' .)" == "${STAGING_IDENTITY}" ]] || return 1
   while IFS= read -r -d '' CANDIDATE; do
-    if [[ ! -f "${CANDIDATE}" || -L "${CANDIDATE}" ]]; then
+    if [[ ! -f "${CANDIDATE}" || -L "${CANDIDATE}" || "$(stat -f '%u' "${CANDIDATE}")" != "$(id -u)" ]]; then
       printf 'Refusing unexpected publication temporary: %s\n' "${CANDIDATE}" >&2
       return 1
     fi
-    MATCHED=0
-    for STAGED_FILE in "${STAGED_FILES[@]}"; do
-      if cmp -s "${STAGED_FILE}" "${CANDIDATE}"; then
-        MATCHED=1
-        break
-      fi
-    done
-    if [[ "${MATCHED}" -ne 1 ]]; then
-      printf 'Refusing divergent publication temporary: %s\n' "${CANDIDATE}" >&2
+    IDENTITY="$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${CANDIDATE}")" || return 1
+    verify_private_staging_directory || return 1
+    if [[ -L "${CANDIDATE}" || "$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${CANDIDATE}")" != "${IDENTITY}" ]]; then
+      printf 'Publication temporary changed before cleanup: %s\n' "${CANDIDATE}" >&2
       return 1
     fi
     if ! rm -f "${CANDIDATE}"; then
       printf 'Could not remove verified publication temporary: %s\n' "${CANDIDATE}" >&2
       return 1
     fi
-  done < <(find "${STAGING_ROOT}" -mindepth 1 -maxdepth 1 -name '.publish.*' -print0)
-}
+  done < <(find . -mindepth 1 -maxdepth 1 -name '.publish.*' -print0)
+)
 
 publish_asset() {
   local INDEX="$1"
@@ -218,7 +240,65 @@ verify_private_staging_directory() {
     printf 'Refusing release staging path without owner-only permissions: %s\n' "${STAGING_ROOT}" >&2
     return 1
   fi
+  local IDENTITY
+  IDENTITY="$(stat -f '%d:%i:%u:%Lp' "${STAGING_ROOT}")" || return 1
+  if [[ -n "${STAGING_IDENTITY}" && "${IDENTITY}" != "${STAGING_IDENTITY}" ]]; then
+    printf 'Release staging directory changed identity: %s\n' "${STAGING_ROOT}" >&2
+    return 1
+  fi
+  STAGING_IDENTITY="${IDENTITY}"
 }
+
+preflight_final_assets() {
+  local MATCH_STAGING="$1"
+  local INDEX
+  local CONFLICTS=0
+  for INDEX in "${!FINAL_FILES[@]}"; do
+    if path_exists "${FINAL_FILES[INDEX]}"; then
+      if [[ "${MATCH_STAGING}" == 1 && -f "${FINAL_FILES[INDEX]}" && ! -L "${FINAL_FILES[INDEX]}" ]] &&
+        cmp -s "${STAGED_FILES[INDEX]}" "${FINAL_FILES[INDEX]}"; then
+        continue
+      fi
+      printf 'Conflicting existing release asset: %s\n' "${FINAL_FILES[INDEX]}" >&2
+      CONFLICTS=$((CONFLICTS + 1))
+    fi
+  done
+  if [[ "${CONFLICTS}" -gt 0 ]]; then
+    printf 'Refusing divergent existing release asset; preserve existing assets and set MAILCLI_RELEASE_DIRECTORY to a different empty absolute directory\n' >&2
+    return 1
+  fi
+}
+
+verify_clean_source() {
+  local STAGED_COMMIT="${1:-none}"
+  if [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" != "${SOURCE_COMMIT}" ||
+    -n "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ||
+    -n "$(git -C "${MAILCLI_ROOT}" ls-files -v | grep -E '^[a-zS] ' || true)" ]]; then
+    printf 'Release requires unchanged clean source: staging=%s current=%s\n' "${STAGED_COMMIT}" "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" >&2
+    return 1
+  fi
+}
+
+discard_verified_staging() (
+  local NAME
+  local IDENTITY
+  local INDEX=0
+  cleanup_stale_publication_files || return 1
+  verify_private_staging_directory || return 1
+  cd -P "${STAGING_ROOT}" || return 1
+  [[ "$(stat -f '%d:%i:%u:%Lp' .)" == "${STAGING_IDENTITY}" ]] || return 1
+  for NAME in "${ARCHIVE_NAME}" SHA256SUMS SHA256SUMS.sig STAGING-MANIFEST STAGING-MANIFEST.sig; do
+    [[ -f "${NAME}" && ! -L "${NAME}" ]] || return 1
+    IDENTITY="$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${NAME}")" || return 1
+    [[ "${IDENTITY}" == "${STAGING_ASSET_IDENTITIES[INDEX]}" ]] || return 1
+    verify_private_staging_directory || return 1
+    [[ ! -L "${NAME}" && "$(stat -f '%d:%i:%u:%Lp:%z:%m:%c' "${NAME}")" == "${IDENTITY}" ]] || return 1
+    rm -f -- "${NAME}" || return 1
+    INDEX=$((INDEX + 1))
+  done
+  verify_private_staging_directory || return 1
+  rmdir "${STAGING_ROOT}"
+)
 
 report_final_state() {
   local INDEX
@@ -254,13 +334,38 @@ cleanup_staging() {
 }
 trap cleanup_staging EXIT
 
+STAGED_COMMIT=none
+if path_exists "${STAGING_ROOT}"; then
+  verify_private_staging_directory || exit 1
+fi
+if [[ -f "${STAGING_MANIFEST}" && ! -L "${STAGING_MANIFEST}" ]]; then
+  STAGED_COMMIT="$(awk 'NR == 1 { print $2 }' "${STAGING_MANIFEST}")"
+fi
+verify_clean_source "${STAGED_COMMIT}" || exit 1
 if [[ -e "${STAGING_ROOT}" || -L "${STAGING_ROOT}" ]]; then
   if ! verify_private_staging_directory || ! verify_staged_assets; then
     printf 'Refusing to publish from unauthenticated release staging; no new final assets were published: %s\n' \
       "${STAGING_ROOT}" >&2
     exit 1
   fi
-else
+  STAGED_COMMIT="$(awk 'NR == 1 { print $2 }' "${STAGING_MANIFEST}")"
+  STAGED_GO_VERSION="$(awk 'NR == 2 { print $2 }' "${STAGING_MANIFEST}")"
+  if [[ "${STAGED_COMMIT}" != "${SOURCE_COMMIT}" || "${STAGED_GO_VERSION}" != "${GO_VERSION}" ]]; then
+    if [[ "${DISCARD_STALE_STAGING}" != --discard-stale-staging ]]; then
+      printf 'Stale release staging: staging=%s current=%s; toolchain=%s current_toolchain=%s; use --discard-stale-staging to rebuild in an empty release directory\n' \
+        "${STAGED_COMMIT}" "${SOURCE_COMMIT}" "${STAGED_GO_VERSION}" "${GO_VERSION}" >&2
+      exit 1
+    fi
+    preflight_final_assets 0 || exit 1
+    discard_verified_staging || exit 1
+    STAGING_IDENTITY=''
+  else
+    STAGING_READY=1
+    preflight_final_assets 1 || exit 1
+  fi
+fi
+if [[ "${STAGING_READY}" -eq 0 ]]; then
+  preflight_final_assets 0 || exit 1
   "${MAILCLI_ROOT}/scripts/build/build.sh"
   BINARY="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
   if [[ "$("${BINARY}" version)" != "mailcli ${VERSION}" ]]; then
@@ -284,6 +389,7 @@ else
     exit 1
   fi
   STAGING_CREATED=1
+  verify_private_staging_directory || exit 1
   mkdir -p "${STAGING_ROOT}/${ARCHIVE_ROOT}/bin" "${STAGING_ROOT}/${ARCHIVE_ROOT}/skills"
   cp "${BINARY}" "${STAGING_ROOT}/${ARCHIVE_ROOT}/bin/mailcli"
   cp -R "${MAILCLI_ROOT}/skills/mailcli" "${STAGING_ROOT}/${ARCHIVE_ROOT}/skills/mailcli"
@@ -312,7 +418,9 @@ else
   chmod 0644 "${STAGING_ARCHIVE}" "${STAGING_CHECKSUM}" "${STAGING_SIGNATURE}"
   (
     cd "${STAGING_ROOT}"
-    shasum -a 256 "${ARCHIVE_NAME}" >"$(basename "${STAGING_MANIFEST}")"
+    printf 'source_commit %s\ngo_version %s\nbinary_sha256 %s\n' \
+      "${SOURCE_COMMIT}" "${GO_VERSION}" "$(shasum -a 256 "${BINARY}" | awk '{ print $1 }')" >"$(basename "${STAGING_MANIFEST}")"
+    shasum -a 256 "${ARCHIVE_NAME}" >>"$(basename "${STAGING_MANIFEST}")"
     shasum -a 256 "$(basename "${STAGING_CHECKSUM}")" >>"$(basename "${STAGING_MANIFEST}")"
     shasum -a 256 "$(basename "${STAGING_SIGNATURE}")" >>"$(basename "${STAGING_MANIFEST}")"
   )
@@ -334,6 +442,7 @@ else
   fi
 fi
 STAGING_READY=1
+verify_clean_source "${SOURCE_COMMIT}" || exit 1
 if ! cleanup_stale_publication_files; then
   exit 1
 fi

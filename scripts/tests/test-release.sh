@@ -2,6 +2,13 @@
 set -euo pipefail
 
 MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+STAGING_ONLY=false
+if [[ "$#" -eq 1 && "$1" == --staging-only ]]; then
+  STAGING_ONLY=true
+elif [[ "$#" -ne 0 ]]; then
+  printf 'Usage: test-release.sh [--staging-only]\n' >&2
+  exit 2
+fi
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -10,7 +17,7 @@ require_command() {
   fi
 }
 
-for command_name in go shasum tar file size codesign diff grep wc awk link stat env; do
+for command_name in go git shasum tar file size codesign diff grep wc awk link stat env; do
   require_command "${command_name}"
 done
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -18,26 +25,38 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
     "$(uname -s)" "$(uname -m)" >&2
   exit 2
 fi
-source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
-check_go_toolchain "${MAILCLI_ROOT}"
-if ! (cd "${MAILCLI_ROOT}" && go mod verify); then
-  printf 'Go module verification failed before release work began\n' >&2
-  exit 1
-fi
-if ! (cd "${MAILCLI_ROOT}" && go build -mod=readonly ./...); then
-  printf 'Source build failed before native release packaging\n' >&2
-  exit 1
-fi
-
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-release-test.XXXXXX")"
-BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${TEST_ROOT}/build/mailcli}"
-export MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}"
 cleanup_test_root() {
   if [[ "${TEST_ROOT}" == *"/mailcli-release-test."* && -d "${TEST_ROOT}" ]]; then
     rm -rf "${TEST_ROOT}"
   fi
 }
 trap cleanup_test_root EXIT
+
+# The reviewed index can differ from HEAD. Build its exact bytes in a clean,
+# detached fixture without staging, committing or changing refs in the source.
+git -C "${MAILCLI_ROOT}" diff --quiet || { printf 'Stage the exact release-test source first\n' >&2; exit 1; }
+SOURCE_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
+SOURCE_PARENT="$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)"
+git clone -q --shared --no-checkout --no-tags "${MAILCLI_ROOT}" "${TEST_ROOT}/source"
+MAILCLI_ROOT="${TEST_ROOT}/source"
+COMMIT_A="$(GIT_AUTHOR_NAME=MailCLI GIT_AUTHOR_EMAIL=tests@example.invalid GIT_COMMITTER_NAME=MailCLI GIT_COMMITTER_EMAIL=tests@example.invalid \
+  git -C "${MAILCLI_ROOT}" commit-tree "${SOURCE_TREE}" -p "${SOURCE_PARENT}" -m 'Release fixture A')"
+git -C "${MAILCLI_ROOT}" checkout -q --detach "${COMMIT_A}"
+cd "${MAILCLI_ROOT}"
+source "${MAILCLI_ROOT}/scripts/utils/check-go-toolchain.sh"
+check_go_toolchain "${MAILCLI_ROOT}"
+if [[ "${STAGING_ONLY}" == false ]] && ! (cd "${MAILCLI_ROOT}" && go mod verify); then
+  printf 'Go module verification failed before release work began\n' >&2
+  exit 1
+fi
+if [[ "${STAGING_ONLY}" == false ]] && ! (cd "${MAILCLI_ROOT}" && go build -mod=readonly ./...); then
+  printf 'Source build failed before native release packaging\n' >&2
+  exit 1
+fi
+
+BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${TEST_ROOT}/build/mailcli}"
+export MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}"
 
 RELEASE_DIRECTORY="${TEST_ROOT}/release"
 TEST_SIGNING_KEY="${TEST_ROOT}/release-signing-key"
@@ -73,13 +92,199 @@ assert_no_release_assets() {
 run_test_release_builder() {
   local RELEASE_DIRECTORY="$1"
   shift
+  local BUILDER_ARGUMENTS=("${TEST_VERSION}")
+  if [[ "${1:-}" == --discard-stale-staging ]]; then
+    BUILDER_ARGUMENTS+=("$1")
+    shift
+  fi
   env \
     MAILCLI_RELEASE_DIRECTORY="${RELEASE_DIRECTORY}" \
     MAILCLI_RELEASE_SIGNING_KEY="${TEST_SIGNING_KEY}" \
     MAILCLI_RELEASE_EXPECTED_PUBLIC_KEY="${TEST_PUBLIC_KEY}" \
     "$@" \
-    "${MAILCLI_ROOT}/scripts/release/build-release.sh" "${TEST_VERSION}"
+    "${MAILCLI_ROOT}/scripts/release/build-release.sh" "${BUILDER_ARGUMENTS[@]}"
 }
+
+test_staging_contracts() {
+  local REAL_GO
+  local REAL_CP
+  local WITNESS_BIN="${TEST_ROOT}/witness-bin"
+  local WORK_LOG="${TEST_ROOT}/release-work"
+  local COLLISION_DIRECTORY
+  local ASSET
+  local ELAPSED
+  local STATUS
+  REAL_GO="$(command -v go)"
+  REAL_CP="$(command -v cp)"
+  mkdir "${WITNESS_BIN}"
+  cat >"${WITNESS_BIN}/go" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  case "${argument}" in build | sign) printf '%s\n' "${argument}" >>"${MAILCLI_TEST_WORK_LOG}" ;; esac
+done
+exec "${MAILCLI_TEST_REAL_GO}" "$@"
+EOF
+  cat >"${WITNESS_BIN}/cp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${MAILCLI_TEST_STOP_PUBLICATION:-}" == 1 && "${@: -1}" == */.publish.* ]]; then
+  printf 'injected publication stop\n' >&2
+  exit 28
+fi
+exec "${MAILCLI_TEST_REAL_CP}" "$@"
+EOF
+  chmod 0755 "${WITNESS_BIN}/go" "${WITNESS_BIN}/cp"
+  local WITNESS_ENV=("PATH=${WITNESS_BIN}:${PATH}" "MAILCLI_TEST_REAL_GO=${REAL_GO}" "MAILCLI_TEST_REAL_CP=${REAL_CP}" "MAILCLI_TEST_WORK_LOG=${WORK_LOG}")
+  for ASSET in "mailcli_${TEST_VERSION}_darwin_arm64.tar.gz" SHA256SUMS SHA256SUMS.sig; do
+    COLLISION_DIRECTORY="${TEST_ROOT}/collision-${ASSET}"
+    mkdir "${COLLISION_DIRECTORY}"
+    printf 'previous release bytes\n' >"${COLLISION_DIRECTORY}/${ASSET}"
+    : >"${WORK_LOG}"
+    STATUS=0
+    ELAPSED="$(TIMEFORMAT='%R'; { time run_test_release_builder "${COLLISION_DIRECTORY}" "${WITNESS_ENV[@]}" >"${TEST_ROOT}/collision.log" 2>&1; } 2>&1)" || STATUS=$?
+    [[ "${STATUS}" == 1 && ! -s "${WORK_LOG}" ]]
+    awk -v elapsed="${ELAPSED}" 'BEGIN { exit !(elapsed >= 0 && elapsed < 1) }'
+    [[ "$(find "${COLLISION_DIRECTORY}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
+    [[ "$(cat "${COLLISION_DIRECTORY}/${ASSET}")" == 'previous release bytes' ]]
+    grep -Fq "${COLLISION_DIRECTORY}/${ASSET}" "${TEST_ROOT}/collision.log"
+    grep -Fq 'different empty absolute directory' "${TEST_ROOT}/collision.log"
+    printf 'collision_refusal_seconds=%s asset=%s work=0\n' "${ELAPSED}" "${ASSET}"
+  done
+
+  local SEED_DIRECTORY="${TEST_ROOT}/stage-seed"
+  local STAGE_NAME=".mailcli-release-staging-${TEST_VERSION}"
+  local SEED_STAGE="${SEED_DIRECTORY}/${STAGE_NAME}"
+  : >"${WORK_LOG}"
+  if run_test_release_builder "${SEED_DIRECTORY}" "${WITNESS_ENV[@]}" MAILCLI_TEST_STOP_PUBLICATION=1 >"${TEST_ROOT}/seed.log" 2>&1; then
+    printf 'Publication stop did not retain authenticated staging\n' >&2; return 1
+  fi
+  [[ "$(grep -c '^build$' "${WORK_LOG}")" == 1 && "$(grep -c '^sign$' "${WORK_LOG}")" == 2 ]]
+  grep -Fxq "source_commit ${COMMIT_A}" "${SEED_STAGE}/STAGING-MANIFEST"
+  grep -Fxq "go_version $(go env GOVERSION)" "${SEED_STAGE}/STAGING-MANIFEST"
+  [[ "$(find "${SEED_DIRECTORY}" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]]
+
+  local CASE_DIRECTORY
+  local CASE_STAGE
+  local CASE
+  local REPLACEMENT_ENV="${TEST_ROOT}/replace-during-stat.sh"
+  cat >"${REPLACEMENT_ENV}" <<'EOF'
+stat() {
+  local target="${@: -1}"
+  local count=0
+  if [[ ( "${MAILCLI_TEST_REPLACEMENT}" == file && "${target}" == ./.publish.replace ) ||
+    ( "${MAILCLI_TEST_REPLACEMENT}" == directory && "${2:-}" == '%d:%i:%u:%Lp' && "${target}" == "${MAILCLI_TEST_STAGE}" ) ]]; then
+    if [[ -f "${MAILCLI_TEST_STAT_COUNT}" ]]; then IFS= read -r count <"${MAILCLI_TEST_STAT_COUNT}"; fi
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${MAILCLI_TEST_STAT_COUNT}"
+    if [[ ( "${MAILCLI_TEST_REPLACEMENT}" == file && "${count}" == 3 ) ||
+      ( "${MAILCLI_TEST_REPLACEMENT}" == directory && "${count}" == 4 ) ]]; then
+      command mv "${target}" "${MAILCLI_TEST_RETAINED}"
+      if [[ "${MAILCLI_TEST_REPLACEMENT}" == file ]]; then
+        printf 'replacement bytes' >"${target}"
+      else
+        command mkdir -m 0700 "${target}"
+        printf 'replacement bytes' >"${target}/sentinel"
+      fi
+    fi
+  fi
+  command stat "$@"
+}
+EOF
+  local CASE_ENV
+  for CASE in resume truncated divergent symlink unsafe-mode file directory binary-digest; do
+    CASE_DIRECTORY="${TEST_ROOT}/stage-${CASE}"
+    mkdir "${CASE_DIRECTORY}"
+    cp -R "${SEED_STAGE}" "${CASE_DIRECTORY}/${STAGE_NAME}"
+    CASE_STAGE="${CASE_DIRECTORY}/${STAGE_NAME}"
+    CASE_ENV=("${WITNESS_ENV[@]}")
+    case "${CASE}" in
+      truncated) printf 'partial' >"${CASE_STAGE}/.publish.truncated" ;;
+      divergent) printf 'final bytes to preserve' >"${CASE_DIRECTORY}/SHA256SUMS" ;;
+      symlink) ln -s "${TEST_ROOT}/seed.log" "${CASE_STAGE}/.publish.symlink" ;;
+      unsafe-mode) chmod 0755 "${CASE_STAGE}" ;;
+      file | directory)
+        printf 'partial' >"${CASE_STAGE}/.publish.replace"
+        CASE_ENV+=("BASH_ENV=${REPLACEMENT_ENV}" "MAILCLI_TEST_REPLACEMENT=${CASE}" "MAILCLI_TEST_STAGE=${CASE_STAGE}" "MAILCLI_TEST_RETAINED=${TEST_ROOT}/retained-${CASE}" "MAILCLI_TEST_STAT_COUNT=${TEST_ROOT}/stat-count-${CASE}")
+        ;;
+      binary-digest)
+        awk 'NR == 3 { $2 = "0000000000000000000000000000000000000000000000000000000000000000" } { print }' "${CASE_STAGE}/STAGING-MANIFEST" >"${TEST_ROOT}/wrong-binary-manifest"
+        mv "${TEST_ROOT}/wrong-binary-manifest" "${CASE_STAGE}/STAGING-MANIFEST"
+        go run -mod=readonly "${MAILCLI_ROOT}/cmd/mailcli-release-sign" sign --private "${TEST_SIGNING_KEY}" --expected-public "${TEST_PUBLIC_KEY}" --input "${CASE_STAGE}/STAGING-MANIFEST" --output "${TEST_ROOT}/wrong-binary-signature"
+        mv "${TEST_ROOT}/wrong-binary-signature" "${CASE_STAGE}/STAGING-MANIFEST.sig"
+        ;;
+    esac
+    : >"${WORK_LOG}"
+    STATUS=0
+    run_test_release_builder "${CASE_DIRECTORY}" --discard-stale-staging "${CASE_ENV[@]}" >"${TEST_ROOT}/${CASE}.log" 2>&1 || STATUS=$?
+    [[ ! -s "${WORK_LOG}" ]]
+    if [[ "${CASE}" == resume || "${CASE}" == truncated ]]; then
+      [[ "${STATUS}" == 0 && ! -e "${CASE_STAGE}" && -f "${CASE_DIRECTORY}/SHA256SUMS.sig" ]]
+    else
+      [[ "${STATUS}" == 1 && -d "${CASE_STAGE}" ]]
+      if [[ "${CASE}" == divergent ]]; then [[ "$(cat "${CASE_DIRECTORY}/SHA256SUMS")" == 'final bytes to preserve' ]]; fi
+      if [[ "${CASE}" == symlink ]]; then [[ -L "${CASE_STAGE}/.publish.symlink" ]]; fi
+      if [[ "${CASE}" == file ]]; then
+        [[ "$(cat "${CASE_STAGE}/.publish.replace")" == 'replacement bytes' && "$(cat "${TEST_ROOT}/retained-file")" == partial ]]
+        grep -Fq 'Publication temporary changed before cleanup' "${TEST_ROOT}/${CASE}.log"
+      fi
+      if [[ "${CASE}" == directory ]]; then
+        [[ "$(cat "${CASE_STAGE}/sentinel")" == 'replacement bytes' ]]
+        cmp -s "${SEED_STAGE}/STAGING-MANIFEST" "${TEST_ROOT}/retained-directory/STAGING-MANIFEST"
+        grep -Fq 'Release staging directory changed identity' "${TEST_ROOT}/${CASE}.log"
+      fi
+      if [[ "${CASE}" == binary-digest ]]; then grep -Fq 'binary digest does not match' "${TEST_ROOT}/${CASE}.log"; fi
+    fi
+  done
+
+  local README_BLOB
+  local TREE_B
+  local COMMIT_B
+  README_BLOB="$( { git -C "${MAILCLI_ROOT}" show "${COMMIT_A}:README.md"; printf '\nRelease source fixture B.\n'; } | git -C "${MAILCLI_ROOT}" hash-object -w --stdin)"
+  git -C "${MAILCLI_ROOT}" update-index --cacheinfo "100644,${README_BLOB},README.md"
+  TREE_B="$(git -C "${MAILCLI_ROOT}" write-tree)"
+  COMMIT_B="$(GIT_AUTHOR_NAME=MailCLI GIT_AUTHOR_EMAIL=tests@example.invalid GIT_COMMITTER_NAME=MailCLI GIT_COMMITTER_EMAIL=tests@example.invalid \
+    git -C "${MAILCLI_ROOT}" commit-tree "${TREE_B}" -p "${COMMIT_A}" -m 'Release fixture B')"
+  git -C "${MAILCLI_ROOT}" checkout -q --detach "${COMMIT_B}"
+  : >"${WORK_LOG}"
+  STATUS=0
+  run_test_release_builder "${SEED_DIRECTORY}" "${WITNESS_ENV[@]}" >"${TEST_ROOT}/stale.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" == 1 && ! -s "${WORK_LOG}" && -d "${SEED_STAGE}" ]]
+  grep -Fq "staging=${COMMIT_A} current=${COMMIT_B}" "${TEST_ROOT}/stale.log"
+  CASE_DIRECTORY="${TEST_ROOT}/stale-final-collision"
+  mkdir "${CASE_DIRECTORY}"
+  cp -R "${SEED_STAGE}" "${CASE_DIRECTORY}/${STAGE_NAME}"
+  cp "${SEED_STAGE}/SHA256SUMS" "${CASE_DIRECTORY}/SHA256SUMS"
+  STATUS=0
+  run_test_release_builder "${CASE_DIRECTORY}" --discard-stale-staging "${WITNESS_ENV[@]}" >"${TEST_ROOT}/stale-final.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" == 1 && ! -s "${WORK_LOG}" ]]
+  cmp -s "${SEED_STAGE}/STAGING-MANIFEST" "${CASE_DIRECTORY}/${STAGE_NAME}/STAGING-MANIFEST"
+  cmp -s "${SEED_STAGE}/SHA256SUMS" "${CASE_DIRECTORY}/SHA256SUMS"
+  printf '\ndirty source\n' >>"${MAILCLI_ROOT}/README.md"
+  STATUS=0
+  run_test_release_builder "${SEED_DIRECTORY}" --discard-stale-staging "${WITNESS_ENV[@]}" >"${TEST_ROOT}/dirty.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" == 1 && ! -s "${WORK_LOG}" && -d "${SEED_STAGE}" ]]
+  git -C "${MAILCLI_ROOT}" checkout -- README.md
+  git -C "${MAILCLI_ROOT}" update-index --assume-unchanged README.md
+  printf '\nhidden dirty source\n' >>"${MAILCLI_ROOT}/README.md"
+  STATUS=0
+  run_test_release_builder "${SEED_DIRECTORY}" --discard-stale-staging "${WITNESS_ENV[@]}" >"${TEST_ROOT}/hidden-dirty.log" 2>&1 || STATUS=$?
+  [[ "${STATUS}" == 1 && ! -s "${WORK_LOG}" && -d "${SEED_STAGE}" ]]
+  git -C "${MAILCLI_ROOT}" update-index --no-assume-unchanged README.md
+  git -C "${MAILCLI_ROOT}" checkout -- README.md
+  run_test_release_builder "${SEED_DIRECTORY}" --discard-stale-staging "${WITNESS_ENV[@]}" MAILCLI_TEST_STOP_PUBLICATION=1 >"${TEST_ROOT}/rebuild.log" 2>&1 && return 1
+  [[ "$(grep -c '^build$' "${WORK_LOG}")" == 1 && "$(grep -c '^sign$' "${WORK_LOG}")" == 2 ]]
+  grep -Fxq "source_commit ${COMMIT_B}" "${SEED_STAGE}/STAGING-MANIFEST"
+  : >"${WORK_LOG}"
+  run_test_release_builder "${SEED_DIRECTORY}" "${WITNESS_ENV[@]}" >"${TEST_ROOT}/rebuild-resume.log" 2>&1
+  [[ ! -s "${WORK_LOG}" && ! -e "${SEED_STAGE}" ]]
+  git -C "${MAILCLI_ROOT}" checkout -q --detach "${COMMIT_A}"
+  printf 'Release staging source, collision and partial-publication contracts passed\n'
+}
+test_staging_contracts
+if [[ "${STAGING_ONLY}" == true ]]; then
+  exit 0
+fi
 VERSION_MISMATCH_DIRECTORY="${TEST_ROOT}/version-mismatch"
 if MAILCLI_RELEASE_DIRECTORY="${VERSION_MISMATCH_DIRECTORY}" \
   "${MAILCLI_ROOT}/scripts/release/build-release.sh" 0.1.0 >/dev/null 2>&1; then
