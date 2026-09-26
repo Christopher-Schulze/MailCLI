@@ -84,6 +84,9 @@ type OperationGuidance struct {
 // command and operation identity after this base classification.
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
+	if guidance, matched := guidanceForAccessGatePreflight(command, code); matched {
+		return guidance
+	}
 	var attachmentOutcome *AttachmentSaveOutcomeError
 	if errors.As(err, &attachmentOutcome) {
 		return guidanceForAttachmentSaveOutcome(attachmentOutcome, code)
@@ -255,6 +258,40 @@ func GuidanceForError(command string, err error) OperationGuidance {
 func isMailStoreAvailabilityError(code string) bool {
 	return code == "mail_store_unavailable" || code == "mail_store_preferences_unavailable" ||
 		code == "safe_mailbox_listing_unavailable" || code == "safe_search_unavailable"
+}
+
+func guidanceForAccessGatePreflight(command string, code string) (OperationGuidance, bool) {
+	switch code {
+	case "mail_access_gate_corrupt", "mail_access_gate_unsafe":
+	case "mail_not_running":
+		if !effectfulCommand(command) {
+			return OperationGuidance{}, false
+		}
+	default:
+		return OperationGuidance{}, false
+	}
+	phase := OperationPhaseRead
+	if effectfulCommand(command) {
+		phase = OperationPhaseExecution
+	}
+	instruction := ""
+	retryability := RetryUserInputRequired
+	action := RecoveryCorrect
+	switch code {
+	case "mail_access_gate_corrupt":
+		instruction = "Quit Mail.app and retry this same operation while it is stopped. MailCLI clears only verified recovery-state contents and returns mail_not_running; then reopen Mail.app and retry. Never delete or replace mail-access.lock."
+	case "mail_access_gate_unsafe":
+		retryability = RetryTerminal
+		action = RecoveryInspect
+		instruction = "No Mail.app action was dispatched. Inspect the existing MailCLI access directory and lock ownership, type, link count, and identity; preserve the lock and use a verified recovery plan before retrying. Never delete or replace mail-access.lock."
+	case "mail_not_running":
+		instruction = "Open Mail.app, allow it to finish loading, then retry this same operation; no action was dispatched."
+	}
+	return OperationGuidance{
+		Phase: phase, EffectCertainty: EffectNone,
+		Retryability: retryability, ReplayAllowed: false,
+		Recovery: RecoveryGuidance{Action: action, Instruction: instruction},
+	}, true
 }
 
 func guidanceForKnownReadError(code string) (OperationGuidance, bool) {

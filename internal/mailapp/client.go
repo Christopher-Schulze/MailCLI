@@ -443,14 +443,21 @@ func mapAccessGateError(err error) error {
 	if errors.As(err, &invalidState) {
 		return &OperationError{
 			Code:    "mail_access_gate_corrupt",
-			Message: "MailCLI recovery state is invalid; quit Mail, remove ~/Library/Application Support/MailCLI/mail-access.lock, then reopen Mail",
+			Message: "MailCLI recovery state is invalid; quit Mail.app and retry this same operation while it is stopped. If repair returns mail_not_running, reopen Mail.app and retry; never remove or replace the access-gate file",
+		}
+	}
+	var unsafePath *unsafeAccessGatePathError
+	if errors.As(err, &unsafePath) {
+		return &OperationError{
+			Code:    "mail_access_gate_unsafe",
+			Message: "MailCLI rejected an unsafe access-gate path before dispatch; inspect the existing directory and lock identity, and do not alter the lock until its origin is verified",
 		}
 	}
 	var notRunning *mailNotRunningError
 	if errors.As(err, &notRunning) {
 		return &OperationError{
 			Code:    "mail_not_running",
-			Message: "Mail.app is not running; open it once before a write or live Automation probe",
+			Message: "Mail.app is not running; open it once, allow it to finish loading, then retry this same operation",
 		}
 	}
 	return fmt.Errorf("acquire Mail.app access gate: %w", err)

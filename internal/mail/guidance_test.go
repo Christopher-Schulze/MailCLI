@@ -260,6 +260,30 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 	}
 }
 
+func TestAccessGatePreflightGuidanceProvesNoEffectForMutations(t *testing.T) {
+	tests := []struct {
+		code              string
+		instructionPhrase string
+		retryability      Retryability
+		recovery          RecoveryAction
+	}{
+		{code: "mail_not_running", instructionPhrase: "no action was dispatched", retryability: RetryUserInputRequired, recovery: RecoveryCorrect},
+		{code: "mail_access_gate_corrupt", instructionPhrase: "Never delete or replace mail-access.lock", retryability: RetryUserInputRequired, recovery: RecoveryCorrect},
+		{code: "mail_access_gate_unsafe", instructionPhrase: "use a verified recovery plan", retryability: RetryTerminal, recovery: RecoveryInspect},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			guidance := GuidanceForError("drafts.send", &OperationError{Code: test.code, Message: "preflight failure"})
+			if guidance.Phase != OperationPhaseExecution || guidance.EffectCertainty != EffectNone ||
+				guidance.Retryability != test.retryability || guidance.ReplayAllowed ||
+				guidance.Recovery.Action != test.recovery ||
+				!strings.Contains(guidance.Recovery.Instruction, test.instructionPhrase) {
+				t.Fatalf("access-gate guidance = %+v", guidance)
+			}
+		})
+	}
+}
+
 func TestGuidanceForAmbiguousMailboxMutationRequiresCorrection(t *testing.T) {
 	ambiguous := &transport.TransportError{
 		Code: transport.CodeIMAPAmbiguousMailbox, Message: "multiple mailbox identities match the requested path",

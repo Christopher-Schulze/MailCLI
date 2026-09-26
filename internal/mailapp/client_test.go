@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 
@@ -197,7 +197,7 @@ func TestClientDoesNotRunScriptWhenMailIsStopped(t *testing.T) {
 	client := &Client{
 		runner: runner,
 		gate: &fileAccessGate{
-			path: filepath.Join(t.TempDir(), "mail.lock"),
+			path: testAccessGatePath(t),
 			mailPID: func(context.Context) (int, error) {
 				return 0, nil
 			},
@@ -210,6 +210,40 @@ func TestClientDoesNotRunScriptWhenMailIsStopped(t *testing.T) {
 	}
 	if runner.request != "" {
 		t.Fatalf("bridge unexpectedly invoked with %q", runner.request)
+	}
+}
+
+func TestClientRepairsStoppedMailGateWithoutDispatching(t *testing.T) {
+	path := testAccessGatePath(t)
+	if err := os.WriteFile(path, []byte(`{"mail_pid":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runnerStub{response: `{"ok":true,"error":null,"accounts":[]}`}
+	client := &Client{
+		runner: runner,
+		gate: &fileAccessGate{
+			path: path, mailPID: func(context.Context) (int, error) { return 0, nil },
+		},
+	}
+	_, err = client.ListAccounts(context.Background())
+	var operationError *OperationError
+	if !errors.As(err, &operationError) || operationError.Code != "mail_not_running" {
+		t.Fatalf("ListAccounts() error = %v, want mail_not_running", err)
+	}
+	if runner.request != "" {
+		t.Fatalf("bridge unexpectedly invoked with %q", runner.request)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil || len(payload) != 0 {
+		t.Fatalf("repaired gate contents = %q, error = %v", payload, err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("repair replaced the gate inode: before=%v after=%v error=%v", before, after, err)
 	}
 }
 

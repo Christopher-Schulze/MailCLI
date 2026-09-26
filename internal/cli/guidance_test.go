@@ -453,20 +453,21 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 		return &mail.DraftRevisionConflict{Ref: ref, ExpectedRevision: "expected", CurrentRevision: "current"}
 	}
 	tests := []struct {
-		name          string
-		command       string
-		code          string
-		data          responseData
-		err           error
-		target        projectionTarget
-		view          string
-		phase         mail.OperationPhase
-		effect        mail.EffectCertainty
-		retryability  mail.Retryability
-		replayAllowed bool
-		action        mail.RecoveryAction
-		recoveryCmd   string
-		recoveryArgs  []string
+		name                string
+		command             string
+		code                string
+		data                responseData
+		err                 error
+		target              projectionTarget
+		view                string
+		phase               mail.OperationPhase
+		effect              mail.EffectCertainty
+		retryability        mail.Retryability
+		replayAllowed       bool
+		action              mail.RecoveryAction
+		recoveryCmd         string
+		recoveryArgs        []string
+		instructionContains string
 	}{
 		{
 			name: "completed draft output with ref", command: "drafts.update", code: "output_too_large",
@@ -542,6 +543,27 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
 		},
 		{
+			name: "stopped Mail gate repair does not dispatch send", command: "drafts.send", code: "mail_not_running",
+			err:   &mail.OperationError{Code: "mail_not_running", Message: "Mail is stopped"},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+			instructionContains: "no action was dispatched",
+		},
+		{
+			name: "corrupt Mail gate requires stopped repair", command: "drafts.send", code: "mail_access_gate_corrupt",
+			err:   &mail.OperationError{Code: "mail_access_gate_corrupt", Message: "invalid retained state"},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+			instructionContains: "Never delete or replace mail-access.lock",
+		},
+		{
+			name: "unsafe Mail gate fails before dispatch", command: "drafts.send", code: "mail_access_gate_unsafe",
+			err:   &mail.OperationError{Code: "mail_access_gate_unsafe", Message: "unsafe path"},
+			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
+			retryability: mail.RetryTerminal, action: mail.RecoveryInspect,
+			instructionContains: "use a verified recovery plan",
+		},
+		{
 			name: "ambiguous mutation mailbox requires correction", command: "messages.move", code: "imap_ambiguous_mailbox",
 			err:    &mail.OperationError{Code: "imap_ambiguous_mailbox", Message: "multiple wire names match"},
 			target: projectionTargetRaw, view: outputViewFull,
@@ -570,6 +592,7 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 				guidance.Retryability != test.retryability || guidance.ReplayAllowed != test.replayAllowed ||
 				guidance.Recovery.Action != test.action || guidance.Recovery.Command != test.recoveryCmd ||
 				!equalStrings(guidance.Recovery.Args, test.recoveryArgs) ||
+				(test.instructionContains != "" && !strings.Contains(guidance.Recovery.Instruction, test.instructionContains)) ||
 				(test.name == "ambiguous mutation mailbox requires correction" &&
 					!strings.Contains(guidance.Recovery.Instruction, "Correct the conflicting IMAP mailbox identities")) {
 				t.Fatalf("%s envelope guidance = %+v", test.name, guidance)
