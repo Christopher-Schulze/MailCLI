@@ -96,6 +96,14 @@ func TestOrphanSnapshotDirectoryRejectsReplacement(t *testing.T) {
 				if err := os.MkdirAll(target, 0o700); err != nil {
 					t.Fatal(err)
 				}
+				original := filepath.Join(target, "keep.txt")
+				if err := os.WriteFile(original, []byte("original"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				originalIdentity, err := os.Lstat(original)
+				if err != nil {
+					t.Fatal(err)
+				}
 				parent, err := os.OpenRoot(filepath.Dir(target))
 				if err != nil {
 					t.Fatal(err)
@@ -132,8 +140,12 @@ func TestOrphanSnapshotDirectoryRejectsReplacement(t *testing.T) {
 				if err := os.WriteFile(sentinel, []byte("replacement"), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				replacementIdentity, err := os.Lstat(sentinel)
+				if err != nil {
+					t.Fatal(err)
+				}
 				if openedFirst {
-					err = removeOrphanSnapshotDirectory(pinned, level)
+					err = removeOrphanSnapshotFile(pinned, "keep.txt", originalIdentity)
 				} else {
 					pinned, err = openOrphanSnapshotDirectory(parent, filepath.Base(target), identity, check)
 					if pinned != nil {
@@ -142,14 +154,23 @@ func TestOrphanSnapshotDirectoryRejectsReplacement(t *testing.T) {
 						}
 					}
 				}
-				if err == nil {
-					t.Fatal("directory replacement was accepted")
+				if errorCode(err) != "draft_lock_changed" {
+					t.Fatalf("directory replacement was not rejected with identity evidence: %v", err)
 				}
-				if payload, err := os.ReadFile(sentinel); err != nil || string(payload) != "replacement" {
-					t.Fatalf("replacement changed: %q, %v", payload, err)
-				}
+				assertRetainedSnapshotFile(t, sentinel, replacementIdentity, "replacement")
+				assertRetainedSnapshotFile(t, filepath.Join(target+".retained", "keep.txt"), originalIdentity, "original")
 			})
 		}
+	}
+}
+
+func assertRetainedSnapshotFile(t *testing.T, path string, identity os.FileInfo, want string) {
+	t.Helper()
+	payload, readErr := os.ReadFile(path)
+	current, statErr := os.Lstat(path)
+	if readErr != nil || statErr != nil || string(payload) != want || !os.SameFile(identity, current) ||
+		current.Mode() != identity.Mode() {
+		t.Fatalf("snapshot changed: path=%q payload=%q read=%v stat=%v", path, payload, readErr, statErr)
 	}
 }
 
@@ -262,11 +283,20 @@ func TestOrphanSnapshotCleanupStopsOnCanceledOrReappearingDraft(t *testing.T) {
 			} else {
 				cancel()
 			}
-			if err := removeOrphanSnapshotDirectory(directory, 0); err == nil {
-				t.Fatal("cleanup ignored cancellation or reappearing draft")
+			wantCode := "draft_operation_canceled"
+			if reappeared {
+				wantCode = "prune_state_changed"
 			}
-			if _, err := os.Lstat(path); err != nil {
-				t.Fatalf("snapshot directory removed: %v", err)
+			if err := removeEmptyOrphanSnapshotParent(lease.storage, parent, info, check); errorCode(err) != wantCode {
+				t.Fatalf("cleanup ignored cancellation or reappearing draft: %v", err)
+			}
+			if current, err := os.Lstat(path); err != nil || !os.SameFile(info, current) || current.Mode() != info.Mode() {
+				t.Fatalf("snapshot directory changed: %v, %v", current, err)
+			}
+			if reappeared {
+				if payload, err := os.ReadFile(draftFile); err != nil || string(payload) != "reappeared" {
+					t.Fatalf("reappearing draft changed: %q, %v", payload, err)
+				}
 			}
 		})
 	}
