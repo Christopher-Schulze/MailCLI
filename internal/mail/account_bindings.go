@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"mailcli/internal/transport"
@@ -27,6 +28,7 @@ const (
 	maximumAccountBindings      = 128
 	maximumSenderAliasesPerBind = 64
 	accountBindingLockWait      = 2 * time.Second
+	accountBindingTemporaryAge  = 10 * time.Minute
 )
 
 // AccountBinding connects one stable Mail account identity to the sender
@@ -649,6 +651,9 @@ func updateAccountBindingsLocked(
 	if err := verifyAccountBindingDirectory(directory, lease.lock.directory); err != nil {
 		return err
 	}
+	if err := sweepAccountBindingTemporaries(ctx, lease.storage, name, lease.lock.directory); err != nil {
+		return err
+	}
 	document, identity, err := loadAccountBindingsFromStorage(lease.storage, name)
 	if err != nil {
 		return err
@@ -687,6 +692,73 @@ func marshalAccountBindingFile(document AccountBindingFile) ([]byte, error) {
 		return nil, &AccountBindingError{Code: "account_binding_invalid", Message: "account-binding file exceeds 256 KiB"}
 	}
 	return payload, nil
+}
+
+func accountBindingTemporaryPrefix(name string) string {
+	digest := sha256.Sum256([]byte(name))
+	return ".account-bindings-" + hex.EncodeToString(digest[:]) + "-"
+}
+
+func accountBindingTemporaryEligible(info os.FileInfo, cutoff time.Time, owner uint32) bool {
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.Mode() == 0o600 &&
+		info.ModTime().Before(cutoff) && metadata.Uid == owner && metadata.Nlink == 1
+}
+
+func sweepAccountBindingTemporaries(ctx context.Context, storage *draftStorage, name string, parent *os.File) error {
+	entries, err := draftStorageReadDir(storage, ".")
+	if err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "list account-binding temporaries", Err: err}
+	}
+	prefix := accountBindingTemporaryPrefix(name)
+	cutoff := time.Now().Add(-accountBindingTemporaryAge)
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return accountBindingBusyError(err)
+		}
+		temporary := entry.Name()
+		if !strings.HasPrefix(temporary, prefix) || !strings.HasSuffix(temporary, ".tmp") || len(temporary) != len(prefix)+32+4 {
+			continue
+		}
+		random := temporary[len(prefix) : len(temporary)-4]
+		if strings.IndexFunc(random, func(value rune) bool { return (value < '0' || value > '9') && (value < 'a' || value > 'f') }) != -1 {
+			continue
+		}
+		info, err := storage.lstat(temporary)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return &AccountBindingError{Code: "account_binding_unavailable", Message: "inspect account-binding temporary", Err: err}
+		}
+		if !accountBindingTemporaryEligible(info, cutoff, uint32(os.Geteuid())) {
+			continue
+		}
+		if err := removeStaleAccountBindingTemporary(storage, temporary, info, cutoff, parent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeStaleAccountBindingTemporary(storage *draftStorage, name string, expected os.FileInfo, cutoff time.Time, parent *os.File) error {
+	if err := verifyAccountBindingDirectory(storage.rootName, parent); err != nil {
+		return err
+	}
+	current, err := storage.lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return &AccountBindingError{Code: "account_binding_unavailable", Message: "reinspect account-binding temporary", Err: err}
+	}
+	if !os.SameFile(expected, current) || expected.Size() != current.Size() || !expected.ModTime().Equal(current.ModTime()) {
+		return &AccountBindingError{Code: "account_binding_changed", Message: "account-binding temporary changed before cleanup"}
+	}
+	if !accountBindingTemporaryEligible(current, cutoff, uint32(os.Geteuid())) {
+		return nil
+	}
+	return removeDraftStorageFile(storage, name, expected, "account-binding temporary")
 }
 
 func accountBindingLockReference(path string) (string, error) {
@@ -758,7 +830,7 @@ func writeAccountBindings(
 	if _, err := rand.Read(random[:]); err != nil {
 		return &AccountBindingError{Code: "account_binding_unavailable", Message: "create account-binding temporary name", Err: err}
 	}
-	temporary := ".account-bindings-" + hex.EncodeToString(random[:]) + ".tmp"
+	temporary := accountBindingTemporaryPrefix(name) + hex.EncodeToString(random[:]) + ".tmp"
 	temporaryInfo, err := writePrivateDraftFile(storage, temporary, payload)
 	if err != nil {
 		return &AccountBindingError{Code: "account_binding_unavailable", Message: "write account-binding file", Err: err}
@@ -790,6 +862,12 @@ func writeAccountBindings(
 	if err := storage.apply(draftStorageSync, "", "", 0); err != nil {
 		return &AccountBindingError{
 			Code: "account_binding_unavailable", Message: "sync account-binding directory", Err: err,
+			publicationStatus: AccountBindingPublicationUnknown,
+		}
+	}
+	if err := errors.Join(verifyAccountBindingDirectory(parentPath, pinnedParent), verifyAccountBindingFileIdentity(storage, name, temporaryInfo)); err != nil {
+		return &AccountBindingError{
+			Code: "account_binding_changed", Message: "verify published account-binding identity", Err: err,
 			publicationStatus: AccountBindingPublicationUnknown,
 		}
 	}

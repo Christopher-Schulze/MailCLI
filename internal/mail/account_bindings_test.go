@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -200,6 +202,344 @@ func TestAccountBindingReadDoesNotRepairPermissions(t *testing.T) {
 	}
 }
 
+func TestAccountBindingTemporarySweepPreservesUnownedAndUnsafeFiles(t *testing.T) {
+	prefix := fmt.Sprintf(".account-bindings-%x-", sha256.Sum256([]byte("account-bindings.json")))
+	stale := time.Now().Add(-11 * time.Minute)
+	for _, test := range []struct {
+		name    string
+		file    string
+		mode    os.FileMode
+		old     bool
+		removed bool
+	}{
+		{"owned stale", prefix + strings.Repeat("a", 32) + ".tmp", 0o600, true, true},
+		{"owned fresh", prefix + strings.Repeat("b", 32) + ".tmp", 0o600, false, false},
+		{"unsafe mode", prefix + strings.Repeat("c", 32) + ".tmp", 0o640, true, false},
+		{"unsafe special mode", prefix + strings.Repeat("f", 32) + ".tmp", os.ModeSetuid | 0o600, true, false},
+		{"legacy", ".account-bindings-" + strings.Repeat("d", 32) + ".tmp", 0o600, true, false},
+		{"other binding", fmt.Sprintf(".account-bindings-%x-%s.tmp", sha256.Sum256([]byte("other.json")), strings.Repeat("e", 32)), 0o600, true, false},
+		{"malformed random", prefix + strings.Repeat("F", 32) + ".tmp", 0o600, true, false},
+		{"short random", prefix + strings.Repeat("a", 31) + ".tmp", 0o600, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "account-bindings.json")
+			file := filepath.Join(directory, test.file)
+			if err := os.WriteFile(file, []byte("retained bytes"), test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(file, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if test.old {
+				if err := os.Chtimes(file, stale, stale); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := NewAccountBindingStore(path).UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil }); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Lstat(file)
+			if test.removed {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("owned stale temporary survived: %v", err)
+				}
+				return
+			}
+			payload, readErr := os.ReadFile(file)
+			if err != nil || readErr != nil || !os.SameFile(before, after) || string(payload) != "retained bytes" {
+				t.Fatalf("preserved temporary changed: %v, %v", err, readErr)
+			}
+		})
+	}
+}
+
+func TestAccountBindingTemporaryOwnerPreservesPausedOtherWriter(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "first.json")
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	result := make(chan error, 1)
+	finished := false
+	defer func() {
+		select {
+		case <-resume:
+		default:
+			close(resume)
+		}
+		if !finished {
+			select {
+			case <-result:
+			case <-time.After(30 * time.Second):
+				t.Error("paused writer did not stop during cleanup")
+			}
+		}
+	}()
+	store := &fileAccountBindingStore{path: path, publicationHook: func(boundary accountBindingPublicationBoundary) error {
+		if boundary == accountBindingBeforeRename {
+			close(entered)
+			<-resume
+		}
+		return nil
+	}}
+	go func() {
+		result <- store.UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil })
+	}()
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("writer did not reach temporary publication")
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var temporary string
+	prefix := fmt.Sprintf(".account-bindings-%x-", sha256.Sum256([]byte("first.json")))
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			temporary = filepath.Join(directory, entry.Name())
+		}
+	}
+	if temporary == "" {
+		t.Fatal("writer did not create its owner-qualified temporary")
+	}
+	stale := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(temporary, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Lstat(temporary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(temporary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewAccountBindingStore(filepath.Join(directory, "second.json")).UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil }); err != nil {
+		t.Fatal(err)
+	}
+	after, statErr := os.Lstat(temporary)
+	retained, readErr := os.ReadFile(temporary)
+	if statErr != nil || readErr != nil || !os.SameFile(before, after) || !bytes.Equal(payload, retained) {
+		t.Fatalf("other binding changed live temporary: %v, %v", statErr, readErr)
+	}
+	close(resume)
+	select {
+	case err := <-result:
+		finished = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("paused writer did not finish")
+	}
+	published, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(payload, published) {
+		t.Fatalf("published binding differs from paused bytes: %v", err)
+	}
+}
+
+func TestAccountBindingTemporarySweepPreservesUnsafeObjects(t *testing.T) {
+	for _, kind := range []string{"symlink", "directory", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "account-bindings.json")
+			name := fmt.Sprintf(".account-bindings-%x-%s.tmp", sha256.Sum256([]byte(filepath.Base(path))), strings.Repeat("a", 32))
+			temporary := filepath.Join(directory, name)
+			outside := filepath.Join(t.TempDir(), "unrelated")
+			if err := os.WriteFile(outside, []byte("unrelated bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch kind {
+			case "symlink":
+				err = os.Symlink(outside, temporary)
+			case "directory":
+				err = os.Mkdir(temporary, 0o700)
+			case "hardlink":
+				err = os.Link(outside, temporary)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			stale := time.Now().Add(-11 * time.Minute)
+			if kind != "symlink" {
+				if err := os.Chtimes(temporary, stale, stale); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Lstat(temporary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := NewAccountBindingStore(path).UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil }); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Lstat(temporary)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("unsafe object changed: %v", err)
+			}
+			payload, err := os.ReadFile(outside)
+			if err != nil || string(payload) != "unrelated bytes" {
+				t.Fatalf("foreign bytes changed: %q, %v", payload, err)
+			}
+		})
+	}
+}
+
+func TestAccountBindingTemporaryEligibilityRequiresOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "temporary")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(path, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for _, test := range []struct {
+		name     string
+		owner    uint32
+		eligible bool
+	}{
+		{"actual owner", uint32(os.Geteuid()), true},
+		{"foreign owner", uint32(os.Geteuid()) + 1, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := accountBindingTemporaryEligible(info, cutoff, test.owner); got != test.eligible {
+				t.Fatalf("temporary eligibility = %t, want %t", got, test.eligible)
+			}
+		})
+	}
+}
+
+func TestAccountBindingTemporarySweepRejectsPinnedReplacement(t *testing.T) {
+	for _, target := range []string{"file", "parent"} {
+		t.Run(target, func(t *testing.T) {
+			base := t.TempDir()
+			directory := filepath.Join(base, "bindings")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, "account-bindings.json")
+			lease, err := acquireAccountBindingLease(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := lease.release(); err != nil {
+					t.Error(err)
+				}
+			}()
+			name := accountBindingTemporaryPrefix(filepath.Base(path)) + strings.Repeat("a", 32) + ".tmp"
+			temporary := filepath.Join(directory, name)
+			if err := os.WriteFile(temporary, []byte("old bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stale := time.Now().Add(-11 * time.Minute)
+			if err := os.Chtimes(temporary, stale, stale); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(temporary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target == "parent" {
+				if err := os.Rename(directory, filepath.Join(base, "moved")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Rename(temporary, temporary+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(temporary, []byte("replacement bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = removeStaleAccountBindingTemporary(lease.storage, name, before, time.Now().Add(-10*time.Minute), lease.lock.directory)
+			if errorCodeForBindingTest(err) != "account_binding_changed" {
+				t.Fatalf("temporary replacement = %v, want account_binding_changed", err)
+			}
+			payload, err := os.ReadFile(temporary)
+			if err != nil || string(payload) != "replacement bytes" {
+				t.Fatalf("replacement changed: %q, %v", payload, err)
+			}
+			original := temporary + ".saved"
+			if target == "parent" {
+				original = filepath.Join(base, "moved", name)
+			}
+			retained, err := os.Lstat(original)
+			if err != nil || !os.SameFile(before, retained) {
+				t.Fatalf("original changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestAccountBindingPostRenameRejectsReplacement(t *testing.T) {
+	for _, target := range []string{"parent", "file", "symlink"} {
+		t.Run(target, func(t *testing.T) {
+			base := t.TempDir()
+			directory := filepath.Join(base, "bindings")
+			path := filepath.Join(directory, "account-bindings.json")
+			var published os.FileInfo
+			store := &fileAccountBindingStore{path: path, publicationHook: func(boundary accountBindingPublicationBoundary) error {
+				if boundary != accountBindingAfterRename {
+					return nil
+				}
+				var err error
+				published, err = os.Lstat(path)
+				if err != nil {
+					return err
+				}
+				if target == "parent" {
+					if err := os.Rename(directory, filepath.Join(base, "moved")); err != nil {
+						return err
+					}
+					if err := os.Mkdir(directory, 0o700); err != nil {
+						return err
+					}
+				} else if err := os.Rename(path, path+".published"); err != nil {
+					return err
+				}
+				if target == "symlink" {
+					return os.Symlink(path+".published", path)
+				}
+				return os.WriteFile(path, []byte("unrelated replacement"), 0o600)
+			}}
+			err := store.UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) { return document, nil })
+			if errorCodeForBindingTest(err) != "account_binding_changed" {
+				t.Fatalf("publication replacement = %v, want account_binding_changed", err)
+			}
+			assertAccountBindingPublicationStatus(t, err, AccountBindingPublicationUnknown)
+			original := path + ".published"
+			if target == "parent" {
+				original = filepath.Join(base, "moved", filepath.Base(path))
+			}
+			retained, err := os.Lstat(original)
+			if err != nil || !os.SameFile(published, retained) {
+				t.Fatalf("published inode was not retained: %v", err)
+			}
+			if target != "symlink" {
+				payload, err := os.ReadFile(path)
+				if err != nil || string(payload) != "unrelated replacement" {
+					t.Fatalf("replacement changed: %q, %v", payload, err)
+				}
+			}
+		})
+	}
+}
+
 type accountBindingWriterCase struct {
 	name        string
 	firstID     string
@@ -239,11 +579,12 @@ func runSerializedAccountBindingWriters(t *testing.T, path string, test accountB
 	readAccountBindingProcessLine(t, first.output, "MAILCLI_BINDING_CALLBACK")
 	second := startAccountBindingProcess(t, path, test.secondID, test.secondAlias, false)
 	readAccountBindingProcessLine(t, second.output, "MAILCLI_BINDING_ATTEMPT")
+	readAccountBindingProcessLine(t, second.output, "MAILCLI_BINDING_BLOCKED")
 	secondCallback := nextAccountBindingProcessLine(second.output)
 	select {
 	case line := <-secondCallback:
 		t.Fatalf("second process entered merge while first held the transaction: %s", line)
-	case <-time.After(500 * time.Millisecond):
+	default:
 	}
 	if _, err := io.WriteString(first.input, "continue\n"); err != nil {
 		t.Fatalf("release first writer: %v", err)
@@ -453,6 +794,21 @@ func replaceAccountBindingParent(t *testing.T, directory string, movedDirectory 
 	return replacement
 }
 
+type accountBindingProcessWaitContext struct {
+	context.Context
+	once sync.Once
+	t    *testing.T
+}
+
+func (c *accountBindingProcessWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() {
+		if _, err := fmt.Fprintln(os.Stdout, "MAILCLI_BINDING_BLOCKED"); err != nil {
+			c.t.Fatalf("write binding helper wait marker: %v", err)
+		}
+	})
+	return c.Context.Done()
+}
+
 func TestAccountBindingStoreProcessHelper(t *testing.T) {
 	if os.Getenv("MAILCLI_ACCOUNT_BINDING_HELPER") != "1" {
 		return
@@ -463,7 +819,18 @@ func TestAccountBindingStoreProcessHelper(t *testing.T) {
 	if _, err := fmt.Fprintln(os.Stdout, "MAILCLI_BINDING_ATTEMPT"); err != nil {
 		t.Fatalf("write binding helper attempt marker: %v", err)
 	}
-	err := NewAccountBindingStore(path).UpdateAccountBindings(context.Background(), func(document AccountBindingFile) (AccountBindingFile, error) {
+	lockReference, err := accountBindingLockReference(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ctx := &accountBindingProcessWaitContext{Context: baseContext, t: t}
+	lease, err := acquireDraftLease(ctx, filepath.Dir(path), lockReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = updateAccountBindingsLocked(ctx, lease, filepath.Base(path), func(document AccountBindingFile) (AccountBindingFile, error) {
 		if _, err := fmt.Fprintln(os.Stdout, "MAILCLI_BINDING_CALLBACK"); err != nil {
 			t.Fatalf("write binding helper callback marker: %v", err)
 		}
@@ -474,7 +841,8 @@ func TestAccountBindingStoreProcessHelper(t *testing.T) {
 			}
 		}
 		return mergeProcessAccountBinding(document, accountID, alias)
-	})
+	}, nil)
+	err = errors.Join(err, lease.release())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +927,7 @@ func waitForAccountBindingProcessLine(t *testing.T, lines <-chan string, want st
 	var line string
 	select {
 	case line = <-lines:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatalf("timed out waiting for binding helper line %q", want)
 	}
 	if line != want {
