@@ -19,7 +19,7 @@ type searchBudgetTooSmallError struct {
 
 func (e *searchBudgetTooSmallError) Error() string {
 	return fmt.Sprintf(
-		"search candidate requires %d RFC bytes, above --max-bytes %d; restart the same search without --cursor and set --max-bytes to at least %d",
+		"search candidate requires %d RFC bytes, above --max-bytes %d; retry the same search page with --max-bytes at least %d, retaining --cursor when supplied",
 		e.requiredBytes, e.maximumBytes, e.requiredBytes,
 	)
 }

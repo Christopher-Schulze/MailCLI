@@ -280,6 +280,8 @@ func parseQueryTime(value string) (*int64, error) {
 func queryFingerprint(query Query) (string, error) {
 	query.Cursor = ""
 	query.Limit = 0
+	query.MaxBytes = 0
+	query.MaxMessages = 0
 	payload, err := json.Marshal(query)
 	if err != nil {
 		return "", fmt.Errorf("encode search query fingerprint: %w", err)
