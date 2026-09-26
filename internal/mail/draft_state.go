@@ -172,9 +172,8 @@ func readDraftForMutation(lease *draftLease, root string, ref string) (Draft, er
 		}
 		return draft, err
 	}
-	if _, err := removeDraftTemporaryFiles(lease.storage, ref); err != nil {
-		return Draft{}, err
-	}
+	// Stable claims are validated above; randomly named crash temporaries
+	// belong to confirmed prune, which enumerates them under the ref lease.
 	return draft, nil
 }
 

@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,83 @@ import (
 	"testing"
 	"time"
 )
+
+func draftMutationFixture(t testing.TB, count int) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	draft, err := prepareDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "ada@example.com"}}, Subject: "Mutation", Body: "complete draft bytes",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range count {
+		draft.Ref = fmt.Sprintf("draft_%024d", index)
+		if err := refreshDraftRevision(&draft); err != nil {
+			t.Fatal(err)
+		}
+		payload, err := json.Marshal(draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, draft.Ref+".json"), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, "draft_000000000000000000000000"
+}
+
+func TestDraftMutationWithoutDirectoryEnumeration(t *testing.T) {
+	for _, count := range []int{10, 10000} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			root, ref := draftMutationFixture(t, count)
+			lease, err := acquireDraftLease(context.Background(), root, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Chmod(root, 0o700); err != nil {
+					t.Error(err)
+				}
+				if err := lease.release(); err != nil {
+					t.Error(err)
+				}
+			})
+			// Keep filename lookup available while forbidding the real pinned
+			// directory-enumeration boundary used by temporary recovery.
+			if err := os.Chmod(root, 0o100); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := removeDraftTemporaryFiles(lease.storage, ref); !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("directory enumeration = %v, want permission refusal", err)
+			}
+			draft, err := readDraftForMutation(lease, root, ref)
+			if err != nil || draft.Ref != ref || draft.Body != "complete draft bytes" {
+				t.Fatalf("single-ref mutation read = %+v, %v", draft, err)
+			}
+		})
+	}
+}
+
+func BenchmarkDraftMutationDirectorySize(b *testing.B) {
+	for _, count := range []int{10, 10000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			root, ref := draftMutationFixture(b, count)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				lease, err := acquireDraftLease(context.Background(), root, ref)
+				if err != nil {
+					b.Fatal(err)
+				}
+				draft, readErr := readDraftForMutation(lease, root, ref)
+				if err := errors.Join(readErr, lease.release()); err != nil || draft.Ref != ref {
+					b.Fatalf("mutation read = %s, %v", draft.Ref, err)
+				}
+			}
+		})
+	}
+}
 
 // The real cancellation boundary observes the completed private temporary.
 // Only this test context pauses; production has no injected test callback.

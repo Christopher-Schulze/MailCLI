@@ -307,7 +307,7 @@ func TestPruneFindsAndRemovesOrphanDraftJSONTemporary(t *testing.T) {
 	}
 }
 
-func TestDraftMutationRecoversJSONTemporaryUnderLease(t *testing.T) {
+func TestDraftMutationLeavesJSONTemporaryForConfirmedPrune(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	service := NewServiceWithDraftRoot(&draftGateway{}, root)
 	draft := createSendTestDraft(t, service)
@@ -327,8 +327,20 @@ func TestDraftMutationRecoversJSONTemporaryUnderLease(t *testing.T) {
 	if err := lease.release(); err != nil {
 		t.Fatal(err)
 	}
+	for _, confirm := range []bool{false, true} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != "partial draft update" {
+			t.Fatalf("mutation or dry run changed crash temporary: %q, %v", got, err)
+		}
+		result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: confirm})
+		if err != nil || len(result.TemporaryArtifacts) != 1 || result.TemporaryArtifacts[0].Name != name {
+			t.Fatalf("prune confirm=%t: %+v, %v", confirm, result, err)
+		}
+	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("stale JSON temporary remains: %v", err)
+		t.Fatalf("confirmed prune retained stale JSON temporary: %v", err)
+	}
+	if stored, err := service.GetDraft(draft.Ref); err != nil || stored.Ref != draft.Ref || stored.Revision != draft.Revision {
+		t.Fatalf("temporary recovery changed the stable draft: %+v, %v", stored, err)
 	}
 }
 
