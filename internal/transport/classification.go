@@ -122,7 +122,7 @@ func IsAppendOutcomeUnknown(err error) bool {
 }
 
 // IsAppendIncomplete reports that the APPEND literal failed before its
-// terminating CRLF was attempted, so the server could not commit the message.
+// terminating CRLF was attempted.
 func IsAppendIncomplete(err error) bool {
 	return ErrorCode(err) == CodeIMAPAppendIncomplete
 }

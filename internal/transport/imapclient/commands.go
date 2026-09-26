@@ -271,7 +271,7 @@ func appendOutcomeUnknown(err error) error {
 func appendOutcomeIncomplete(err error) error {
 	return &transport.TransportError{
 		Code:    transport.CodeIMAPAppendIncomplete,
-		Message: "IMAP APPEND literal failed before its terminating CRLF was attempted; the server could not commit the message",
+		Message: "IMAP APPEND literal failed before its terminating CRLF was attempted",
 		Err:     err,
 	}
 }

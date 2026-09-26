@@ -219,6 +219,12 @@ func TestDoAppendDistinguishesPreTerminatorFailures(t *testing.T) {
 			if gotErr == nil || transport.ErrorCode(gotErr) != test.wantCode {
 				t.Fatalf("doAppend() error = %v, want code %q", gotErr, test.wantCode)
 			}
+			if test.wantCode == transport.CodeIMAPAppendIncomplete {
+				var incomplete *transport.TransportError
+				if !errors.As(gotErr, &incomplete) || incomplete.Message != "IMAP APPEND literal failed before its terminating CRLF was attempted" {
+					t.Fatalf("APPEND incomplete diagnostic exceeds its dispatch evidence: %v", gotErr)
+				}
+			}
 			if !sess.dirty {
 				t.Fatal("APPEND failure left the interrupted session clean")
 			}
