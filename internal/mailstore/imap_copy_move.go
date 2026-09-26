@@ -49,7 +49,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
-	dstImapBox, err := mapPathToIMAP(boxes, dstRef.Path)
+	dstImapBox, err := transport.ResolveMailboxPathForMutation(boxes, dstRef.Path)
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}

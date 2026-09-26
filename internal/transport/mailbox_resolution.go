@@ -115,6 +115,40 @@ func ResolveMailboxPath(mailboxes []MailboxInfo, path []string) (string, error) 
 	}
 }
 
+// ResolveMailboxPathForMutation refuses canonical collisions even when the
+// local path byte-matches one server mailbox. Read selection remains unchanged.
+func ResolveMailboxPathForMutation(mailboxes []MailboxInfo, path []string) (string, error) {
+	selected, err := ResolveMailboxPath(mailboxes, path)
+	if err != nil {
+		return "", err
+	}
+	return rejectCanonicalMailboxCollision(mailboxes, selected, path)
+}
+
+func rejectCanonicalMailboxCollision(mailboxes []MailboxInfo, selected string, requestedPaths ...[]string) (string, error) {
+	for _, mailbox := range mailboxes {
+		if mailboxWireName(mailbox) != selected {
+			continue
+		}
+		paths := append(mailboxDisplayPaths(mailbox), requestedPaths...)
+		candidates := make([]string, 0)
+		for _, path := range paths {
+			candidates = append(candidates, canonicalMailboxPathMatches(mailboxes, path)...)
+		}
+		sort.Strings(candidates)
+		unique := candidates[:0]
+		for _, candidate := range candidates {
+			if len(unique) == 0 || unique[len(unique)-1] != candidate {
+				unique = append(unique, candidate)
+			}
+		}
+		if len(unique) > 1 {
+			return "", ambiguousMailboxError(unique, "canonically equivalent mutation mailbox")
+		}
+	}
+	return selected, nil
+}
+
 // ResolveSentMailbox selects one Sent mailbox and preserves ambiguity evidence.
 func ResolveSentMailbox(mailboxes []MailboxInfo) (string, error) {
 	return resolveRoleMailbox(mailboxes, mailboxRoleSent, CodeIMAPSentMailboxNotFound)
@@ -122,7 +156,11 @@ func ResolveSentMailbox(mailboxes []MailboxInfo) (string, error) {
 
 // ResolveTrashMailbox selects one Trash mailbox and preserves ambiguity evidence.
 func ResolveTrashMailbox(mailboxes []MailboxInfo) (string, error) {
-	return resolveRoleMailbox(mailboxes, mailboxRoleTrash, CodeIMAPMailboxNotFound)
+	selected, err := resolveRoleMailbox(mailboxes, mailboxRoleTrash, CodeIMAPMailboxNotFound)
+	if err != nil {
+		return "", err
+	}
+	return rejectCanonicalMailboxCollision(mailboxes, selected)
 }
 
 func resolveRoleMailbox(mailboxes []MailboxInfo, role mailboxRole, missingCode string) (string, error) {
@@ -251,11 +289,19 @@ func chooseMailbox(candidates []string, source string, missingCode string) (stri
 	if len(candidates) == 0 {
 		return "", &TransportError{Code: missingCode, Message: "no " + source + " found on the IMAP server"}
 	}
-	return "", &TransportError{
+	return "", ambiguousMailboxError(candidates, source)
+}
+
+func ambiguousMailboxError(candidates []string, source string) error {
+	evidence := strings.Join(candidates[:min(len(candidates), 10)], ", ")
+	if len(candidates) > 10 {
+		evidence += fmt.Sprintf(" (and %d more)", len(candidates)-10)
+	}
+	return &TransportError{
 		Code: CodeIMAPAmbiguousMailbox,
 		Message: fmt.Sprintf(
-			"multiple %s candidates exist on the IMAP server: %s; use an exact mailbox path or resolve the duplicate special-use folders before retrying",
-			source, strings.Join(candidates, ", "),
+			"multiple %s candidates exist on the IMAP server: %s; resolve the conflicting mailbox identities before retrying",
+			source, evidence,
 		),
 	}
 }

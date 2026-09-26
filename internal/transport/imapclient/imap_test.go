@@ -842,6 +842,81 @@ func TestAppendToSentMidCommandCancel(t *testing.T) {
 	}
 }
 
+func TestListCanonicalMailboxReadAndMutationSelection(t *testing.T) {
+	for _, encoding := range []transport.MailboxEncoding{transport.MailboxEncodingUTF8, transport.MailboxEncodingModifiedUTF7} {
+		t.Run(string(encoding), func(t *testing.T) {
+			names := []string{"Caf\u00e9", "Cafe\u0301"}
+			wire := append([]string(nil), names...)
+			capabilities := []string{"IMAP4rev1", "UTF8=ACCEPT"}
+			if encoding == transport.MailboxEncodingModifiedUTF7 {
+				capabilities = []string{"IMAP4rev1"}
+				for index, name := range names {
+					var err error
+					wire[index], err = encodeModifiedUTF7(name)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			srv := newFakeServer(t, fakeServerConfig{
+				authOK: true, capabilities: capabilities,
+				listResponse: []byte("* LIST () \".\" " + quoteIMAP(wire[0]) + "\r\n* LIST () \".\" " + quoteIMAP(wire[1]) + "\r\n"),
+			})
+			client, cfg := newFakeClient(t, srv)
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			boxes, err := client.ListMailboxes(context.Background(), cfg)
+			if err != nil || len(boxes) != 2 {
+				t.Fatalf("LIST = %+v, %v", boxes, err)
+			}
+			for index, name := range names {
+				read, err := transport.ResolveMailboxPath(boxes, []string{name})
+				if err != nil || read != wire[index] {
+					t.Fatalf("read %q = %q, %v; want exact wire %q", name, read, err, wire[index])
+				}
+				selected, err := transport.ResolveMailboxPathForMutation(boxes, []string{name})
+				if selected != "" || !transport.IsAmbiguousMailbox(err) ||
+					!strings.Contains(err.Error(), wire[0]) || !strings.Contains(err.Error(), wire[1]) {
+					t.Fatalf("mutation %q = %q, %v; want both actual wire candidates", name, selected, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDeleteCanonicalTrashRefusesBeforeDispatch(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(strconv.FormatBool(reverse), func(t *testing.T) {
+			lines := []string{"* LIST (\\Trash) \".\" \"Gel\u00f6scht\"\r\n", "* LIST () \".\" \"Gelo\u0308scht\"\r\n"}
+			if reverse {
+				lines[0], lines[1] = lines[1], lines[0]
+			}
+			srv := newFakeServer(t, fakeServerConfig{
+				authOK: true, capabilities: []string{"IMAP4rev1", "UTF8=ACCEPT"},
+				moveSupported: true, listResponse: []byte(strings.Join(lines, "")),
+			})
+			client, cfg := newFakeClient(t, srv)
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			evidence, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345)
+			if !transport.IsAmbiguousMailbox(err) || evidence.Command != "" || evidence.Outcome != "" || len(evidence.CompletedEffects) != 0 {
+				t.Fatalf("DELETE = %+v, %v; want no dispatch evidence", evidence, err)
+			}
+			for _, command := range srv.Commands() {
+				if command == "SELECT" || strings.HasPrefix(command, "UID ") || command == "EXPUNGE" {
+					t.Fatalf("DELETE dispatched %q despite ambiguous Trash", command)
+				}
+			}
+		})
+	}
+}
+
 func TestListMailboxes(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,

@@ -259,3 +259,54 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		t.Fatalf("unknown read guidance = %+v", unknown)
 	}
 }
+
+func TestGuidanceForAmbiguousMailboxMutationRequiresCorrection(t *testing.T) {
+	ambiguous := &transport.TransportError{
+		Code: transport.CodeIMAPAmbiguousMailbox, Message: "multiple mailbox identities match the requested path",
+	}
+	for _, command := range []string{
+		"messages.mark", "messages.move", "messages.copy", "messages.delete",
+		BatchOperationMark, BatchOperationMove, BatchOperationCopy, BatchOperationDelete,
+	} {
+		t.Run(command, func(t *testing.T) {
+			got := GuidanceForError(command, ambiguous)
+			if got.Phase != OperationPhaseValidation || got.EffectCertainty != EffectNone ||
+				got.Retryability != RetryUserInputRequired || got.ReplayAllowed ||
+				got.Recovery.Action != RecoveryCorrect ||
+				!strings.Contains(got.Recovery.Instruction, "Correct the conflicting IMAP mailbox identities") {
+				t.Fatalf("GuidanceForError(%q) = %+v", command, got)
+			}
+		})
+	}
+
+	batch := GuidanceForError("batch", ambiguous)
+	if batch.EffectCertainty != EffectUnknown || batch.Retryability != RetryObserveRequired ||
+		batch.ReplayAllowed || batch.Recovery.Action != RecoveryInspect {
+		t.Fatalf("batch guidance = %+v; want conservative inspection", batch)
+	}
+	for _, operation := range []BatchOperation{
+		BatchOperationMark, BatchOperationMove, BatchOperationCopy, BatchOperationDelete,
+	} {
+		t.Run("batch item "+operation, func(t *testing.T) {
+			item := (&batchExecution{request: BatchRequest{Operation: operation}}).itemError(ambiguous)
+			if item.Retryable || item.Guidance == nil ||
+				item.Guidance.Phase != OperationPhaseValidation || item.Guidance.EffectCertainty != EffectNone ||
+				item.Guidance.Retryability != RetryUserInputRequired || item.Guidance.ReplayAllowed ||
+				item.Guidance.Recovery.Action != RecoveryCorrect ||
+				!strings.Contains(item.Guidance.Recovery.Instruction, "duplicate special-use assignments") {
+				t.Fatalf("batch item guidance = %+v; want pre-dispatch correction guidance", item)
+			}
+		})
+	}
+
+	uncertain := &transport.MutationOutcomeError{
+		Code:     transport.CodeIMAPMoveOutcomeUnknown,
+		Evidence: transport.MutationEvidence{Command: "MOVE", OperationID: "op_1"},
+		Err:      ambiguous,
+	}
+	got := GuidanceForError("messages.move", uncertain)
+	if got.EffectCertainty != EffectUnknown || got.Retryability != RetryObserveRequired ||
+		got.ReplayAllowed || got.Recovery.Action == RecoveryCorrect {
+		t.Fatalf("wrapped uncertain mutation guidance = %+v; mailbox ambiguity must not erase outcome uncertainty", got)
+	}
+}

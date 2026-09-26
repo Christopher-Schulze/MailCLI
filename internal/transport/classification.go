@@ -111,6 +111,11 @@ func IsMessageNotFound(err error) bool {
 	return ErrorCode(err) == CodeIMAPMessageNotFound
 }
 
+// IsAmbiguousMailbox reports a caller-correctable mailbox selection failure.
+func IsAmbiguousMailbox(err error) bool {
+	return ErrorCode(err) == CodeIMAPAmbiguousMailbox
+}
+
 // IsSentMailboxNotFound reports that no Sent mailbox could be resolved.
 func IsSentMailboxNotFound(err error) bool {
 	return ErrorCode(err) == CodeIMAPSentMailboxNotFound

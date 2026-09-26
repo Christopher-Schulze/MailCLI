@@ -93,6 +93,16 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY" || mutation.Evidence.Command == "MOVE") {
 		return guidanceForMutationUnknown(err)
 	}
+	if isMailboxMutationCommand(command) && transport.IsAmbiguousMailbox(err) {
+		return OperationGuidance{
+			Phase: OperationPhaseValidation, EffectCertainty: EffectNone,
+			Retryability: RetryUserInputRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{
+				Action:      RecoveryCorrect,
+				Instruction: "Correct the conflicting IMAP mailbox identities, either by renaming a colliding mailbox or correcting duplicate special-use assignments, refresh the mailbox list, and rerun the command only after the requested mailbox resolves uniquely.",
+			},
+		}
+	}
 	if !effectfulCommand(command) && errors.Is(err, fs.ErrPermission) {
 		return guidanceForReadCorrection("Grant Full Disk Access to the calling app, or correct the file permissions before retrying this read.")
 	}
@@ -396,6 +406,16 @@ func effectfulCommand(command string) bool {
 		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move",
 		"messages.copy", "messages.delete":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMailboxMutationCommand(command string) bool {
+	switch command {
+	case "messages.mark", "messages.move", "messages.copy", "messages.delete",
+		BatchOperationMark, BatchOperationMove, BatchOperationCopy, BatchOperationDelete:
 		return true
 	default:
 		return false

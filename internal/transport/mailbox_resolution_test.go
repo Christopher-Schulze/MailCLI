@@ -1,9 +1,104 @@
 package transport
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestMutationMailboxRejectsCanonicalCollisions(t *testing.T) {
+	composed, decomposed := "Caf\u00e9", "Cafe\u0301"
+	for _, test := range []struct {
+		name      string
+		paths     [][]string
+		requested []string
+		want      string
+		ambiguous bool
+	}{
+		{name: "exact NFC", paths: [][]string{{composed}, {decomposed}}, requested: []string{composed}, ambiguous: true},
+		{name: "exact NFD", paths: [][]string{{decomposed}, {composed}}, requested: []string{decomposed}, ambiguous: true},
+		{name: "shortened Gmail display alias", paths: [][]string{{"[Gmail]", composed}, {decomposed}}, requested: []string{composed}, ambiguous: true},
+		{name: "hierarchical", paths: [][]string{{"Projects", composed}, {"Projects", decomposed}}, requested: []string{"Projects", composed}, ambiguous: true},
+		{name: "unique canonical", paths: [][]string{{composed}}, requested: []string{decomposed}, want: "wire-0"},
+		{name: "case distinct", paths: [][]string{{"Custom"}, {"custom"}}, requested: []string{"Custom"}, want: "wire-0"},
+		{name: "compatibility distinct", paths: [][]string{{"file"}, {"\ufb01le"}}, requested: []string{"file"}, want: "wire-0"},
+		{name: "segments distinct", paths: [][]string{{composed + "/Records"}, {decomposed, "Records"}}, requested: []string{composed + "/Records"}, want: "wire-0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boxes := make([]MailboxInfo, len(test.paths))
+			for index, path := range test.paths {
+				boxes[index] = MailboxInfo{WireName: fmt.Sprintf("wire-%d", index), DisplayPath: path}
+			}
+			read, err := ResolveMailboxPath(boxes, test.requested)
+			if err != nil || read != "wire-0" {
+				t.Fatalf("read = %q, %v; want byte-exact or unique canonical wire-0", read, err)
+			}
+			got, err := ResolveMailboxPathForMutation(boxes, test.requested)
+			if !test.ambiguous {
+				if err != nil || got != test.want {
+					t.Fatalf("mutation = %q, %v; want %q", got, err, test.want)
+				}
+				return
+			}
+			if got != "" || !IsAmbiguousMailbox(err) || !strings.Contains(err.Error(), "wire-0, wire-1") {
+				t.Fatalf("mutation = %q, %v; want sorted ambiguous wire identities", got, err)
+			}
+			boxes[0], boxes[1] = boxes[1], boxes[0]
+			_, reverseErr := ResolveMailboxPathForMutation(boxes, test.requested)
+			if reverseErr == nil || reverseErr.Error() != err.Error() {
+				t.Fatalf("LIST order changed ambiguity: %v versus %v", err, reverseErr)
+			}
+		})
+	}
+}
+
+func TestMutationMailboxAmbiguityEvidenceIsBounded(t *testing.T) {
+	for _, count := range []int{10, 12} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			boxes := make([]MailboxInfo, count)
+			for index := range boxes {
+				boxes[index] = MailboxInfo{WireName: fmt.Sprintf("candidate-%02d", index), DisplayPath: []string{"Caf\u00e9"}}
+			}
+			_, err := ResolveMailboxPathForMutation(boxes, []string{"Cafe\u0301"})
+			if !IsAmbiguousMailbox(err) {
+				t.Fatalf("ambiguity = %v", err)
+			}
+			for index := 0; index < 10; index++ {
+				if !strings.Contains(err.Error(), fmt.Sprintf("candidate-%02d", index)) {
+					t.Fatalf("missing bounded candidate %d: %v", index, err)
+				}
+			}
+			if strings.Contains(err.Error(), "candidate-10") || strings.Contains(err.Error(), "candidate-11") ||
+				(count > 10 && !strings.Contains(err.Error(), "and 2 more")) {
+				t.Fatalf("unbounded or missing overflow evidence: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveTrashMailboxRejectsCanonicalUnflaggedTwin(t *testing.T) {
+	boxes := []MailboxInfo{
+		{WireName: "wire-nfc", DisplayPath: []string{"Gel\u00f6scht"}, Flags: []string{"\\Trash"}},
+		{WireName: "wire-nfd", DisplayPath: []string{"Gelo\u0308scht"}},
+	}
+	if got, err := ResolveTrashMailbox(boxes); got != "" || !IsAmbiguousMailbox(err) {
+		t.Fatalf("Trash = %q, %v; want canonical collision refusal", got, err)
+	}
+	if got, err := ResolveTrashMailbox(boxes[:1]); err != nil || got != "wire-nfc" {
+		t.Fatalf("unique Trash = %q, %v", got, err)
+	}
+}
+
+func TestResolveTrashMailboxRejectsCanonicalGmailAliasTwin(t *testing.T) {
+	boxes := []MailboxInfo{
+		{WireName: "wire-trash", DisplayPath: []string{"[Gmail]", "Gel\u00f6scht"}, Flags: []string{"\\Trash"}},
+		{WireName: "wire-twin", DisplayPath: []string{"Gelo\u0308scht"}},
+	}
+	if got, err := ResolveTrashMailbox(boxes); got != "" || !IsAmbiguousMailbox(err) ||
+		!strings.Contains(err.Error(), "wire-trash, wire-twin") {
+		t.Fatalf("Trash = %q, %v; want canonical collision through the shortened Gmail alias", got, err)
+	}
+}
 
 func TestResolveMailboxPathPrecedenceAndAmbiguity(t *testing.T) {
 	tests := []struct {

@@ -1063,6 +1063,88 @@ func TestTransferMessageRetriesOnceAfterUIDValidityChange(t *testing.T) {
 	}
 }
 
+func TestClientCanonicalMailboxMutationRefusesBeforeDispatch(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		source     bool
+		operation  string
+		gmailAlias bool
+	}{
+		{name: "mark source", source: true, operation: "mark"},
+		{name: "mark source through Gmail display alias", source: true, operation: "mark", gmailAlias: true},
+		{name: "delete source", source: true, operation: "delete"},
+		{name: "move source", source: true, operation: "move"},
+		{name: "copy source", source: true, operation: "copy"},
+		{name: "move destination", operation: "move"},
+		{name: "move destination through Gmail display alias", operation: "move", gmailAlias: true},
+		{name: "copy destination", operation: "copy"},
+		{name: "delete destination", operation: "delete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "test store")
+			address := "canonical-mutation@gmail.com"
+			installImapIdentityFixture(t, store, address)
+			composed, decomposed := "Caf\u00e9", "Cafe\u0301"
+			if test.source {
+				updateFixtureMessage(t, store, `UPDATE mailboxes SET url='imap://`+testAccountID+`/Caf%C3%A9' WHERE ROWID=1`)
+				var err error
+				inboxRef, err = mailref.EncodeMailbox(testAccountID, []string{composed})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := messageRefWithExpectedID(t, messageRefWithSubject(t, page.Messages, "Status Update"), "<102@example.com>")
+			canonicalMailbox := transport.MailboxInfo{WireName: composed, DisplayPath: []string{composed}}
+			if test.gmailAlias {
+				canonicalMailbox = transport.MailboxInfo{WireName: "[Gmail]/" + composed, DisplayPath: []string{"[Gmail]", composed}}
+			}
+			boxes := []transport.MailboxInfo{
+				{Name: "INBOX"}, {Name: "Trash", Flags: []string{"\\Trash"}},
+				canonicalMailbox,
+				{WireName: decomposed, DisplayPath: []string{decomposed}},
+			}
+			if test.operation == "delete" && !test.source {
+				boxes[1].Flags = nil
+				boxes[2].Flags = []string{"\\Trash"}
+			}
+			operator := &stubImapOperator{boxes: boxes}
+			client := &Client{store: store, send: mail.SendTransport{Imap: operator, Credentials: strictCredentials{address: "secret"}}}
+			if test.source {
+				target, readErr := client.resolveImapTarget(context.Background(), ref)
+				wantMailbox := composed
+				if test.gmailAlias {
+					wantMailbox = "[Gmail]/" + composed
+				}
+				if readErr != nil || target.imapMailbox != wantMailbox {
+					t.Fatalf("read target = %+v, %v; want byte-exact mailbox", target, readErr)
+				}
+			}
+			destination, err := mailref.EncodeMailbox(testAccountID, []string{composed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch test.operation {
+			case "mark":
+				read := true
+				_, err = client.MarkMessage(context.Background(), mail.MarkMessageRequest{Ref: ref, Read: &read, AllowDraftMutation: true})
+			case "delete":
+				_, err = client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{Ref: ref, AllowDraftMutation: true})
+			default:
+				_, err = client.TransferMessage(context.Background(), mail.TransferMessageRequest{Ref: ref, DestinationMailbox: destination, Copy: test.operation == "copy", AllowDraftMutation: true})
+			}
+			if !transport.IsAmbiguousMailbox(err) || operator.mutationCalls != 0 || operator.lastCommand != "" ||
+				!strings.Contains(err.Error(), composed) || !strings.Contains(err.Error(), decomposed) {
+				t.Fatalf("mutation error = %v, calls=%d command=%q; want canonical refusal before dispatch", err, operator.mutationCalls, operator.lastCommand)
+			}
+		})
+	}
+}
+
 func TestTransferMessageRejectsAmbiguousDestinationMailbox(t *testing.T) {
 	store, inboxRef := newSearchFixture(t)
 	closeTestResource(t, store, "test store")

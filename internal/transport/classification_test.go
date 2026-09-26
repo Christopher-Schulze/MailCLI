@@ -108,6 +108,12 @@ func TestFailureClassificationPredicates(t *testing.T) {
 			negative:  []string{CodeIMAPMessageNotFound},
 		},
 		{
+			name:      "IsAmbiguousMailbox",
+			predicate: IsAmbiguousMailbox,
+			positive:  []string{CodeIMAPAmbiguousMailbox},
+			negative:  []string{CodeIMAPMailboxNotFound, CodeIMAPAmbiguousMessageID, CodeIMAPCopyOutcomeUnknown},
+		},
+		{
 			name:      "IsSourceTooLarge",
 			predicate: IsSourceTooLarge,
 			positive:  []string{CodeIMAPRawSourceTooLarge},
@@ -155,6 +161,10 @@ func TestClassificationPrefersOutcomeUncertainty(t *testing.T) {
 	}
 	if !IsMutationOutcomeUnknown(outcomeErr) {
 		t.Fatal("outcome-uncertain code must classify the wrapped error")
+	}
+	outcomeErr.Err = codedErr(CodeIMAPAmbiguousMailbox)
+	if IsAmbiguousMailbox(outcomeErr) || !IsMutationOutcomeUnknown(outcomeErr) {
+		t.Fatal("mutation uncertainty must outrank wrapped mailbox ambiguity")
 	}
 }
 

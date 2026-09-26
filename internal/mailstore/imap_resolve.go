@@ -14,15 +14,15 @@ import (
 )
 
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true, false)
 }
 
 func (c *Client) resolveImapTargetForMutation(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true, true)
 }
 
 func (c *Client) resolveImapTargetForDelete(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, true, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, true, true, true)
 }
 
 func (c *Client) resolveImapTargetWithOptions(
@@ -30,6 +30,7 @@ func (c *Client) resolveImapTargetWithOptions(
 	messageRef string,
 	rejectTrash bool,
 	rejectDuplicate bool,
+	forMutation bool,
 ) (imapTarget, error) {
 	var target imapTarget
 	if c.store == nil {
@@ -146,7 +147,11 @@ func (c *Client) resolveImapTargetWithOptions(
 		}
 	}
 
-	imapBox, err := mapPathToIMAP(boxes, resolved.Reference.MailboxPath)
+	resolveMailbox := transport.ResolveMailboxPath
+	if forMutation {
+		resolveMailbox = transport.ResolveMailboxPathForMutation
+	}
+	imapBox, err := resolveMailbox(boxes, resolved.Reference.MailboxPath)
 	if err != nil {
 		return target, err
 	}

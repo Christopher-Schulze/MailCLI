@@ -541,6 +541,13 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			phase: mail.OperationPhaseExecution, effect: mail.EffectUnknown,
 			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
 		},
+		{
+			name: "ambiguous mutation mailbox requires correction", command: "messages.move", code: "imap_ambiguous_mailbox",
+			err:    &mail.OperationError{Code: "imap_ambiguous_mailbox", Message: "multiple wire names match"},
+			target: projectionTargetRaw, view: outputViewFull,
+			phase: mail.OperationPhaseValidation, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryCorrect,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -562,7 +569,9 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			if guidance.Phase != test.phase || guidance.EffectCertainty != test.effect ||
 				guidance.Retryability != test.retryability || guidance.ReplayAllowed != test.replayAllowed ||
 				guidance.Recovery.Action != test.action || guidance.Recovery.Command != test.recoveryCmd ||
-				!equalStrings(guidance.Recovery.Args, test.recoveryArgs) {
+				!equalStrings(guidance.Recovery.Args, test.recoveryArgs) ||
+				(test.name == "ambiguous mutation mailbox requires correction" &&
+					!strings.Contains(guidance.Recovery.Instruction, "Correct the conflicting IMAP mailbox identities")) {
 				t.Fatalf("%s envelope guidance = %+v", test.name, guidance)
 			}
 		})
