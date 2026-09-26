@@ -55,17 +55,10 @@ read_manifest() {
   [[ -z "$(LC_ALL=C sort "${DESTINATION}" | uniq -d)" ]] ||
     fail 'Duplicate shell test registration'
 }
-BASELINE_MARKER=false
-if grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${BASELINE_ROOT}/scripts/tests/test.sh"; then
-  BASELINE_MARKER=true
-  read_manifest "${BASELINE_ROOT}" --list-shell-tests "${TEST_ROOT}/baseline-cases"
-  read_manifest "${BASELINE_ROOT}" --list-live-shell-tests "${TEST_ROOT}/baseline-live"
-else
-  [[ "${GATE_TIER}" == targeted ]] || fail 'Bootstrap requires explicit targeted checks'
-  git -C "${SOURCE_ROOT}" ls-tree -r --name-only "${BASELINE_HEAD}" scripts/tests |
-    awk '/^scripts\/tests\/test-.*\.sh$/ && $0 != "scripts/tests/test-live-responsiveness.sh"' >"${TEST_ROOT}/baseline-cases"
-  printf 'scripts/tests/test-live-responsiveness.sh\n' >"${TEST_ROOT}/baseline-live"
-fi
+grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${BASELINE_ROOT}/scripts/tests/test.sh" ||
+  fail 'Baseline gate harness marker is required'
+read_manifest "${BASELINE_ROOT}" --list-shell-tests "${TEST_ROOT}/baseline-cases"
+read_manifest "${BASELINE_ROOT}" --list-live-shell-tests "${TEST_ROOT}/baseline-live"
 read_manifest "${PRODUCT_ROOT}" --list-shell-tests "${TEST_ROOT}/staged-cases"
 read_manifest "${PRODUCT_ROOT}" --list-live-shell-tests "${TEST_ROOT}/staged-live"
 cat "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/staged-live" |

@@ -127,6 +127,17 @@ run_gate 0 gate_tier=targeted 491 --checks scripts/tests/test-invariant.sh
 ! grep -Fq core-checks "${TEST_ROOT}/output"
 run_gate 1 'Duplicate selected check' 491 --checks scripts/tests/test-invariant.sh scripts/tests/test-invariant.sh
 run_gate 1 'Unregistered selected check' 491 --checks scripts/tests/test-missing.sh
+sed '/^# MAILCLI_GATE_HARNESS=/d' "${REPOSITORY}/scripts/tests/test.sh" >"${TEST_ROOT}/markerless-orchestrator"
+MARKERLESS_BLOB="$(git -C "${REPOSITORY}" hash-object -w "${TEST_ROOT}/markerless-orchestrator")"
+git -C "${REPOSITORY}" update-index --cacheinfo "100755,${MARKERLESS_BLOB},scripts/tests/test.sh"
+MARKERLESS_TREE="$(git -C "${REPOSITORY}" write-tree)"
+MARKERLESS_BASELINE="$(printf 'unsupported markerless baseline\n' |
+  git -C "${REPOSITORY}" commit-tree "${MARKERLESS_TREE}")"
+git -C "${REPOSITORY}" read-tree --reset -u "${BASELINE_TREE}"
+SUPPORTED_BASELINE="${BASELINE_HEAD}"
+BASELINE_HEAD="${MARKERLESS_BASELINE}"
+run_gate 1 'Baseline gate harness marker is required' 491 --checks scripts/tests/test-invariant.sh
+BASELINE_HEAD="${SUPPORTED_BASELINE}"
 printf 'skip\n' >"${REPOSITORY}/skip-core"
 stage_all
 run_gate 1 'did not execute every registered shell test'

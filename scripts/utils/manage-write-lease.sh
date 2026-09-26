@@ -37,12 +37,11 @@ lease_file() {
 
 remove_lease_files() {
   local NAME
-  # Old keys are cleanup-only until the in-flight pre-migration lease closes.
-  for NAME in task owner owner_session pid token acquired_at baseline_head baseline_status \
-    allowed_paths allowed_fingerprints private_task_fingerprints \
+  for NAME in task owner_session token acquired_at baseline_head \
+    allowed_paths allowed_fingerprints \
     ignored_asset_fingerprints \
     reviewed_digest reviewed_patch_sha256 \
-    reviewed_at gate_patch_sha256 gate_head gate_at gate_index_tree \
+    gate_patch_sha256 gate_index_tree \
     gate_harness gate_tier gate_shell_receipts changed_paths; do
     rm -f "${LEASE_DIRECTORY}/${NAME}"
   done
@@ -139,19 +138,7 @@ verify_ignored_asset_scope() {
   local DIFF_STATUS
   local OUT_OF_SCOPE
   BASELINE="$(lease_file ignored_asset_fingerprints)"
-  if [[ ! -f "${BASELINE}" ]]; then
-    local BASELINE_HEAD
-    local BASELINE_SCRIPT
-    BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
-    BASELINE_SCRIPT="$(git -C "${MAILCLI_ROOT}" show \
-      "${BASELINE_HEAD}:scripts/utils/manage-write-lease.sh")" ||
-      fail "Could not inspect baseline lease script"
-    if [[ "${BASELINE_SCRIPT}" == *ignored_asset_fingerprints* ]]; then
-      fail "Ignored asset baseline is missing"
-    fi
-    printf 'ignored_asset_scope=legacy_lease\n' >&2
-    return 0
-  fi
+  [[ -f "${BASELINE}" ]] || fail "Ignored asset baseline is missing"
   CURRENT="$(ignored_asset_snapshot | LC_ALL=C sort)" ||
     fail "Could not inventory ignored assets"
   if OUT_OF_SCOPE="$(diff -u \
@@ -341,9 +328,6 @@ status_lease() {
   for NAME in task owner_session acquired_at baseline_head; do
     if [[ -f "$(lease_file "${NAME}")" ]]; then
       printf '%s=%s\n' "${NAME}" "$(<"$(lease_file "${NAME}")")"
-    elif [[ "${NAME}" == owner_session && -f "$(lease_file owner)" ]]; then
-      # The already-owned migration lease still carries the same stable owner.
-      printf 'owner_session=%s\n' "$(<"$(lease_file owner)")"
     else
       printf '%s=missing\n' "${NAME}"
     fi
@@ -435,56 +419,27 @@ gate_lease() {
   [[ "${CURRENT_PATCH_DIGEST}" == "$(<"$(lease_file reviewed_patch_sha256)")" ]] ||
     fail "Staged patch changed after review; review the patch again"
 
-  rm -f "$(lease_file gate_patch_sha256)" "$(lease_file gate_head)" "$(lease_file gate_at)" \
+  rm -f "$(lease_file gate_patch_sha256)" \
     "$(lease_file gate_index_tree)" "$(lease_file gate_harness)" "$(lease_file gate_tier)" "$(lease_file gate_shell_receipts)"
   local GATE_STATUS=0
   local HARNESS_DIR
-  local HARNESS_SCRIPT
-  local HARNESS_CAPABLE=true
   local INDEX_TREE
   local BASELINE_ORCHESTRATOR
-  local GATE_HARNESS_MODE=baseline_bootstrap
+  local GATE_HARNESS_MODE
   INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
   BASELINE_ORCHESTRATOR="$(git -C "${MAILCLI_ROOT}" show "${BASELINE_HEAD}:scripts/tests/test.sh")"
+  grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' <<<"${BASELINE_ORCHESTRATOR}" ||
+    fail 'Baseline gate harness marker is required'
   HARNESS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-gate-harness.XXXXXX")"
   trap 'rm -rf -- "${HARNESS_DIR}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  if grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' <<<"${BASELINE_ORCHESTRATOR}"; then
-    git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils/run-staged-gate.sh |
-      tar -x -C "${HARNESS_DIR}"
-    "${HARNESS_DIR}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
-      "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
-      tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
-    GATE_HARNESS_MODE="$(sed -n 's/^gate_harness=//p' "${HARNESS_DIR}/gate-output")"
-  elif [[ "${GATE_TIER}" == targeted ]]; then
-    "${MAILCLI_ROOT}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
-      "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
-      tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
-    GATE_HARNESS_MODE=staged_bootstrap_targeted
-  else
-  if ! git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |
-    tar -x -C "${HARNESS_DIR}"; then
-    rm -rf "${HARNESS_DIR}"
-    fail "Could not extract the baseline gate harness from ${BASELINE_HEAD}"
-  fi
-  while IFS= read -r -d '' HARNESS_SCRIPT; do
-    if ! grep -q 'MAILCLI_ROOT:-' "${HARNESS_SCRIPT}"; then
-      HARNESS_CAPABLE=false
-      break
-    fi
-  done < <(find "${HARNESS_DIR}/scripts/tests" -type f -name 'test*.sh' -print0)
-  if [[ "${HARNESS_CAPABLE}" == true &&
-    -x "${HARNESS_DIR}/scripts/tests/test.sh" ]]; then
-    MAILCLI_ROOT="${MAILCLI_ROOT}" \
-      "${HARNESS_DIR}/scripts/tests/test.sh" || GATE_STATUS=$?
-    printf 'gate_harness=baseline_bootstrap\n'
-  else
-    rm -rf "${HARNESS_DIR}"
-    printf 'gate_harness=worktree_transitional\n' >&2
-    "${MAILCLI_ROOT}/scripts/tests/test.sh" || GATE_STATUS=$?
-  fi
-  fi
+  git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils/run-staged-gate.sh |
+    tar -x -C "${HARNESS_DIR}"
+  "${HARNESS_DIR}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
+    "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "$@" |
+    tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
+  GATE_HARNESS_MODE="$(sed -n 's/^gate_harness=//p' "${HARNESS_DIR}/gate-output")"
   trap - INT TERM
   if [[ "${GATE_STATUS}" -ne 0 ]]; then
     printf '%s gate failed with status %s; commit proof was not recorded\n' "${GATE_TIER}" "${GATE_STATUS}" >&2
