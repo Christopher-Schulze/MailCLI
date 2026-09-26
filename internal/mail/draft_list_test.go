@@ -36,6 +36,43 @@ func createDraftListFixture(t testing.TB, count, bodyBytes int) (*Service, []str
 
 func TestDraftListPagesCoverLargeDirectoryExactly(t *testing.T) {
 	service, refs := createDraftListFixture(t, 2049, 32)
+	readLocks := func() map[string]os.FileInfo {
+		entries, err := os.ReadDir(service.draftRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		locks := make(map[string]os.FileInfo, len(refs))
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".lock") {
+				continue
+			}
+			path := filepath.Join(service.draftRoot, entry.Name())
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != 0 ||
+				!ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+				t.Fatalf("lock %s is not an empty private regular file: %v", path, info)
+			}
+			locks[path] = info
+		}
+		return locks
+	}
+	beforeLocks := readLocks()
+	if len(beforeLocks) != len(refs) {
+		t.Fatalf("fixture locks = %d, want %d", len(beforeLocks), len(refs))
+	}
+	for _, ref := range refs {
+		path, err := draftLockPath(service.draftRoot, ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if beforeLocks[path] == nil {
+			t.Fatalf("fixture lock missing: %s", path)
+		}
+	}
 	var observed []string
 	request := ListDraftsRequest{}
 	var revision string
@@ -77,7 +114,31 @@ func TestDraftListPagesCoverLargeDirectoryExactly(t *testing.T) {
 	if !slices.Equal(observed, refs) {
 		t.Fatalf("pagination lost, repeated, or reordered records: got %d, want %d", len(observed), len(refs))
 	}
-	assertNoDraftLockFiles(t, service.draftRoot)
+	afterLocks := readLocks()
+	if len(afterLocks) != len(beforeLocks) {
+		t.Fatalf("listing changed lock count: got %d, want %d", len(afterLocks), len(beforeLocks))
+	}
+	for path, before := range beforeLocks {
+		after := afterLocks[path]
+		if after == nil || !os.SameFile(before, after) || before.Mode() != after.Mode() ||
+			!before.ModTime().Equal(after.ModTime()) || before.Size() != after.Size() {
+			t.Fatalf("listing changed retained lock %s: before=%v, after=%v", path, before, after)
+		}
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened, statErr := file.Stat()
+		if statErr != nil || !os.SameFile(before, opened) {
+			t.Fatalf("retained lock %s changed while opening: %v", path, errors.Join(statErr, file.Close()))
+		}
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatalf("listing left lock %s held: %v", path, errors.Join(err, file.Close()))
+		}
+		if err := errors.Join(syscall.Flock(int(file.Fd()), syscall.LOCK_UN), file.Close()); err != nil {
+			t.Fatalf("release retained lock probe %s: %v", path, err)
+		}
+	}
 }
 
 func TestDraftListRejectsInvalidRequestsBeforeCreatingStorage(t *testing.T) {
