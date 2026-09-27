@@ -41,4 +41,4 @@ Mutation mailbox ambiguity: fix colliding server names/special-use assignments, 
 
 Read overflow: raise budget/narrow fields/export full content. [Drafts](drafts.md): resize lists/resolve conflicts/inspect completed mutations, never repeat.
 
-Draft busy: inspect/no replay; emitted command needs ref (state plain, conflicts/completed full). Search stale: remove cursor; changed index: safe retry; keep filters. Stale binding: accounts.list/setup. Mail recovery: quit/reopen, no safe CLI recovery.
+Draft busy: inspect/no replay; emitted command needs ref (state metadata, conflicts/completed full). Search stale: remove cursor; changed index: safe retry; keep filters. Stale binding: accounts.list/setup. Mail recovery: quit/reopen, no safe CLI recovery.

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mailcli/internal/compose"
@@ -73,6 +74,19 @@ func TestDraftHandoffOutcomesPreserveLifecycleEvidence(t *testing.T) {
 			loaded, err := service.GetDraft(draft.Ref)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if nativeError, ok := test.err.(*compose.Error); ok {
+				if response.Error == nil || response.Error.Code != nativeError.Code {
+					t.Fatalf("native error code lost: envelope=%s", stdout.String())
+				}
+				if nativeError.State == compose.StateCanceledBeforeDispatch {
+					for _, path := range []string{"README.md", "docs/documentation.md"} {
+						content := strings.ToLower(readRepositoryFile(t, path))
+						if !strings.Contains(content, "returns error code `"+response.Error.Code+"` with public outcome `"+string(result.Outcome)+"`") {
+							t.Errorf("%s differs from executed cancellation error/outcome", path)
+						}
+					}
+				}
 			}
 			if test.wantRetain {
 				if loaded.HandoffAttempt == nil || loaded.HandoffAttempt.ID != result.AttemptID || loaded.HandoffAttempt.Outcome != mail.HandoffOutcomeUnknown ||

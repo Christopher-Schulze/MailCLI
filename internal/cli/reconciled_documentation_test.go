@@ -90,4 +90,8 @@ func TestStateOnlyDraftRecoveryUsesDocumentedMetadataView(t *testing.T) {
 	if !strings.Contains(content, "State-only draft recovery uses the default metadata view") {
 		t.Fatal("documentation differs from executed recovery view")
 	}
+	guide := readRepositoryFile(t, "skills/mailcli/references/output-and-recovery.md")
+	if !strings.Contains(guide, "(state "+result.Data.Projection.View+", conflicts/completed full)") {
+		t.Fatal("portable recovery guide differs from executed recovery view")
+	}
 }
