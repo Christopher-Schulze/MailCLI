@@ -63,6 +63,89 @@ func TestSendFailureGuidanceRequiresReconciliation(t *testing.T) {
 	}
 }
 
+func TestDraftInspectionRecoveryBuildersUseConsistentContract(t *testing.T) {
+	ref := "draft_abcdefghijklmnopqrstuvwx"
+	draft := mail.Draft{Ref: ref}
+	fullArgs := []string{"--ref", ref, "--view", "full", "--json"}
+	plainArgs := []string{"--ref", ref, "--json"}
+	tests := []struct {
+		name        string
+		command     string
+		data        responseData
+		err         error
+		wantAction  mail.RecoveryAction
+		wantCommand string
+		wantArgs    []string
+		wantID      string
+	}{
+		{
+			name: "revision conflict", command: "drafts.update",
+			err:        &mail.DraftRevisionConflict{Ref: ref, ExpectedRevision: "expected", CurrentRevision: "current"},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: fullArgs,
+		},
+		{
+			name: "editor failure", command: "drafts.edit",
+			err:        &draftEditorError{cause: errors.New("editor failed"), evidence: draftEditorEvidence{Ref: ref}, updateAttempted: true},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: fullArgs,
+		},
+		{
+			name: "unclaimed send spool", command: "drafts.send",
+			err: &mail.OperationError{
+				Code: "send_recovery_spool_changed", Message: "spool changed", DraftRef: ref,
+				UnclaimedSpool: &mail.UnclaimedSpoolObservation{Path: "/tmp/spool", ObjectType: "regular", OwnerUID: 501, Mode: "0600"},
+			},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: plainArgs,
+		},
+		{
+			name: "invalid SMTP source", command: "drafts.send", data: responseData{draftRef: ref},
+			err:        &transport.TransportError{Code: transport.CodeSMTPSourceInvalid, Message: "invalid source"},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: plainArgs,
+		},
+		{
+			name: "completed draft mutation", command: "drafts.update",
+			data:       responseData{Draft: &draft, draftMutationCompleted: true},
+			err:        &outputTooLargeError{target: "draft", completedDraftRef: ref},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: fullArgs,
+		},
+		{
+			name: "busy draft with ref", command: "drafts.send",
+			err:        &mail.OperationError{Code: "draft_busy", Message: "busy", DraftRef: ref},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: plainArgs,
+		},
+		{
+			name: "completed send", command: "drafts.send",
+			data:       responseData{SendResult: &mail.SendResult{DraftRef: ref, AttemptID: "send_attempt", Outcome: mail.SendOutcomeSent}},
+			err:        &testCodedError{code: "send_cleanup_failed", message: "cleanup failed"},
+			wantAction: mail.RecoveryInspect, wantCommand: "drafts.inspect", wantArgs: plainArgs, wantID: "send_attempt",
+		},
+		{
+			name: "revision conflict without ref", command: "drafts.update",
+			err:        &mail.DraftRevisionConflict{ExpectedRevision: "expected", CurrentRevision: "current"},
+			wantAction: mail.RecoveryInspect,
+		},
+		{
+			name: "busy draft without ref", command: "drafts.send",
+			err:        &mail.OperationError{Code: "draft_busy", Message: "busy"},
+			wantAction: mail.RecoveryObserve,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := newErrorData(test.command, test.data, test.err)
+			recovery := result.Guidance.Recovery
+			if recovery.Action != test.wantAction || recovery.Command != test.wantCommand ||
+				!equalStrings(recovery.Args, test.wantArgs) || recovery.OperationID != test.wantID {
+				t.Fatalf("recovery = %+v, want action=%q command=%q args=%v operation_id=%q",
+					recovery, test.wantAction, test.wantCommand, test.wantArgs, test.wantID)
+			}
+			if recovery.Command == "drafts.inspect" &&
+				(len(recovery.Args) < 3 || recovery.Args[0] != "--ref" || recovery.Args[1] == "" || recovery.Args[len(recovery.Args)-1] != "--json") {
+				t.Fatalf("inspect recovery is missing its ref or JSON output: %+v", recovery)
+			}
+		})
+	}
+}
+
 type sourceInvalidSubmitter struct {
 	calls int
 }
@@ -767,7 +850,7 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			name: "draft busy with ref", command: "drafts.send", code: "draft_busy",
 			err:   &mail.OperationError{Code: "draft_busy", Message: "busy", DraftRef: draft.Ref},
 			phase: mail.OperationPhaseExecution, effect: mail.EffectNone,
-			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+			retryability: mail.RetryObserveRequired, action: mail.RecoveryInspect,
 			recoveryCmd: "drafts.inspect", recoveryArgs: []string{"--ref", draft.Ref, "--json"},
 		},
 		{

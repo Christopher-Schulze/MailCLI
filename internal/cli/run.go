@@ -151,18 +151,14 @@ func newErrorData(command string, data responseData, err error) *errorData {
 	}
 	var conflict *mail.DraftRevisionConflict
 	if errors.As(err, &conflict) && conflict.Ref != "" {
-		guidance.Recovery = mail.RecoveryGuidance{
-			Action: mail.RecoveryInspect, Command: "drafts.inspect",
-			Args: []string{"--ref", conflict.Ref, "--view", "full", "--json"},
-		}
+		guidance.Recovery = draftInspectRecovery(conflict.Ref, true)
 	}
 	var editor *draftEditorError
 	var editorEvidence *draftEditorEvidence
 	if errors.As(err, &editor) {
 		editorEvidence = &editor.evidence
 		guidance.ReplayAllowed, guidance.Retryability = false, mail.RetryObserveRequired
-		guidance.Recovery = mail.RecoveryGuidance{Action: mail.RecoveryInspect, Command: "drafts.inspect",
-			Args: []string{"--ref", editor.evidence.Ref, "--view", "full", "--json"}}
+		guidance.Recovery = draftInspectRecovery(editor.evidence.Ref, true)
 		if !editor.updateAttempted {
 			guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectNone
 		}
@@ -200,6 +196,15 @@ func newErrorData(command string, data responseData, err error) *errorData {
 	}
 }
 
+func draftInspectRecovery(ref string, includeFullView bool) mail.RecoveryGuidance {
+	args := []string{"--ref", ref}
+	if includeFullView {
+		args = append(args, "--view", outputViewFull)
+	}
+	args = append(args, "--json")
+	return mail.RecoveryGuidance{Action: mail.RecoveryInspect, Command: "drafts.inspect", Args: args}
+}
+
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
 	if command == "drafts.list" && errorCode(err) == "output_too_large" && data.draftListRecovery != nil {
@@ -215,38 +220,26 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 			guidance = mail.OperationGuidance{
 				Phase: mail.OperationPhaseExecution, EffectCertainty: mail.EffectNone,
 				Retryability: mail.RetryUserInputRequired, ReplayAllowed: false,
-				Recovery: mail.RecoveryGuidance{
-					Action: mail.RecoveryInspect, Command: "drafts.inspect",
-					Args:        []string{"--ref", operation.DraftRef, "--json"},
-					Instruction: "SMTP was not contacted. Inspect this draft and confirm that no send claim remains. Remove only the reported path after confirming the draft lock is free and its current type, owner UID, and mode still match this observation. If it is a symlink, unlink only the link and never its target; then retry the send explicitly.",
-				},
+				Recovery: draftInspectRecovery(operation.DraftRef, false),
 			}
+			guidance.Recovery.Instruction = "SMTP was not contacted. Inspect this draft and confirm that no send claim remains. Remove only the reported path after confirming the draft lock is free and its current type, owner UID, and mode still match this observation. If it is a symlink, unlink only the link and never its target; then retry the send explicitly."
 		}
 	}
 	if command == "drafts.send" && transport.IsSMTPSourceInvalid(err) && data.draftRef != "" {
-		guidance.Recovery = mail.RecoveryGuidance{
-			Action: mail.RecoveryInspect, Command: "drafts.inspect",
-			Args: []string{"--ref", data.draftRef, "--json"},
-		}
+		guidance.Recovery = draftInspectRecovery(data.draftRef, false)
 	}
 	if data.draftMutationCompleted && errorCode(err) == "output_too_large" {
 		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectComplete
 		guidance.Retryability, guidance.ReplayAllowed = mail.RetryObserveRequired, false
 		guidance.Recovery = mail.RecoveryGuidance{Action: mail.RecoveryObserve}
 		if data.Draft != nil && data.Draft.Ref != "" {
-			guidance.Recovery = mail.RecoveryGuidance{
-				Action: mail.RecoveryInspect, Command: "drafts.inspect",
-				Args: []string{"--ref", data.Draft.Ref, "--view", "full", "--json"},
-			}
+			guidance.Recovery = draftInspectRecovery(data.Draft.Ref, true)
 		}
 	}
 	if errorCode(err) == "draft_busy" {
 		var operation *mail.OperationError
 		if errors.As(err, &operation) && operation.DraftRef != "" {
-			guidance.Recovery = mail.RecoveryGuidance{
-				Action: mail.RecoveryObserve, Command: "drafts.inspect",
-				Args: []string{"--ref", operation.DraftRef, "--json"},
-			}
+			guidance.Recovery = draftInspectRecovery(operation.DraftRef, false)
 		}
 	}
 	if errorCode(err) == "account_binding_stale" && guidance.Phase != mail.OperationPhaseRead {
@@ -278,7 +271,8 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 		case mail.SendOutcomeSent, mail.SendOutcomeObserved:
 			guidance.Phase, guidance.EffectCertainty, guidance.Recovery.Action = mail.OperationPhaseCleanup, mail.EffectComplete, mail.RecoveryInspect
 			if result.DraftRef != "" {
-				guidance.Recovery.Command = "drafts.inspect"
+				guidance.Recovery = draftInspectRecovery(result.DraftRef, false)
+				guidance.Recovery.OperationID = result.AttemptID
 			}
 		default:
 			guidance.Phase = mail.OperationPhaseSubmission
