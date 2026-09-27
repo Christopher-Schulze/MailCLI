@@ -602,13 +602,16 @@ func TestClientGetMessageReportsCorruptAttachment(t *testing.T) {
 
 func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 	tests := []struct {
-		name           string
-		fetchErr       error
-		wantCode       string
-		wantState      mail.HydrationState
-		wantRetry      mail.Retryability
-		cancelCaller   bool
-		wantNoMutation bool
+		name                    string
+		fetchErr                error
+		wantCode                string
+		wantState               mail.HydrationState
+		wantRetry               mail.Retryability
+		cancelCaller            bool
+		wantNoMutation          bool
+		wantNoRemediation       bool
+		wantCanceledCause       bool
+		wantRemediationContains string
 	}{
 		{
 			name:      "authentication",
@@ -625,11 +628,37 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			wantRetry: mail.RetryTerminal,
 		},
 		{
-			name:         "canceled",
-			wantCode:     operationCanceledCode,
-			wantState:    mail.HydrationStateCanceled,
-			wantRetry:    mail.RetrySafe,
-			cancelCaller: true,
+			name:              "canceled",
+			wantCode:          operationCanceledCode,
+			wantState:         mail.HydrationStateCanceled,
+			wantRetry:         mail.RetrySafe,
+			cancelCaller:      true,
+			wantNoRemediation: true,
+			wantCanceledCause: true,
+			wantNoMutation:    true,
+		},
+		{
+			name: "transport canceled",
+			fetchErr: &transport.TransportError{
+				Code: transport.CodeIMAPCanceled, Message: "IMAP FETCH canceled", Err: context.Canceled,
+			},
+			wantCode:          transport.CodeIMAPCanceled,
+			wantState:         mail.HydrationStateCanceled,
+			wantRetry:         mail.RetrySafe,
+			wantNoMutation:    true,
+			wantNoRemediation: true,
+			wantCanceledCause: true,
+		},
+		{
+			name: "disconnect",
+			fetchErr: &transport.TransportError{
+				Code: transport.CodeIMAPDisconnected, Message: "server closed connection", Err: io.EOF,
+			},
+			wantCode:                transport.CodeIMAPDisconnected,
+			wantState:               mail.HydrationStateFailed,
+			wantRetry:               mail.RetrySafe,
+			wantNoMutation:          true,
+			wantRemediationContains: "restore IMAP connectivity",
 		},
 		{
 			name:           "timeout",
@@ -723,7 +752,10 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			if message.Hydration == nil || message.Hydration.State != test.wantState ||
 				message.Hydration.AttemptedSource != "imap" || message.Hydration.Local == nil ||
 				message.Hydration.Local.Code != "raw_source_partial" || message.Hydration.Remote == nil ||
-				message.Hydration.Remote.Code != test.wantCode || message.Hydration.Remediation == "" {
+				message.Hydration.Remote.Code != test.wantCode ||
+				(test.wantNoRemediation && message.Hydration.Remediation != "") ||
+				(!test.wantNoRemediation && message.Hydration.Remediation == "") ||
+				(test.wantRemediationContains != "" && !strings.Contains(message.Hydration.Remediation, test.wantRemediationContains)) {
 				t.Fatalf("hydration diagnostic = %+v", message.Hydration)
 			}
 			if strings.Contains(message.Hydration.Remote.Message, "secret-token") {
@@ -744,8 +776,57 @@ func TestClientPartialHydrationFailureRetainsContentAndCauses(t *testing.T) {
 			if test.wantNoMutation && !strings.Contains(message.Hydration.Remote.Message, "no external mutation was attempted") {
 				t.Fatalf("timeout diagnostic lacks read-only effect: %+v", message.Hydration.Remote)
 			}
-			if test.name == "canceled" && !errors.Is(err, context.Canceled) {
+			if test.wantCanceledCause && !errors.Is(err, context.Canceled) {
 				t.Fatalf("GetMessage() error = %v, want context.Canceled cause", err)
+			}
+		})
+	}
+}
+
+func TestHydrationDiagnosticMappingsCoverReachableIMAPCodes(t *testing.T) {
+	tests := []struct {
+		code                    string
+		wantMessageContains     string
+		wantRemediationContains string
+		wantNoRemediation       bool
+	}{
+		{transport.CodeIMAPConnectFailed, "IMAP connection failed", "restore IMAP connectivity", false},
+		{transport.CodeIMAPCanceled, "no external mutation was attempted", "", true},
+		{transport.CodeIMAPDisconnected, "connection was lost", "restore IMAP connectivity", false},
+		{transport.CodeIMAPTimeout, "timed out", "restore IMAP connectivity", false},
+		{transport.CodeIMAPAuthFailed, "authentication failed", "restore the credential", false},
+		{transport.CodeIMAPCommandRejected, "rejected a read command", "error.imap_rejection", false},
+		{transport.CodeIMAPMailboxNotFound, "mailbox is no longer available", "restore the IMAP mailbox", false},
+		{transport.CodeIMAPAmbiguousMailbox, "mailbox identity is ambiguous", "resolve duplicate IMAP mailbox names", false},
+		{transport.CodeIMAPMessageNotFound, "message is no longer present", "refresh the local catalog", false},
+		{transport.CodeIMAPMessageUIDUnknown, "could not verify the message identity", "verified IMAP UID", false},
+		{transport.CodeIMAPUIDValidityUnknown, "could not verify the message identity", "verified IMAP UID", false},
+		{"mailbox_uidvalidity_changed", "identity changed since", "verified IMAP UID and UIDVALIDITY", false},
+		{transport.CodeIMAPAmbiguousMessageID, "message identity is ambiguous", "verified IMAP UID", false},
+		{transport.CodeIMAPInvalidValue, "rejected an invalid", "valid message reference", false},
+		{transport.CodeIMAPMutationFailed, "identity discovery failed", "operator configuration", false},
+		{transport.CodeIMAPFetchFailed, "could not fetch the message", "FETCH cause", false},
+		{transport.CodeIMAPResponseMalformed, "malformed response", "inspect the IMAP server response", false},
+		{transport.CodeIMAPMessageUIDMismatch, "could not verify the message identity", "verified IMAP UID", false},
+		{transport.CodeIMAPRawSourceTooLarge, "64 MiB hydration limit", "Mail.app", false},
+		{transport.CodeIMAPResourceLimitExceeded, "bounded hydration limit", "bounded response", false},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			state := mail.HydrationStateFailed
+			if test.wantNoRemediation {
+				state = mail.HydrationStateCanceled
+			}
+			if got := safeRemoteHydrationMessage(test.code); !strings.Contains(got, test.wantMessageContains) {
+				t.Fatalf("safeRemoteHydrationMessage(%q) = %q, want it to contain %q", test.code, got, test.wantMessageContains)
+			}
+			remediation := hydrationRemediation(state, test.code)
+			if test.wantNoRemediation {
+				if remediation != "" {
+					t.Fatalf("hydrationRemediation(%q) = %q, want none", test.code, remediation)
+				}
+			} else if !strings.Contains(remediation, test.wantRemediationContains) {
+				t.Fatalf("hydrationRemediation(%q) = %q, want it to contain %q", test.code, remediation, test.wantRemediationContains)
 			}
 		})
 	}
