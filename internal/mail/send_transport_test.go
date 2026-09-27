@@ -491,8 +491,13 @@ func TestSendDraftRejectsHistoricalSaveClaimBeforeTransport(t *testing.T) {
 	if submitter.calls != 0 || mirror.calls != 0 || credentialLoads != 0 {
 		t.Fatalf("transport calls submit=%d mirror=%d credential loads=%d", submitter.calls, mirror.calls, credentialLoads)
 	}
-	if !strings.Contains(sendErr.Error(), attempt.ID) || !strings.Contains(sendErr.Error(), "drafts save") {
+	if !strings.Contains(sendErr.Error(), attempt.ID) || !strings.Contains(sendErr.Error(), "drafts reconcile") || strings.Contains(sendErr.Error(), "drafts save") {
 		t.Fatalf("SendDraft() error = %v, want claim identity and recovery command", sendErr)
+	}
+	guidance := GuidanceForError("drafts.send", sendErr)
+	if guidance.ReplayAllowed || guidance.Recovery.Command != "drafts.reconcile" ||
+		len(guidance.Recovery.Args) != 3 || guidance.Recovery.Args[1] != draft.Ref {
+		t.Fatalf("historical save recovery guidance = %+v", guidance)
 	}
 	assertNoSendClaim(t, root, draft.Ref)
 

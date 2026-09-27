@@ -22,7 +22,6 @@ const (
 	draftReconcileTimeout        = draftSendTimeout
 	draftHandoffDispatchTimeout  = 10 * time.Second
 	draftHandoffReconcileTimeout = 15 * time.Second
-	draftSaveTimeout             = 2 * time.Minute
 	draftSendTimeout             = 15 * time.Minute
 	pruneDayDuration             = 24 * time.Hour
 	maxPruneAgeDays              = int64((1<<63 - 1) / int64(pruneDayDuration))
@@ -88,13 +87,28 @@ func runDraftHandoffReconcile(ctx context.Context, service *mail.Service, args [
 
 func runDraftReconcile(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts reconcile", stderr)
-	ref := flags.String("ref", "", "draft ref with an existing send attempt")
+	ref := flags.String("ref", "", "draft ref with an existing send or historical native save attempt")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, draftReconcileTimeout)
 	defer cancel()
+	draft, draftErr := service.GetDraft(*ref)
+	if draftErr == nil && draft.SaveAttempt != nil {
+		saved, err := service.ReconcileSavedDraft(operationCtx, *ref)
+		if err != nil {
+			if saved.Message.Ref != "" {
+				return failCommandWithData("drafts.reconcile", *jsonOutput, responseData{SavedDraft: &saved}, err, stdout, stderr)
+			}
+			return failCommand("drafts.reconcile", *jsonOutput, err, stdout, stderr)
+		}
+		if *jsonOutput {
+			return writeSuccess(stdout, "drafts.reconcile", responseData{SavedDraft: &saved})
+		}
+		writeFormat(stdout, "%s\t%s\n", saved.Message.Ref, oneLine(saved.Message.Subject))
+		return 0
+	}
 	result, err := service.ReconcileDraft(operationCtx, *ref)
 	if err != nil {
 		if result.AttemptID != "" {
@@ -108,31 +122,6 @@ func runDraftReconcile(ctx context.Context, service *mail.Service, args []string
 		return writeSuccess(stdout, "drafts.reconcile", responseData{SendResult: &result})
 	}
 	writeHumanSendResult(stdout, result)
-	return 0
-}
-
-func runDraftSave(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	flags := newFlagSet("drafts save", stderr)
-	ref := flags.String("ref", "", "local draft ref")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
-		return code
-	}
-	operationCtx, cancel := context.WithTimeout(ctx, draftSaveTimeout)
-	defer cancel()
-	saved, err := service.SaveDraft(operationCtx, *ref)
-	if err != nil {
-		if saved.Message.Ref != "" {
-			return failCommandWithData(
-				"drafts.save", *jsonOutput, responseData{SavedDraft: &saved}, err, stdout, stderr,
-			)
-		}
-		return failCommand("drafts.save", *jsonOutput, err, stdout, stderr)
-	}
-	if *jsonOutput {
-		return writeSuccess(stdout, "drafts.save", responseData{SavedDraft: &saved})
-	}
-	writeFormat(stdout, "%s\t%s\n", saved.Message.Ref, oneLine(saved.Message.Subject))
 	return 0
 }
 

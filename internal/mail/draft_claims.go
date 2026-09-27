@@ -26,9 +26,10 @@ func rejectClaimedDraft(draft Draft) error {
 	}
 	if draft.SaveAttempt != nil {
 		return &OperationError{
-			Code: "draft_save_retry_blocked",
+			Code:     "draft_save_retry_blocked",
+			DraftRef: draft.Ref,
 			Message: fmt.Sprintf(
-				"draft has legacy native save attempt %s; recover it with `mailcli drafts save --ref %s --json` (reconcile-only), or discard explicitly",
+				"draft has legacy native save attempt %s; recover it with `mailcli drafts reconcile --ref %s --json` (reconcile-only), or discard explicitly",
 				draft.SaveAttempt.ID, draft.Ref,
 			),
 		}

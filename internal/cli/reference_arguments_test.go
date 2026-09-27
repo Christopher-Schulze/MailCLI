@@ -145,7 +145,7 @@ func referenceRouteIDs() []string {
 	return []string{
 		"messages.get", "messages.raw", "messages.state", "messages.thread", "messages.mark", "messages.move", "messages.copy", "messages.delete", "messages.reply", "messages.forward",
 		"attachments.list", "attachments.save",
-		"drafts.open", "drafts.adopt", "drafts.save", "drafts.inspect", "drafts.update", "drafts.send", "drafts.discard", "drafts.reconcile", "drafts.handoff", "drafts.preview", "drafts.edit", "drafts.handoff-reconcile",
+		"drafts.open", "drafts.adopt", "drafts.inspect", "drafts.update", "drafts.send", "drafts.discard", "drafts.reconcile", "drafts.handoff", "drafts.preview", "drafts.edit", "drafts.handoff-reconcile",
 	}
 }
 

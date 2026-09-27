@@ -741,7 +741,7 @@ func TestIMAPWireFailureGuidanceKeepsReadsSafeAndWritesUncertain(t *testing.T) {
 }
 
 func TestWriteTimeoutRequiresObservation(t *testing.T) {
-	for _, command := range []string{"sync", "drafts.handoff", "drafts.save"} {
+	for _, command := range []string{"sync", "drafts.handoff", "drafts.reconcile"} {
 		guidance := mail.GuidanceForError(command, &testCodedError{code: "operation_timeout", message: "timeout"})
 		if guidance.Retryability != mail.RetryObserveRequired || guidance.ReplayAllowed ||
 			guidance.Recovery.Action != mail.RecoveryInspect {

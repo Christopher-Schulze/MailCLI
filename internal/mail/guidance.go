@@ -289,6 +289,14 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		return guidanceForMirrorUnknown()
 	case code == "send_outcome_unknown" || code == "send_outcome_unverifiable" || code == "send_state_unknown":
 		return guidanceForSendUnknown()
+	case code == "draft_save_outcome_unknown" || code == "draft_save_retry_blocked":
+		guidance := guidanceForUnknown(OperationPhaseExecution)
+		guidance.Recovery = RecoveryGuidance{Action: RecoveryReconcile, Command: "drafts.reconcile"}
+		var operation *OperationError
+		if errors.As(err, &operation) && operation.DraftRef != "" {
+			guidance.Recovery.Args = []string{"--ref", operation.DraftRef, "--json"}
+		}
+		return guidance
 	case code == "handoff_outcome_unknown" || code == "handoff_retry_blocked" || code == "handoff_attachment_cleanup_failed" || code == "handoff_claim_cleanup_failed":
 		return guidanceForHandoffUnknown()
 	case code == "handoff_canceled_before_dispatch":
@@ -593,7 +601,7 @@ func isInputErrorCode(code string) bool {
 func effectfulCommand(command string) bool {
 	switch command {
 	case "batch", "update", "attachments.save", "attachment_save", "send.setup", "sync",
-		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.adopt",
+		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.adopt",
 		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move",
 		"messages.copy", "messages.delete":

@@ -335,7 +335,7 @@ func TestDraftReconcileTimeoutCoversTransferBudget(t *testing.T) {
 	}
 }
 
-func TestDraftSaveReturnsObservedResultWithPostflightError(t *testing.T) {
+func TestRemovedDraftSaveDoesNotStartNativePostflight(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(
 		postflightSaveGateway{}, filepath.Join(t.TempDir(), "drafts"),
 	)
@@ -348,12 +348,16 @@ func TestDraftSaveReturnsObservedResultWithPostflightError(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runDraftSave(
-		context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr,
+	code := Run(
+		context.Background(), service, []string{"drafts", "save", "--ref", draft.Ref, "--json"}, &stdout, &stderr,
 	)
-	if code != 1 || !strings.Contains(stdout.String(), `"code":"draft_postflight_failed"`) ||
-		!strings.Contains(stdout.String(), `"saved_draft":{"local_draft_ref":"`+draft.Ref+`"`) {
+	if code != 2 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"code":"unknown_command"`) ||
+		strings.Contains(stdout.String(), `"saved_draft"`) || strings.Contains(stdout.String(), "draft_postflight_failed") {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.Revision != draft.Revision || retained.SaveAttempt != nil {
+		t.Fatalf("removed save changed the draft: %+v, error=%v", retained, err)
 	}
 }
 

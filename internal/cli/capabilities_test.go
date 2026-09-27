@@ -82,7 +82,7 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	}
 	if manifest.DraftSavePolicy.NewNativeSave != "rejected_before_mail_contact" ||
 		manifest.DraftSavePolicy.LegacyClaimHandling != "reconcile_only" ||
-		manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts save --ref <DRAFT_REF> --json" {
+		manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts reconcile --ref <DRAFT_REF> --json" {
 		t.Fatalf("draft save policy = %+v", manifest.DraftSavePolicy)
 	}
 	if !manifest.SyncCheckPolicy.IncompleteIsSuccessfulResult ||
@@ -110,7 +110,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state",
 		"messages.thread",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
-		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.save", "drafts.open",
+		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open",
 		"drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync", "drafts.handoff-reconcile",
@@ -188,11 +188,6 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		!slices.Equal(setup.ResultStates, []string{"stored", "removed"}) {
 		t.Fatalf("send.setup capability = %+v", setup)
 	}
-	save := manifest.Commands[slices.Index(got, "drafts.save")]
-	if save.EffectClass != "unsupported" || save.StoreDependency != "draft-store" ||
-		!slices.Equal(save.ResultStates, []string{"compose_automation_unsupported"}) {
-		t.Fatalf("drafts.save capability = %+v", save)
-	}
 	for _, id := range []string{"messages.reply", "messages.forward"} {
 		command := manifest.Commands[slices.Index(got, id)]
 		if command.StoreDependency != "mail-store" {
@@ -217,7 +212,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	if reconcile.EffectClass != "local-write+imap-write" ||
 		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" ||
 		!slices.Equal(reconcile.ResultStates, []string{
-			"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown",
+			"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown", "native_draft_observed", "draft_save_outcome_unknown",
 		}) {
 		t.Fatalf("drafts.reconcile capability = %+v", reconcile)
 	}
@@ -277,7 +272,6 @@ func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 		"drafts.edit":    {{Kind: dependencyKindApp, Target: dependencyTargetEditor, Condition: dependencyConditionAlways}},
 		"drafts.handoff": {{Kind: dependencyKindApp, Target: dependencyTargetSystemComposeService, Condition: dependencyConditionAlways}},
 		"drafts.update":  {},
-		"drafts.save":    {},
 		"drafts.open": {
 			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
 			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},

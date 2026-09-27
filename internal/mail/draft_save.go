@@ -31,7 +31,16 @@ func composeWriteSupportError(gateway Gateway) error {
 	return capability.ComposeWriteSupportError()
 }
 
-func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft, resultErr error) {
+func (s *Service) SaveDraft(ctx context.Context, ref string) (SavedDraft, error) {
+	return s.saveDraft(ctx, ref, false)
+}
+
+// ReconcileSavedDraft observes an existing historical claim and never saves a new draft.
+func (s *Service) ReconcileSavedDraft(ctx context.Context, ref string) (SavedDraft, error) {
+	return s.saveDraft(ctx, ref, true)
+}
+
+func (s *Service) saveDraft(ctx context.Context, ref string, reconcileOnly bool) (result SavedDraft, resultErr error) {
 	if err := draftContextError(ctx, "save"); err != nil {
 		return SavedDraft{}, err
 	}
@@ -73,6 +82,11 @@ func (s *Service) SaveDraft(ctx context.Context, ref string) (result SavedDraft,
 			}
 		}
 		return reconcileNativeDraftSave(ctx, lease, backend, root, ref, draft, *draft.SaveAttempt)
+	}
+	if reconcileOnly {
+		return SavedDraft{}, &OperationError{
+			Code: "draft_save_reconcile_unavailable", Message: "draft has no historical native save attempt to reconcile",
+		}
 	}
 	if err := composeWriteSupportError(s.gateway); err != nil {
 		return SavedDraft{}, err
@@ -133,8 +147,9 @@ func reconcileNativeDraftSave(
 	}
 	if evidence.ObservedMessage.Ref == "" {
 		return SavedDraft{}, &OperationError{
-			Code:    "draft_save_outcome_unknown",
-			Message: "Drafts still does not prove the prior native save; the local draft is retained and duplicate saves remain blocked",
+			Code:     "draft_save_outcome_unknown",
+			DraftRef: ref,
+			Message:  "Drafts still does not prove the prior native save; the local draft is retained and duplicate saves remain blocked",
 		}
 	}
 	attempt.InvocationStarted = true

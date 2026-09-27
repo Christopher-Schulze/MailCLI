@@ -530,7 +530,7 @@ func TestJSONGroupSubcommandFailuresReturnValidChoices(t *testing.T) {
 		}},
 		{name: "attachments", validSubcommands: []string{"list", "save"}},
 		{name: "drafts", validSubcommands: []string{
-			"create", "list", "inspect", "preview", "edit", "handoff", "update", "save", "open", "adopt", "send", "reconcile", "discard", "prune", "handoff-reconcile",
+			"create", "list", "inspect", "preview", "edit", "handoff", "update", "open", "adopt", "send", "reconcile", "discard", "prune", "handoff-reconcile",
 		}},
 		{name: "send", validSubcommands: []string{"setup"}},
 	}
@@ -689,7 +689,7 @@ func TestMessageThreadCommand(t *testing.T) {
 	}
 }
 
-func TestDraftSaveAndOpenCommands(t *testing.T) {
+func TestRemovedDraftSaveAndOpenCommands(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(testGateway{}, filepath.Join(t.TempDir(), "drafts"))
 	draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
 		From: "mail@example.com", To: []mail.Recipient{{Address: "recipient@example.com"}},
@@ -700,8 +700,8 @@ func TestDraftSaveAndOpenCommands(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := runDraftSave(context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr)
-	if code != 0 || !strings.Contains(stdout.String(), `"command":"drafts.save"`) || !strings.Contains(stdout.String(), `"msg_saved"`) {
+	code := Run(context.Background(), service, []string{"drafts", "save", "--ref", draft.Ref, "--json"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stdout.String(), `"code":"unknown_command"`) || strings.Contains(stdout.String(), `"msg_saved"`) {
 		t.Fatalf("save code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()

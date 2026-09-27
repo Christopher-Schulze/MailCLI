@@ -862,8 +862,8 @@ func TestSchemaDescribesRepeatableDraftFlags(t *testing.T) {
 
 func TestReferenceRouteSchemasPublishCanonicalFlagAndOperand(t *testing.T) {
 	commands := referenceRouteIDs()
-	if len(commands) != 24 {
-		t.Fatalf("reference route inventory has %d commands, want 24", len(commands))
+	if len(commands) != 23 {
+		t.Fatalf("reference route inventory has %d commands, want 23", len(commands))
 	}
 	for _, command := range commands {
 		t.Run(command, func(t *testing.T) {

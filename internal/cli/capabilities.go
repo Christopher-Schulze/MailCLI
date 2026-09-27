@@ -293,7 +293,7 @@ func capabilitiesForScope(command, family string) (capabilityManifest, error) {
 		DraftSavePolicy: draftSavePolicy{
 			NewNativeSave:       "rejected_before_mail_contact",
 			LegacyClaimHandling: "reconcile_only",
-			SafeRecoveryCommand: "mailcli drafts save --ref <DRAFT_REF> --json",
+			SafeRecoveryCommand: "mailcli drafts reconcile --ref <DRAFT_REF> --json",
 		},
 	}
 	if command != "" {

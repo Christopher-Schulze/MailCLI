@@ -43,6 +43,29 @@ func TestCatalogCursorDocumentationMatchesRuntimeContract(t *testing.T) {
 	}
 }
 
+func TestHistoricalSaveRecoveryDocumentationMatchesRemovedCommand(t *testing.T) {
+	manifest := mustCapabilities(t)
+	if len(manifest.Commands) != 39 || manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts reconcile --ref <DRAFT_REF> --json" {
+		t.Fatalf("published inventory=%d policy=%+v", len(manifest.Commands), manifest.DraftSavePolicy)
+	}
+	for _, command := range manifest.Commands {
+		if command.ID == "drafts.save" {
+			t.Fatal("unsupported save command remains published")
+		}
+	}
+	for _, path := range []string{"README.md", "docs/documentation.md", "skills/mailcli/SKILL.md", "skills/mailcli/references/native-handoff.md", "skills/mailcli/references/sending.md"} {
+		content := readRepositoryFile(t, path)
+		if !strings.Contains(content, "drafts reconcile") && !strings.Contains(content, "drafts.reconcile") {
+			t.Errorf("%s omits supported historical recovery", path)
+		}
+		for _, obsolete := range []string{"mailcli drafts save --ref", "reconcile-only `drafts save`", "`drafts.save`", "minutes for `drafts save`"} {
+			if strings.Contains(content, obsolete) {
+				t.Errorf("%s still instructs an unsupported operation: %q", path, obsolete)
+			}
+		}
+	}
+}
+
 func TestCapabilityDependencyDocumentationMatchesRuntimeContract(t *testing.T) {
 	versions := []struct {
 		path    string
@@ -579,9 +602,9 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", "([\\d]+) minutes for `drafts send`", 60),
 		}},
-	{name: "draft save operation budget", expected: 120, unit: "seconds",
+	{name: "draft prune operation budget", expected: int64(draftPruneTimeout / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
-			boundCheck("docs/documentation.md", "([\\w]+) minutes for `drafts save`", 60),
+			boundCheck("docs/documentation.md", "([\\w]+) minutes for `drafts prune`", 60),
 		}},
 	{name: "draft edit operation budget", expected: 15, unit: "seconds",
 		checks: []documentedBoundCheck{
