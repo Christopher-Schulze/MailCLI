@@ -253,7 +253,7 @@ func TestDraftHandoffPreDispatchFailureCleansAttempt(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDraftHandoffWith(context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
-	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"confirmed_failed"`) ||
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"not_handed_off"`) ||
 		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
@@ -289,7 +289,7 @@ func TestDraftHandoffCancellationBeforeDispatchReportsCanceledState(t *testing.T
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDraftHandoffWith(ctx, service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
-	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"canceled_before_dispatch"`) ||
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"not_handed_off"`) ||
 		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
@@ -312,7 +312,7 @@ func TestDraftHandoffDispatchMarkerCancellationReportsCanceledState(t *testing.T
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDraftHandoffWithDispatch(ctx, service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr, handoff)
-	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"canceled_before_dispatch"`) ||
+	if code != 1 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"outcome":"not_handed_off"`) ||
 		!strings.Contains(stdout.String(), `"dispatch_started":false`) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}

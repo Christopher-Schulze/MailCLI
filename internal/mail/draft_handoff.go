@@ -290,7 +290,7 @@ func (s *Service) BeginDraftHandoff(ref string) (*DraftHandoffSession, error) {
 	return s.BeginDraftHandoffContext(context.Background(), ref)
 }
 
-func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*DraftHandoffSession, error) {
+func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (session *DraftHandoffSession, resultErr error) {
 	if err := draftContextError(ctx, "handoff"); err != nil {
 		return nil, err
 	}
@@ -305,9 +305,13 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 		return nil, classifyDraftContextError(ctx, err, "handoff")
 	}
 	storage := lease.storage
+	defer func() {
+		if session == nil {
+			resultErr = errors.Join(resultErr, lease.release())
+		}
+	}()
 	draft, err := readDraftForMutation(lease, root, ref)
 	if err != nil {
-		_ = lease.release()
 		return nil, err
 	}
 	// Attachment preflight and staging are byte-proportional: the staging
@@ -321,22 +325,18 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 	defer cancelStaging()
 	if draft.HandoffAttempt != nil && !draft.HandoffAttempt.DispatchStarted && draft.HandoffAttempt.Outcome == HandoffOutcomePrepared {
 		if err := recoverPreparedHandoffStaging(stagingCtx, ref, draft.HandoffAttempt.ID, draft.Attachments, storage); err != nil {
-			_ = lease.release()
 			return nil, err
 		}
 		draft.HandoffAttempt = nil
 	}
 	if err := validateDraftHandoffContext(stagingCtx, draft); err != nil {
-		_ = lease.release()
 		return nil, err
 	}
 	if draft.HandoffAttempt != nil {
-		_ = lease.release()
 		return nil, handoffRetryBlockedError(draft.HandoffAttempt.ID)
 	}
 	attemptID, err := newHandoffAttemptID()
 	if err != nil {
-		_ = lease.release()
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -347,11 +347,9 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 	name := ref + handoffClaimSuffix
 	payload, err := encodeHandoffAttempt(ref, attempt)
 	if err != nil {
-		_ = lease.release()
 		return nil, err
 	}
 	if _, err := writePrivateDraftFile(storage, name, payload); err != nil {
-		_ = lease.release()
 		if errors.Is(err, os.ErrExist) {
 			return nil, handoffRetryBlockedError(attempt.ID)
 		}
@@ -382,14 +380,14 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (*Dr
 	}
 	if err != nil {
 		cleanupErr := recoverPreparedHandoffStaging(stagingCtx, ref, attemptID, draft.Attachments, storage)
-		return nil, errors.Join(classifyDraftContextError(stagingCtx, err, "handoff"), cleanupErr, lease.release())
+		return nil, errors.Join(classifyDraftContextError(stagingCtx, err, "handoff"), cleanupErr)
 	}
 	attempt.Snapshots = snapshots
 	attempt.SnapshotsRetained = len(snapshots) > 0
 	attempt.UpdatedAt = time.Now().UTC()
 	if err := replaceHandoffAttempt(ref, attempt, storage); err != nil {
 		cleanupErr := recoverPreparedHandoffStaging(stagingCtx, ref, attemptID, draft.Attachments, storage)
-		return nil, errors.Join(err, cleanupErr, lease.release())
+		return nil, errors.Join(err, cleanupErr)
 	}
 	draft.HandoffAttempt = &attempt
 	return &DraftHandoffSession{

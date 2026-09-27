@@ -349,7 +349,7 @@ func TestDraftReconcileForeignAcceptedSpoolKeepsReconciliationGuidance(t *testin
 
 func TestHandoffUnknownGuidanceKeepsRecoveryWithoutAttachments(t *testing.T) {
 	result := draftHandoffResult{
-		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeUnknown,
+		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: draftHandoffUnknown,
 		DispatchStarted: true, DraftRetained: true,
 	}
 	guidance := guidanceForResponse("drafts.handoff", responseData{DraftHandoff: &result}, &testCodedError{code: "handoff_outcome_unknown", message: "unknown"})
@@ -361,7 +361,7 @@ func TestHandoffUnknownGuidanceKeepsRecoveryWithoutAttachments(t *testing.T) {
 
 func TestHandoffConfirmedFailureDoesNotInventReconciliation(t *testing.T) {
 	result := draftHandoffResult{
-		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: mail.HandoffOutcomeConfirmedFailed,
+		DraftRef: "draft_ref", AttemptID: "handoff_123456789012345678901234", Outcome: draftHandoffNotHandedOff,
 		DispatchStarted: true, DraftRetained: true,
 	}
 	guidance := guidanceForResponse("drafts.handoff", responseData{DraftHandoff: &result}, &testCodedError{code: "handoff_failed", message: "native failure"})

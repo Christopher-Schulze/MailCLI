@@ -222,7 +222,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		t.Fatalf("drafts.reconcile capability = %+v", reconcile)
 	}
 	handoff := manifest.Commands[slices.Index(got, "drafts.handoff")]
-	if !slices.Equal(handoff.ResultStates, []string{"confirmed_opened", "confirmed_failed", "outcome_unknown", "canceled_before_dispatch"}) {
+	if !slices.Equal(handoff.ResultStates, []string{"handed_off", "not_handed_off", "unknown"}) {
 		t.Fatalf("drafts.handoff result states = %+v", handoff.ResultStates)
 	}
 	handoffReconcile := manifest.Commands[slices.Index(got, "drafts.handoff-reconcile")]

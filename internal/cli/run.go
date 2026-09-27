@@ -260,6 +260,7 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 			Action: mail.RecoveryReconcile, Command: "drafts.handoff-reconcile",
 			Args:        []string{"--ref", result.DraftRef, "--attempt", result.AttemptID, "--confirm", "--json"},
 			OperationID: result.AttemptID,
+			Instruction: "Inspect Mail.app first, then reconcile this exact attempt with --outcome opened or --outcome failed. Never guess the observed outcome or replay the handoff.",
 		}
 	}
 	if result := data.SendResult; result != nil && result.AttemptID != "" {
@@ -302,7 +303,7 @@ func handoffNeedsReconciliation(result *draftHandoffResult, err error) bool {
 	if result == nil || result.AttemptID == "" || !result.DispatchStarted {
 		return false
 	}
-	if result.Outcome == mail.HandoffOutcomeUnknown || result.SnapshotsRetained {
+	if result.Outcome == draftHandoffUnknown || result.SnapshotsRetained {
 		return true
 	}
 	var cleanupErr *mail.OperationError

@@ -299,7 +299,7 @@ var commandContracts = []commandContract{
 		effectClass: "visible-compose", confirmation: "none",
 		storeDependency:    "draft-store",
 		dependencies:       []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetSystemComposeService, Condition: dependencyConditionAlways}},
-		resultStates:       []string{"confirmed_opened", "confirmed_failed", "outcome_unknown", "canceled_before_dispatch"},
+		resultStates:       []string{"handed_off", "not_handed_off", "unknown"},
 		mailService:        mailServiceNotRequired,
 		published:          true,
 		requiresSignal:     true,
