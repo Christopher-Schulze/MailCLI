@@ -23,6 +23,7 @@ type sourceImapOperator struct {
 	reportedSize *int64
 	lastBound    int64
 	fetchClock   *hydrationFakeClock
+	setupElapsed time.Duration
 	fetchElapsed time.Duration
 	fetchBudget  time.Duration
 	stallFetch   bool
@@ -35,10 +36,10 @@ func (clock *hydrationFakeClock) Advance(duration time.Duration) {
 	clock.elapsed += duration
 }
 
-func TestLocalReadContextRemainsSixtySecondsAndHonorsCancellation(t *testing.T) {
+func TestLocalReadOrResolveContextRemainsSixtySecondsAndHonorsCallerLimits(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
-	ctx, cancel := localReadContext(parent)
+	ctx, cancel := localReadOrResolveContext(parent)
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -51,6 +52,48 @@ func TestLocalReadContextRemainsSixtySecondsAndHonorsCancellation(t *testing.T) 
 	cancelParent()
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("local cancellation = %v, want context.Canceled", ctx.Err())
+	}
+
+	deadlineParent, cancelDeadlineParent := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDeadlineParent()
+	deadlineCtx, cancelDeadline := localReadOrResolveContext(deadlineParent)
+	defer cancelDeadline()
+	parentDeadline, parentHasDeadline := deadlineParent.Deadline()
+	childDeadline, childHasDeadline := deadlineCtx.Deadline()
+	if !parentHasDeadline || !childHasDeadline || !childDeadline.Equal(parentDeadline) {
+		t.Fatalf("local/read-resolve deadline = %v/%v, want caller deadline %v/%v", childDeadline, childHasDeadline, parentDeadline, parentHasDeadline)
+	}
+}
+
+func TestHydrationFetchContextIncludesSetupAndHonorsCallerDeadline(t *testing.T) {
+	wantBudget := transport.TransferCommandBudget + transport.TransferBudgetForSize(mail.MaximumRawSourceBytes)
+	ctx, cancel := hydrationFetchContext(context.Background(), mail.MaximumRawSourceBytes)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("hydration FETCH context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining > wantBudget || wantBudget-remaining > 5*time.Second || wantBudget != 124*time.Second {
+		t.Fatalf("hydration FETCH budget = %v, want setup+transfer %v and 124s", remaining, wantBudget)
+	}
+
+	deadlineParent, cancelDeadlineParent := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDeadlineParent()
+	deadlineCtx, cancelDeadline := hydrationFetchContext(deadlineParent, mail.MaximumRawSourceBytes)
+	defer cancelDeadline()
+	parentDeadline, parentHasDeadline := deadlineParent.Deadline()
+	childDeadline, childHasDeadline := deadlineCtx.Deadline()
+	if !parentHasDeadline || !childHasDeadline || !childDeadline.Equal(parentDeadline) {
+		t.Fatalf("hydration FETCH deadline = %v/%v, want caller deadline %v/%v", childDeadline, childHasDeadline, parentDeadline, parentHasDeadline)
+	}
+
+	cancellationParent, cancelCaller := context.WithCancel(context.Background())
+	canceledCtx, cancelFetch := hydrationFetchContext(cancellationParent, mail.MaximumRawSourceBytes)
+	cancelCaller()
+	defer cancelFetch()
+	if canceledCtx.Err() != context.Canceled {
+		t.Fatalf("hydration FETCH cancellation = %v, want context.Canceled", canceledCtx.Err())
 	}
 }
 
@@ -80,7 +123,13 @@ func (operator *sourceImapOperator) FetchMessageReader(ctx context.Context, cfg 
 		if !ok {
 			return nil, 0, errors.New("hydration FETCH context has no deadline")
 		}
-		operator.fetchBudget = time.Until(deadline)
+		remaining := time.Until(deadline)
+		if operator.setupElapsed >= remaining {
+			operator.fetchClock.Advance(remaining)
+			return nil, 0, context.DeadlineExceeded
+		}
+		operator.fetchBudget = remaining - operator.setupElapsed
+		operator.fetchClock.Advance(operator.setupElapsed)
 		if operator.stallFetch || operator.fetchElapsed >= operator.fetchBudget {
 			operator.fetchClock.Advance(operator.fetchBudget)
 			return nil, 0, context.DeadlineExceeded
@@ -111,19 +160,15 @@ func (operator *sourceImapOperator) FetchMessageReader(ctx context.Context, cfg 
 	return &trackedHydrationSource{File: file, owner: operator}, size, nil
 }
 
-func TestHydrationFetchCompletesAfterLocalReadDeadline(t *testing.T) {
+func TestHydrationFetchBudgetIncludesTwentySecondSetup(t *testing.T) {
 	client, ref, operator := hydrationReaderFixture(t, "Subject: bounded fixture\r\n\r\nbody")
 	size := mail.MaximumRawSourceBytes
 	operator.reportedSize = &size
 	operator.fetchClock = &hydrationFakeClock{}
-	operator.fetchElapsed = 61 * time.Second
-	if operator.fetchElapsed <= mail.LocalReadTimeout {
-		t.Fatalf("simulated FETCH duration = %v, must exceed local read timeout %v", operator.fetchElapsed, mail.LocalReadTimeout)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), mail.LocalReadTimeout+transport.TransferBudgetCap)
-	defer cancel()
+	operator.setupElapsed = 20 * time.Second
+	operator.fetchElapsed = transport.TransferBudgetForSize(size)
 
-	source, gotSize, _, err := client.hydrateMessageSource(ctx, ref)
+	source, gotSize, _, err := client.hydrateMessageSource(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("hydrateMessageSource() error = %v", err)
 	}
@@ -138,28 +183,36 @@ func TestHydrationFetchCompletesAfterLocalReadDeadline(t *testing.T) {
 	if gotSize != size || operator.lastBound != mail.MaximumRawSourceBytes {
 		t.Fatalf("hydrated size/bound = %d/%d, want %d/%d", gotSize, operator.lastBound, size, mail.MaximumRawSourceBytes)
 	}
-	if operator.fetchBudget > transport.TransferBudgetForSize(size) ||
-		transport.TransferBudgetForSize(size)-operator.fetchBudget > 5*time.Second {
-		t.Fatalf("simulated FETCH budget = %v, want %v", operator.fetchBudget, transport.TransferBudgetForSize(size))
+	wantTotalBudget := transport.TransferCommandBudget + transport.TransferBudgetForSize(size)
+	wantFetchBudget := wantTotalBudget - operator.setupElapsed
+	if operator.fetchBudget > wantFetchBudget || wantFetchBudget-operator.fetchBudget > 5*time.Second {
+		t.Fatalf("simulated FETCH budget after setup = %v, want %v", operator.fetchBudget, wantFetchBudget)
 	}
-	if operator.fetchClock.elapsed != operator.fetchElapsed {
-		t.Fatalf("fake clock elapsed = %v, want %v", operator.fetchClock.elapsed, operator.fetchElapsed)
+	if operator.fetchElapsed != transport.TransferBudgetForSize(size) ||
+		operator.fetchClock.elapsed != operator.setupElapsed+operator.fetchElapsed ||
+		operator.fetchClock.elapsed > wantTotalBudget {
+		t.Fatalf("fake clock total = %v (setup %v + transfer %v), want transfer %v within %v",
+			operator.fetchClock.elapsed, operator.setupElapsed, operator.fetchElapsed,
+			transport.TransferBudgetForSize(size), wantTotalBudget)
 	}
 }
 
 func TestStalledHydrationFetchEndsAtComputedBudget(t *testing.T) {
 	client, ref, operator := hydrationReaderFixture(t, "Subject: bounded fixture\r\n\r\nbody")
 	operator.fetchClock = &hydrationFakeClock{}
+	operator.setupElapsed = 20 * time.Second
 	operator.stallFetch = true
 
 	_, _, _, err := client.hydrateMessageSource(context.Background(), ref)
-	wantBudget := transport.TransferBudgetForSize(mail.MaximumRawSourceBytes)
+	wantBudget := transport.TransferCommandBudget + transport.TransferBudgetForSize(mail.MaximumRawSourceBytes)
 	if !errors.Is(err, context.DeadlineExceeded) || transport.ErrorCode(err) != operationTimeoutCode {
 		t.Fatalf("stalled hydration error = %v (code %q), want bounded timeout", err, transport.ErrorCode(err))
 	}
-	if operator.fetchBudget > wantBudget || wantBudget-operator.fetchBudget > 5*time.Second ||
+	wantFetchBudget := wantBudget - operator.setupElapsed
+	if operator.fetchBudget > wantFetchBudget || wantFetchBudget-operator.fetchBudget > 5*time.Second ||
 		operator.fetchClock.elapsed < wantBudget-5*time.Second || operator.fetchClock.elapsed > wantBudget {
-		t.Fatalf("stalled FETCH budget/elapsed = %v/%v, want %v", operator.fetchBudget, operator.fetchClock.elapsed, wantBudget)
+		t.Fatalf("stalled FETCH budget/elapsed = %v/%v, want remaining/total %v/%v",
+			operator.fetchBudget, operator.fetchClock.elapsed, wantFetchBudget, wantBudget)
 	}
 	if !strings.Contains(err.Error(), "no external mutation was attempted") {
 		t.Fatalf("timeout error lacks read-only effect: %v", err)

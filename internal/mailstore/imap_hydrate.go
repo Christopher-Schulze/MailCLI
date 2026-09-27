@@ -12,7 +12,7 @@ import (
 // record, so the hydration fallback can fill metadata the raw message alone
 // cannot provide (ref, subject, sender, dates, flags, mailbox).
 func (c *Client) hydrateMessage(ctx context.Context, messageRef string) ([]byte, mail.MessageSummary, error) {
-	resolveCtx, cancelResolve := localReadContext(ctx)
+	resolveCtx, cancelResolve := localReadOrResolveContext(ctx)
 	target, err := c.resolveImapTarget(resolveCtx, messageRef)
 	cancelResolve()
 	if err != nil {

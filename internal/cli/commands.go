@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 
 	"mailcli/internal/mail"
@@ -16,11 +17,17 @@ import (
 
 const (
 	readTimeout          = mail.LocalReadTimeout
-	hydrationReadTimeout = readTimeout + transport.TransferBudgetCap
+	resolveTimeout       = mail.LocalReadTimeout
+	hydrationParseMargin = 10 * time.Second
 )
 
+func hydrationReadBudget() time.Duration {
+	return readTimeout + resolveTimeout + transport.TransferCommandBudget +
+		transport.TransferBudgetForSize(mail.MaximumRawSourceBytes) + hydrationParseMargin
+}
+
 func hydrationReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, hydrationReadTimeout)
+	return context.WithTimeout(ctx, hydrationReadBudget())
 }
 
 type codedError interface {

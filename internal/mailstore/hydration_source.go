@@ -16,16 +16,16 @@ type byteHydrationSource struct{ *bytes.Reader }
 
 func (byteHydrationSource) Close() error { return nil }
 
-func localReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func localReadOrResolveContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, mail.LocalReadTimeout)
 }
 
 func hydrationFetchContext(ctx context.Context, maximum int64) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, transport.TransferBudgetForSize(maximum))
+	return context.WithTimeout(ctx, transport.TransferCommandBudget+transport.TransferBudgetForSize(maximum))
 }
 
 func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string) (io.ReadSeekCloser, int64, mail.MessageSummary, error) {
-	resolveCtx, cancelResolve := localReadContext(ctx)
+	resolveCtx, cancelResolve := localReadOrResolveContext(ctx)
 	target, err := c.resolveImapTarget(resolveCtx, messageRef)
 	cancelResolve()
 	if err != nil {

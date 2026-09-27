@@ -199,7 +199,7 @@ func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (m
 	hasLocal := false
 	var localErr error
 	if c.store != nil {
-		localCtx, cancelLocal := localReadContext(ctx)
+		localCtx, cancelLocal := localReadOrResolveContext(ctx)
 		local, localErr = c.store.GetMessage(localCtx, ref)
 		cancelLocal()
 		hasLocal = localErr == nil
@@ -299,7 +299,7 @@ func messageFromRawReader(ctx context.Context, base mail.Message, summary mail.M
 func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 	var localErr error
 	if c.store != nil {
-		localCtx, cancelLocal := localReadContext(ctx)
+		localCtx, cancelLocal := localReadOrResolveContext(ctx)
 		raw, err := c.store.GetRawSource(localCtx, ref)
 		cancelLocal()
 		if err == nil {
@@ -332,7 +332,7 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
 	var localErr error
 	if c.store != nil {
-		localCtx, cancelLocal := localReadContext(ctx)
+		localCtx, cancelLocal := localReadOrResolveContext(ctx)
 		err := c.store.WriteRawSource(localCtx, ref, writer)
 		cancelLocal()
 		if err == nil {
@@ -379,7 +379,7 @@ func (c *Client) SaveAttachmentToWithEvidence(
 ) (mail.AttachmentEvidence, error) {
 	var localErr error
 	if c.store != nil {
-		localCtx, cancelLocal := localReadContext(ctx)
+		localCtx, cancelLocal := localReadOrResolveContext(ctx)
 		evidence, err := c.store.saveAttachmentToWithEvidence(localCtx, messageRef, attachmentID, outputPath)
 		if err == nil {
 			cancelLocal()

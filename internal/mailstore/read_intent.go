@@ -149,7 +149,7 @@ func (c *Client) GetMessageWithIntent(
 }
 
 func (c *Client) getMessageHeaders(ctx context.Context, ref string) (mail.Message, error) {
-	localCtx, cancelLocal := localReadContext(ctx)
+	localCtx, cancelLocal := localReadOrResolveContext(ctx)
 	local, localErr := c.store.GetMessageWithIntent(localCtx, ref, mail.MessageReadIntentHeaders)
 	cancelLocal()
 	if localErr == nil {
@@ -193,7 +193,7 @@ func messageFromRawHeaders(
 }
 
 func (c *Client) getMessageAttachments(ctx context.Context, ref string) (mail.Message, error) {
-	localCtx, cancelLocal := localReadContext(ctx)
+	localCtx, cancelLocal := localReadOrResolveContext(ctx)
 	local, localErr := c.store.GetMessageWithIntent(localCtx, ref, mail.MessageReadIntentAttachments)
 	cancelLocal()
 	hasLocal := localErr == nil

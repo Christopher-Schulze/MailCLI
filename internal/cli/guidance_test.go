@@ -456,7 +456,7 @@ func TestDraftInspectPermissionEnvelopePreservesCorrectiveRecovery(t *testing.T)
 	}
 }
 
-func TestHydrationReadContextAllowsBoundedTransferAndCallerCancellation(t *testing.T) {
+func TestHydrationReadContextComposesBudgetsAndHonorsCallerLimits(t *testing.T) {
 	parent, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
 	ctx, cancel := hydrationReadContext(parent)
@@ -465,7 +465,11 @@ func TestHydrationReadContextAllowsBoundedTransferAndCallerCancellation(t *testi
 	if !ok {
 		t.Fatal("hydration read context has no deadline")
 	}
-	want := mail.LocalReadTimeout + transport.TransferBudgetCap
+	want := readTimeout + resolveTimeout + transport.TransferCommandBudget +
+		transport.TransferBudgetForSize(mail.MaximumRawSourceBytes) + hydrationParseMargin
+	if hydrationReadBudget() != want || want != 254*time.Second {
+		t.Fatalf("hydration budget = %v, want component formula %v and 254s", hydrationReadBudget(), want)
+	}
 	remaining := time.Until(deadline)
 	if readTimeout != 60*time.Second || remaining > want || want-remaining > 5*time.Second {
 		t.Fatalf("hydration timeout = %v, local timeout = %v, want bounded %v", remaining, readTimeout, want)
@@ -473,6 +477,16 @@ func TestHydrationReadContextAllowsBoundedTransferAndCallerCancellation(t *testi
 	cancelParent()
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("caller cancellation = %v, want context.Canceled", ctx.Err())
+	}
+
+	deadlineParent, cancelDeadlineParent := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDeadlineParent()
+	deadlineCtx, cancelDeadline := hydrationReadContext(deadlineParent)
+	defer cancelDeadline()
+	parentDeadline, parentHasDeadline := deadlineParent.Deadline()
+	childDeadline, childHasDeadline := deadlineCtx.Deadline()
+	if !parentHasDeadline || !childHasDeadline || !childDeadline.Equal(parentDeadline) {
+		t.Fatalf("hydration deadline = %v/%v, want caller deadline %v/%v", childDeadline, childHasDeadline, parentDeadline, parentHasDeadline)
 	}
 }
 
