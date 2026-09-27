@@ -33,6 +33,7 @@ run_group() {
   local PACKAGE="$3"
   local REGEX="$4"
   local BENCHTIME="$5"
+  local REPETITIONS="${6:-${BENCHMARK_REPETITIONS}}"
   local RESULT_PATH="${RESULT_DIRECTORY}/${NAME}.txt"
 
   if [[ -n "${SELECTED_GROUP}" && "${NAME}" != "${SELECTED_GROUP}" ]]; then
@@ -41,11 +42,11 @@ run_group() {
   SELECTED_GROUP_FOUND=true
 
   printf '\ngroup=%s\ninput=%s\npackage=%s\nregex=%s\nbenchtime=%s\nrepetitions=%d\n' \
-    "${NAME}" "${INPUT_SHAPE}" "${PACKAGE}" "${REGEX}" "${BENCHTIME}" "${BENCHMARK_REPETITIONS}"
+    "${NAME}" "${INPUT_SHAPE}" "${PACKAGE}" "${REGEX}" "${BENCHTIME}" "${REPETITIONS}"
   go test -run '^$' -bench "${REGEX}" -benchmem -benchtime "${BENCHTIME}" \
-    -count "${BENCHMARK_REPETITIONS}" -cpu "${BENCHMARK_CPUS}" -timeout 10m "${PACKAGE}" |
+    -count "${REPETITIONS}" -cpu "${BENCHMARK_CPUS}" -timeout 10m "${PACKAGE}" |
     tee "${RESULT_PATH}"
-  summarize_benchmark_results "${RESULT_PATH}" "${BENCHMARK_REPETITIONS}"
+  summarize_benchmark_results "${RESULT_PATH}" "${REPETITIONS}"
 }
 
 cd "${MAILCLI_ROOT}"
@@ -171,6 +172,13 @@ run_group \
   ./internal/mailstore \
   '^BenchmarkListSummaryRead$' \
   1x
+run_group \
+  mailbox-list-plan \
+  '16 cases: 10k/100k messages, labels absent/present, first/later 25-item page, forced CTE/production probe; 20 operation samples per case' \
+  ./internal/mailstore \
+  '^BenchmarkMailboxListPlan$' \
+  20x \
+  1
 run_group \
   incoming-html \
   'ordinary, dense 512 KiB, and excessive-token received HTML; legacy and context-bounded conversion' \

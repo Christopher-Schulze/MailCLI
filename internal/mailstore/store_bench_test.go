@@ -3,13 +3,17 @@ package mailstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mattn/go-sqlite3"
 
@@ -563,6 +567,283 @@ func BenchmarkListSummaryRead(b *testing.B) {
 			reportGeneratedStoreFixture(b, fixture)
 		})
 	}
+}
+
+const mailboxListPlanPageSize = 25
+
+func BenchmarkMailboxListPlan(b *testing.B) {
+	for _, messageCount := range []int{10_000, 100_000} {
+		for _, hasLabels := range []bool{false, true} {
+			fixture := newMailboxListPlanFixture(b, messageCount, hasLabels)
+			store := openGeneratedStoreFixture(b, fixture)
+			closeTestResource(b, store, "mailbox list-plan benchmark store")
+			ctx := context.Background()
+			firstPage, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+				MailboxRef: fixture.inboxRef, Limit: mailboxListPlanPageSize,
+			})
+			if err != nil || len(firstPage.Messages) != mailboxListPlanPageSize || firstPage.NextCursor == "" {
+				b.Fatalf("prepare first generated page: messages=%d cursor=%t error=%v",
+					len(firstPage.Messages), firstPage.NextCursor != "", err)
+			}
+			for _, pageCase := range []struct {
+				name   string
+				cursor string
+			}{{name: "first"}, {name: "later", cursor: firstPage.NextCursor}} {
+				page, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+					MailboxRef: fixture.inboxRef, Limit: mailboxListPlanPageSize, Cursor: pageCase.cursor,
+				})
+				if err != nil || len(page.Messages) != mailboxListPlanPageSize || page.NextCursor == "" {
+					b.Fatalf("prepare %s generated page: messages=%d cursor=%t error=%v",
+						pageCase.name, len(page.Messages), page.NextCursor != "", err)
+				}
+				nextPage, err := store.ListMessages(ctx, mail.ListMessagesRequest{
+					MailboxRef: fixture.inboxRef, Limit: mailboxListPlanPageSize, Cursor: page.NextCursor,
+				})
+				if err != nil || len(nextPage.Messages) == 0 {
+					b.Fatalf("prepare %s continuation candidate: messages=%d error=%v",
+						pageCase.name, len(nextPage.Messages), err)
+				}
+				var cursor *listCursor
+				if pageCase.cursor != "" {
+					cursor, err = decodeListCursor(pageCase.cursor, fixture.inboxRef, store.storeUUID)
+					if err != nil || cursor == nil {
+						b.Fatalf("decode %s generated cursor: cursor=%+v error=%v", pageCase.name, cursor, err)
+					}
+				}
+				for _, path := range []struct {
+					name     string
+					forceCTE bool
+				}{{name: "forced_cte", forceCTE: true}, {name: "production_probe"}} {
+					records, err := runMailboxListPlanQuery(b, store, 1, cursor, path.forceCTE)
+					if err != nil {
+						b.Fatalf("verify %s/%s query: %v", pageCase.name, path.name, err)
+					}
+					assertMailboxListPlanRows(b, records, page, nextPage)
+					b.Run(fmt.Sprintf("messages_%d/labels_%t/page_%s/path_%s",
+						messageCount, hasLabels, pageCase.name, path.name), func(b *testing.B) {
+						b.ReportAllocs()
+						latencies := make([]time.Duration, 0, 20)
+						for b.Loop() {
+							measureSample := len(latencies) < cap(latencies)
+							var started time.Time
+							if measureSample {
+								started = time.Now()
+							}
+							measured, err := runMailboxListPlanQuery(b, store, 1, cursor, path.forceCTE)
+							if measureSample {
+								latencies = append(latencies, time.Since(started))
+							}
+							if err != nil || len(measured) != mailboxListPlanPageSize+1 {
+								b.Fatalf("list-plan query returned %d rows: %v", len(measured), err)
+							}
+						}
+						b.StopTimer()
+						reportMailboxListPlanLatencies(b, latencies)
+						reportGeneratedStoreFixture(b, fixture)
+					})
+				}
+			}
+		}
+	}
+}
+
+func newMailboxListPlanFixture(tb testing.TB, messageCount int, hasLabels bool) searchFixtureData {
+	tb.Helper()
+	if messageCount < 3 {
+		tb.Fatalf("mailbox list-plan fixture requires at least three messages: %d", messageCount)
+	}
+	extraCount := messageCount - 3
+	fixture := createSearchFixtureData(tb, 0, false)
+	databasePath := filepath.Join(fixture.mailRoot, "V10", "MailData", envelopeIndexName)
+	database := openTestWriter(tb, databasePath)
+	transaction, err := database.BeginTx(context.Background(), nil)
+	if err != nil {
+		closeTestResourceNow(tb, database, "mailbox list-plan fixture database")
+		tb.Fatalf("begin mailbox list-plan fixture: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+				tb.Errorf("rollback mailbox list-plan fixture: %v", err)
+			}
+		}
+	}()
+	if !hasLabels {
+		if _, err := transaction.ExecContext(
+			context.Background(), "DELETE FROM labels WHERE mailbox_id = ?", 1,
+		); err != nil {
+			tb.Fatalf("remove mailbox labels from generated fixture: %v", err)
+		}
+	}
+	if extraCount > 0 {
+		_, err := transaction.ExecContext(context.Background(), `
+			WITH RECURSIVE generated(n) AS (
+				SELECT 0
+				UNION ALL
+				SELECT n + 1 FROM generated WHERE n + 1 < ?
+			)
+			INSERT INTO messages(
+				ROWID, message_id, global_message_id, sender, subject, summary,
+				date_sent, date_received, mailbox, flags, read, flagged, deleted,
+				size, conversation_id, type, display_date, flag_color
+			)
+			SELECT 104 + n, 1104 + n, 2104 + n, 1, 2, 2,
+				1000 - n, 1000 - n,
+				CASE WHEN ? = 1 AND n % 2 = 1 THEN 2 ELSE 1 END,
+				0, 1, 0, 0, 100, 104 + n, 0, 1000 - n, 0
+			FROM generated
+		`, extraCount, hasLabels)
+		if err != nil {
+			tb.Fatalf("insert generated mailbox list-plan messages: %v", err)
+		}
+	}
+	if hasLabels {
+		if _, err := transaction.ExecContext(context.Background(), `
+			INSERT INTO labels(message_id, mailbox_id)
+			SELECT ROWID, 1 FROM messages WHERE ROWID >= 104 AND mailbox = 2
+		`); err != nil {
+			tb.Fatalf("label generated mailbox list-plan messages: %v", err)
+		}
+	}
+	mailboxCount := messageCount - 1
+	if hasLabels {
+		mailboxCount = messageCount
+	}
+	if _, err := transaction.ExecContext(
+		context.Background(), "UPDATE mailboxes SET total_count = ? WHERE ROWID = ?", mailboxCount, 1,
+	); err != nil {
+		tb.Fatalf("update generated mailbox list-plan count: %v", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		tb.Fatalf("commit mailbox list-plan fixture: %v", err)
+	}
+	committed = true
+	closeTestResourceNow(tb, database, "mailbox list-plan fixture database")
+	info, err := os.Stat(databasePath)
+	if err != nil {
+		tb.Fatalf("stat mailbox list-plan fixture index: %v", err)
+	}
+	fixture.messageCount = messageCount
+	fixture.indexBytes = info.Size()
+	return fixture
+}
+
+func runMailboxListPlanQuery(
+	b testing.TB,
+	store *Store,
+	mailboxRowID int64,
+	cursor *listCursor,
+	forceCTE bool,
+) ([]messageRecord, error) {
+	b.Helper()
+	ctx := context.Background()
+	transaction, err := store.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin mailbox list-plan transaction: %w", err)
+	}
+	defer func() {
+		if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			b.Errorf("rollback mailbox list-plan transaction: %v", err)
+		}
+	}()
+	useCTE := forceCTE
+	arguments := []any{mailboxRowID}
+	if forceCTE {
+		arguments = append(arguments, mailboxRowID)
+	} else {
+		var hasLabels bool
+		if err := transaction.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM labels WHERE mailbox_id = ?)", mailboxRowID,
+		).Scan(&hasLabels); err != nil {
+			return nil, fmt.Errorf("probe mailbox list-plan labels: %w", err)
+		}
+		if hasLabels {
+			useCTE = true
+			arguments = append(arguments, mailboxRowID)
+		}
+	}
+	cursorClause := ""
+	if cursor != nil {
+		if cursor.DateReceivedNull {
+			cursorClause = "AND m.date_received IS NULL AND m.ROWID < ?"
+			arguments = append(arguments, cursor.RowID)
+		} else {
+			cursorClause = "AND ((m.date_received < ? OR (m.date_received = ? AND m.ROWID < ?)) OR m.date_received IS NULL)"
+			arguments = append(arguments, cursor.DateReceived, cursor.DateReceived, cursor.RowID)
+		}
+	}
+	query := physicalMailboxMessagesSQL(cursorClause)
+	if useCTE {
+		query = mailboxMessagesSQL(cursorClause)
+	}
+	arguments = append(arguments, mailboxListPlanPageSize+1)
+	rows, err := transaction.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("query mailbox list-plan page: %w", err)
+	}
+	records := make([]messageRecord, 0, mailboxListPlanPageSize+1)
+	for rows.Next() {
+		item, err := scanListMessageRecord(rows)
+		if err != nil {
+			if closeErr := rows.Close(); closeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("close mailbox list-plan rows: %w", closeErr))
+			}
+			return nil, err
+		}
+		records = append(records, item)
+	}
+	if err := rows.Err(); err != nil {
+		if closeErr := rows.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("close mailbox list-plan rows: %w", closeErr))
+		}
+		return nil, fmt.Errorf("iterate mailbox list-plan rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close mailbox list-plan rows: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return nil, fmt.Errorf("commit mailbox list-plan transaction: %w", err)
+	}
+	return records, nil
+}
+
+func assertMailboxListPlanRows(
+	b testing.TB,
+	records []messageRecord,
+	page mail.MessagePage,
+	nextPage mail.MessagePage,
+) {
+	b.Helper()
+	if len(records) != mailboxListPlanPageSize+1 || len(page.Messages) != mailboxListPlanPageSize || len(nextPage.Messages) == 0 {
+		b.Fatalf("list-plan continuation rows=%d current=%d next=%d", len(records), len(page.Messages), len(nextPage.Messages))
+	}
+	for index, message := range append(append([]mail.MessageSummary(nil), page.Messages...), nextPage.Messages[0]) {
+		reference, err := mailref.DecodeMessage(message.Ref)
+		if err != nil {
+			b.Fatalf("decode list-plan message %d reference: %v", index, err)
+		}
+		if reference.LibraryID != strconv.FormatInt(records[index].RowID, 10) {
+			b.Fatalf("list-plan message %d row=%d, want row %s", index, records[index].RowID, reference.LibraryID)
+		}
+	}
+}
+
+func reportMailboxListPlanLatencies(b *testing.B, latencies []time.Duration) {
+	b.Helper()
+	if len(latencies) == 0 {
+		b.Fatal("mailbox list-plan benchmark recorded no operation samples")
+	}
+	ordered := append([]time.Duration(nil), latencies...)
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
+	median := ordered[(len(ordered)-1)/2]
+	if len(ordered)%2 == 0 {
+		median = (ordered[len(ordered)/2-1] + ordered[len(ordered)/2]) / 2
+	}
+	p95Rank := (95*len(ordered) + 99) / 100
+	b.ReportMetric(float64(median.Nanoseconds()), "sample_p50_ns")
+	b.ReportMetric(float64(ordered[p95Rank-1].Nanoseconds()), "sample_p95_ns")
+	b.ReportMetric(float64(len(ordered)), "operation_samples")
 }
 
 func benchmarkGeneratedStoreGetMessage(b *testing.B, fixture searchFixtureData) {

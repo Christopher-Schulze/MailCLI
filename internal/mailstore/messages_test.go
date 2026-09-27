@@ -77,6 +77,81 @@ func TestListMessagesWithoutMailboxLabelsUsesPhysicalMailboxMembership(t *testin
 	}
 }
 
+func TestMailboxListQueryPlanIndexesAndOrdering(t *testing.T) {
+	t.Parallel()
+	store, _ := newSearchFixture(t, 600)
+	closeTestResource(t, store, "test store")
+	ctx := context.Background()
+
+	labelRows, err := store.database.QueryContext(
+		ctx, "EXPLAIN QUERY PLAN "+mailboxMessagesSQL(""), 1, 1, 26,
+	)
+	if err != nil {
+		t.Fatalf("explain labeled mailbox list: %v", err)
+	}
+	var labelDetails []string
+	for labelRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := labelRows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			if closeErr := labelRows.Close(); closeErr != nil {
+				t.Fatalf("scan labeled mailbox plan: %v; close: %v", err, closeErr)
+			}
+			t.Fatalf("scan labeled mailbox plan: %v", err)
+		}
+		labelDetails = append(labelDetails, detail)
+	}
+	if err := labelRows.Err(); err != nil {
+		if closeErr := labelRows.Close(); closeErr != nil {
+			t.Fatalf("iterate labeled mailbox plan: %v; close: %v", err, closeErr)
+		}
+		t.Fatalf("iterate labeled mailbox plan: %v", err)
+	}
+	if err := labelRows.Close(); err != nil {
+		t.Fatalf("close labeled mailbox plan: %v", err)
+	}
+	labelPlan := strings.Join(labelDetails, "\n")
+	if !strings.Contains(labelPlan, "messages_mailbox_date_received") ||
+		!strings.Contains(labelPlan, "labels_mailbox") ||
+		!strings.Contains(labelPlan, "USE TEMP B-TREE FOR ORDER BY") {
+		t.Fatalf("labeled mailbox plan lost indexed membership or its measured order sort: %s", labelPlan)
+	}
+
+	updateFixtureMessage(t, store, `DELETE FROM labels WHERE mailbox_id = 1`)
+	physicalRows, err := store.database.QueryContext(
+		ctx, "EXPLAIN QUERY PLAN "+physicalMailboxMessagesSQL(""), 1, 26,
+	)
+	if err != nil {
+		t.Fatalf("explain physical mailbox list: %v", err)
+	}
+	var physicalDetails []string
+	for physicalRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := physicalRows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			if closeErr := physicalRows.Close(); closeErr != nil {
+				t.Fatalf("scan physical mailbox plan: %v; close: %v", err, closeErr)
+			}
+			t.Fatalf("scan physical mailbox plan: %v", err)
+		}
+		physicalDetails = append(physicalDetails, detail)
+	}
+	if err := physicalRows.Err(); err != nil {
+		if closeErr := physicalRows.Close(); closeErr != nil {
+			t.Fatalf("iterate physical mailbox plan: %v; close: %v", err, closeErr)
+		}
+		t.Fatalf("iterate physical mailbox plan: %v", err)
+	}
+	if err := physicalRows.Close(); err != nil {
+		t.Fatalf("close physical mailbox plan: %v", err)
+	}
+	physicalPlan := strings.Join(physicalDetails, "\n")
+	if !strings.Contains(physicalPlan, "messages_deleted_date_received") ||
+		strings.Contains(physicalPlan, "USE TEMP B-TREE FOR ORDER BY") {
+		t.Fatalf("physical mailbox plan lost its deleted/date index or added an order sort: %s", physicalPlan)
+	}
+}
+
 func TestStoreReturnsExactFullRawSource(t *testing.T) {
 	t.Parallel()
 	store, inboxRef := newSearchFixture(t)
