@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -414,32 +415,241 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 	}
 }
 
-func TestPruneInventoryClassifiesEveryGeneratedDirectoryEntryOnce(t *testing.T) {
-	for _, count := range []int{10000, 100000} {
-		t.Run(fmt.Sprintf("entries-%d", count), func(t *testing.T) {
-			root := t.TempDir()
-			for index := count - 1; index >= 0; index-- {
-				name := fmt.Sprintf("unknown-%06d", index)
-				if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
-					t.Fatalf("write fixture %s: %v", name, err)
-				}
-			}
-			inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+func BenchmarkDraftPruneDirectoryScan100K(b *testing.B) {
+	const count = 100000
+	root := b.TempDir()
+	for index := count - 1; index >= 0; index-- {
+		name := fmt.Sprintf("unknown-%06d", index)
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+			b.Fatalf("write fixture %s: %v", name, err)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+		if err != nil {
+			b.Fatal(err)
+		}
+		result, err := prepareDraftPruneResult(context.Background(), root, inventory, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if inventory.entryVisits != count || inventory.classificationVisits != count ||
+			len(inventory.entries) != count || inventory.metadataBytes > maximumPruneCandidateMetadataBytes || len(result.Candidates) != 0 {
+			b.Fatalf("invalid inventory: visits=%d classified=%d entries=%d metadata=%d candidates=%d", inventory.entryVisits, inventory.classificationVisits, len(inventory.entries), inventory.metadataBytes, len(result.Candidates))
+		}
+		b.ReportMetric(float64(inventory.entryVisits), "root_entries/op")
+		b.ReportMetric(float64(inventory.classificationVisits), "classified_entries/op")
+		b.ReportMetric(float64(inventory.metadataBytes), "metadata_bytes/op")
+	}
+}
+
+type pruneReportTemporaries struct {
+	stale   string
+	young   string
+	unknown string
+	unsafe  string
+}
+
+type prunePathSnapshot struct {
+	identity os.FileInfo
+	content  string
+	link     string
+}
+
+func TestPruneMixedDirectoryReportsAndPreservesArtifacts(t *testing.T) {
+	service, refs := createPruneReportDrafts(t)
+	temporaries, sentinel := createPruneReportArtifacts(t, service.draftRoot, refs)
+	lease, err := acquireDraftLease(context.Background(), service.draftRoot, refs[6])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.release(); err != nil {
+			t.Error(err)
+		}
+	})
+	entries, err := os.ReadDir(service.draftRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 1000 - len(entries) - 1; index >= 0; index-- {
+		if err := os.WriteFile(filepath.Join(service.draftRoot, fmt.Sprintf("foreign-%04d", index)), []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := snapshotPrunePaths(t, service.draftRoot)
+	inventory, err := collectDraftPruneInventory(context.Background(), service.draftRoot, time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPruneInventoryPaths(t, inventory, before)
+	dryRun, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPruneArtifactReport(t, refs, temporaries, dryRun, true)
+	assertPrunePathChanges(t, before, snapshotPrunePaths(t, service.draftRoot), nil)
+	result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 30 * 24 * time.Hour, Confirm: true})
+	if errorCode(err) != "prune_failed" {
+		t.Fatalf("confirmed mixed prune error = %v, want unsafe temporary refusal", err)
+	}
+	assertPruneArtifactReport(t, refs, temporaries, result, false)
+	removed := []string{refs[0] + ".json", refs[0] + ".lock", refs[1] + ".json", refs[1] + ".lock",
+		refs[4] + ".send-claim", refs[4] + ".send-spool", refs[4] + ".lock", temporaries.stale,
+		refs[7] + ".send-receipt", refs[7] + ".lock", refs[8] + handoffSnapshotSuffix, refs[8] + ".lock", refs[9] + ".lock"}
+	assertPrunePathChanges(t, before, snapshotPrunePaths(t, service.draftRoot), removed)
+	if content, err := os.ReadFile(sentinel); err != nil || string(content) != "foreign sentinel" {
+		t.Fatalf("symlink target changed: %q, %v", content, err)
+	}
+}
+
+func createPruneReportDrafts(t *testing.T) (*Service, []string) {
+	t.Helper()
+	service, refs := createDraftListFixture(t, 10, 32)
+	for _, index := range []int{0, 1, 3} {
+		ageDraftFile(t, service.draftRoot, refs[index], 40)
+	}
+	for _, index := range []int{3, 4, 6} {
+		if _, err := beginSendAttempt(sendAttemptOptions{Root: service.draftRoot, Ref: refs[index]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, index := range []int{4, 6, 7, 8, 9} {
+		if err := os.Remove(filepath.Join(service.draftRoot, refs[index]+".json")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completed := time.Now().UTC().Add(-SendReceiptRetention - time.Hour)
+	receipt := SendReceipt{DraftRef: refs[7], AttemptID: "send_expired", StartedAt: completed.Add(-time.Minute),
+		CompletedAt: completed, ExpiresAt: completed.Add(SendReceiptRetention), Outcome: SendOutcomeSent, Accepted: true}
+	if err := persistSendReceipt(service.draftRoot, refs[7], receipt); err != nil {
+		t.Fatal(err)
+	}
+	return service, refs
+}
+
+func createPruneReportArtifacts(t *testing.T, root string, refs []string) (pruneReportTemporaries, string) {
+	t.Helper()
+	names := pruneReportTemporaries{
+		stale: "." + refs[5] + ".json.mailcli-000000000000000000000001", young: "." + refs[5] + ".send-spool.mailcli-000000000000000000000002",
+		unknown: "." + refs[5] + ".unknown.mailcli-000000000000000000000003", unsafe: "." + refs[9] + ".json.mailcli-000000000000000000000004",
+	}
+	for _, name := range []string{refs[4] + ".send-spool", names.stale, names.young, names.unknown} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ageDraftTemporary(t, filepath.Join(root, names.stale))
+	if err := os.Mkdir(filepath.Join(root, refs[8]+handoffSnapshotSuffix), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(sentinel, []byte("foreign sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, filepath.Join(root, names.unsafe)); err != nil {
+		t.Fatal(err)
+	}
+	return names, sentinel
+}
+
+func snapshotPrunePaths(t *testing.T, root string) map[string]prunePathSnapshot {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]prunePathSnapshot, len(entries))
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		identity, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := prunePathSnapshot{identity: identity}
+		if identity.Mode().IsRegular() {
+			content, err := os.ReadFile(path)
 			if err != nil {
-				t.Fatalf("collectDraftPruneInventory() error = %v", err)
+				t.Fatal(err)
 			}
-			result, err := prepareDraftPruneResult(context.Background(), root, inventory, false)
+			snapshot.content = string(content)
+		} else if identity.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
 			if err != nil {
-				t.Fatalf("prepareDraftPruneResult() error = %v", err)
+				t.Fatal(err)
 			}
-			if inventory.entryVisits != int64(count) || inventory.classificationVisits != int64(count) ||
-				len(inventory.entries) != count || inventory.metadataBytes > maximumPruneCandidateMetadataBytes {
-				t.Fatalf("inventory visits=%d classified=%d entries=%d metadata=%d", inventory.entryVisits, inventory.classificationVisits, len(inventory.entries), inventory.metadataBytes)
-			}
-			if len(result.Candidates) != 0 {
-				t.Fatalf("result = %+v; unknown entries must not become candidates", result)
-			}
-		})
+			snapshot.link = link
+		}
+		paths[entry.Name()] = snapshot
+	}
+	return paths
+}
+
+func assertPruneInventoryPaths(t *testing.T, inventory *draftPruneInventory, paths map[string]prunePathSnapshot) {
+	t.Helper()
+	if len(paths) != 1000 || len(inventory.entries) != len(paths) {
+		t.Fatalf("actual inventory entries = %d, directory paths = %d, want 1000 each", len(inventory.entries), len(paths))
+	}
+	seen := make(map[string]bool, len(paths))
+	for _, entry := range inventory.entries {
+		if _, exists := paths[entry.name]; !exists || seen[entry.name] {
+			t.Fatalf("inventory returned missing or duplicate path %q", entry.name)
+		}
+		seen[entry.name] = true
+	}
+}
+
+func assertPrunePathChanges(t *testing.T, before, after map[string]prunePathSnapshot, removed []string) {
+	t.Helper()
+	if len(after) != len(before)-len(removed) {
+		t.Fatalf("remaining paths = %d, want %d", len(after), len(before)-len(removed))
+	}
+	removedSet := make(map[string]bool, len(removed))
+	for _, name := range removed {
+		if _, existed := before[name]; !existed {
+			t.Fatalf("expected removal %q was not in the fixture", name)
+		}
+		if _, exists := after[name]; exists {
+			t.Fatalf("eligible path %q remains", name)
+		}
+		removedSet[name] = true
+	}
+	for name, expected := range before {
+		if removedSet[name] {
+			continue
+		}
+		actual, exists := after[name]
+		if !exists || !os.SameFile(expected.identity, actual.identity) || actual.identity.Mode() != expected.identity.Mode() ||
+			actual.identity.Size() != expected.identity.Size() || !actual.identity.ModTime().Equal(expected.identity.ModTime()) ||
+			actual.content != expected.content || actual.link != expected.link {
+			t.Fatalf("preserved path %q changed: before=%+v after=%+v", name, expected, actual)
+		}
+	}
+}
+
+func assertPruneArtifactReport(t *testing.T, refs []string, names pruneReportTemporaries, result PruneDraftsResult, dryRun bool) {
+	t.Helper()
+	candidates := []PruneCandidate{{Ref: refs[0], Subject: "Listed", AgeDays: 40}, {Ref: refs[1], Subject: "Listed", AgeDays: 40}}
+	temporaries := []PruneTemporaryArtifact{{Ref: refs[5], Name: names.stale, Size: 5}}
+	if result.DryRun != dryRun || !slices.Equal(result.Candidates, candidates) ||
+		!slices.Equal(result.ExpiredReceipts, []string{refs[7]}) || !slices.Equal(result.TemporaryArtifacts, temporaries) ||
+		!slices.Equal(result.PreservedTemporaries, []string{names.unknown}) || result.PreservedTemporaryCount != 1 {
+		t.Fatalf("mixed prune report = %+v, want exact candidate/receipt/temporary evidence", result)
+	}
+	if dryRun {
+		if result.Revision == "" || result.Stable == nil || !*result.Stable ||
+			!slices.Equal(result.OrphanArtifacts, []string{refs[4], refs[8], refs[9]}) ||
+			len(result.Removed)+len(result.SweptArtifacts)+len(result.SweptLocks)+len(result.Failed) != 0 {
+			t.Fatalf("mixed dry-run report = %+v, want sorted orphan evidence without effects", result)
+		}
+		return
+	}
+	if !slices.Equal(result.Removed, []string{refs[0], refs[1]}) || !slices.Equal(result.SweptArtifacts, []string{refs[4], refs[5], refs[8]}) ||
+		!slices.Equal(result.SweptLocks, []string{refs[9]}) || len(result.Failed) != 1 || result.Failed[0].Ref != refs[9] || result.Failed[0].Error == "" ||
+		len(result.OrphanArtifacts) != 0 || result.Revision != "" || result.Stable != nil {
+		t.Fatalf("mixed confirmed report = %+v, want exact completed effects and retained unsafe artifact", result)
 	}
 }
 

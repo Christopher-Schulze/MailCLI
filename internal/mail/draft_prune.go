@@ -82,7 +82,6 @@ type draftPruneDirectoryEntry struct {
 	receiptCandidate         bool
 	temporaryCandidate       bool
 	orphanTemporaryCandidate bool
-	orphanArtifactCandidate  bool
 }
 
 type draftPruneDirectoryReader interface {
@@ -391,6 +390,9 @@ func collectDraftPruneInventoryFromReader(
 		}
 	}
 	sort.Slice(inventory.entries, func(left int, right int) bool {
+		if inventory.entries[left].ref != inventory.entries[right].ref {
+			return inventory.entries[left].ref < inventory.entries[right].ref
+		}
 		return inventory.entries[left].name < inventory.entries[right].name
 	})
 	return inventory, nil
@@ -501,8 +503,7 @@ func classifyDraftPruneTemporary(
 	}
 	entry.identity = identity
 	staleOrUnsafe := !identity.Mode().IsRegular() || identity.ModTime().Before(now.Add(-draftTemporaryMinimumAge))
-	entry.orphanTemporaryCandidate = known && staleOrUnsafe
-	entry.orphanArtifactCandidate = entry.orphanTemporaryCandidate
+	entry.orphanTemporaryCandidate = staleOrUnsafe
 	if !identity.Mode().IsRegular() || !staleOrUnsafe {
 		return nil
 	}
@@ -638,12 +639,6 @@ func prepareDraftPruneResult(
 			return PruneDraftsResult{}, err
 		}
 	}
-	sort.Slice(inventory.entries, func(left int, right int) bool {
-		if inventory.entries[left].ref != inventory.entries[right].ref {
-			return inventory.entries[left].ref < inventory.entries[right].ref
-		}
-		return inventory.entries[left].name < inventory.entries[right].name
-	})
 	if dryRun {
 		if err := appendDraftPruneOrphanResults(ctx, root, inventory, &result); err != nil {
 			return PruneDraftsResult{}, err
@@ -763,7 +758,7 @@ func nextDraftPruneRefGroup(entries []draftPruneDirectoryEntry, start int) int {
 
 func hasOrphanPruneTemporary(entries []draftPruneDirectoryEntry) bool {
 	for _, entry := range entries {
-		if entry.orphanArtifactCandidate {
+		if entry.orphanTemporaryCandidate {
 			return true
 		}
 	}
@@ -840,12 +835,6 @@ release:
 }
 
 func sweepOrphanDraftLocks(root string, inventory *draftPruneInventory) ([]string, []PruneFailure, error) {
-	sort.Slice(inventory.entries, func(left int, right int) bool {
-		if inventory.entries[left].ref != inventory.entries[right].ref {
-			return inventory.entries[left].ref < inventory.entries[right].ref
-		}
-		return inventory.entries[left].name < inventory.entries[right].name
-	})
 	var swept []string
 	var failures []PruneFailure
 	for start := 0; start < len(inventory.entries); {

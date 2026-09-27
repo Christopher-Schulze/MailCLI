@@ -198,6 +198,13 @@ run_group \
   '^Benchmark(DraftReferenceSelection|DraftPruneCandidateSelection)$' \
   5x
 run_group \
+  prune-large-directory \
+  '100000 foreign files through one bounded prune inventory stream; fixture creation excluded from per-operation metrics' \
+  ./internal/mail \
+  '^BenchmarkDraftPruneDirectoryScan100K$' \
+  1x \
+  1
+run_group \
   projected-output \
   'tiny, 1 MiB and 8 MiB raw JSON; accepted and oversized output including finalization' \
   ./internal/cli \
