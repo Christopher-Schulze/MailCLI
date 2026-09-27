@@ -141,6 +141,12 @@ func TestBatchJSONRejectsAmbiguityBeforeDispatch(t *testing.T) {
 	for _, test := range []struct{ name, payload, location string }{
 		{"operation duplicate", `{"operation":"mark","operation":"mark","items":[{"id":"one","ref":"msg_ref","read":true}]}`, "$.operation"},
 		{"operation alias", `{"operation":"mark","Operation":"mark","items":[{"id":"one","ref":"msg_ref","read":true}]}`, "$"},
+		{"defaults null", `{"operation":"read","defaults":null,"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults"},
+		{"defaults view null", `{"operation":"read","defaults":{"view":null},"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults.view"},
+		{"defaults fields null", `{"operation":"read","defaults":{"fields":null},"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults.fields"},
+		{"defaults duplicate", `{"operation":"read","defaults":{"view":"metadata","view":"full"},"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults.view"},
+		{"defaults alias", `{"operation":"read","defaults":{"view":"metadata","View":"full"},"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults"},
+		{"defaults unknown", `{"operation":"read","defaults":{"extra":"PRIVATE_FIRST"},"items":[{"id":"one","ref":"msg_ref"}]}`, "$.defaults"},
 		{"late item duplicate", `{"operation":"mark","items":[{"id":"one","ref":"msg_ref","read":true},{"id":"two","ref":"msg_ref","read":true,"read":false}]}`, "$.items[1].read"},
 		{"item alias", `{"operation":"mark","items":[{"id":"one","ref":"msg_ref","Read":true}]}`, "$.items[0]"},
 		{"item unknown", `{"operation":"mark","items":[{"id":"one","ref":"msg_ref","read":true,"extra":"PRIVATE_FIRST"}]}`, "$.items[0]"},

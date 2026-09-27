@@ -92,7 +92,7 @@ func runBatch(
 	if err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
-	if err := prepareBatchReadProjection(&request, *maxBytes, *jsonOutput); err != nil {
+	if err := prepareBatchReadProjection(&request, *maxBytes); err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
 	if request.Operation == mail.BatchOperationDelete && !*confirm {
@@ -144,7 +144,22 @@ func runBatch(
 	return 1
 }
 
-func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64, jsonOutput bool) error {
+func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) error {
+	if request.Defaults != nil {
+		if request.Operation != mail.BatchOperationRead {
+			return &commandError{code: "invalid_argument", message: "batch defaults are only valid for read operations"}
+		}
+		if err := validateBatchReadDefaults(request.Defaults); err != nil {
+			return err
+		}
+		for index := range request.Items {
+			if request.Items[index].View == nil && request.Items[index].Fields == nil {
+				request.Items[index].View = request.Defaults.View
+				request.Items[index].Fields = request.Defaults.Fields
+			}
+		}
+		request.Defaults = nil
+	}
 	if request.Operation != mail.BatchOperationRead {
 		return nil
 	}
@@ -155,9 +170,7 @@ func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64, json
 		}
 		request.Items[index].RetainReadContent = options.includes("content")
 		request.Items[index].RetainReadHeaders = options.includes("headers")
-		if jsonOutput {
-			request.Items[index].ReadIntent = messageReadIntentForProjection(options)
-		}
+		request.Items[index].ReadIntent = messageReadIntentForProjection(options)
 	}
 	return nil
 }

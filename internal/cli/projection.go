@@ -409,6 +409,7 @@ type projectionInputKind uint8
 const (
 	projectionInputFlag projectionInputKind = iota
 	projectionInputBatchItem
+	projectionInputBatchDefaults
 )
 
 type projectionInputSource struct {
@@ -419,8 +420,11 @@ type projectionInputSource struct {
 
 func projectionValidationError(source projectionInputSource, field, detail string) error {
 	name := "--" + field
-	if source.kind == projectionInputBatchItem {
+	switch source.kind {
+	case projectionInputBatchItem:
 		name = fmt.Sprintf("batch read item %q at items[%d].%s", source.itemID, source.itemIndex, field)
+	case projectionInputBatchDefaults:
+		name = "batch defaults." + field
 	}
 	return &commandError{code: "invalid_argument", message: name + " " + detail}
 }
@@ -460,6 +464,15 @@ func parsePageProjectionFields(target projectionTarget, value string) (map[strin
 	return parseProjectionFields(target, value)
 }
 
+func parseBatchReadFields(fields []string, source projectionInputSource) (map[string]struct{}, error) {
+	for _, field := range fields {
+		if strings.Contains(field, ",") {
+			return nil, projectionValidationError(source, "fields", "must contain one field name per array item")
+		}
+	}
+	return parseProjectionFieldsFrom(projectionTargetMessage, strings.Join(fields, ","), source)
+}
+
 func pageProjectionOptions(
 	flags *flag.FlagSet,
 	target projectionTarget,
@@ -488,7 +501,7 @@ func pageProjectionOptions(
 
 func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (outputOptions, error) {
 	source := projectionInputSource{kind: projectionInputBatchItem, itemIndex: index, itemID: item.ID}
-	options := outputOptions{target: projectionTargetMessage, view: outputViewFull, maxBytes: maxBytes}
+	options := outputOptions{target: projectionTargetMessage, view: defaultMessageOutputView, maxBytes: maxBytes}
 	if item.View != nil {
 		options.view = strings.ToLower(strings.TrimSpace(*item.View))
 	}
@@ -496,12 +509,7 @@ func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (out
 		if item.View != nil {
 			return outputOptions{}, projectionValidationError(source, "fields", "cannot be combined with view")
 		}
-		for _, field := range *item.Fields {
-			if strings.Contains(field, ",") {
-				return outputOptions{}, projectionValidationError(source, "fields", "must contain one field name per array item")
-			}
-		}
-		fields, err := parseProjectionFieldsFrom(projectionTargetMessage, strings.Join(*item.Fields, ","), source)
+		fields, err := parseBatchReadFields(*item.Fields, source)
 		if err != nil {
 			return outputOptions{}, err
 		}
@@ -512,6 +520,27 @@ func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (out
 		return outputOptions{}, projectionValidationError(source, "view", projectionViewError(projectionTargetMessage, options.view))
 	}
 	return options, nil
+}
+
+func validateBatchReadDefaults(defaults *mail.BatchReadDefaults) error {
+	if defaults == nil {
+		return nil
+	}
+	source := projectionInputSource{kind: projectionInputBatchDefaults}
+	if defaults.View != nil && defaults.Fields != nil {
+		return projectionValidationError(source, "fields", "cannot be combined with view")
+	}
+	if defaults.View != nil {
+		view := strings.ToLower(strings.TrimSpace(*defaults.View))
+		if !validProjectionView(projectionTargetMessage, view) {
+			return projectionValidationError(source, "view", projectionViewError(projectionTargetMessage, view))
+		}
+	}
+	if defaults.Fields != nil {
+		_, err := parseBatchReadFields(*defaults.Fields, source)
+		return err
+	}
+	return nil
 }
 
 func projectBatchResult(

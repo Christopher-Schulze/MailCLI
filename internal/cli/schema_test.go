@@ -24,7 +24,11 @@ func TestPublishedCommandSchemasAreComplete(t *testing.T) {
 			continue
 		}
 		schema := decodeTestCommandSchema(t, schemaForCommand(contract.ID))
-		if schema.ID != contract.ID+"@v1" || schema.Version != 1 {
+		wantID, wantVersion := contract.ID+"@v1", 1
+		if contract.ID == "batch" {
+			wantID, wantVersion = "batch@v2", 2
+		}
+		if schema.ID != wantID || schema.Version != wantVersion {
 			t.Fatalf("%s schema identity = %q/%d", contract.ID, schema.ID, schema.Version)
 		}
 		if len(schema.Flags) == 0 {
@@ -92,6 +96,9 @@ func projectionSchemaMetadata(t *testing.T, id string, source json.RawMessage) [
 			t.Fatal(err)
 		}
 		input["item_fields"] = projectionFieldMetadata(t, input["item_fields"], "fields")
+		if defaultsFields, exists := input["defaults_fields"]; exists {
+			input["defaults_fields"] = projectionFieldMetadata(t, defaultsFields, "fields")
+		}
 		encoded, err := json.Marshal(input)
 		if err != nil {
 			t.Fatal(err)
@@ -153,6 +160,31 @@ func TestEveryProjectionSchemaEnumMatchesItsTargetRegistry(t *testing.T) {
 	if fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) {
 		t.Fatalf("batch field enum = %+v", fields)
 	}
+	defaultsFields := jsonFieldByName(batch.JSONInput.DefaultsFields, "fields")
+	if defaultsFields == nil || !reflect.DeepEqual(defaultsFields.Values, projectionFieldNames(projectionTargetMessage)) {
+		t.Fatalf("batch default field enum = %+v", defaultsFields)
+	}
+	defaultsView := jsonFieldByName(batch.JSONInput.DefaultsFields, "view")
+	if defaultsView == nil || !reflect.DeepEqual(defaultsView.Values, []string{outputViewMetadata, outputViewPlain, outputViewFull}) {
+		t.Fatalf("batch default view enum = %+v", defaultsView)
+	}
+}
+
+func TestBatchV2SchemaIsVisibleInCapabilities(t *testing.T) {
+	for _, command := range capabilities().Commands {
+		if command.ID != "batch" {
+			continue
+		}
+		var schema testCommandSchema
+		if err := json.Unmarshal(command.Schema, &schema); err != nil {
+			t.Fatalf("decode batch capability schema: %v", err)
+		}
+		if schema.ID != "batch@v2" || schema.Version != 2 {
+			t.Fatalf("published batch schema = %q/%d, want batch@v2/2", schema.ID, schema.Version)
+		}
+		return
+	}
+	t.Fatal("capabilities omitted the batch command")
 }
 
 func TestProjectionSchemaAugmentationPreservesMetadataAndRejectsMissingFields(t *testing.T) {
@@ -668,14 +700,17 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 		t.Fatalf("draft constraints = %+v", draft.Constraints)
 	}
 	batch := decodeTestCommandSchema(t, schemaForCommand("batch"))
-	if batch.JSONInput == nil || batch.JSONInput.MaximumBytes != mail.MaximumBatchInputBytes || batch.JSONInput.AdditionalProperties {
+	if batch.ID != "batch@v2" || batch.Version != 2 || batch.JSONInput == nil ||
+		batch.JSONInput.MaximumBytes != mail.MaximumBatchInputBytes || batch.JSONInput.AdditionalProperties {
 		t.Fatalf("batch JSON input = %+v", batch.JSONInput)
 	}
 	items := jsonFieldByName(batch.JSONInput.Fields, "items")
 	concurrency := jsonFieldByName(batch.JSONInput.Fields, "concurrency")
+	defaults := jsonFieldByName(batch.JSONInput.Fields, "defaults")
 	maxBytes := schemaFlagsByName(batch)["--max-bytes"]
 	if items == nil || !items.Required || !schemaHasConstraint(batch, "non_empty") ||
 		items.Maximum == nil || *items.Maximum != int64(mail.MaximumBatchItems) ||
+		defaults == nil || defaults.ValueType != "batch_read_defaults" ||
 		concurrency == nil || concurrency.Minimum == nil || *concurrency.Minimum != 0 ||
 		concurrency.Maximum == nil || *concurrency.Maximum != int64(mail.MaximumBatchConcurrency) ||
 		maxBytes.Name != "--max-bytes" || maxBytes.Default != "1048576" ||
@@ -685,19 +720,28 @@ func TestDraftAndBatchJSONSchemasExposeBoundedInput(t *testing.T) {
 	}
 	view := jsonFieldByName(batch.JSONInput.ItemFields, "view")
 	fields := jsonFieldByName(batch.JSONInput.ItemFields, "fields")
+	defaultView := jsonFieldByName(batch.JSONInput.DefaultsFields, "view")
+	defaultFields := jsonFieldByName(batch.JSONInput.DefaultsFields, "fields")
 	id := jsonFieldByName(batch.JSONInput.ItemFields, "id")
 	ref := jsonFieldByName(batch.JSONInput.ItemFields, "ref")
 	if view == nil || !reflect.DeepEqual(view.Values, []string{outputViewMetadata, outputViewPlain, outputViewFull}) ||
 		fields == nil || !reflect.DeepEqual(fields.Values, projectionFieldNames(projectionTargetMessage)) ||
+		defaultView == nil || !reflect.DeepEqual(defaultView.Values, []string{outputViewMetadata, outputViewPlain, outputViewFull}) ||
+		defaultFields == nil || !reflect.DeepEqual(defaultFields.Values, projectionFieldNames(projectionTargetMessage)) ||
 		id == nil || !id.Required || !strings.Contains(id.Description, "non-empty trimmed") ||
 		ref == nil || !ref.Required {
-		t.Fatalf("batch item fields = id:%+v ref:%+v view:%+v fields:%+v", id, ref, view, fields)
+		t.Fatalf("batch projection fields = id:%+v ref:%+v item_view:%+v item_fields:%+v defaults_view:%+v defaults_fields:%+v",
+			id, ref, view, fields, defaultView, defaultFields)
 	}
-	if countJSONConstraints(batch.JSONInput, "conditional") != 10 {
+	if countJSONConstraints(batch.JSONInput, "conditional") != 11 {
 		t.Fatalf("batch operation constraints = %+v", batch.JSONInput.Constraints)
 	}
 	if !jsonInputHasFieldConstraint(batch.JSONInput, "mutually_exclusive", []string{"view", "fields"}) {
 		t.Fatalf("batch read view/fields exclusivity is missing: %+v", batch.JSONInput.Constraints)
+	}
+	if !jsonInputHasFieldConstraint(batch.JSONInput, "mutually_exclusive", []string{"defaults.view", "defaults.fields"}) ||
+		!jsonInputHasFieldConstraint(batch.JSONInput, "conditional", []string{"operation", "defaults"}) {
+		t.Fatalf("batch defaults constraints are missing: %+v", batch.JSONInput.Constraints)
 	}
 	if !jsonInputHasFieldConstraint(batch.JSONInput, "unique", []string{"items.id"}) ||
 		!jsonInputHasFieldConstraint(batch.JSONInput, "conditional", []string{"operation", "output_path"}) {
@@ -801,6 +845,7 @@ type testJSONInput struct {
 	MaximumBytes         int64            `json:"maximum_bytes"`
 	AdditionalProperties bool             `json:"additional_properties"`
 	Fields               []testJSONField  `json:"fields"`
+	DefaultsFields       []testJSONField  `json:"defaults_fields,omitempty"`
 	ItemFields           []testJSONField  `json:"item_fields,omitempty"`
 	Constraints          []testConstraint `json:"constraints"`
 }

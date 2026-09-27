@@ -43,9 +43,16 @@ const (
 // are never discovered implicitly and retain their input order in the result.
 type BatchRequest struct {
 	Operation            BatchOperation         `json:"operation"`
+	Defaults             *BatchReadDefaults     `json:"defaults,omitempty"`
 	Items                []BatchItem            `json:"items"`
 	Concurrency          int                    `json:"concurrency,omitempty"`
 	ReadContentAdmission BatchReadAdmissionFunc `json:"-"`
+}
+
+// BatchReadDefaults selects the projection inherited by batch read items.
+type BatchReadDefaults struct {
+	View   *string   `json:"view,omitempty"`
+	Fields *[]string `json:"fields,omitempty"`
 }
 
 // BatchReadAdmission carries only the content-retention decision made by the
@@ -201,6 +208,9 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 		BatchOperationMove, BatchOperationCopy, BatchOperationDelete:
 	default:
 		return 0, validationError(fmt.Sprintf("unsupported batch operation %q", request.Operation))
+	}
+	if request.Defaults != nil && request.Operation != BatchOperationRead {
+		return 0, validationError("batch defaults are supported only for read operations")
 	}
 	if len(request.Items) == 0 {
 		return 0, validationError("batch requires at least one item")

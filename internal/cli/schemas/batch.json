@@ -1,6 +1,6 @@
 {
-  "id": "batch@v1",
-  "version": 1,
+  "id": "batch@v2",
+  "version": 2,
   "flags": [
     {
       "name": "--input",
@@ -64,6 +64,11 @@
         "description": "batch operation"
       },
       {
+        "name": "defaults",
+        "value_type": "batch_read_defaults",
+        "description": "default read projection inherited by items without view or fields"
+      },
+      {
         "name": "items",
         "value_type": "array\u003cbatch_item\u003e",
         "required": true,
@@ -76,6 +81,37 @@
         "description": "maximum concurrent items",
         "minimum": 0,
         "maximum": 8
+      }
+    ],
+    "defaults_fields": [
+      {
+        "name": "view",
+        "value_type": "enum",
+        "values": [
+          "metadata",
+          "plain",
+          "full"
+        ],
+        "description": "default read projection view"
+      },
+      {
+        "name": "fields",
+        "value_type": "array\u003cmessage_field\u003e",
+        "values": [
+          "summary",
+          "reply_to",
+          "to",
+          "cc",
+          "bcc",
+          "headers",
+          "content",
+          "content_source",
+          "content_complete",
+          "missing_parts",
+          "hydration",
+          "attachments"
+        ],
+        "description": "default message fields, mutually exclusive with view"
       }
     ],
     "item_fields": [
@@ -134,7 +170,7 @@
           "plain",
           "full"
         ],
-        "description": "read message projection view; omitted uses full"
+        "description": "read message projection view; overrides request defaults"
       },
       {
         "name": "fields",
@@ -153,7 +189,7 @@
           "hydration",
           "attachments"
         ],
-        "description": "message fields, mutually exclusive with view"
+        "description": "message fields, overrides request defaults and is mutually exclusive with view"
       }
     ],
     "constraints": [
@@ -174,6 +210,14 @@
       {
         "kind": "mutually_exclusive",
         "fields": [
+          "defaults.view",
+          "defaults.fields"
+        ],
+        "description": "batch defaults cannot combine view and fields"
+      },
+      {
+        "kind": "mutually_exclusive",
+        "fields": [
           "view",
           "fields"
         ],
@@ -185,6 +229,14 @@
           "items.id"
         ],
         "description": "batch item IDs must be non-empty, trimmed, and unique"
+      },
+      {
+        "kind": "conditional",
+        "fields": [
+          "operation",
+          "defaults"
+        ],
+        "description": "batch defaults are supported only for read operations"
       },
       {
         "kind": "conditional",

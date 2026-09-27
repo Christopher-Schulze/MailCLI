@@ -18,6 +18,7 @@ func TestInputJSONFieldSetsMatchModelsAndRejectEveryAmbiguousKey(t *testing.T) {
 		{inputJSONDraft, reflect.TypeFor[mail.DraftInput]()},
 		{inputJSONRecipient, reflect.TypeFor[mail.Recipient]()},
 		{inputJSONBatch, reflect.TypeFor[mail.BatchRequest]()},
+		{inputJSONBatchDefaults, reflect.TypeFor[mail.BatchReadDefaults]()},
 		{inputJSONBatchItem, reflect.TypeFor[mail.BatchItem]()},
 	} {
 		t.Run(test.model.Name(), func(t *testing.T) {
@@ -42,6 +43,9 @@ func TestInputJSONFieldSetsMatchModelsAndRejectEveryAmbiguousKey(t *testing.T) {
 				if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Slice {
 					modelValue = reflect.New(field.Type.Elem())
 					modelValue.Elem().Set(reflect.MakeSlice(field.Type.Elem(), 0, 0))
+				}
+				if field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Struct {
+					modelValue = reflect.New(field.Type.Elem())
 				}
 				value, err := json.Marshal(modelValue.Interface())
 				if err != nil {
@@ -81,6 +85,9 @@ func jsonInputShapeForField(t *testing.T, field reflect.StructField) inputJSONSh
 	for value.Kind() == reflect.Pointer {
 		value = value.Elem()
 	}
+	if value == reflect.TypeFor[mail.BatchReadDefaults]() {
+		return inputJSONBatchDefaults
+	}
 	if field.Name == "Fields" {
 		return inputJSONStringList
 	}
@@ -115,6 +122,7 @@ func TestInputJSONFieldsMatchPublishedContract(t *testing.T) {
 		if command == "batch" {
 			shape = inputJSONBatch
 			assertInputJSONPublishedFields(t, inputJSONFields(inputJSONBatchItem), schema.ItemFields)
+			assertInputJSONPublishedFields(t, inputJSONFields(inputJSONBatchDefaults), schema.DefaultsFields)
 		}
 		assertInputJSONPublishedFields(t, inputJSONFields(shape), schema.Fields)
 	}

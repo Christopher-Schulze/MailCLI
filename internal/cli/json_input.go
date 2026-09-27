@@ -16,6 +16,7 @@ const (
 	inputJSONDraft
 	inputJSONRecipient
 	inputJSONBatch
+	inputJSONBatchDefaults
 	inputJSONBatchItem
 	inputJSONRecipients
 	inputJSONAttachments
@@ -46,8 +47,12 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 		return []inputJSONField{{"name", inputJSONString, false}, {"address", inputJSONString, false}}
 	case inputJSONBatch:
 		return []inputJSONField{
-			{"operation", inputJSONString, false}, {"items", inputJSONBatchItems, false},
-			{"concurrency", inputJSONNumber, false},
+			{"operation", inputJSONString, false}, {"defaults", inputJSONBatchDefaults, true},
+			{"items", inputJSONBatchItems, false}, {"concurrency", inputJSONNumber, false},
+		}
+	case inputJSONBatchDefaults:
+		return []inputJSONField{
+			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true},
 		}
 	case inputJSONBatchItem:
 		return []inputJSONField{
@@ -151,7 +156,7 @@ func readInputJSONValue(decoder *json.Decoder, field inputJSONField, path string
 		if _, ok := token.(bool); ok {
 			return nil
 		}
-	case inputJSONRecipient, inputJSONBatchItem:
+	case inputJSONRecipient, inputJSONBatchDefaults, inputJSONBatchItem:
 		if token == json.Delim('{') {
 			_, err := readInputJSONObject(decoder, field.shape, path)
 			return err

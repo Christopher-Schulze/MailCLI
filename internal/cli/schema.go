@@ -32,7 +32,7 @@ func schemaPayload() []byte {
 }
 
 func schemaForCommand(id string) json.RawMessage {
-	prefix := []byte(`{"id":"` + id + `@v1"`)
+	prefix := []byte(`{"id":"` + id + `@v`)
 	for _, line := range bytes.Split(schemaPayload(), []byte{'\n'}) {
 		if bytes.HasPrefix(line, prefix) {
 			schema, err := augmentProjectionSchema(id, line)
@@ -112,6 +112,13 @@ func augmentBatchProjectionSchema(source json.RawMessage) (json.RawMessage, erro
 		return nil, err
 	}
 	input["item_fields"] = fields
+	if defaultsFields, exists := input["defaults_fields"]; exists {
+		fields, err := projectionSchemaFields(defaultsFields, "fields", projectionTargetMessage)
+		if err != nil {
+			return nil, err
+		}
+		input["defaults_fields"] = fields
+	}
 	encoded, err := marshalCLIJSON(input)
 	if err != nil {
 		return nil, fmt.Errorf("encode batch projection schema: %w", err)

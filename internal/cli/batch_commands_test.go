@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -113,8 +114,181 @@ func TestBatchCommandJSONProjectsReadItemsIndependently(t *testing.T) {
 	if _, exists := items[3].Message["headers"]; exists {
 		t.Error("fields item retained unrequested headers")
 	}
-	if _, exists := items[4].Message["content"]; !exists || items[4].Projection.View != outputViewFull {
-		t.Errorf("omitted-view item did not preserve full behavior: %+v", items[4])
+	if _, exists := items[4].Message["content"]; exists || items[4].Projection.View != outputViewMetadata {
+		t.Errorf("omitted-view item did not default to metadata: %+v", items[4])
+	}
+	if _, exists := items[4].Message["headers"]; exists {
+		t.Error("default metadata item retained headers")
+	}
+}
+
+func TestBatchReadDefaultsFollowPrecedence(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		want    map[string]mail.MessageReadIntent
+		views   map[string]string
+		fields  map[string][]string
+		full    int
+	}{
+		{
+			name: "view defaults and item overrides",
+			payload: `{"operation":"read","defaults":{"view":"full"},"items":[` +
+				`{"id":"inherited","ref":"inherited_ref"},` +
+				`{"id":"field_override","ref":"field_ref","fields":["summary"]},` +
+				`{"id":"view_override","ref":"view_ref","view":"metadata"}]}`,
+			want: map[string]mail.MessageReadIntent{
+				"field_ref": mail.MessageReadIntentHeaders,
+				"view_ref":  mail.MessageReadIntentAttachments,
+			},
+			views: map[string]string{"inherited": outputViewFull, "field_override": "custom", "view_override": outputViewMetadata},
+			full:  1,
+		},
+		{
+			name: "field defaults and item overrides",
+			payload: `{"operation":"read","defaults":{"fields":["attachments"]},"items":[` +
+				`{"id":"inherited","ref":"inherited_ref"},` +
+				`{"id":"view_override","ref":"view_ref","view":"full"},` +
+				`{"id":"field_override","ref":"field_ref","fields":["summary"]}]}`,
+			want: map[string]mail.MessageReadIntent{
+				"inherited_ref": mail.MessageReadIntentAttachments,
+				"field_ref":     mail.MessageReadIntentHeaders,
+			},
+			views: map[string]string{"inherited": "custom", "view_override": outputViewFull, "field_override": "custom"},
+			fields: map[string][]string{
+				"inherited":      {"attachments", "content_complete", "content_source", "hydration", "missing_parts", "summary"},
+				"field_override": {"content_complete", "content_source", "hydration", "missing_parts", "summary"},
+			},
+			full: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "batch.json")
+			if err := os.WriteFile(path, []byte(test.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gateway := &intentProjectionGateway{projectionGateway: &projectionGateway{message: projectionMessage()}}
+			code, output, stderr := runIntentProjectionCommand(t, gateway, "batch", "--input", path, "--json")
+			if code != 0 || stderr != "" {
+				t.Fatalf("code = %d, stderr = %q, output = %s", code, stderr, output)
+			}
+			gateway.intentMu.Lock()
+			gotIntents := make(map[string]mail.MessageReadIntent, len(gateway.intents))
+			for index, ref := range gateway.refs {
+				gotIntents[ref] = gateway.intents[index]
+			}
+			gateway.intentMu.Unlock()
+			if !reflect.DeepEqual(gotIntents, test.want) {
+				t.Fatalf("read intents = %v, want %v", gotIntents, test.want)
+			}
+			var response struct {
+				Data struct {
+					BatchResult struct {
+						Items []struct {
+							ID         string         `json:"id"`
+							Projection projectionInfo `json:"projection"`
+						} `json:"items"`
+					} `json:"batch_result"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(output), &response); err != nil {
+				t.Fatalf("decode batch projection: %v", err)
+			}
+			for _, item := range response.Data.BatchResult.Items {
+				if got, want := item.Projection.View, test.views[item.ID]; got != want {
+					t.Errorf("item %q effective view = %q, want %q", item.ID, got, want)
+				}
+				if want, exists := test.fields[item.ID]; exists && !reflect.DeepEqual(item.Projection.Fields, want) {
+					t.Errorf("item %q effective fields = %v, want %v", item.ID, item.Projection.Fields, want)
+				}
+			}
+			if gateway.getCalls != test.full {
+				t.Fatalf("full reads = %d, want %d", gateway.getCalls, test.full)
+			}
+		})
+	}
+}
+
+func TestBatchReadDefaultsAreValidatedBeforeRetrieval(t *testing.T) {
+	for _, test := range []struct {
+		name, payload, field string
+	}{
+		{
+			name:    "invalid view hidden by item fields",
+			payload: `{"operation":"read","defaults":{"view":"unknown"},"items":[{"id":"item","ref":"message_ref","fields":["summary"]}]}`,
+			field:   "batch defaults.view",
+		},
+		{
+			name:    "invalid fields hidden by item view",
+			payload: `{"operation":"read","defaults":{"fields":["unknown"]},"items":[{"id":"item","ref":"message_ref","view":"metadata"}]}`,
+			field:   "batch defaults.fields",
+		},
+		{
+			name:    "conflicting defaults hidden by item selector",
+			payload: `{"operation":"read","defaults":{"view":"metadata","fields":["summary"]},"items":[{"id":"item","ref":"message_ref","view":"full"}]}`,
+			field:   "batch defaults.fields",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "batch.json")
+			if err := os.WriteFile(path, []byte(test.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gateway := &intentProjectionGateway{projectionGateway: &projectionGateway{message: projectionMessage()}}
+			code, output, stderr := runIntentProjectionCommand(t, gateway, "batch", "--input", path, "--json")
+			var response envelope
+			if err := json.Unmarshal([]byte(output), &response); err != nil {
+				t.Fatalf("decode validation error: %v; output=%s", err, output)
+			}
+			if code != 2 || stderr != "" || response.Error == nil || response.Error.Code != "invalid_argument" ||
+				!strings.Contains(response.Error.Message, test.field) {
+				t.Fatalf("validation result code=%d error=%+v stderr=%q", code, response.Error, stderr)
+			}
+			gateway.intentMu.Lock()
+			intentCount := len(gateway.intents)
+			intents := append([]mail.MessageReadIntent(nil), gateway.intents...)
+			gateway.intentMu.Unlock()
+			if gateway.getCalls != 0 || intentCount != 0 {
+				t.Fatalf("invalid defaults reached retrieval: full=%d intents=%v", gateway.getCalls, intents)
+			}
+		})
+	}
+}
+
+func TestBatchHumanReadDefaultsToMetadataIntent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "batch.json")
+	if err := os.WriteFile(path, []byte(`{"operation":"read","items":[{"id":"default","ref":"message_ref"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &intentProjectionGateway{projectionGateway: &projectionGateway{message: projectionMessage()}}
+	code, output, stderr := runIntentProjectionCommand(t, gateway, "batch", "--input", path)
+	if code != 0 || stderr != "" || !strings.Contains(output, "completed=1") || gateway.getCalls != 0 {
+		t.Fatalf("human batch code=%d full reads=%d stderr=%q output=%q", code, gateway.getCalls, stderr, output)
+	}
+	gateway.intentMu.Lock()
+	defer gateway.intentMu.Unlock()
+	if len(gateway.intents) != 1 || gateway.intents[0] != mail.MessageReadIntentAttachments {
+		t.Fatalf("human metadata intents = %v, want one metadata-only intent", gateway.intents)
+	}
+}
+
+func TestBatchMutationRejectsReadDefaultsBeforeDispatch(t *testing.T) {
+	payload := `{"operation":"mark","defaults":{"view":"full"},"items":[{"id":"mark","ref":"` + jsonInputSourceRef(t) + `","read":true}]}`
+	path := filepath.Join(t.TempDir(), "batch.json")
+	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &jsonInputGateway{}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewServiceWithDraftRoot(gateway, t.TempDir()),
+		[]string{"batch", "--input", path, "--json"}, &stdout, &stderr)
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode validation error: %v; output=%s", err, stdout.String())
+	}
+	if code != 2 || stderr.Len() != 0 || response.Error == nil || response.Error.Code != "invalid_argument" ||
+		!strings.Contains(response.Error.Message, "only valid for read operations") || gateway.calls.Load() != 0 {
+		t.Fatalf("mutation defaults result code=%d error=%+v calls=%d stderr=%q", code, response.Error, gateway.calls.Load(), stderr.String())
 	}
 }
 

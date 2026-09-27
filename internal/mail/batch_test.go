@@ -677,6 +677,7 @@ func TestExecuteBatchDeleteMixedOutcomes(t *testing.T) {
 func TestExecuteBatchMutationValidationRejectsStrayFieldsBeforeEffects(t *testing.T) {
 	gateway := &batchGateway{gatewayStub: &gatewayStub{}}
 	service := NewService(gateway)
+	readView := "full"
 	cases := []struct {
 		name    string
 		request BatchRequest
@@ -688,6 +689,7 @@ func TestExecuteBatchMutationValidationRejectsStrayFieldsBeforeEffects(t *testin
 		{"delete with mailbox", BatchRequest{Operation: BatchOperationDelete, Items: []BatchItem{{ID: "a", Ref: "r", Mailbox: "m"}}}},
 		{"delete with attachment", BatchRequest{Operation: BatchOperationDelete, Items: []BatchItem{{ID: "a", Ref: "r", AttachmentID: "1"}}}},
 		{"mark with mailbox", BatchRequest{Operation: BatchOperationMark, Items: []BatchItem{{ID: "a", Ref: "r", Read: boolPointer(true), Mailbox: "m"}}}},
+		{"mark with read defaults", BatchRequest{Operation: BatchOperationMark, Defaults: &BatchReadDefaults{View: &readView}, Items: []BatchItem{{ID: "a", Ref: "r", Read: boolPointer(true)}}}},
 		{"read with mailbox", BatchRequest{Operation: BatchOperationRead, Items: []BatchItem{{ID: "a", Ref: "r", Mailbox: "m"}}}},
 	}
 	for _, test := range cases {
@@ -695,7 +697,7 @@ func TestExecuteBatchMutationValidationRejectsStrayFieldsBeforeEffects(t *testin
 			t.Fatalf("%s was accepted", test.name)
 		}
 	}
-	if len(gateway.transfers) != 0 || len(gateway.deletes) != 0 || len(gateway.reads) != 0 {
+	if len(gateway.transfers) != 0 || len(gateway.deletes) != 0 || len(gateway.markRequests) != 0 || len(gateway.reads) != 0 {
 		t.Fatal("gateway was called during preflight")
 	}
 }

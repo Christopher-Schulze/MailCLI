@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"mailcli/internal/cli"
@@ -216,13 +217,16 @@ func readSchemas() ([]schemaDefinition, error) {
 			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
 		var identity struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Version int    `json:"version"`
 		}
 		if err := json.Unmarshal(data, &identity); err != nil {
 			return nil, fmt.Errorf("decode %s: %w", path, err)
 		}
-		commandID, versioned := strings.CutSuffix(identity.ID, "@v1")
-		if !versioned || commandID == "" || commandID+".json" != entry.Name() {
+		commandID, versionText, versioned := strings.Cut(identity.ID, "@v")
+		version, versionErr := strconv.Atoi(versionText)
+		if !versioned || versionErr != nil || version <= 0 || strconv.Itoa(version) != versionText ||
+			commandID == "" || commandID+".json" != entry.Name() || identity.Version != version {
 			return nil, fmt.Errorf("schema ID %q does not match filename %s", identity.ID, entry.Name())
 		}
 		if !json.Valid(data) {
@@ -262,12 +266,16 @@ func runtimeSchemas() ([]publishedCommand, error) {
 		}
 		seen[command.ID] = struct{}{}
 		var identity struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Version int    `json:"version"`
 		}
 		if err := json.Unmarshal(command.Schema, &identity); err != nil {
 			return nil, fmt.Errorf("decode %s schema identity: %w", command.ID, err)
 		}
-		if identity.ID != command.ID+"@v1" {
+		commandID, versionText, versioned := strings.Cut(identity.ID, "@v")
+		version, versionErr := strconv.Atoi(versionText)
+		if !versioned || commandID != command.ID || versionErr != nil || version <= 0 ||
+			strconv.Itoa(version) != versionText || identity.Version != version {
 			return nil, fmt.Errorf("published command %s has schema identity %s", command.ID, identity.ID)
 		}
 	}
