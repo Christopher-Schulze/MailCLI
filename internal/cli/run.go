@@ -86,7 +86,7 @@ type responseData struct {
 }
 
 func rawResponsePage(value any) *json.RawMessage {
-	payload, err := json.Marshal(value)
+	payload, err := marshalCLIJSON(value)
 	if err == nil {
 		return (*json.RawMessage)(&payload)
 	}

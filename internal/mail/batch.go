@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -43,11 +42,22 @@ const (
 // BatchRequest is an explicit, bounded set of independent operations. Items
 // are never discovered implicitly and retain their input order in the result.
 type BatchRequest struct {
-	Operation              BatchOperation `json:"operation"`
-	Items                  []BatchItem    `json:"items"`
-	Concurrency            int            `json:"concurrency,omitempty"`
-	ReadContentBudgetBytes int64          `json:"-"`
+	Operation            BatchOperation         `json:"operation"`
+	Items                []BatchItem            `json:"items"`
+	Concurrency          int                    `json:"concurrency,omitempty"`
+	ReadContentAdmission BatchReadAdmissionFunc `json:"-"`
 }
+
+// BatchReadAdmission carries only the content-retention decision made by the
+// caller after measuring its own output representation.
+type BatchReadAdmission struct {
+	RetainContent bool
+	RetainHeaders bool
+}
+
+// BatchReadAdmissionFunc returns the caller's requested-content retention
+// decision. It may run concurrently; shared admission state must be synchronized.
+type BatchReadAdmissionFunc func(content, headers string, retainContent, retainHeaders bool) BatchReadAdmission
 
 // BatchItem identifies one request. Ref is a store-bound message reference for
 // every operation; attachment fields are used only by attachment_save, state
@@ -86,34 +96,24 @@ type BatchItemResult struct {
 }
 
 type BatchResult struct {
-	Operation                BatchOperation    `json:"operation"`
-	Concurrency              int               `json:"concurrency"`
-	Total                    int               `json:"total"`
-	Completed                int               `json:"completed"`
-	Failed                   int               `json:"failed"`
-	Skipped                  int               `json:"skipped"`
-	Uncertain                int               `json:"uncertain"`
-	Items                    []BatchItemResult `json:"items"`
-	ReadContentExceeded      bool              `json:"-"`
-	ReadContentRequiredBytes int64             `json:"-"`
+	Operation   BatchOperation    `json:"operation"`
+	Concurrency int               `json:"concurrency"`
+	Total       int               `json:"total"`
+	Completed   int               `json:"completed"`
+	Failed      int               `json:"failed"`
+	Skipped     int               `json:"skipped"`
+	Uncertain   int               `json:"uncertain"`
+	Items       []BatchItemResult `json:"items"`
 }
 
 type batchExecution struct {
-	ctx        context.Context
-	service    *Service
-	request    BatchRequest
-	result     *BatchResult
-	jobs       chan int
-	wait       sync.WaitGroup
-	next       int
-	readBudget *batchReadBudget
-}
-
-type batchReadBudget struct {
-	mu            sync.Mutex
-	remaining     int64
-	requiredBytes int64
-	exceeded      bool
+	ctx     context.Context
+	service *Service
+	request BatchRequest
+	result  *BatchResult
+	jobs    chan int
+	wait    sync.WaitGroup
+	next    int
 }
 
 func (r BatchResult) Complete() bool {
@@ -144,14 +144,7 @@ func (s *Service) ExecuteBatch(ctx context.Context, request BatchRequest) (Batch
 		}
 	}
 	execution := batchExecution{ctx: ctx, service: s, request: request, result: &result}
-	if request.Operation == BatchOperationRead && request.ReadContentBudgetBytes > 0 {
-		execution.readBudget = &batchReadBudget{remaining: request.ReadContentBudgetBytes}
-	}
 	execution.run()
-	if execution.readBudget != nil {
-		result.ReadContentExceeded = execution.readBudget.exceeded
-		result.ReadContentRequiredBytes = execution.readBudget.requiredBytes
-	}
 	return result, nil
 }
 
@@ -220,9 +213,6 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 	}
 	if concurrency < 1 || concurrency > MaximumBatchConcurrency {
 		return 0, validationError(fmt.Sprintf("batch concurrency must be between 1 and %d", MaximumBatchConcurrency))
-	}
-	if request.ReadContentBudgetBytes < 0 || request.ReadContentBudgetBytes > MaximumRawSourceBytes {
-		return 0, validationError(fmt.Sprintf("batch read content budget must be between 0 and %d bytes", MaximumRawSourceBytes))
 	}
 	ids := make(map[string]struct{}, len(request.Items))
 	destinations := make(map[string]string)
@@ -336,14 +326,14 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 		if err != nil {
 			result.State = BatchItemFailed
 			if hasBatchMessageEvidence(message) {
-				run.retainReadMessage(&message, item)
+				run.admitReadMessage(&message, item)
 				result.Message = &message
 			}
 			result.Error = run.itemError(err)
 			return result
 		}
 		result.State = BatchItemCompleted
-		run.retainReadMessage(&message, item)
+		run.admitReadMessage(&message, item)
 		result.Message = &message
 	case BatchOperationAttachmentSave:
 		saved, err := run.service.SaveAttachment(run.ctx, SaveAttachmentRequest{
@@ -426,8 +416,8 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 	return result
 }
 
-func (run *batchExecution) retainReadMessage(message *Message, item BatchItem) {
-	if run.readBudget == nil {
+func (run *batchExecution) admitReadMessage(message *Message, item BatchItem) {
+	if run.request.ReadContentAdmission == nil {
 		return
 	}
 	if !item.RetainReadContent {
@@ -436,62 +426,15 @@ func (run *batchExecution) retainReadMessage(message *Message, item BatchItem) {
 	if !item.RetainReadHeaders {
 		message.Headers = ""
 	}
-	requiredBytes := int64(0)
-	if item.RetainReadContent {
-		requiredBytes += jsonStringOutputBytes(message.Content)
+	admission := run.request.ReadContentAdmission(
+		message.Content, message.Headers, item.RetainReadContent, item.RetainReadHeaders,
+	)
+	if !admission.RetainContent {
+		message.Content = ""
 	}
-	if item.RetainReadHeaders {
-		requiredBytes += jsonStringOutputBytes(message.Headers)
+	if !admission.RetainHeaders {
+		message.Headers = ""
 	}
-	run.readBudget.mu.Lock()
-	defer run.readBudget.mu.Unlock()
-	run.readBudget.requiredBytes += requiredBytes
-	if requiredBytes > run.readBudget.remaining {
-		if item.RetainReadContent {
-			message.Content = ""
-		}
-		if item.RetainReadHeaders {
-			message.Headers = ""
-		}
-		run.readBudget.exceeded = true
-		return
-	}
-	run.readBudget.remaining -= requiredBytes
-}
-
-func jsonStringOutputBytes(value string) int64 {
-	encodedBytes := int64(2)
-	for index := 0; index < len(value); {
-		current := value[index]
-		if current < utf8.RuneSelf {
-			switch current {
-			case '"', '\\':
-				encodedBytes += 2
-			case '<', '>', '&':
-				encodedBytes += 6
-			case '\b', '\f', '\n', '\r', '\t':
-				encodedBytes += 2
-			case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0e, 0x0f,
-				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
-				0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f:
-				encodedBytes += 6
-			default:
-				encodedBytes++
-			}
-			index++
-			continue
-		}
-		rune, width := utf8.DecodeRuneInString(value[index:])
-		if rune == utf8.RuneError && width == 1 {
-			encodedBytes += 3
-		} else if rune == 0x2028 || rune == 0x2029 {
-			encodedBytes += 6
-		} else {
-			encodedBytes += int64(width)
-		}
-		index += width
-	}
-	return encodedBytes
 }
 
 func (run *batchExecution) itemError(err error) *BatchItemError {

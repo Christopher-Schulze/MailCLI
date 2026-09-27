@@ -2,7 +2,6 @@ package mail
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -127,9 +126,32 @@ func TestExecuteBatchReadPreservesOrderAndPerItemErrors(t *testing.T) {
 	}
 }
 
-func TestExecuteBatchReadBudgetsConcurrentContentBeforeRetention(t *testing.T) {
+func TestExecuteBatchReadAppliesConcurrentAdmissionDecisions(t *testing.T) {
 	const itemCount = 100
 	const budget = int64(32 * 1024)
+	var admissionMu sync.Mutex
+	remaining := budget
+	var admittedBytes, requiredBytes int64
+	exceeded := false
+	admit := func(content, headers string, retainContent, retainHeaders bool) BatchReadAdmission {
+		required := int64(0)
+		if retainContent {
+			required += int64(len(content))
+		}
+		if retainHeaders {
+			required += int64(len(headers))
+		}
+		admissionMu.Lock()
+		defer admissionMu.Unlock()
+		requiredBytes += required
+		if required > remaining {
+			exceeded = true
+			return BatchReadAdmission{}
+		}
+		remaining -= required
+		admittedBytes += required
+		return BatchReadAdmission{RetainContent: retainContent, RetainHeaders: retainHeaders}
+	}
 	body := strings.Repeat("<&\n", 2048)
 	header := strings.Repeat("X", 256)
 	messages := make(map[string]Message, itemCount)
@@ -144,14 +166,11 @@ func TestExecuteBatchReadBudgetsConcurrentContentBeforeRetention(t *testing.T) {
 	result, err := NewService(&batchGateway{gatewayStub: &gatewayStub{}, messages: messages}).ExecuteBatch(
 		context.Background(), BatchRequest{
 			Operation: BatchOperationRead, Concurrency: MaximumBatchConcurrency,
-			Items: items, ReadContentBudgetBytes: budget,
+			Items: items, ReadContentAdmission: admit,
 		},
 	)
 	if err != nil {
 		t.Fatalf("ExecuteBatch() error = %v", err)
-	}
-	if !result.ReadContentExceeded || result.ReadContentRequiredBytes <= budget {
-		t.Fatalf("content budget result = exceeded:%t required:%d", result.ReadContentExceeded, result.ReadContentRequiredBytes)
 	}
 	if len(result.Items) != itemCount || result.Completed != itemCount {
 		t.Fatalf("batch result counts = %+v", result)
@@ -164,25 +183,14 @@ func TestExecuteBatchReadBudgetsConcurrentContentBeforeRetention(t *testing.T) {
 		}
 		if item.Message.Content != "" || item.Message.Headers != "" {
 			retainedMessages++
-			retainedBytes += jsonStringOutputBytes(item.Message.Content) + jsonStringOutputBytes(item.Message.Headers)
+			retainedBytes += int64(len(item.Message.Content)) + int64(len(item.Message.Headers))
 		}
 	}
-	if retainedMessages == 0 || retainedBytes > budget {
-		t.Fatalf("retained messages/encoded bytes = %d/%d, budget %d", retainedMessages, retainedBytes, budget)
-	}
-}
-
-func TestJSONStringOutputBytesMatchesJSONEncoding(t *testing.T) {
-	for _, value := range []string{
-		"plain text", `quote"slash\\`, "<>&", "\x00\x08\n\r\t", "\u2028\u2029", "\xff",
-	} {
-		encoded, err := json.Marshal(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := jsonStringOutputBytes(value); got != int64(len(encoded)) {
-			t.Errorf("jsonStringOutputBytes(%q) = %d, encoded size = %d (%s)", value, got, len(encoded), encoded)
-		}
+	admissionMu.Lock()
+	defer admissionMu.Unlock()
+	if !exceeded || requiredBytes <= budget || retainedMessages == 0 || retainedBytes != admittedBytes || admittedBytes > budget {
+		t.Fatalf("admission result = exceeded:%t required:%d retained:%d/%d messages:%d budget:%d",
+			exceeded, requiredBytes, admittedBytes, retainedBytes, retainedMessages, budget)
 	}
 }
 

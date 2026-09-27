@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"mailcli/internal/mail"
 )
@@ -1209,13 +1210,58 @@ func marshalEnvelope(value envelope) ([]byte, error) {
 		value.Data.LimitBytes = &limitBytes
 		value.Data.Measured = string(value.Error.outputSize.measured)
 	}
+	payload, err := marshalCLIJSON(value)
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
+func marshalCLIJSON(value any) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
-	return buffer.Bytes(), nil
+	payload := buffer.Bytes()
+	if len(payload) == 0 || payload[len(payload)-1] != '\n' {
+		return nil, errors.New("JSON encoder omitted its terminating newline")
+	}
+	return payload[:len(payload)-1], nil
+}
+
+// jsonStringOutputBytes matches marshalCLIJSON's JSON string encoding without
+// allocating the encoded copy needed only for batch admission.
+func jsonStringOutputBytes(value string) int64 {
+	encodedBytes := int64(2)
+	for index := 0; index < len(value); {
+		current := value[index]
+		if current < utf8.RuneSelf {
+			switch current {
+			case '"', '\\', '\b', '\f', '\n', '\r', '\t':
+				encodedBytes += 2
+			case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0b, 0x0e, 0x0f,
+				0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+				0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f:
+				encodedBytes += 6
+			default:
+				encodedBytes++
+			}
+			index++
+			continue
+		}
+		rune, width := utf8.DecodeRuneInString(value[index:])
+		if rune == utf8.RuneError && width == 1 {
+			encodedBytes += 3
+		} else if rune == 0x2028 || rune == 0x2029 {
+			encodedBytes += 6
+		} else {
+			encodedBytes += int64(width)
+		}
+		index += width
+	}
+	return encodedBytes
 }
 
 func writeEnvelopeBytes(writer io.Writer, payload []byte) int {
@@ -1231,7 +1277,7 @@ func (data responseData) MarshalJSON() ([]byte, error) {
 	copy := responseDataAlias(data)
 	projection := data.serialization
 	if projection == nil {
-		return json.Marshal(copy)
+		return marshalCLIJSON(copy)
 	}
 	if projection.hideRaw {
 		copy.RawSource = nil
@@ -1240,31 +1286,31 @@ func (data responseData) MarshalJSON() ([]byte, error) {
 	// typed view so encoding visits body strings once, without RawMessage copies.
 	switch {
 	case data.Message != nil && projection.message != nil:
-		return json.Marshal(struct {
+		return marshalCLIJSON(struct {
 			*responseDataAlias
 			Message *messageProjection `json:"message,omitempty"`
 		}{&copy, projection.message})
 	case data.Draft != nil && projection.draft != nil:
-		return json.Marshal(struct {
+		return marshalCLIJSON(struct {
 			*responseDataAlias
 			Draft *draftProjection `json:"draft,omitempty"`
 		}{&copy, projection.draft})
 	case data.Attachments != nil && projection.attachments != nil:
-		return json.Marshal(struct {
+		return marshalCLIJSON(struct {
 			*responseDataAlias
 			Attachments *[]attachmentProjection `json:"attachments,omitempty"`
 		}{&copy, projection.attachments})
 	case data.Drafts != nil && projection.drafts != nil:
-		return json.Marshal(struct {
+		return marshalCLIJSON(struct {
 			*responseDataAlias
 			Drafts *[]draftListEntryProjection `json:"drafts,omitempty"`
 		}{&copy, projection.drafts})
 	case data.BatchResult != nil && projection.batch != nil:
-		return json.Marshal(struct {
+		return marshalCLIJSON(struct {
 			*responseDataAlias
 			BatchResult *batchResultProjection `json:"batch_result,omitempty"`
 		}{&copy, projection.batch})
 	default:
-		return json.Marshal(copy)
+		return marshalCLIJSON(copy)
 	}
 }

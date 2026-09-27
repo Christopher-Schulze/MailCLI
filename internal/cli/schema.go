@@ -69,6 +69,11 @@ func projectionTargetForCommand(id string) (projectionTarget, bool) {
 // Only projection enums are derived in memory; canonical schema metadata stays
 // intact and the stored schema source remains unchanged.
 func augmentProjectionSchema(id string, source json.RawMessage) (json.RawMessage, error) {
+	normalized, err := normalizeSchemaJSON(source)
+	if err != nil {
+		return nil, err
+	}
+	source = normalized
 	target, projected := projectionTargetForCommand(id)
 	if !projected && id != "batch" {
 		return append(json.RawMessage(nil), source...), nil
@@ -90,7 +95,7 @@ func augmentProjectionSchema(id string, source json.RawMessage) (json.RawMessage
 		}
 		schema["json_input"] = input
 	}
-	encoded, err := json.Marshal(schema)
+	encoded, err := marshalCLIJSON(schema)
 	if err != nil {
 		return nil, fmt.Errorf("encode projection schema: %w", err)
 	}
@@ -107,7 +112,7 @@ func augmentBatchProjectionSchema(source json.RawMessage) (json.RawMessage, erro
 		return nil, err
 	}
 	input["item_fields"] = fields
-	encoded, err := json.Marshal(input)
+	encoded, err := marshalCLIJSON(input)
 	if err != nil {
 		return nil, fmt.Errorf("encode batch projection schema: %w", err)
 	}
@@ -131,7 +136,7 @@ func projectionSchemaFields(source json.RawMessage, name string, target projecti
 		if found {
 			return nil, fmt.Errorf("duplicate projection field %s", name)
 		}
-		values, err := json.Marshal(projectionFieldNames(target))
+		values, err := marshalCLIJSON(projectionFieldNames(target))
 		if err != nil {
 			return nil, fmt.Errorf("encode projection values: %w", err)
 		}
@@ -141,7 +146,7 @@ func projectionSchemaFields(source json.RawMessage, name string, target projecti
 	if !found {
 		return nil, fmt.Errorf("missing projection field %s", name)
 	}
-	encoded, err := json.Marshal(fields)
+	encoded, err := marshalCLIJSON(fields)
 	if err != nil {
 		return nil, fmt.Errorf("encode projection fields: %w", err)
 	}
@@ -149,13 +154,65 @@ func projectionSchemaFields(source json.RawMessage, name string, target projecti
 }
 
 func emptyCommandSchema(id string) json.RawMessage {
-	encoded, err := json.Marshal(id + "@v1")
+	encoded, err := marshalCLIJSON(id + "@v1")
 	if err != nil {
 		return json.RawMessage(`{"id":"unknown@v1","version":1,"flags":[],"positional_arguments":[],"constraints":[]}`)
 	}
 	output := append([]byte(`{"id":`), encoded...)
 	output = append(output, `,"version":1,"flags":[],"positional_arguments":[],"constraints":[]}`...)
 	return json.RawMessage(output)
+}
+
+// normalizeSchemaJSON removes only HTML Unicode escapes and preserves schema
+// property order and every other source escape.
+func normalizeSchemaJSON(source json.RawMessage) (json.RawMessage, error) {
+	if !json.Valid(source) {
+		return nil, fmt.Errorf("normalize command schema: invalid JSON")
+	}
+	if !containsHTMLEscapedString(source) {
+		return append(json.RawMessage(nil), source...), nil
+	}
+	var normalized bytes.Buffer
+	normalized.Grow(len(source))
+	inString := false
+	for index := 0; index < len(source); index++ {
+		current := source[index]
+		if current == '"' {
+			inString = !inString
+			normalized.WriteByte(current)
+			continue
+		}
+		if inString && current == '\\' {
+			if source[index+1] == 'u' {
+				escaped := source[index+2 : index+6]
+				switch {
+				case bytes.EqualFold(escaped, []byte("0026")):
+					normalized.WriteByte('&')
+					index += 5
+					continue
+				case bytes.EqualFold(escaped, []byte("003c")):
+					normalized.WriteByte('<')
+					index += 5
+					continue
+				case bytes.EqualFold(escaped, []byte("003e")):
+					normalized.WriteByte('>')
+					index += 5
+					continue
+				}
+			}
+			normalized.Write(source[index : index+2])
+			index++
+			continue
+		}
+		normalized.WriteByte(current)
+	}
+	return normalized.Bytes(), nil
+}
+
+func containsHTMLEscapedString(source []byte) bool {
+	return bytes.Contains(source, []byte(`\u0026`)) || bytes.Contains(source, []byte(`\u003c`)) ||
+		bytes.Contains(source, []byte(`\u003C`)) || bytes.Contains(source, []byte(`\u003e`)) ||
+		bytes.Contains(source, []byte(`\u003E`))
 }
 
 func resolveCapabilityScope(command, family, scope string) (string, string, error) {

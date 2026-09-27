@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"mailcli/internal/mail"
@@ -15,6 +16,54 @@ import (
 
 const batchTimeout = 15 * time.Minute
 const maximumBatchReadOverflowItems = 10
+
+type batchReadBudgetResult struct {
+	exceeded      bool
+	limitBytes    int64
+	requiredBytes int64
+}
+
+type batchReadContentBudget struct {
+	mu            sync.Mutex
+	limit         int64
+	remaining     int64
+	requiredBytes int64
+	exceeded      bool
+}
+
+func newBatchReadContentBudget(limit int64) *batchReadContentBudget {
+	return &batchReadContentBudget{limit: limit, remaining: limit}
+}
+
+func (budget *batchReadContentBudget) admit(
+	content, headers string,
+	retainContent, retainHeaders bool,
+) mail.BatchReadAdmission {
+	requiredBytes := int64(0)
+	if retainContent {
+		requiredBytes += jsonStringOutputBytes(content)
+	}
+	if retainHeaders {
+		requiredBytes += jsonStringOutputBytes(headers)
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	budget.requiredBytes += requiredBytes
+	if requiredBytes > budget.remaining {
+		budget.exceeded = true
+		return mail.BatchReadAdmission{}
+	}
+	budget.remaining -= requiredBytes
+	return mail.BatchReadAdmission{RetainContent: retainContent, RetainHeaders: retainHeaders}
+}
+
+func (budget *batchReadContentBudget) result() batchReadBudgetResult {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return batchReadBudgetResult{
+		exceeded: budget.exceeded, limitBytes: budget.limit, requiredBytes: budget.requiredBytes,
+	}
+}
 
 func runBatch(
 	ctx context.Context,
@@ -60,10 +109,14 @@ func runBatch(
 		request.Concurrency = *concurrency
 	}
 	if *jsonOutput {
-		request.ReadContentBudgetBytes = *maxBytes
 		if err := preflightBatchOutputBudget(request, *maxBytes); err != nil {
 			return failCommand("batch", true, err, stdout, stderr)
 		}
+	}
+	var readBudget *batchReadContentBudget
+	if *jsonOutput && request.Operation == mail.BatchOperationRead {
+		readBudget = newBatchReadContentBudget(*maxBytes)
+		request.ReadContentAdmission = readBudget.admit
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, batchTimeout)
 	defer cancel()
@@ -72,7 +125,11 @@ func runBatch(
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
-		return writeBatchJSON(stdout, result, request, *maxBytes)
+		budgetResult := batchReadBudgetResult{}
+		if readBudget != nil {
+			budgetResult = readBudget.result()
+		}
+		return writeBatchJSON(stdout, result, request, *maxBytes, budgetResult)
 	}
 	for _, item := range result.Items {
 		writeBatchHumanItem(stdout, item)
@@ -102,9 +159,15 @@ func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) erro
 	return nil
 }
 
-func writeBatchJSON(stdout io.Writer, result mail.BatchResult, request mail.BatchRequest, maxBytes int64) int {
-	if result.ReadContentExceeded {
-		return writeBatchOutputTooLarge(stdout, result, request, maxBytes, 0)
+func writeBatchJSON(
+	stdout io.Writer,
+	result mail.BatchResult,
+	request mail.BatchRequest,
+	maxBytes int64,
+	readBudget batchReadBudgetResult,
+) int {
+	if readBudget.exceeded {
+		return writeBatchOutputTooLarge(stdout, result, request, maxBytes, 0, readBudget)
 	}
 	data, err := batchResponseData(result, request, maxBytes, true, true, true, true)
 	if err != nil {
@@ -121,7 +184,7 @@ func writeBatchJSON(stdout io.Writer, result mail.BatchResult, request mail.Batc
 		return failCommand("batch", true, &commandError{code: "serialization_failed", message: "could not serialize batch JSON response"}, stdout, io.Discard)
 	}
 	if int64(len(payload)) > maxBytes {
-		return writeBatchOutputTooLarge(stdout, result, request, maxBytes, int64(len(payload)))
+		return writeBatchOutputTooLarge(stdout, result, request, maxBytes, int64(len(payload)), readBudget)
 	}
 	if code := writeEnvelopeBytes(stdout, payload); code != 0 {
 		return code
@@ -158,13 +221,19 @@ func batchResponseData(
 	return data, nil
 }
 
-func writeBatchOutputTooLarge(stdout io.Writer, result mail.BatchResult, request mail.BatchRequest, maxBytes, actualBytes int64) int {
+func writeBatchOutputTooLarge(
+	stdout io.Writer,
+	result mail.BatchResult,
+	request mail.BatchRequest,
+	maxBytes, actualBytes int64,
+	readBudget batchReadBudgetResult,
+) int {
 	for _, includeItemErrors := range []bool{true, false} {
 		data, err := batchResponseData(result, request, maxBytes, false, false, true, includeItemErrors)
 		if err != nil {
 			return failCommand("batch", true, err, stdout, io.Discard)
 		}
-		response := batchOutputFailureEnvelope(result, data, batchOutputTooLargeError(result, maxBytes, actualBytes))
+		response := batchOutputFailureEnvelope(result, data, batchOutputTooLargeError(maxBytes, actualBytes, readBudget))
 		payload, marshalErr := marshalEnvelope(response)
 		if marshalErr == nil && int64(len(payload)) <= maxBytes {
 			if code := writeEnvelopeBytes(stdout, payload); code != 0 {
@@ -177,7 +246,7 @@ func writeBatchOutputTooLarge(stdout io.Writer, result mail.BatchResult, request
 	if err != nil {
 		return failCommand("batch", true, err, stdout, io.Discard)
 	}
-	response := batchOutputFailureEnvelope(result, data, batchOutputTooLargeError(result, maxBytes, actualBytes))
+	response := batchOutputFailureEnvelope(result, data, batchOutputTooLargeError(maxBytes, actualBytes, readBudget))
 	payload, marshalErr := marshalEnvelope(response)
 	if marshalErr != nil || int64(len(payload)) > maxBytes {
 		return 1
@@ -221,9 +290,14 @@ func batchOutputFailureEnvelope(result mail.BatchResult, data responseData, err 
 	return response
 }
 
-func batchOutputTooLargeError(result mail.BatchResult, maxBytes, actualBytes int64) error {
-	if result.ReadContentExceeded {
-		return newOutputTooLargeError(result.ReadContentRequiredBytes, maxBytes, outputSizeLowerBound, "batch read content")
+func batchOutputTooLargeError(
+	maxBytes, actualBytes int64,
+	readBudget batchReadBudgetResult,
+) error {
+	if readBudget.exceeded {
+		return newOutputTooLargeError(
+			readBudget.requiredBytes, readBudget.limitBytes, outputSizeLowerBound, "batch read content",
+		)
 	}
 	return newOutputTooLargeError(actualBytes, maxBytes, outputSizeExact, "batch")
 }
@@ -252,13 +326,17 @@ func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error
 	if err != nil {
 		return &commandError{code: "serialization_failed", message: "could not validate batch output budget"}
 	}
-	result.ReadContentExceeded = true
-	result.ReadContentRequiredBytes = mail.MaximumRawSourceBytes * mail.MaximumBatchItems
+	readBudget := batchReadBudgetResult{
+		exceeded: true, limitBytes: maxBytes,
+		requiredBytes: maximumJSONOutputBytes * mail.MaximumBatchItems,
+	}
 	contentSampleData, err := batchResponseData(result, request, maxBytes, false, false, false, false)
 	if err != nil {
 		return err
 	}
-	contentSample := batchOutputFailureEnvelope(result, contentSampleData, batchOutputTooLargeError(result, maxBytes, 0))
+	contentSample := batchOutputFailureEnvelope(
+		result, contentSampleData, batchOutputTooLargeError(maxBytes, 0, readBudget),
+	)
 	contentPayload, err := marshalEnvelope(contentSample)
 	if err != nil {
 		return &commandError{code: "serialization_failed", message: "could not validate batch output budget"}

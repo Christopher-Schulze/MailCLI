@@ -16,7 +16,7 @@ import (
 
 func TestTypedResponseSerializationPreservesProjectedValues(t *testing.T) {
 	message := projectionMessage()
-	message.Content = "<>&\x00\xff\u2028"
+	message.Content = "<>&\x00\n\xff\u2028"
 	draft := mail.Draft{Ref: "draft_ref", Body: message.Content, BodySource: "source", BodyHTML: "<p>body</p>"}
 	raw := message.Content
 	attachments := []mail.Attachment{{ID: "1", Name: "file.txt"}}
@@ -34,7 +34,7 @@ func TestTypedResponseSerializationPreservesProjectedValues(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				var actual, expected map[string]json.RawMessage
+				var actual, expected map[string]any
 				if err := json.Unmarshal(got, &actual); err != nil {
 					t.Fatal(err)
 				}
@@ -46,6 +46,161 @@ func TestTypedResponseSerializationPreservesProjectedValues(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestJSONStringOutputBytesMatchesCLIEncoder(t *testing.T) {
+	controls := make([]byte, 0x20)
+	for value := byte(0); value < 0x20; value++ {
+		controls[value] = value
+	}
+	for _, value := range []string{
+		"plain text", `quote"slash\\`, "<>&", string(controls), "\u2028\u2029", "\xff", "emoji 🚀",
+	} {
+		encoded, err := marshalCLIJSON(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := jsonStringOutputBytes(value); got != int64(len(encoded)) {
+			t.Errorf("jsonStringOutputBytes(%q) = %d, encoder size = %d (%s)", value, got, len(encoded), encoded)
+		}
+	}
+}
+
+func TestBatchReadContentBudgetUsesExactCLIEncodingThresholds(t *testing.T) {
+	content := strings.Repeat("<&>", 512) + "\x00\n\u2028"
+	encoded, err := marshalCLIJSON(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredBytes := int64(len(encoded))
+	for _, test := range []struct {
+		name         string
+		limitBytes   int64
+		wantExceeded bool
+		wantRetained bool
+	}{
+		{name: "below", limitBytes: requiredBytes - 1, wantExceeded: true},
+		{name: "at", limitBytes: requiredBytes, wantRetained: true},
+		{name: "above", limitBytes: requiredBytes + 1, wantRetained: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			budget := newBatchReadContentBudget(test.limitBytes)
+			admission := budget.admit(content, "", true, false)
+			result := budget.result()
+			if result.requiredBytes != requiredBytes || result.limitBytes != test.limitBytes ||
+				result.exceeded != test.wantExceeded || admission.RetainContent != test.wantRetained ||
+				admission.RetainHeaders {
+				t.Fatalf("budget result/admission = %+v/%+v, want required=%d limit=%d exceeded=%t retained=%t",
+					result, admission, requiredBytes, test.limitBytes, test.wantExceeded, test.wantRetained)
+			}
+			if test.wantExceeded {
+				request := mail.BatchRequest{
+					Operation: mail.BatchOperationRead, Concurrency: 1,
+					Items: []mail.BatchItem{{ID: "body", Ref: "message-ref", RetainReadContent: true}},
+				}
+				batchResult := mail.BatchResult{
+					Operation: mail.BatchOperationRead, Concurrency: 1, Total: 1, Completed: 1,
+					Items: []mail.BatchItemResult{{ID: "body", State: mail.BatchItemCompleted}},
+				}
+				var output bytes.Buffer
+				if code := writeBatchJSON(&output, batchResult, request, test.limitBytes, result); code != 1 ||
+					int64(output.Len()) > test.limitBytes {
+					t.Fatalf("bounded below-threshold overflow = code:%d bytes:%d limit:%d",
+						code, output.Len(), test.limitBytes)
+				}
+				var response envelope
+				if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+					t.Fatalf("decode below-threshold overflow: %v", err)
+				}
+				assertOutputSizeEvidence(t, response, requiredBytes, test.limitBytes, string(outputSizeLowerBound))
+			}
+		})
+	}
+}
+
+func TestCLIJSONEncoderRemovesHTMLEscapingWithoutChangingControlSafety(t *testing.T) {
+	body := strings.Repeat("<>&", 3333) + "<\x00\n"
+	data := responseData{RawSource: &body}
+	actual, err := marshalEnvelope(envelope{SchemaVersion: schemaVersion, OK: true, Command: "messages.raw", Data: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyData, err := marshalResponseDataBaseline(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(struct {
+		SchemaVersion int             `json:"schema_version"`
+		OK            bool            `json:"ok"`
+		Command       string          `json:"command"`
+		Data          json.RawMessage `json:"data"`
+		Error         json.RawMessage `json:"error"`
+	}{SchemaVersion: schemaVersion, OK: true, Command: "messages.raw", Data: legacyData, Error: json.RawMessage("null")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy = append(legacy, '\n')
+	if difference := len(legacy) - len(actual); difference < 50_000 {
+		t.Fatalf("HTML output shrank by %d bytes, want at least 50000", difference)
+	}
+	if !bytes.Contains(actual, []byte("<>&")) || bytes.Contains(actual, []byte{0}) ||
+		!bytes.Contains(actual, []byte(`\u0000`)) || !bytes.Contains(actual, []byte(`\n`)) {
+		t.Fatalf("encoded output has wrong HTML/control escaping: %s", actual[:min(160, len(actual))])
+	}
+	var decoded envelope
+	if err := json.Unmarshal(actual, &decoded); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if decoded.Data.RawSource == nil {
+		t.Fatal("JSON round-trip omitted the raw body")
+	}
+	if *decoded.Data.RawSource != body {
+		t.Fatalf("JSON round-trip changed body: got %d bytes, want %d", len(*decoded.Data.RawSource), len(body))
+	}
+}
+
+func TestPublishedSchemasUseUnescapedJSONStrings(t *testing.T) {
+	for _, command := range []string{"drafts.create", "batch", "messages.list"} {
+		schema := schemaForCommand(command)
+		if bytes.Contains(schema, []byte(`\u003c`)) || bytes.Contains(schema, []byte(`\u003e`)) ||
+			bytes.Contains(schema, []byte(`\u0026`)) {
+			t.Errorf("%s schema still HTML-escapes strings: %s", command, schema)
+		}
+	}
+	if !bytes.Contains(schemaForCommand("drafts.create"), []byte("array<recipient>")) ||
+		!bytes.Contains(schemaForCommand("batch"), []byte("array<batch_item>")) {
+		t.Fatal("schema normalization lost the original value-type strings")
+	}
+}
+
+func TestNormalizeSchemaJSONUnescapesHTMLWithoutChangingOtherEscapes(t *testing.T) {
+	source := json.RawMessage(`{"literal":"\\u003c","markup":"\u003c\u003e\u0026"}`)
+	normalized, err := normalizeSchemaJSON(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(normalized, &decoded); err != nil {
+		t.Fatalf("decode normalized schema: %v", err)
+	}
+	if decoded["literal"] != `\u003c` || decoded["markup"] != "<>&" {
+		t.Fatalf("normalized schema strings = %+v, want literal escape preserved and HTML decoded", decoded)
+	}
+}
+
+func TestJSONOutputPagesUseSharedEscapingPolicy(t *testing.T) {
+	page := &mail.MessagePage{Messages: []mail.MessageSummary{{Subject: "<>&"}}}
+	payload, err := marshalEnvelope(envelope{
+		SchemaVersion: schemaVersion, OK: true, Command: "messages.list",
+		Data: responseData{Page: messageResponsePage(page)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte("<>&")) || bytes.Contains(payload, []byte(`\u003c`)) ||
+		bytes.Contains(payload, []byte(`\u003e`)) || bytes.Contains(payload, []byte(`\u0026`)) {
+		t.Fatalf("page output did not use the shared HTML escaping policy: %s", payload)
 	}
 }
 
@@ -277,7 +432,7 @@ func serializedPageRegistryFixture(t *testing.T, target projectionTarget, summar
 }
 
 // This frozen pre-optimization serializer is a differential oracle for typed
-// projection fields, omission rules and escaping, not a production fallback.
+// projection fields and omission rules, not the production escaping policy.
 func marshalResponseDataBaseline(data responseData) ([]byte, error) {
 	type responseDataAlias responseData
 	copy := data

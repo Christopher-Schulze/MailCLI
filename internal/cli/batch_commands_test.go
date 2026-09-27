@@ -250,7 +250,7 @@ func TestBatchCommandMutationOverflowPreservesCompletedEffects(t *testing.T) {
 		},
 	}
 	var stdout bytes.Buffer
-	if code := writeBatchJSON(&stdout, result, request, 4096); code != 1 || stdout.Len() > 4096 {
+	if code := writeBatchJSON(&stdout, result, request, 4096, batchReadBudgetResult{}); code != 1 || stdout.Len() > 4096 {
 		t.Fatalf("writeBatchJSON() code=%d output bytes=%d", code, stdout.Len())
 	}
 	var response envelope
@@ -612,7 +612,7 @@ func TestBatchJSONAttachmentSaveErrorPreservesVerifiedEvidence(t *testing.T) {
 		}},
 	}
 	var stdout bytes.Buffer
-	if code := writeBatchJSON(&stdout, result, request, maximumJSONOutputBytes); code != 1 {
+	if code := writeBatchJSON(&stdout, result, request, maximumJSONOutputBytes, batchReadBudgetResult{}); code != 1 {
 		t.Fatalf("writeBatchJSON() code = %d, want partial-batch exit 1", code)
 	}
 	var response envelope
