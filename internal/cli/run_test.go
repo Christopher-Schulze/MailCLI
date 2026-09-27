@@ -695,7 +695,7 @@ func TestDraftSaveAndOpenCommands(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	code = runMailDraftOpen(context.Background(), service, []string{"--message", "msg_ref", "--json"}, &stdout, &stderr)
+	code = runMailDraftOpen(context.Background(), service, []string{"--ref", "msg_ref", "--json"}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), `"command":"drafts.open"`) {
 		t.Fatalf("open code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}

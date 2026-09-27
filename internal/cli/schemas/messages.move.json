@@ -7,7 +7,7 @@
       "value_type": "ref",
       "takes_value": true,
       "value_required": true,
-      "required": true,
+      "repeatable": true,
       "description": "resource reference"
     },
     {
@@ -31,6 +31,19 @@
       "description": "emit JSON"
     }
   ],
-  "positional_arguments": [],
-  "constraints": []
+  "positional_arguments": [
+    "REF"
+  ],
+  "constraints": [
+    {
+      "kind": "reference_source",
+      "flags": [
+        "--ref"
+      ],
+      "fields": [
+        "REF"
+      ],
+      "description": "Supply one non-empty reference; all supplied --ref and REF values must be identical."
+    }
+  ]
 }

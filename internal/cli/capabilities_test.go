@@ -448,7 +448,7 @@ func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
 		args []string
 		want string
 	}{
-		{args: []string{"drafts", "open", "--message", "ref"}, want: "read"},
+		{args: []string{"drafts", "open", "--ref", "ref"}, want: "read"},
 		{args: []string{"drafts", "reconcile", "--ref", "draft"}, want: "local-write+imap-write"},
 	} {
 		contract, _ := commandContractForArgs(test.args)

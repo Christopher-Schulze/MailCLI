@@ -7,7 +7,7 @@
       "value_type": "ref",
       "takes_value": true,
       "value_required": true,
-      "required": true,
+      "repeatable": true,
       "description": "draft reference"
     },
     {
@@ -62,8 +62,20 @@
       "description": "maximum bounded bytes"
     }
   ],
-  "positional_arguments": [],
+  "positional_arguments": [
+    "REF"
+  ],
   "constraints": [
+    {
+      "kind": "reference_source",
+      "flags": [
+        "--ref"
+      ],
+      "fields": [
+        "REF"
+      ],
+      "description": "Supply one non-empty reference; all supplied --ref and REF values must be identical."
+    },
     {
       "kind": "mutually_exclusive",
       "flags": [

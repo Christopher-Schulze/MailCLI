@@ -278,21 +278,16 @@ func captureCommandParserFlags(t *testing.T, commandID string) map[string]parser
 		}
 		registered["--"+option.Name] = parserFlagSnapshot{
 			ValueKind:  valueType.Kind().String(),
-			TakesValue: parserFlagTakesValue(option.Value),
+			TakesValue: flagTakesValue(option.Value),
 			Default:    option.DefValue,
-			Repeatable: parserFlagCollectsRepeatedValues(option),
+			Repeatable: parserFlagCollectsRepeatedValues(option) || option.Name == "ref",
 		}
 	})
 	return registered
 }
 
-func parserFlagTakesValue(value flag.Value) bool {
-	booleanFlag, ok := value.(interface{ IsBoolFlag() bool })
-	return !ok || !booleanFlag.IsBoolFlag()
-}
-
 func parserFlagCollectsRepeatedValues(option *flag.Flag) bool {
-	if !parserFlagTakesValue(option.Value) {
+	if !flagTakesValue(option.Value) {
 		return false
 	}
 	first := "mailcli-schema-first"
@@ -741,6 +736,40 @@ func TestSchemaDescribesRepeatableDraftFlags(t *testing.T) {
 				t.Fatalf("%s flag %s metadata = %+v", command, name, flag)
 			}
 		}
+	}
+}
+
+func TestReferenceRouteSchemasPublishCanonicalFlagAndOperand(t *testing.T) {
+	commands := referenceRouteIDs()
+	if len(commands) != 24 {
+		t.Fatalf("reference route inventory has %d commands, want 24", len(commands))
+	}
+	for _, command := range commands {
+		t.Run(command, func(t *testing.T) {
+			schema := decodeTestCommandSchema(t, schemaForCommand(command))
+			flags := schemaFlagsByName(schema)
+			ref, exists := flags["--ref"]
+			if !exists || !ref.TakesValue || !ref.ValueRequired || ref.Required || !ref.Repeatable {
+				t.Fatalf("--ref schema = %+v, exists=%t", ref, exists)
+			}
+			if _, exists := flags["--message"]; exists {
+				t.Fatal("legacy --message remains in canonical schema")
+			}
+			if !reflect.DeepEqual(schema.PositionalArguments, []string{"REF"}) {
+				t.Fatalf("positional_arguments = %q, want [REF]", schema.PositionalArguments)
+			}
+			var source *testConstraint
+			for index := range schema.Constraints {
+				if schema.Constraints[index].Kind == "reference_source" {
+					source = &schema.Constraints[index]
+				}
+			}
+			if source == nil || !reflect.DeepEqual(source.Flags, []string{"--ref"}) ||
+				!reflect.DeepEqual(source.Fields, []string{"REF"}) ||
+				source.Description != "Supply one non-empty reference; all supplied --ref and REF values must be identical." {
+				t.Fatalf("reference_source constraint = %+v", source)
+			}
+		})
 	}
 }
 

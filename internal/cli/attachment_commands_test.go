@@ -76,7 +76,7 @@ func runAttachmentSaveOutcomeCase(t *testing.T, test attachmentSaveOutcomeCase) 
 	saver := &attachmentSaveResult{saved: saved, err: err}
 	var stdout, stderr bytes.Buffer
 	code := runAttachmentsSave(context.Background(), saver, []string{
-		"--message", "message", "--attachment", "1", "--output", outputPath, "--json",
+		"--ref", "message", "--attachment", "1", "--output", outputPath, "--json",
 	}, &stdout, &stderr)
 	if code != 1 || stderr.Len() != 0 {
 		t.Fatalf("runAttachmentsSave() = (%d, %q, %q), want JSON operation failure", code, stdout.String(), stderr.String())

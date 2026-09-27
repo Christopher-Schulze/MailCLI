@@ -381,7 +381,7 @@ func TestDraftsAdoptCopiesStoreDraft(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDrafts(context.Background(), service, []string{
-		"adopt", "--message", "msg_store_draft", "--json",
+		"adopt", "--ref", "msg_store_draft", "--json",
 	}, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
@@ -410,7 +410,7 @@ func TestDraftsAdoptMissingStoreDraftFails(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDrafts(context.Background(), service, []string{
-		"adopt", "--message", "msg_missing", "--json",
+		"adopt", "--ref", "msg_missing", "--json",
 	}, &stdout, &stderr)
 	if code == 0 || stderr.Len() != 0 {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())

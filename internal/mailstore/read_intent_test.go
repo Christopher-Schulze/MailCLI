@@ -186,7 +186,7 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 	if len(visibleFields) != 9 || visibleFields["content"] != nil || visibleFields["headers"] != nil {
 		t.Fatalf("default metadata fields = %v", visibleFields)
 	}
-	attachmentArgs := []string{"attachments", "list", "--message", ref, "--json"}
+	attachmentArgs := []string{"attachments", "list", "--ref", ref, "--json"}
 	optimizedCode, optimizedOutput, optimizedStderr := runReadIntentCLI(t, client, attachmentArgs...)
 	legacyCode, legacyOutput, legacyStderr = runLegacyReadIntentCLI(t, client, attachmentArgs...)
 	if optimizedCode != legacyCode || optimizedStderr != legacyStderr ||
@@ -237,7 +237,7 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 		!reflect.DeepEqual(optimizedPartial.Attachments, legacyPartial.Attachments) {
 		t.Fatalf("partial evidence changed: optimized=%+v legacy=%+v", optimizedPartial, legacyPartial)
 	}
-	code, output, stderr = runReadIntentCLI(t, client, "attachments", "list", "--message", ref, "--json")
+	code, output, stderr = runReadIntentCLI(t, client, "attachments", "list", "--ref", ref, "--json")
 	if code != 0 || stderr != "" {
 		t.Fatalf("partial attachment JSON code = %d, stderr = %q, output = %s", code, stderr, output)
 	}
@@ -253,7 +253,7 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 		t.Fatalf("unmarshal partial attachment JSON: %v", err)
 	}
 	legacyCode, legacyOutput, legacyStderr = runLegacyReadIntentCLI(t, client,
-		"attachments", "list", "--message", ref, "--json",
+		"attachments", "list", "--ref", ref, "--json",
 	)
 	if legacyCode != code || legacyStderr != stderr || !bytes.Equal([]byte(legacyOutput), []byte(output)) {
 		t.Fatalf("partial attachment JSON changed: optimized=%s legacy=%s", output, legacyOutput)

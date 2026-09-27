@@ -104,7 +104,7 @@ func TestDraftJSONRejectsAmbiguityBeforeAnyMutation(t *testing.T) {
 					args = append(args, "--ref", draft.Ref, "--expected-revision", draft.Revision)
 				case "reply", "forward":
 					args[0] = "messages"
-					args = append(args, "--message", sourceRef)
+					args = append(args, "--ref", sourceRef)
 				}
 				assertJSONInputRejected(t, service, args, test.location)
 				if after := jsonInputDirectoryState(t, root); !reflect.DeepEqual(before, after) {
@@ -194,7 +194,7 @@ func TestDraftJSONValidInputKeepsWorkflowMeaning(t *testing.T) {
 				args = append(args, "--ref", draft.Ref, "--expected-revision", draft.Revision)
 			case "reply", "forward":
 				args[0] = "messages"
-				args = append(args, "--message", jsonInputSourceRef(t))
+				args = append(args, "--ref", jsonInputSourceRef(t))
 			}
 			var stdout, stderr bytes.Buffer
 			code := Run(context.Background(), service, args, &stdout, &stderr)

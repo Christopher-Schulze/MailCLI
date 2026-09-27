@@ -36,7 +36,7 @@ func TestDraftCommandsReturnPersistedDiagnostics(t *testing.T) {
 				args = append(args, "--ref", previous.Ref, "--expected-revision", previous.Revision)
 			case "reply", "forward":
 				args[0] = "messages"
-				args = append(args, "--message", jsonInputSourceRef(t))
+				args = append(args, "--ref", jsonInputSourceRef(t))
 			}
 			var stdout, stderr bytes.Buffer
 			code := Run(context.Background(), service, args, &stdout, &stderr)

@@ -64,7 +64,7 @@ func draftEffectCommand(t *testing.T, service *mail.Service, command string) ([]
 	args := []string{"drafts", command, "--to", "recipient@example.com", "--subject", "After", "--body", "Body"}
 	if command == "reply" || command == "forward" {
 		args[0] = "messages"
-		return append(args, "--message", jsonInputSourceRef(t)), ""
+		return append(args, "--ref", jsonInputSourceRef(t)), ""
 	}
 	if command == "create" {
 		return args, ""
@@ -172,7 +172,7 @@ func TestProjectionLimitSuggestsOnlySupportedExport(t *testing.T) {
 	}{
 		{[]string{"messages", "get", "--ref", "msg_ref", "--view", "full"}, true},
 		{[]string{"messages", "raw", "--ref", "msg_ref"}, true},
-		{[]string{"drafts", "open", "--message", "msg_ref", "--view", "full"}, false},
+		{[]string{"drafts", "open", "--ref", "msg_ref", "--view", "full"}, false},
 	} {
 		gateway := &projectionGateway{message: projectionMessage(), raw: "raw bytes"}
 		args := append(test.args, "--max-bytes", "1", "--json")

@@ -11,7 +11,7 @@ MailCLI gives command-line tools and agents a typed interface to the accounts al
 ```bash
 mailcli messages search --sender example.com --after 2026-01-01 --json
 mailcli messages get --ref MESSAGE_REF --json
-mailcli attachments save --message MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/path/file.pdf --json
+mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/path/file.pdf --json
 ```
 
 ## Why MailCLI
@@ -268,9 +268,9 @@ mailcli messages get --ref MESSAGE_REF --view full --export /absolute/new/path/m
 mailcli messages raw --ref MESSAGE_REF
 mailcli messages raw --ref MESSAGE_REF --export /absolute/new/path/message.eml --json
 mailcli messages thread --ref MESSAGE_REF --json
-mailcli attachments list --message MESSAGE_REF --json
+mailcli attachments list --ref MESSAGE_REF --json
 mailcli attachments save \
-  --message MESSAGE_REF \
+  --ref MESSAGE_REF \
   --attachment ATTACHMENT_ID \
   --output /absolute/non-existing/path/document.pdf \
   --json
@@ -358,10 +358,10 @@ Transport code lookup traverses wrapped and joined causes. When an error tree in
 
 ```bash
 printf '%s' '{"body":"Thanks, I will review this.\n"}' \
-  | mailcli messages reply --message MESSAGE_REF --input - --all --json
+  | mailcli messages reply --ref MESSAGE_REF --input - --all --json
 
 printf '%s' '{"to":[{"address":"recipient@example.com"}],"body":"For your review.\n"}' \
-  | mailcli messages forward --message MESSAGE_REF --input - --json
+  | mailcli messages forward --ref MESSAGE_REF --input - --json
 
 mailcli messages mark --ref MESSAGE_REF --read true --flagged false --json
 mailcli messages move --ref MESSAGE_REF --mailbox DESTINATION_MAILBOX_REF --json

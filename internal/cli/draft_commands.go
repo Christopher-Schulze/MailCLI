@@ -178,7 +178,7 @@ func runDraftSave(ctx context.Context, service *mail.Service, args []string, std
 
 func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts open", stderr)
-	messageRef := flags.String("message", "", "Mail.app draft message ref")
+	ref := flags.String("ref", "", "Mail.app draft message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetMessage, defaultMessageOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
@@ -191,7 +191,7 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	output.stderr = stderr
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
-	message, err := service.OpenDraft(operationCtx, *messageRef)
+	message, err := service.OpenDraft(operationCtx, *ref)
 	if err != nil {
 		return failMessageRead("drafts.open", *jsonOutput, message, err, stdout, stderr, output)
 	}
@@ -206,7 +206,7 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 
 func runDraftAdopt(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts adopt", stderr)
-	messageRef := flags.String("message", "", "Mail.app draft message ref to adopt")
+	ref := flags.String("ref", "", "Mail.app draft message ref to adopt")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
@@ -217,7 +217,7 @@ func runDraftAdopt(ctx context.Context, service *mail.Service, args []string, st
 		return failCommand("drafts.adopt", *jsonOutput, err, stdout, stderr)
 	}
 	output.stderr = stderr
-	draft, err := service.AdoptStoreDraft(ctx, *messageRef)
+	draft, err := service.AdoptStoreDraft(ctx, *ref)
 	if err != nil {
 		return failProjectedEmpty("drafts.adopt", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -632,7 +632,7 @@ func runMessageForward(ctx context.Context, service *mail.Service, args []string
 // creates the local review draft.
 func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.DraftKind, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages "+string(kind), stderr)
-	messageRef := flags.String("message", "", "source message ref")
+	ref := flags.String("ref", "", "source message ref")
 	inputFlags := registerDraftInputFlags(flags)
 	replyAll := false
 	if kind == mail.DraftKindReply {
@@ -652,7 +652,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
-	source, err := service.ThreadSource(ctx, *messageRef)
+	source, err := service.ThreadSource(ctx, *ref)
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
@@ -661,7 +661,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{
-		Kind: kind, SourceRef: *messageRef, ReplyAll: replyAll, Input: derived,
+		Kind: kind, SourceRef: *ref, ReplyAll: replyAll, Input: derived,
 		SourceMessageID: sourceMessageID, SourceReferences: references,
 	})
 	if err != nil {

@@ -138,7 +138,7 @@ func TestAttachmentsListPreservesPartialEvidenceAfterHydrationFailure(t *testing
 		},
 	}
 	code, output, stderr := runIntentProjectionCommand(t, gateway,
-		"attachments", "list", "--message", "msg_ref", "--json")
+		"attachments", "list", "--ref", "msg_ref", "--json")
 	if code != 1 || stderr != "" || len(gateway.intents) != 1 ||
 		gateway.intents[0] != mail.MessageReadIntentAttachments ||
 		!strings.Contains(output, `"content_source":"emlx_partial"`) ||

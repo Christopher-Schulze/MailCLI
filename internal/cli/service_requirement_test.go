@@ -57,12 +57,12 @@ func TestRequiresMailService(t *testing.T) {
 		{name: "send group", args: []string{"send"}},
 		{name: "send setup", args: []string{"send", "setup", "--from", "user@icloud.com"}},
 		{name: "send setup remove", args: []string{"send", "setup", "--from", "user@icloud.com", "--remove"}},
-		{name: "reply draft resolves source", args: []string{"messages", "reply", "--message", "ref"}, want: true},
-		{name: "forward draft resolves source", args: []string{"messages", "forward", "--message", "ref"}, want: true},
+		{name: "reply draft resolves source", args: []string{"messages", "reply", "--ref", "ref"}, want: true},
+		{name: "forward draft resolves source", args: []string{"messages", "forward", "--ref", "ref"}, want: true},
 		{name: "doctor", args: []string{"doctor"}, want: true},
 		{name: "list accounts", args: []string{"accounts", "list"}, want: true},
 		{name: "read message", args: []string{"--json", "messages", "get", "--ref", "ref"}, want: true},
-		{name: "open Mail draft", args: []string{"drafts", "open", "--message", "ref"}, want: true},
+		{name: "open Mail draft", args: []string{"drafts", "open", "--ref", "ref"}, want: true},
 		{name: "reconcile draft", args: []string{"drafts", "reconcile", "--ref", "draft"}, want: true},
 	}
 
@@ -89,8 +89,8 @@ func TestRequiresSignalContext(t *testing.T) {
 		{args: []string{"drafts", "create", "--to", "recipient@example.com", "--body", "body"}, want: true},
 		{args: []string{"drafts", "edit", "--ref", "draft"}, want: true},
 		{args: []string{"drafts", "update", "--ref", "draft"}, want: true},
-		{args: []string{"messages", "reply", "--message", "ref"}, want: true},
-		{args: []string{"messages", "forward", "--message", "ref"}, want: true},
+		{args: []string{"messages", "reply", "--ref", "ref"}, want: true},
+		{args: []string{"messages", "forward", "--ref", "ref"}, want: true},
 		{args: []string{"drafts", "handoff", "--ref", "draft"}, want: true},
 		{args: []string{"drafts", "save", "--ref", "draft"}, want: true},
 		{args: []string{"drafts", "send", "--ref", "draft", "--confirm"}, want: true},
@@ -150,11 +150,15 @@ func TestRequiresMailServiceSkipsDirectReconcile(t *testing.T) {
 			t.Fatalf("SendDraft() error = %v, want %s", err, transport.CodeSMTPSubmissionUnknown)
 		}
 	}
-	args := []string{"drafts", "reconcile", "--ref", draft.Ref}
-	if RequiresMailService(args) {
-		t.Fatalf("RequiresMailService(%q) = true for a direct unknown claim", args)
-	}
-	if !RequiresSignalContext(args) {
-		t.Fatalf("RequiresSignalContext(%q) = false for direct IMAP recovery", args)
+	for _, args := range [][]string{
+		{"drafts", "reconcile", "--ref", draft.Ref},
+		{"drafts", "reconcile", draft.Ref},
+	} {
+		if RequiresMailService(args) {
+			t.Fatalf("RequiresMailService(%q) = true for a direct unknown claim", args)
+		}
+		if !RequiresSignalContext(args) {
+			t.Fatalf("RequiresSignalContext(%q) = false for direct IMAP recovery", args)
+		}
 	}
 }

@@ -46,7 +46,7 @@ func runAttachmentsList(
 	stderr io.Writer,
 ) int {
 	flags := newFlagSet("attachments list", stderr)
-	messageRef := flags.String("message", "", "message ref")
+	ref := flags.String("ref", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetAttachment, outputViewMetadata, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
@@ -58,7 +58,7 @@ func runAttachmentsList(
 	}
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
-	message, readErr := service.GetMessageWithIntent(operationCtx, *messageRef, mail.MessageReadIntentAttachments)
+	message, readErr := service.GetMessageWithIntent(operationCtx, *ref, mail.MessageReadIntentAttachments)
 	if readErr != nil && message.ContentSource == "" && len(message.Attachments) == 0 {
 		if *jsonOutput {
 			return failProjectedEmpty("attachments.list", true, output, readErr, stdout, stderr)
@@ -125,7 +125,7 @@ func runAttachmentsSave(
 	stderr io.Writer,
 ) int {
 	flags := newFlagSet("attachments save", stderr)
-	messageRef := flags.String("message", "", "message ref")
+	ref := flags.String("ref", "", "message ref")
 	attachmentID := flags.String("attachment", "", "attachment id")
 	outputPath := flags.String("output", "", "absolute non-existing output path")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -135,7 +135,7 @@ func runAttachmentsSave(
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	saved, err := service.SaveAttachment(operationCtx, mail.SaveAttachmentRequest{
-		MessageRef: *messageRef, AttachmentID: *attachmentID, OutputPath: *outputPath,
+		MessageRef: *ref, AttachmentID: *attachmentID, OutputPath: *outputPath,
 	})
 	if err != nil {
 		data := responseData{}

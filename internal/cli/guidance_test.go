@@ -327,7 +327,7 @@ func TestPartialHydrationGuidanceUsesSupportedCommandArguments(t *testing.T) {
 		t.Fatalf("messages.get recovery = %+v", guidance.Recovery)
 	}
 	guidance = guidanceForResponse("drafts.open", responseData{Message: &message}, err)
-	if guidance.Recovery.Command != "drafts.open" || !equalStrings(guidance.Recovery.Args, []string{"--message", "msg_ref", "--json"}) {
+	if guidance.Recovery.Command != "drafts.open" || !equalStrings(guidance.Recovery.Args, []string{"--ref", "msg_ref", "--json"}) {
 		t.Fatalf("drafts.open recovery = %+v", guidance.Recovery)
 	}
 }

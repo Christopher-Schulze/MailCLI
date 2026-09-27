@@ -571,22 +571,160 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 		writeFlagUsage(flags, stdout)
 		return 0
 	}
+	referenceState := referenceArgumentState{}
+	if flags.Lookup("ref") != nil {
+		args, referenceState = normalizeReferenceArguments(flags, args)
+	}
 	flags.SetOutput(io.Discard)
 	err := flags.Parse(args)
 	if errors.Is(err, flag.ErrHelp) {
 		writeFlagUsage(flags, stdout)
 		return 0
 	}
-	if err != nil || flags.NArg() != 0 {
-		if err != nil {
-			writeLine(stderr, err)
-		} else {
-			writeFormat(stderr, "unexpected argument %q\n", flags.Arg(0))
+	if err != nil {
+		writeLine(stderr, err)
+		writeFlagUsage(flags, stderr)
+		return 2
+	}
+	if flags.Lookup("ref") != nil {
+		if err := referenceArgumentError(flags, referenceState); err != nil {
+			jsonOutput := flags.Lookup("json")
+			return failCommand(
+				strings.ReplaceAll(flags.Name(), " ", "."),
+				jsonOutput != nil && jsonOutput.Value.String() == "true",
+				err, stdout, stderr,
+			)
 		}
+		return -1
+	}
+	if flags.NArg() != 0 {
+		writeFormat(stderr, "unexpected argument %q\n", flags.Arg(0))
 		writeFlagUsage(flags, stderr)
 		return 2
 	}
 	return -1
+}
+
+type referenceArgumentState struct {
+	flagValues       []string
+	missingFlagValue bool
+}
+
+func normalizeReferenceArguments(flags *flag.FlagSet, args []string) ([]string, referenceArgumentState) {
+	normalized := make([]string, 0, len(args)+2)
+	operands := make([]string, 0, 1)
+	state := referenceArgumentState{}
+	parsingOptions := true
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if !parsingOptions {
+			operands = append(operands, argument)
+			continue
+		}
+		if argument == "--" {
+			parsingOptions = false
+			continue
+		}
+		if argument == "" || argument == "-" || argument[0] != '-' {
+			operands = append(operands, argument)
+			continue
+		}
+		optionArgs, consumedThrough := normalizeReferenceOption(flags, args, index, &state)
+		normalized = append(normalized, optionArgs...)
+		index = consumedThrough
+	}
+	if len(operands) > 0 {
+		normalized = append(normalized, "--")
+		normalized = append(normalized, operands...)
+	}
+	return normalized, state
+}
+
+func normalizeReferenceOption(
+	flags *flag.FlagSet,
+	args []string,
+	index int,
+	state *referenceArgumentState,
+) ([]string, int) {
+	argument := args[index]
+	name, value, hasValue := flagArgument(argument)
+	option := flags.Lookup(name)
+	if option == nil || !flagTakesValue(option.Value) {
+		return []string{argument}, index
+	}
+	if hasValue {
+		if name == "ref" {
+			state.flagValues = append(state.flagValues, value)
+		}
+		return []string{argument}, index
+	}
+	if index+1 < len(args) {
+		value = args[index+1]
+		if name == "ref" {
+			state.flagValues = append(state.flagValues, value)
+		}
+		return []string{argument, value}, index + 1
+	}
+	if name == "ref" {
+		state.missingFlagValue = true
+		return []string{"--ref="}, index
+	}
+	return []string{argument}, index
+}
+
+func flagArgument(argument string) (string, string, bool) {
+	if strings.HasPrefix(argument, "--") {
+		argument = argument[2:]
+	} else {
+		argument = argument[1:]
+	}
+	name, value, hasValue := strings.Cut(argument, "=")
+	return name, value, hasValue
+}
+
+func flagTakesValue(value flag.Value) bool {
+	booleanFlag, ok := value.(interface{ IsBoolFlag() bool })
+	return !ok || !booleanFlag.IsBoolFlag()
+}
+
+func referenceArgumentError(flags *flag.FlagSet, state referenceArgumentState) error {
+	if state.missingFlagValue {
+		return &commandError{code: "invalid_argument", message: "--ref requires a value"}
+	}
+	for _, value := range state.flagValues {
+		if value == "" {
+			return &commandError{code: "invalid_argument", message: "--ref must not be empty"}
+		}
+	}
+	if len(state.flagValues) > 1 {
+		for _, value := range state.flagValues[1:] {
+			if value != state.flagValues[0] {
+				return &commandError{code: "invalid_argument", message: "repeated --ref values must match"}
+			}
+		}
+	}
+	operands := flags.Args()
+	if len(operands) > 1 {
+		return &commandError{code: "invalid_argument", message: "only one positional REF is allowed"}
+	}
+	if len(operands) == 1 && operands[0] == "" {
+		return &commandError{code: "invalid_argument", message: "REF must not be empty"}
+	}
+	ref := flags.Lookup("ref")
+	if len(operands) == 1 {
+		if len(state.flagValues) > 0 && state.flagValues[0] != operands[0] {
+			return &commandError{code: "invalid_argument", message: "--ref and positional REF must match"}
+		}
+		if len(state.flagValues) == 0 {
+			if err := ref.Value.Set(operands[0]); err != nil {
+				return &commandError{code: "invalid_argument", message: "invalid positional REF", cause: err}
+			}
+		}
+	}
+	if ref.Value.String() == "" {
+		return &commandError{code: "invalid_argument", message: "missing required --ref or REF"}
+	}
+	return nil
 }
 
 type parserFlagObserver interface {
@@ -618,7 +756,11 @@ func writeFlagUsage(flags *flag.FlagSet, writer io.Writer) {
 	options = append(options, optionHelp{synopsis: helpSynopsis, description: "Show command help"})
 	width = max(width, len(helpSynopsis))
 
-	writeFormat(writer, "Usage:\n  mailcli %s [options]\n\nOptions:\n", flags.Name())
+	usage := flags.Name() + " [options]"
+	if flags.Lookup("ref") != nil {
+		usage = flags.Name() + " [REF] [options]"
+	}
+	writeFormat(writer, "Usage:\n  mailcli %s\n\nOptions:\n", usage)
 	for _, option := range options {
 		writeFormat(writer, "  %-*s  %s\n", width, option.synopsis, option.description)
 	}

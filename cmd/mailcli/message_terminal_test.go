@@ -49,7 +49,7 @@ func TestRunMessageTerminalPresentationAndExactData(t *testing.T) {
 		args []string
 	}{
 		{"get", []string{"messages", "get", "--ref", summary.Ref}},
-		{"open", []string{"drafts", "open", "--message", summary.Ref}},
+		{"open", []string{"drafts", "open", "--ref", summary.Ref}},
 		{"table", []string{"messages", "list", "--mailbox", mailboxRef}},
 	}
 	for _, route := range routes {

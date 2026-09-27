@@ -112,7 +112,7 @@ func TestDraftsOpenUsesPartialHydrationFailureEnvelope(t *testing.T) {
 		message: failedHydrationMessage(),
 		err:     &testCodedError{code: "operation_canceled", message: "canceled"},
 	})
-	code := Run(context.Background(), service, []string{"drafts", "open", "--message", "msg_ref", "--json"}, &stdout, &stderr)
+	code := Run(context.Background(), service, []string{"drafts", "open", "--ref", "msg_ref", "--json"}, &stdout, &stderr)
 	if code != 1 || stderr.Len() != 0 {
 		t.Fatalf("Run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
@@ -186,7 +186,7 @@ func TestHydrationEnvelopePreservesCausePolicyAndSanitizesDiagnostics(t *testing
 				if test.name == "unknown UID identity" {
 					argument := "--ref"
 					if command == "drafts.open" {
-						argument = "--message"
+						argument = "--ref"
 					}
 					if guidance.Phase != mail.OperationPhaseHydration || guidance.Recovery.Command != command ||
 						!equalStrings(guidance.Recovery.Args, []string{argument, "msg_ref", "--json"}) {

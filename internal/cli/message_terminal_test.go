@@ -104,7 +104,7 @@ func TestMessageDetailRoutesPreserveJSONAndSanitizeHumanErrors(t *testing.T) {
 		args []string
 	}{
 		{"get", []string{"messages", "get", "--ref", "msg_ref"}},
-		{"open", []string{"drafts", "open", "--message", "msg_ref"}},
+		{"open", []string{"drafts", "open", "--ref", "msg_ref"}},
 	}
 	for _, route := range routes {
 		for _, state := range []string{"complete", "partial", "unavailable"} {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -281,11 +282,7 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 		if message.Summary.Ref != "" && (guidance.Recovery.Action == mail.RecoveryRetry || guidance.Recovery.Action == mail.RecoveryCorrect) &&
 			(command == "messages.get" || command == "drafts.open") {
 			guidance.Recovery.Command = command
-			argument := "--ref"
-			if command == "drafts.open" {
-				argument = "--message"
-			}
-			guidance.Recovery.Args = []string{argument, message.Summary.Ref, "--json"}
+			guidance.Recovery.Args = []string{"--ref", message.Summary.Ref, "--json"}
 		}
 	}
 	return guidance
@@ -462,18 +459,17 @@ func draftReconcileCommandRequired(args []string) bool {
 }
 
 func draftRefArgument(args []string) (string, bool) {
-	for index, argument := range args {
-		if argument == "--ref" {
-			if index+1 >= len(args) {
-				return "", true
-			}
-			return args[index+1], true
-		}
-		if strings.HasPrefix(argument, "--ref=") {
-			return strings.TrimPrefix(argument, "--ref="), true
-		}
+	flags := newFlagSet("drafts reconcile", io.Discard)
+	ref := flags.String("ref", "", "draft ref")
+	flags.Bool("json", false, "emit JSON")
+	normalized, state := normalizeReferenceArguments(flags, args)
+	if err := flags.Parse(normalized); err != nil {
+		return "", false
 	}
-	return "", false
+	if err := referenceArgumentError(flags, state); err != nil {
+		return "", false
+	}
+	return *ref, true
 }
 
 func runJSONCommand(
@@ -693,6 +689,9 @@ func runCommand(
 
 // NormalizeGlobalJSON moves a global --json flag to the command tail.
 func NormalizeGlobalJSON(args []string) ([]string, bool) {
+	if normalized, requested, handled := normalizeReferenceGlobalJSON(args); handled {
+		return normalized, requested
+	}
 	requested := false
 	normalized := make([]string, 0, len(args)+1)
 	for index, argument := range args {
@@ -715,6 +714,117 @@ func NormalizeGlobalJSON(args []string) ([]string, bool) {
 		normalized = append(normalized, "--json")
 	}
 	return normalized, true
+}
+
+func normalizeReferenceGlobalJSON(args []string) ([]string, bool, bool) {
+	contract, commandEnd, found := referenceCommandForArgs(args)
+	if !found {
+		return nil, false, false
+	}
+	flagArity, ok := referenceGlobalJSONFlagArity(contract)
+	if !ok {
+		return nil, false, false
+	}
+	beforeDelimiter, afterDelimiter, requested := separateReferenceGlobalJSON(args, commandEnd, flagArity)
+	if !requested {
+		return args, false, true
+	}
+	beforeDelimiter = append(beforeDelimiter, "--json")
+	return append(beforeDelimiter, afterDelimiter...), true, true
+}
+
+func referenceCommandForArgs(args []string) (*commandContract, int, bool) {
+	commandArgs := make([]string, 0, len(args))
+	for _, argument := range args {
+		if argument != "--json" {
+			commandArgs = append(commandArgs, argument)
+		}
+	}
+	contract, _ := commandContractForArgs(commandArgs)
+	if contract == nil {
+		return nil, 0, false
+	}
+	parts := strings.Split(contract.ID, ".")
+	commandEnd := referenceCommandEnd(args, parts)
+	return contract, commandEnd, commandEnd > 0
+}
+
+func referenceCommandEnd(args, parts []string) int {
+	matched := 0
+	for index, argument := range args {
+		if argument == "--json" {
+			continue
+		}
+		if argument == parts[matched] {
+			matched++
+			if matched == len(parts) {
+				return index + 1
+			}
+		}
+	}
+	return 0
+}
+
+func referenceGlobalJSONFlagArity(contract *commandContract) (map[string]bool, bool) {
+	var schema struct {
+		Flags []struct {
+			Name       string `json:"name"`
+			TakesValue bool   `json:"takes_value"`
+		} `json:"flags"`
+		PositionalArguments []string `json:"positional_arguments"`
+	}
+	if err := json.Unmarshal(schemaForCommand(contract.ID), &schema); err != nil {
+		return nil, false
+	}
+	flagArity := make(map[string]bool, len(schema.Flags))
+	hasReferenceFlag := false
+	for _, option := range schema.Flags {
+		flagArity[strings.TrimPrefix(option.Name, "--")] = option.TakesValue
+		hasReferenceFlag = hasReferenceFlag || option.Name == "--ref"
+	}
+	hasReferenceOperand := slices.Contains(schema.PositionalArguments, "REF")
+	return flagArity, hasReferenceFlag && hasReferenceOperand
+}
+
+func separateReferenceGlobalJSON(args []string, commandEnd int, flagArity map[string]bool) ([]string, []string, bool) {
+	beforeDelimiter := make([]string, 0, len(args)+1)
+	afterDelimiter := make([]string, 0, 1)
+	requested, parsingOptions := false, true
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if index < commandEnd {
+			if argument == "--json" {
+				requested = true
+				continue
+			}
+			beforeDelimiter = append(beforeDelimiter, argument)
+			continue
+		}
+		if !parsingOptions {
+			afterDelimiter = append(afterDelimiter, argument)
+			continue
+		}
+		if argument == "--" {
+			parsingOptions = false
+			afterDelimiter = append(afterDelimiter, argument)
+			continue
+		}
+		beforeDelimiter = append(beforeDelimiter, argument)
+		if argument == "" || argument == "-" || argument[0] != '-' {
+			continue
+		}
+		name, _, hasValue := flagArgument(argument)
+		if takesValue, known := flagArity[name]; known && takesValue && !hasValue && index+1 < len(args) {
+			beforeDelimiter = append(beforeDelimiter, args[index+1])
+			index++
+			continue
+		}
+		if argument == "--json" {
+			beforeDelimiter = beforeDelimiter[:len(beforeDelimiter)-1]
+			requested = true
+		}
+	}
+	return beforeDelimiter, afterDelimiter, requested
 }
 
 func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {

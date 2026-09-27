@@ -36,7 +36,7 @@ func TestHumanReadOutputPreservesCompletenessTable(t *testing.T) {
 			want: []string{"Content source: emlx_partial", "Content complete: false", "Missing parts: external attachment bytes"},
 		},
 		{
-			name: "attachment list", args: []string{"attachments", "list", "--message", "msg_ref"},
+			name: "attachment list", args: []string{"attachments", "list", "--ref", "msg_ref"},
 			want: []string{"size=unknown", "size_known=false", "content\tsource=emlx_partial\tcomplete=false", "missing=external attachment bytes"},
 		},
 	}
@@ -63,7 +63,7 @@ func TestAttachmentJSONPreservesCompleteness(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Run(
 		context.Background(), mail.NewService(partialMessageGateway{}),
-		[]string{"attachments", "list", "--message", "msg_ref", "--json"},
+		[]string{"attachments", "list", "--ref", "msg_ref", "--json"},
 		&stdout, &stderr,
 	)
 	if code != 0 || stderr.Len() != 0 {
