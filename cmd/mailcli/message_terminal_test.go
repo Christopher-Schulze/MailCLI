@@ -54,7 +54,7 @@ func TestRunMessageTerminalPresentationAndExactData(t *testing.T) {
 	}
 	for _, route := range routes {
 		t.Run(route.name, func(t *testing.T) {
-			visible := runTerminalCommand(t, route.args...)
+			visible := runTerminalCommand(t, append(route.args, "--human")...)
 			if strings.ContainsAny(visible, "\x1b\x07\r\b\u009b\u009d\u009c") || !strings.Contains(visible, "Résumé") {
 				t.Fatalf("unsafe or lossy presentation = %q", visible)
 			}
@@ -79,7 +79,7 @@ func TestRunMessageTerminalPresentationAndExactData(t *testing.T) {
 			}
 		})
 	}
-	if got := runTerminalCommand(t, "messages", "raw", "--ref", summary.Ref); got != raw {
+	if got := runTerminalCommand(t, "messages", "raw", "--ref", summary.Ref, "--human"); got != raw {
 		t.Fatalf("raw output = %q, want %q", got, raw)
 	}
 	var rawResponse struct {

@@ -37,7 +37,7 @@ func TestOutputTooLargeConstructionSitesStayEnumerated(t *testing.T) {
 		"projection.go:writeProjectedSuccess":          1,
 		"list_pagination.go:writeBoundedListSuccess":   1,
 		"draft_workflow.go:writeBoundedDraftPreview":   1,
-		"batch_commands.go:batchOutputTooLargeError":   2,
+		"batch_commands.go:batchOutputTooLargeError":   3,
 		"batch_commands.go:preflightBatchOutputBudget": 1,
 	}
 	got := make(map[string]int)
@@ -88,6 +88,44 @@ func TestOutputTooLargeConstructionSitesStayEnumerated(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("output overflow constructor sites = %v, want %v", got, want)
+	}
+}
+
+func TestBatchOverflowConstructorsPreserveMeasurementEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		budget   batchReadBudgetResult
+		required int64
+		limit    int64
+		measured outputSizeMeasurement
+	}{
+		{name: "serialized envelope", required: 8192, limit: 4096, measured: outputSizeExact},
+		{name: "producer content", budget: batchReadBudgetResult{
+			exceeded: true, requiredBytes: 4097, limitBytes: 2048,
+		}, required: 4097, limit: 2048, measured: outputSizeLowerBound},
+		{name: "complete admitted envelope", budget: batchReadBudgetResult{
+			exceeded: true, requiredBytes: 5001, limitBytes: 2048, measured: outputSizeExact,
+		}, required: 5001, limit: 2048, measured: outputSizeExact},
+		{name: "partial admitted envelope", budget: batchReadBudgetResult{
+			exceeded: true, requiredBytes: 5001, limitBytes: 2048, measured: outputSizeLowerBound,
+		}, required: 5001, limit: 2048, measured: outputSizeLowerBound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := mail.BatchResult{Operation: mail.BatchOperationRead}
+			response := batchOutputFailureEnvelope(result, responseData{}, batchOutputTooLargeError(4096, 8192, test.budget))
+			payload, err := marshalEnvelope(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(payload, &response); err != nil {
+				t.Fatal(err)
+			}
+			assertOutputSizeEvidence(t, response, test.required, test.limit, string(test.measured))
+			if response.Error.Guidance == nil || response.Error.Guidance.EffectCertainty != mail.EffectNone ||
+				!response.Error.Guidance.ReplayAllowed || response.Error.Guidance.Retryability != mail.RetryUserInputRequired {
+				t.Fatalf("read overflow lost corrected-replay guidance: %+v", response.Error.Guidance)
+			}
+		})
 	}
 }
 

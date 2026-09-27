@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"mailcli/internal/mail"
 )
@@ -63,7 +67,14 @@ func runEditorCLI(t *testing.T, home string, args ...string) (editorCLIResponse,
 	var stdout, stderr bytes.Buffer
 	command := newEditorCLIProcess(t, home, args...)
 	command.Stdout, command.Stderr = &stdout, &stderr
+	var finishTerminal func()
+	if len(args) >= 2 && args[0] == "drafts" && args[1] == "edit" {
+		finishTerminal = attachEditorCLITerminal(t, command, &stderr)
+	}
 	err := command.Run()
+	if finishTerminal != nil {
+		finishTerminal()
+	}
 	code := 0
 	if err != nil {
 		var exit *exec.ExitError
@@ -77,6 +88,72 @@ func runEditorCLI(t *testing.T, home string, args ...string) (editorCLIResponse,
 		t.Fatalf("one JSON envelope required: error=%v code=%d stdout=%q stderr=%q", err, code, &stdout, &stderr)
 	}
 	return response, stderr.String(), code
+}
+
+func openEditorCLITerminal(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
+	for _, request := range []uint{unix.TIOCPTYGRANT, unix.TIOCPTYUNLK} {
+		if err := unix.IoctlSetInt(int(master.Fd()), request, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var name [128]byte
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), unix.TIOCPTYGNAME, uintptr(unsafe.Pointer(&name[0])))
+	end := bytes.IndexByte(name[:], 0)
+	if errno != 0 || end < 1 {
+		t.Fatalf("PTY slave name: errno=%v end=%d", errno, end)
+	}
+	slave, err := os.OpenFile(string(name[:end]), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := slave.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
+	return master, slave
+}
+
+func attachEditorCLITerminal(t *testing.T, command *exec.Cmd, diagnostics io.Writer) func() {
+	t.Helper()
+	master, slave := openEditorCLITerminal(t)
+	attributes, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attributes.Oflag &^= unix.ONLCR
+	if err := unix.IoctlSetTermios(int(slave.Fd()), unix.TIOCSETA, attributes); err != nil {
+		t.Fatal(err)
+	}
+	command.Stdin, command.Stderr = slave, slave
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	drained := make(chan error, 1)
+	go func() { _, err := io.Copy(diagnostics, master); drained <- err }()
+	closed := false
+	finish := func() {
+		if closed {
+			return
+		}
+		closed = true
+		if err := master.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := <-drained; err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, syscall.EIO) {
+			t.Errorf("terminal diagnostics: %v", err)
+		}
+	}
+	t.Cleanup(finish)
+	return finish
 }
 
 func TestDraftEditorCLISeparatesNoisyOutputAndRetainsFailure(t *testing.T) {
@@ -177,6 +254,7 @@ func TestDraftEditorCLICancellationKeepsJSONAndCandidate(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	command := newEditorCLIProcess(t, home, "drafts", "edit", "--ref", created.Data.Draft.Ref, "--editor", editor, "--json")
 	command.Stdout, command.Stderr = &stdout, &stderr
+	finishTerminal := attachEditorCLITerminal(t, command, &stderr)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +294,7 @@ func TestDraftEditorCLICancellationKeepsJSONAndCandidate(t *testing.T) {
 	case <-time.After(7 * time.Second):
 		t.Fatal("editor cancellation did not finish")
 	}
+	finishTerminal()
 	var response editorCLIResponse
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || response.OK || response.Error == nil ||
 		response.Error.Code != "editor_canceled" || response.Error.Editor == nil {
