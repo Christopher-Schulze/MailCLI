@@ -1758,6 +1758,42 @@ func TestFetchMessage(t *testing.T) {
 	}
 }
 
+func TestFetchMessageHeadersBoundsLiteral(t *testing.T) {
+	headers := []byte("From: Alice <alice@example.com>\r\nSubject: Header read\r\n\r\n")
+	response := []byte("* 1 FETCH (UID 42 BODY[HEADER] {" + strconv.Itoa(len(headers)) + "}\r\n")
+	response = append(response, headers...)
+	response = append(response, []byte(")\r\n<tag> OK FETCH completed\r\n")...)
+	srv := newFakeServer(t, fakeServerConfig{
+		authOK: true, otherMboxes: []string{"INBOX"}, fetchResponse: response,
+	})
+	host, portStr, err := net.SplitHostPort(srv.Addr())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port: %v", err)
+	}
+	client := New()
+	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
+
+	got, err := client.FetchMessageHeaders(context.Background(), cfg, "INBOX", 42, 12345, int64(len(headers)))
+	if err != nil {
+		t.Fatalf("FetchMessageHeaders() error = %v", err)
+	}
+	if !bytes.Equal(got, headers) {
+		t.Fatalf("FetchMessageHeaders() = %q, want %q", got, headers)
+	}
+	commands := protocolCommands(srv.Commands())
+	if len(commands) < 2 || commands[len(commands)-1] != "UID FETCH" {
+		t.Fatalf("protocol commands = %q, want bounded header FETCH", commands)
+	}
+	if _, err := client.FetchMessageHeaders(context.Background(), cfg, "INBOX", 42, 12345, int64(len(headers)-1)); transport.ErrorCode(err) != transport.CodeIMAPRawSourceTooLarge {
+		t.Fatalf("FetchMessageHeaders() below literal size error = %v, want %s", err, transport.CodeIMAPRawSourceTooLarge)
+	}
+}
+
 func TestFetchMessageAcceptsUIDAfterBody(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK:      true,

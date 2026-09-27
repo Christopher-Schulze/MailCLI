@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -12,15 +15,20 @@ import (
 
 type intentProjectionGateway struct {
 	*projectionGateway
-	intents []mail.MessageReadIntent
+	intentMu sync.Mutex
+	intents  []mail.MessageReadIntent
+	refs     []string
 }
 
 func (g *intentProjectionGateway) GetMessageWithIntent(
 	_ context.Context,
-	_ string,
+	ref string,
 	intent mail.MessageReadIntent,
 ) (mail.Message, error) {
+	g.intentMu.Lock()
+	defer g.intentMu.Unlock()
 	g.intents = append(g.intents, intent)
+	g.refs = append(g.refs, ref)
 	return g.message, g.getErr
 }
 
@@ -45,22 +53,27 @@ func TestMessageGetSelectsNarrowReadIntentsOnlyForJSONProjections(t *testing.T) 
 		wantState    bool
 	}{
 		{
-			name: "index summary", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary", "--json"},
-			wantIntent: mail.MessageReadIntentIndex, wantFields: []string{"summary"},
+			name: "summary includes header-derived Message-ID", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary", "--json"},
+			wantIntent: mail.MessageReadIntentHeaders, wantFields: []string{"summary"},
 		},
 		{
 			name: "requested headers", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary,headers", "--json"},
 			wantIntent: mail.MessageReadIntentHeaders, wantFields: []string{"headers", "summary"},
 		},
 		{
-			name: "requested content state keeps full read", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary,content_complete", "--json"},
-			wantFullRead: 1, wantFields: []string{"content_complete", "content_source", "hydration", "missing_parts", "summary"}, wantState: true,
+			name: "requested diagnostic state uses no-body MIME metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary,content_complete", "--json"},
+			wantIntent: mail.MessageReadIntentAttachments, wantFields: []string{"content_complete", "content_source", "hydration", "missing_parts", "summary"}, wantState: true,
 		},
 		{
-			name: "default metadata stays full", args: []string{"messages", "get", "--ref", "msg_ref", "--json"},
-			wantFullRead: 1,
-			wantFields:   []string{"attachments", "bcc", "cc", "content_complete", "content_source", "hydration", "missing_parts", "reply_to", "summary", "to"},
-			wantState:    true,
+			name: "source diagnostic uses no-body MIME metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "content_source", "--json"},
+			wantIntent: mail.MessageReadIntentAttachments,
+			wantFields: []string{"content_complete", "content_source", "hydration", "missing_parts", "summary"}, wantState: true,
+		},
+		{
+			name: "default metadata uses no-body MIME metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--json"},
+			wantIntent: mail.MessageReadIntentAttachments,
+			wantFields: []string{"attachments", "bcc", "cc", "content_complete", "content_source", "hydration", "missing_parts", "reply_to", "summary", "to"},
+			wantState:  true,
 		},
 		{
 			name: "human output stays full", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary"},
@@ -112,6 +125,38 @@ func TestMessageGetSelectsNarrowReadIntentsOnlyForJSONProjections(t *testing.T) 
 				t.Fatalf("index projection leaked unselected message state: %s", output)
 			}
 		})
+	}
+}
+
+func TestBatchReadUsesMessageReadIntentPolicy(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "batch.json")
+	input := `{"operation":"read","items":[{"id":"metadata","ref":"metadata_ref","view":"metadata"},{"id":"summary","ref":"summary_ref","fields":["summary"]},{"id":"diagnostics","ref":"diagnostics_ref","fields":["summary","content_source"]},{"id":"full","ref":"full_ref","view":"full"}]}`
+	if err := os.WriteFile(inputPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &intentProjectionGateway{projectionGateway: &projectionGateway{message: projectionMessage()}}
+	code, output, stderr := runIntentProjectionCommand(t, gateway, "batch", "--input", inputPath, "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("batch code = %d, stderr = %q, output = %s", code, stderr, output)
+	}
+	gateway.intentMu.Lock()
+	gotIntents := make(map[string]mail.MessageReadIntent, len(gateway.intents))
+	for index, ref := range gateway.refs {
+		gotIntents[ref] = gateway.intents[index]
+	}
+	gateway.intentMu.Unlock()
+	wantIntents := map[string]mail.MessageReadIntent{
+		"metadata_ref":    mail.MessageReadIntentAttachments,
+		"summary_ref":     mail.MessageReadIntentHeaders,
+		"diagnostics_ref": mail.MessageReadIntentAttachments,
+	}
+	if len(gotIntents) != len(wantIntents) || gateway.getCalls != 1 {
+		t.Fatalf("narrow intents = %v, full calls = %d; want %v and one full call", gotIntents, gateway.getCalls, wantIntents)
+	}
+	for ref, want := range wantIntents {
+		if gotIntents[ref] != want {
+			t.Errorf("read intent for %s = %q, want %q", ref, gotIntents[ref], want)
+		}
 	}
 }
 

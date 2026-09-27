@@ -20,7 +20,37 @@ func (c *Client) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 	return source.data, nil
 }
 
+// FetchMessageHeaders fetches only the RFC header block with BODY.PEEK[HEADER].
+// maxBytes bounds the server-announced header literal.
+func (c *Client) FetchMessageHeaders(
+	ctx context.Context,
+	cfg transport.ImapConfig,
+	mailbox string,
+	uid uint32,
+	expectedUIDValidity uint32,
+	maxBytes int64,
+) ([]byte, error) {
+	source, err := c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false, true)
+	if err != nil {
+		return nil, err
+	}
+	return source.data, nil
+}
+
 func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64, spool bool) (*fetchSource, error) {
+	return c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, spool, false)
+}
+
+func (c *Client) fetchMessageSection(
+	ctx context.Context,
+	cfg transport.ImapConfig,
+	mailbox string,
+	uid uint32,
+	expectedUIDValidity uint32,
+	maxBytes int64,
+	spool bool,
+	headerOnly bool,
+) (*fetchSource, error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
@@ -42,7 +72,11 @@ func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 	}
 
 	tag := ps.sess.nextTag()
-	cmd := fmt.Sprintf("%s UID FETCH %d (BODY.PEEK[])", tag, uid)
+	bodySection := "BODY.PEEK[]"
+	if headerOnly {
+		bodySection = "BODY.PEEK[HEADER]"
+	}
+	cmd := fmt.Sprintf("%s UID FETCH %d (%s)", tag, uid, bodySection)
 	if err := c.setTransferDeadline(ctx, ps.sess, maxBytes); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
 	}

@@ -92,7 +92,7 @@ func runBatch(
 	if err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
-	if err := prepareBatchReadProjection(&request, *maxBytes); err != nil {
+	if err := prepareBatchReadProjection(&request, *maxBytes, *jsonOutput); err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
 	if request.Operation == mail.BatchOperationDelete && !*confirm {
@@ -144,7 +144,7 @@ func runBatch(
 	return 1
 }
 
-func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) error {
+func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64, jsonOutput bool) error {
 	if request.Operation != mail.BatchOperationRead {
 		return nil
 	}
@@ -155,6 +155,9 @@ func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) erro
 		}
 		request.Items[index].RetainReadContent = options.includes("content")
 		request.Items[index].RetainReadHeaders = options.includes("headers")
+		if jsonOutput {
+			request.Items[index].ReadIntent = messageReadIntentForProjection(options)
+		}
 	}
 	return nil
 }

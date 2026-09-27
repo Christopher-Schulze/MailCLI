@@ -1,6 +1,7 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 type readMetrics struct {
@@ -52,13 +54,27 @@ func (s *Store) GetMessageWithIntent(
 	switch intent {
 	case mail.MessageReadIntentFull:
 		return s.GetMessage(ctx, ref)
-	case mail.MessageReadIntentIndex, mail.MessageReadIntentHeaders:
+	case mail.MessageReadIntentIndex:
+		return s.getMessageIndex(ctx, ref)
+	case mail.MessageReadIntentHeaders:
 		return s.getMessageHeaders(ctx, ref)
 	case mail.MessageReadIntentAttachments:
 		return s.getMessageAttachments(ctx, ref)
 	default:
 		return mail.Message{}, operationError("invalid_argument", "message read intent is invalid")
 	}
+}
+
+func (s *Store) getMessageIndex(ctx context.Context, ref string) (mail.Message, error) {
+	resolved, err := s.resolveMessage(ctx, ref)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	summary, err := s.messageSummary(resolved)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	return mail.Message{Summary: summary}, nil
 }
 
 func (s *Store) getMessageHeaders(ctx context.Context, ref string) (result mail.Message, resultErr error) {
@@ -139,7 +155,9 @@ func (c *Client) GetMessageWithIntent(
 		return mail.Message{}, c.readUnavailableError()
 	}
 	switch intent {
-	case mail.MessageReadIntentIndex, mail.MessageReadIntentHeaders:
+	case mail.MessageReadIntentIndex:
+		return c.store.GetMessageWithIntent(ctx, ref, intent)
+	case mail.MessageReadIntentHeaders:
 		return c.getMessageHeaders(ctx, ref)
 	case mail.MessageReadIntentAttachments:
 		return c.getMessageAttachments(ctx, ref)
@@ -158,38 +176,63 @@ func (c *Client) getMessageHeaders(ctx context.Context, ref string) (mail.Messag
 	if !safeTargetedFallback(localErr) || c.send.ImapClient() == nil {
 		return local, localErr
 	}
-	source, _, summary, remoteErr := c.hydrateMessageSource(ctx, ref)
+	headers, summary, remoteErr := c.hydrateMessageHeaders(ctx, ref)
 	if remoteErr != nil {
 		return local, newHydrationError("read message headers", localErr, remoteErr)
 	}
-	message, parseErr := messageFromRawHeaders(ctx, local, summary, source)
-	closeErr := source.Close()
-	if parseErr != nil {
-		return local, newHydrationError("read message headers", localErr, errors.Join(parseErr, closeErr))
-	}
-	if closeErr != nil {
-		return mail.Message{}, closeErr
-	}
-	return message, nil
+	return messageFromHeaders(local, summary, headers), nil
 }
 
-func messageFromRawHeaders(
+func (c *Client) hydrateMessageHeaders(
 	ctx context.Context,
-	base mail.Message,
-	summary mail.MessageSummary,
-	source io.Reader,
-) (mail.Message, error) {
-	headers, err := sourceHeadersFromReader(mimeContextReader{ctx: ctx, reader: source})
-	if err != nil {
-		return mail.Message{}, err
+	messageRef string,
+) (sourceHeaders, mail.MessageSummary, error) {
+	if fetcher, ok := c.send.ImapClient().(transport.MessageHeaderFetcher); ok {
+		resolveCtx, cancelResolve := localReadOrResolveContext(ctx)
+		target, err := c.resolveImapTarget(resolveCtx, messageRef)
+		cancelResolve()
+		if err != nil {
+			return sourceHeaders{}, mail.MessageSummary{}, typedHydrationFailure(err)
+		}
+		bound := int64(maximumHeaderBytes)
+		fetchCtx, cancelFetch := hydrationFetchContext(ctx, bound)
+		defer cancelFetch()
+		raw, err := fetcher.FetchMessageHeaders(
+			fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound,
+		)
+		if err != nil {
+			return sourceHeaders{}, target.summary, typedHydrationFailure(err)
+		}
+		if int64(len(raw)) > bound {
+			return sourceHeaders{}, target.summary, &transport.TransportError{
+				Code:    transport.CodeIMAPRawSourceTooLarge,
+				Message: fmt.Sprintf("IMAP header block exceeds the %d byte header limit", bound),
+			}
+		}
+		headers, err := sourceHeadersFromReader(mimeContextReader{ctx: ctx, reader: bytes.NewReader(raw)})
+		return headers, target.summary, err
 	}
+
+	source, _, summary, err := c.hydrateMessageSource(ctx, messageRef)
+	if err != nil {
+		return sourceHeaders{}, summary, err
+	}
+	headers, readErr := sourceHeadersFromReader(mimeContextReader{ctx: ctx, reader: source})
+	closeErr := source.Close()
+	if readErr != nil || closeErr != nil {
+		return sourceHeaders{}, summary, errors.Join(readErr, closeErr)
+	}
+	return headers, summary, nil
+}
+
+func messageFromHeaders(base mail.Message, summary mail.MessageSummary, headers sourceHeaders) mail.Message {
 	base.Summary = summary
 	base.Summary.MessageID = headers.MessageID
 	base.ReplyTo = headers.ReplyToText
 	base.To, base.CC, base.BCC = headers.To, headers.CC, headers.BCC
 	base.Headers = headers.Raw
 	base.ContentSource = "imap_raw"
-	return base, nil
+	return base
 }
 
 func (c *Client) getMessageAttachments(ctx context.Context, ref string) (mail.Message, error) {

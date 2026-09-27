@@ -719,18 +719,18 @@ func projectMessageSummary(message mail.MessageSummary, fields map[string]struct
 }
 
 func messageReadIntentForProjection(options outputOptions) mail.MessageReadIntent {
-	if !options.omitUnselectedMessageState {
+	if options.exportPath != "" || options.includes("content") {
 		return mail.MessageReadIntentFull
 	}
-	for _, field := range []string{"content", "content_source", "content_complete", "missing_parts", "hydration"} {
-		if options.includes(field) {
-			return mail.MessageReadIntentFull
-		}
-	}
-	if options.includes("attachments") {
+	if !options.fieldsProvided && options.view == outputViewMetadata {
 		return mail.MessageReadIntentAttachments
 	}
-	for _, field := range []string{"reply_to", "to", "cc", "bcc", "headers"} {
+	for _, field := range []string{"content_source", "content_complete", "missing_parts", "hydration", "attachments"} {
+		if options.includes(field) {
+			return mail.MessageReadIntentAttachments
+		}
+	}
+	for _, field := range []string{"summary", "reply_to", "to", "cc", "bcc", "headers"} {
 		if options.includes(field) {
 			return mail.MessageReadIntentHeaders
 		}

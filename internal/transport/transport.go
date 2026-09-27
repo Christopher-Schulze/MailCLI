@@ -172,6 +172,12 @@ type StreamingFetcher interface {
 	FetchMessageReader(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) (io.ReadSeekCloser, int64, error)
 }
 
+// MessageHeaderFetcher optionally fetches only a message's RFC header block.
+// maxBytes bounds the returned BODY.PEEK[HEADER] literal.
+type MessageHeaderFetcher interface {
+	FetchMessageHeaders(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error)
+}
+
 // ImapConcurrencyProvider optionally reports the configured per-account pool
 // capacity so callers can bound independent STATUS work without creating an
 // unbounded number of goroutines. Implementations must return a positive limit

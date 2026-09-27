@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/cli"
 	"mailcli/internal/mail"
@@ -39,20 +40,28 @@ func (s *countingReadIntentIMAP) FetchMessage(
 
 func TestMessageReadIntentsMeasureBoundedSourceAndRetainNoBody(t *testing.T) {
 	store, ref, raw := newLargeReadIntentFixture(t, 512<<10)
+	if len(raw) < 1<<20 {
+		t.Fatalf("fixture source bytes = %d, want at least 1 MiB", len(raw))
+	}
 	metrics := &readMetrics{}
 	store.readMetrics = metrics
 	imap := &countingReadIntentIMAP{}
 	client := &Client{store: store, send: mail.SendTransport{Imap: imap}}
 	ctx := context.Background()
+	baseline, err := store.GetMessage(ctx, ref)
+	if err != nil {
+		t.Fatalf("GetMessage() baseline error = %v", err)
+	}
 
 	for _, test := range []struct {
 		name          string
 		intent        mail.MessageReadIntent
 		maxSourceRead int64
 		minSourceRead int64
+		wantZeroRead  bool
 	}{
-		{name: "index summary", intent: mail.MessageReadIntentIndex, maxSourceRead: int64(len(raw)) / 2, minSourceRead: 1},
-		{name: "requested headers", intent: mail.MessageReadIntentHeaders, maxSourceRead: int64(len(raw)) / 2, minSourceRead: 1},
+		{name: "index summary", intent: mail.MessageReadIntentIndex, wantZeroRead: true},
+		{name: "requested headers", intent: mail.MessageReadIntentHeaders, maxSourceRead: 64 << 10, minSourceRead: 1},
 		{name: "attachment metadata", intent: mail.MessageReadIntentAttachments, minSourceRead: int64(len(raw)) / 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -67,49 +76,34 @@ func TestMessageReadIntentsMeasureBoundedSourceAndRetainNoBody(t *testing.T) {
 			}
 			metrics.sourceBytes.Store(0)
 			metrics.retainedBodyBytes.Store(0)
+			started := time.Now()
 			message, err := client.GetMessageWithIntent(ctx, ref, test.intent)
+			elapsed := time.Since(started)
 			if err != nil {
 				t.Fatalf("GetMessageWithIntent() error = %v", err)
 			}
 			sourceBytes := metrics.sourceBytes.Load()
 			retainedBodyBytes := metrics.retainedBodyBytes.Load()
-			if sourceBytes < test.minSourceRead ||
+			if test.wantZeroRead && sourceBytes != 0 {
+				t.Fatalf("index-only source bytes = %d, want zero", sourceBytes)
+			}
+			if !test.wantZeroRead && sourceBytes < test.minSourceRead ||
 				(test.maxSourceRead > 0 && sourceBytes >= test.maxSourceRead) {
 				t.Fatalf("source bytes = %d, want [%d,%d)", sourceBytes, test.minSourceRead, test.maxSourceRead)
 			}
 			if retainedBodyBytes != 0 || message.Content != "" || imap.fetchCalls != 0 {
 				t.Fatalf("retained body bytes = %d, content length = %d, IMAP FETCH calls = %d", retainedBodyBytes, len(message.Content), imap.fetchCalls)
 			}
-			if test.intent == mail.MessageReadIntentIndex && message.Summary.MessageID != "101@example.com" {
-				t.Fatalf("index projection Message-ID = %q", message.Summary.MessageID)
-			}
 			if test.intent == mail.MessageReadIntentIndex {
-				code, output, stderr := runReadIntentCLI(t, client,
-					"messages", "get", "--ref", ref, "--fields", "summary", "--json",
-				)
-				if code != 0 || stderr != "" {
-					t.Fatalf("index JSON code = %d, stderr = %q, output = %s", code, stderr, output)
+				wantSummary := baseline.Summary
+				wantSummary.MessageID = ""
+				wantSummary.AttachmentCount = message.Summary.AttachmentCount
+				if message.Summary.MessageID != "" || !reflect.DeepEqual(message.Summary, wantSummary) {
+					t.Fatalf("index projection summary = %+v, want index evidence %+v", message.Summary, wantSummary)
 				}
-				var response struct {
-					Data struct {
-						Message    json.RawMessage `json:"message"`
-						Projection struct {
-							Fields []string `json:"fields"`
-						} `json:"projection"`
-					} `json:"data"`
-				}
-				if err := json.Unmarshal([]byte(output), &response); err != nil {
-					t.Fatalf("unmarshal index JSON: %v", err)
-				}
-				summaryJSON, err := json.Marshal(message.Summary)
-				if err != nil {
-					t.Fatalf("marshal expected summary: %v", err)
-				}
-				wantMessage := append(append([]byte(`{"summary":`), summaryJSON...), '}')
-				if !bytes.Equal(response.Data.Message, wantMessage) ||
-					!reflect.DeepEqual(response.Data.Projection.Fields, []string{"summary"}) {
-					t.Fatalf("index JSON message = %s, want %s; fields = %v", response.Data.Message, wantMessage, response.Data.Projection.Fields)
-				}
+			}
+			if test.intent == mail.MessageReadIntentHeaders && message.Summary.MessageID != "101@example.com" {
+				t.Fatalf("header projection Message-ID = %q", message.Summary.MessageID)
 			}
 			if test.intent == mail.MessageReadIntentHeaders &&
 				(!strings.Contains(message.Headers, "Reply-To: Reply <reply@example.com>") ||
@@ -120,22 +114,63 @@ func TestMessageReadIntentsMeasureBoundedSourceAndRetainNoBody(t *testing.T) {
 				(!message.ContentComplete || len(message.Attachments) < 1) {
 				t.Fatalf("attachment projection completeness=%t attachments=%+v", message.ContentComplete, message.Attachments)
 			}
-			t.Logf("source_bytes=%d retained_body_bytes=%d allocations_per_read=%.1f imap_fetch_calls=%d", sourceBytes, retainedBodyBytes, allocations, imap.fetchCalls)
+			t.Logf("intent=%s elapsed=%s source_bytes=%d retained_body_bytes=%d allocations_per_read=%.1f imap_fetch_calls=%d",
+				test.intent, elapsed, sourceBytes, retainedBodyBytes, allocations, imap.fetchCalls)
 		})
 	}
+
+	metrics.sourceBytes.Store(0)
+	metrics.retainedBodyBytes.Store(0)
+	started := time.Now()
+	code, output, stderr := runReadIntentCLI(t, client, "messages", "get", "--ref", ref, "--fields", "summary", "--json")
+	elapsed := time.Since(started)
+	if code != 0 || stderr != "" {
+		t.Fatalf("header-only summary JSON code = %d, stderr = %q, output = %s", code, stderr, output)
+	}
+	var response struct {
+		Data struct {
+			Message    mail.Message `json:"message"`
+			Projection struct {
+				Fields []string `json:"fields"`
+			} `json:"projection"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		t.Fatalf("unmarshal header-only summary JSON: %v", err)
+	}
+	sourceBytes := metrics.sourceBytes.Load()
+	retainedBodyBytes := metrics.retainedBodyBytes.Load()
+	if sourceBytes == 0 || sourceBytes >= 64<<10 || retainedBodyBytes != 0 ||
+		response.Data.Message.Summary.MessageID != "101@example.com" ||
+		!reflect.DeepEqual(response.Data.Projection.Fields, []string{"summary"}) || imap.fetchCalls != 0 {
+		t.Fatalf("summary read elapsed=%s source_bytes=%d retained_body_bytes=%d fetches=%d projection=%+v",
+			elapsed, sourceBytes, retainedBodyBytes, imap.fetchCalls, response.Data.Projection)
+	}
+	t.Logf("single_summary elapsed=%s source_bytes=%d retained_body_bytes=%d imap_fetch_calls=%d",
+		elapsed, sourceBytes, retainedBodyBytes, imap.fetchCalls)
 }
 
 func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
-	store, ref, raw := newLargeReadIntentFixture(t, 32<<10)
+	store, ref, raw := newLargeReadIntentFixture(t, 512<<10)
 	baseline, err := store.GetMessage(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("legacy GetMessage() error = %v", err)
 	}
 	client := &Client{store: store}
+	metrics := &readMetrics{}
+	store.readMetrics = metrics
+	started := time.Now()
 	code, output, stderr := runReadIntentCLI(t, client, "messages", "get", "--ref", ref, "--json")
+	elapsed := time.Since(started)
 	if code != 0 || stderr != "" {
 		t.Fatalf("default metadata code = %d, stderr = %q, output = %s", code, stderr, output)
 	}
+	if sourceBytes := metrics.sourceBytes.Load(); sourceBytes < int64(len(raw))/2 || metrics.retainedBodyBytes.Load() != 0 {
+		t.Fatalf("default metadata source_bytes=%d retained_body_bytes=%d; want diagnostic MIME scan without retained body",
+			sourceBytes, metrics.retainedBodyBytes.Load())
+	}
+	t.Logf("default_metadata elapsed=%s source_bytes=%d retained_body_bytes=%d",
+		elapsed, metrics.sourceBytes.Load(), metrics.retainedBodyBytes.Load())
 	legacyCode, legacyOutput, legacyStderr := runLegacyReadIntentCLI(
 		t, client, "messages", "get", "--ref", ref, "--json",
 	)
@@ -262,6 +297,75 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 		!reflect.DeepEqual(partialJSON.Data.MissingParts, legacyPartial.MissingParts) ||
 		!reflect.DeepEqual(partialJSON.Data.Attachments, legacyPartial.Attachments) {
 		t.Fatalf("partial attachment JSON evidence = %+v, legacy = %+v", partialJSON.Data, legacyPartial)
+	}
+}
+
+type readIntentHeaderFetcher struct {
+	*metadataResolverStub
+	headers          []byte
+	headerFetchCalls int
+	lastHeaderLimit  int64
+}
+
+func (operator *readIntentHeaderFetcher) FetchMessageHeaders(
+	ctx context.Context,
+	_ transport.ImapConfig,
+	_ string,
+	_ uint32,
+	_ uint32,
+	maxBytes int64,
+) ([]byte, error) {
+	operator.headerFetchCalls++
+	operator.lastHeaderLimit = maxBytes
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if int64(len(operator.headers)) > maxBytes {
+		return nil, &transport.TransportError{Code: transport.CodeIMAPRawSourceTooLarge, Message: "header test literal exceeds bound"}
+	}
+	return append([]byte(nil), operator.headers...), nil
+}
+
+func TestMissingSourceHeaderIntentUsesBoundedHeaderFetcher(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "header-intent fixture store")
+	installImapIdentityFixture(t, store, "metadata@gmail.com")
+	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID = 102`)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatalf("ListMessages() error = %v", err)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Status Update")
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := store.messageBasePath(location, 102)
+	if err != nil {
+		t.Fatalf("messageBasePath() error = %v", err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatalf("remove local source: %v", err)
+	}
+	resolver := &readIntentHeaderFetcher{
+		metadataResolverStub: &metadataResolverStub{
+			stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}}},
+			identity:         transport.MessageIdentity{UID: 202, UIDValidity: 12345, MessageID: "<remote-102@example.com>"},
+		},
+		headers: []byte("From: Alice <alice@example.com>\r\nSubject: Status Update\r\nMessage-ID: <remote-102@example.com>\r\n\r\n"),
+	}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap: resolver, Credentials: stubCredentials{"metadata@gmail.com": "secret"},
+	}}
+	message, err := client.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentHeaders)
+	if err != nil {
+		t.Fatalf("GetMessageWithIntent(headers) error = %v", err)
+	}
+	if message.Summary.MessageID != "remote-102@example.com" || message.ContentSource != "imap_raw" ||
+		message.Content != "" || resolver.headerFetchCalls != 1 || resolver.lastHeaderLimit != int64(maximumHeaderBytes) ||
+		resolver.fetchCalls != 0 {
+		t.Fatalf("header result=%+v header_fetches=%d bound=%d full_fetches=%d",
+			message, resolver.headerFetchCalls, resolver.lastHeaderLimit, resolver.fetchCalls)
 	}
 }
 

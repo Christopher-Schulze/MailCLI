@@ -351,10 +351,14 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
-	if *jsonOutput && output.fieldsProvided {
-		output.omitUnselectedMessageState = true
+	intent := mail.MessageReadIntentFull
+	if *jsonOutput {
+		if output.fieldsProvided {
+			output.omitUnselectedMessageState = true
+		}
+		intent = messageReadIntentForProjection(output)
 	}
-	message, err := service.GetMessageWithIntent(operationCtx, *ref, messageReadIntentForProjection(output))
+	message, err := service.GetMessageWithIntent(operationCtx, *ref, intent)
 	if err != nil {
 		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr, output)
 	}

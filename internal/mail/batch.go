@@ -63,19 +63,20 @@ type BatchReadAdmissionFunc func(content, headers string, retainContent, retainH
 // every operation; attachment fields are used only by attachment_save, state
 // fields only by mark, Mailbox by move/copy, and view/fields by read.
 type BatchItem struct {
-	ID                 string    `json:"id"`
-	Ref                string    `json:"ref"`
-	AttachmentID       string    `json:"attachment_id"`
-	OutputPath         string    `json:"output_path"`
-	Read               *bool     `json:"read"`
-	Flagged            *bool     `json:"flagged"`
-	Junk               *bool     `json:"junk"`
-	Mailbox            string    `json:"mailbox"`
-	AllowDraftMutation bool      `json:"allow_draft_mutation,omitempty"`
-	View               *string   `json:"view,omitempty"`
-	Fields             *[]string `json:"fields,omitempty"`
-	RetainReadContent  bool      `json:"-"`
-	RetainReadHeaders  bool      `json:"-"`
+	ID                 string            `json:"id"`
+	Ref                string            `json:"ref"`
+	AttachmentID       string            `json:"attachment_id"`
+	OutputPath         string            `json:"output_path"`
+	Read               *bool             `json:"read"`
+	Flagged            *bool             `json:"flagged"`
+	Junk               *bool             `json:"junk"`
+	Mailbox            string            `json:"mailbox"`
+	AllowDraftMutation bool              `json:"allow_draft_mutation,omitempty"`
+	View               *string           `json:"view,omitempty"`
+	Fields             *[]string         `json:"fields,omitempty"`
+	ReadIntent         MessageReadIntent `json:"-"`
+	RetainReadContent  bool              `json:"-"`
+	RetainReadHeaders  bool              `json:"-"`
 }
 
 type BatchItemError struct {
@@ -322,7 +323,11 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 	result := BatchItemResult{ID: item.ID}
 	switch run.request.Operation {
 	case BatchOperationRead:
-		message, err := run.service.GetMessage(run.ctx, item.Ref)
+		intent := item.ReadIntent
+		if intent == "" {
+			intent = MessageReadIntentFull
+		}
+		message, err := run.service.GetMessageWithIntent(run.ctx, item.Ref, intent)
 		if err != nil {
 			result.State = BatchItemFailed
 			if hasBatchMessageEvidence(message) {
