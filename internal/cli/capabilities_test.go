@@ -228,6 +228,9 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 }
 
+// The audited Apple Events paths are account/message-list fallback, default sync
+// and live doctor; message/raw/attachment detail and drafts.open hydrate via IMAP,
+// while visible handoff uses AppKit and scripted compose writes stay disabled.
 func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 	want := map[string][]commandDependency{
 		"capabilities": {},

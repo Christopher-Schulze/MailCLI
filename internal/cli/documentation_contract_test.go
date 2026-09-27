@@ -3,7 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -207,6 +211,70 @@ func TestPublicDocumentationOmitsOwnerLocalTaskWorkflow(t *testing.T) {
 				t.Errorf("%s exposes owner-local task workflow marker %q", path, marker)
 			}
 		}
+	}
+}
+
+func TestPublicGoCommentsOmitPrivateTaskPaths(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "git", "ls-files", "-z", "--", "*.go")
+	command.Dir = repositoryRoot(t)
+	paths, err := command.Output()
+	if err != nil {
+		t.Fatalf("inventory tracked Go sources: %v", err)
+	}
+	count := 0
+	for _, path := range strings.Split(string(paths), "\x00") {
+		if path == "" {
+			continue
+		}
+		count++
+		if err := validatePublicGoComments(path, readRepositoryFile(t, path)); err != nil {
+			t.Error(err)
+		}
+	}
+	if count == 0 {
+		t.Fatal("tracked Go comment inventory is empty")
+	}
+	t.Logf("checked comments in %d tracked Go sources, including tests", count)
+}
+
+func validatePublicGoComments(filename, source string) error {
+	file, err := parser.ParseFile(token.NewFileSet(), filename, source, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parse public Go source %s: %w", filename, err)
+	}
+	privatePath := strings.Join([]string{"docs", "tasks", ""}, "/")
+	for _, comments := range file.Comments {
+		for _, comment := range comments.List {
+			if strings.Contains(comment.Text, privatePath) {
+				return fmt.Errorf("%s contains a private task-history link in a public comment", filename)
+			}
+		}
+	}
+	return nil
+}
+
+func TestPublicGoCommentValidationDistinguishesCommentsFromInputs(t *testing.T) {
+	privatePath := strings.Join([]string{"docs", "tasks", "done", "fixture.md"}, "/")
+	for _, test := range []struct {
+		name   string
+		source string
+		valid  bool
+	}{
+		{name: "inline evidence", source: "package fixture\n// Reads hydrate via IMAP.\nvar value = 1", valid: true},
+		{name: "required tooling input", source: "package fixture\nvar path = \"" + privatePath + "\"", valid: true},
+		{name: "line comment", source: "package fixture\n// See " + privatePath},
+		{name: "block comment", source: "package fixture\n/* See " + privatePath + " */"},
+		{name: "Go directive", source: "package fixture\n//go:generate cat " + privatePath},
+		{name: "test-file comment", source: "package fixture\n// Evidence: " + privatePath + "\nvar value = 1"},
+		{name: "invalid source", source: "not Go source"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validatePublicGoComments("fixture_test.go", test.source); (err == nil) != test.valid {
+				t.Fatalf("comment validation = %v, want valid=%t", err, test.valid)
+			}
+		})
 	}
 }
 
