@@ -17,5 +17,6 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go -C "${MAILCLI_ROOT}" build \
   -o "${MAILCLI_BINARY_OUTPUT}" \
   ./cmd/mailcli
 
-strip -no_uuid "${MAILCLI_BINARY_OUTPUT}"
+# Keep the Go-derived UUID: macOS 26 requires LC_UUID to launch the binary.
+strip "${MAILCLI_BINARY_OUTPUT}"
 file "${MAILCLI_BINARY_OUTPUT}"

@@ -65,6 +65,11 @@ verify_install() {
   local binary_destination="$1"
   local skill_destination="$2"
   cmp -s "${BUILD_OUTPUT}" "${binary_destination}"
+  if ! otool -l "${binary_destination}" |
+    awk '$1 == "cmd" && $2 == "LC_UUID" { count++ } END { exit(count != 1) }'; then
+    printf 'Installed binary must retain exactly one Mach-O LC_UUID\n' >&2
+    return 1
+  fi
   diff -qr "${MAILCLI_ROOT}/skills/mailcli" "${skill_destination}" >/dev/null
   (
     cd "${MAILCLI_ROOT}"
