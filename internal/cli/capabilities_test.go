@@ -23,6 +23,9 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
+	if response.SchemaVersion != schemaVersion {
+		t.Fatalf("response schema version = %d, want %d", response.SchemaVersion, schemaVersion)
+	}
 	if !response.OK || response.Command != "capabilities" || response.Data.Capabilities == nil {
 		t.Fatalf("response = %+v", response)
 	}
@@ -76,6 +79,11 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 	if !bytes.Contains(stdout.Bytes(), []byte(`"imap_operation_contract":[{"operation":"LIST"`)) {
 		t.Fatalf("serialized IMAP operation contract = %s", stdout.String())
 	}
+	for _, field := range []string{`"mail_app_dependency"`, `"credential_dependencies"`, `"network_dependencies"`} {
+		if bytes.Contains(stdout.Bytes(), []byte(field)) {
+			t.Fatalf("serialized capabilities retain removed field %s", field)
+		}
+	}
 }
 
 func TestCapabilityCommandInventory(t *testing.T) {
@@ -99,8 +107,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		seen[command.ID] = struct{}{}
 		got = append(got, command.ID)
 		if command.EffectClass == "" || command.Confirmation == "" || command.StoreDependency == "" ||
-			command.MailAppDependency == "" || command.CredentialDependencies == nil ||
-			command.NetworkDependencies == nil || len(command.ResultStates) == 0 {
+			command.Dependencies == nil || len(command.ResultStates) == 0 {
 			t.Fatalf("incomplete capability = %+v", command)
 		}
 	}
@@ -149,24 +156,24 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]
 	if send.EffectClass != "smtp-send" || send.Confirmation != "required-flag" ||
-		send.StoreDependency != "draft-store" || send.MailAppDependency != "none" ||
+		send.StoreDependency != "draft-store" ||
 		!slices.Equal(send.ResultStates, []string{"sent", "sent_mirror_pending"}) {
 		t.Fatalf("drafts.send capability = %+v", send)
 	}
 	setup := manifest.Commands[slices.Index(got, "send.setup")]
 	if setup.EffectClass != "keychain-write" || setup.Confirmation != "none" ||
-		setup.StoreDependency != "none" || setup.MailAppDependency != "none" ||
+		setup.StoreDependency != "none" ||
 		!slices.Equal(setup.ResultStates, []string{"stored", "removed"}) {
 		t.Fatalf("send.setup capability = %+v", setup)
 	}
 	save := manifest.Commands[slices.Index(got, "drafts.save")]
-	if save.EffectClass != "unsupported" || save.StoreDependency != "draft-store" || save.MailAppDependency != "none" ||
+	if save.EffectClass != "unsupported" || save.StoreDependency != "draft-store" ||
 		!slices.Equal(save.ResultStates, []string{"compose_automation_unsupported"}) {
 		t.Fatalf("drafts.save capability = %+v", save)
 	}
 	for _, id := range []string{"messages.reply", "messages.forward"} {
 		command := manifest.Commands[slices.Index(got, id)]
-		if command.StoreDependency != "mail-store" || command.MailAppDependency != "none" {
+		if command.StoreDependency != "mail-store" {
 			t.Fatalf("%s capability = %+v", id, command)
 		}
 	}
@@ -175,18 +182,18 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		t.Fatalf("sync result states = %+v", syncCommand.ResultStates)
 	}
 	open := manifest.Commands[slices.Index(got, "drafts.open")]
-	if open.EffectClass != "read" || open.StoreDependency != "mail-store" || open.MailAppDependency != "none" ||
+	if open.EffectClass != "read" || open.StoreDependency != "mail-store" ||
 		!slices.Equal(open.ResultStates, []string{"complete", "partial"}) {
 		t.Fatalf("drafts.open capability = %+v", open)
 	}
 	adopt := manifest.Commands[slices.Index(got, "drafts.adopt")]
 	if adopt.EffectClass != "local-write" || adopt.StoreDependency != "draft-store+mail-store" ||
-		adopt.MailAppDependency != "none" || !slices.Equal(adopt.ResultStates, []string{"created"}) {
+		!slices.Equal(adopt.ResultStates, []string{"created"}) {
 		t.Fatalf("drafts.adopt capability = %+v", adopt)
 	}
 	reconcile := manifest.Commands[slices.Index(got, "drafts.reconcile")]
 	if reconcile.EffectClass != "local-write+imap-write" ||
-		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" || reconcile.MailAppDependency != "none" ||
+		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" ||
 		!slices.Equal(reconcile.ResultStates, []string{
 			"sent_store_observed", "accepted_by_mail", "sent", "sent_mirror_pending", "outcome_unknown",
 		}) {
@@ -198,63 +205,172 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 	handoffReconcile := manifest.Commands[slices.Index(got, "drafts.handoff-reconcile")]
 	if handoffReconcile.EffectClass != "local-write" || handoffReconcile.Confirmation != "required-flag" ||
-		handoffReconcile.StoreDependency != "draft-store" || handoffReconcile.MailAppDependency != "none" ||
+		handoffReconcile.StoreDependency != "draft-store" ||
 		!slices.Equal(handoffReconcile.ResultStates, []string{"confirmed_opened", "confirmed_failed"}) {
 		t.Fatalf("drafts.handoff-reconcile capability = %+v", handoffReconcile)
 	}
 }
 
-func TestCapabilityCredentialAndNetworkDependenciesAreExplicit(t *testing.T) {
-	type dependencies struct {
-		credentials []string
-		network     []string
-	}
-	want := map[string]dependencies{
-		"update": {network: []string{"release-https"}},
+func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
+	want := map[string][]commandDependency{
+		"capabilities": {},
+		"version":      {},
+		"update":       {{Kind: dependencyKindNetwork, Target: dependencyTargetGitHubRelease, Condition: dependencyConditionAlways}},
+		"doctor":       {{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfDoctorLive}},
 		"batch": {
-			credentials: []string{"imap-account-credential-if-operation-mutates-mail"},
-			network:     []string{"imap-if-operation-mutates-mail"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfBatchItemRequiresIMAP},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfBatchItemRequiresIMAP},
+		},
+		"accounts.list":     {{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
+		"mailboxes.list":    {},
+		"mailboxes.resolve": {},
+		"messages.list":     {{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
+		"messages.filter":   {},
+		"messages.search":   {},
+		"messages.get": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
+		},
+		"messages.raw": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
+		},
+		"messages.state": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
+		},
+		"messages.thread": {},
+		"attachments.list": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
+		},
+		"attachments.save": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalAttachmentBytesUnavailable},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalAttachmentBytesUnavailable},
+		},
+		"drafts.create":  {},
+		"drafts.list":    {},
+		"drafts.inspect": {},
+		"drafts.preview": {},
+		"drafts.edit":    {{Kind: dependencyKindApp, Target: dependencyTargetEditor, Condition: dependencyConditionAlways}},
+		"drafts.handoff": {{Kind: dependencyKindApp, Target: dependencyTargetSystemComposeService, Condition: dependencyConditionAlways}},
+		"drafts.update":  {},
+		"drafts.save":    {},
+		"drafts.open": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
+		},
+		"drafts.adopt": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalAttachmentBytesUnavailable},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalAttachmentBytesUnavailable},
 		},
 		"drafts.send": {
-			credentials: []string{"account-keychain-credential-for-smtp-and-imap"},
-			network:     []string{"smtp-submission", "imap-sent-mirror-after-smtp"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfSend},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetSMTP, Condition: dependencyConditionIfSend},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfSMTPAccepted},
 		},
-		"send.setup": {credentials: []string{"keychain-write-access"}},
+		"send.setup": {{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways}},
 		"drafts.reconcile": {
-			credentials: []string{"imap-account-credential-if-sent-append-repair-is-needed"},
-			network:     []string{"imap-if-sent-append-repair-is-needed"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfTransportClaimNeedsIMAPReconciliation},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfTransportClaimNeedsIMAPReconciliation},
 		},
+		"drafts.discard":   {},
+		"drafts.prune":     {},
+		"messages.reply":   {},
+		"messages.forward": {},
 		"messages.mark": {
-			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
 		},
 		"messages.move": {
-			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
 		},
 		"messages.copy": {
-			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
 		},
 		"messages.delete": {
-			credentials: []string{"imap-account-keychain-credential"}, network: []string{"imap"},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
 		},
-		"sync": {network: []string{"mail-app-managed-sync"}},
+		"sync": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfSyncCheck},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfSyncCheck},
+			{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfSyncDefault},
+		},
+		"drafts.handoff-reconcile": {},
 	}
-	empty := dependencies{credentials: []string{}, network: []string{}}
-	for _, command := range capabilities().Commands {
-		expected := empty
-		if declared, ok := want[command.ID]; ok {
-			expected = declared
+
+	validKinds := map[dependencyKind]struct{}{
+		dependencyKindNetwork: {}, dependencyKindCredential: {}, dependencyKindApp: {},
+	}
+	validTargets := map[dependencyTarget]struct{}{
+		dependencyTargetIMAP: {}, dependencyTargetSMTP: {}, dependencyTargetGitHubRelease: {},
+		dependencyTargetKeychain: {}, dependencyTargetMailApp: {}, dependencyTargetEditor: {},
+		dependencyTargetSystemComposeService: {},
+	}
+	validConditions := map[dependencyCondition]struct{}{
+		dependencyConditionAlways: {}, dependencyConditionIfLocalSourceIncomplete: {},
+		dependencyConditionIfLocalAttachmentBytesUnavailable: {}, dependencyConditionIfLocalStoreUnavailable: {},
+		dependencyConditionIfBatchItemRequiresIMAP: {}, dependencyConditionIfSyncCheck: {},
+		dependencyConditionIfSyncDefault: {}, dependencyConditionIfDoctorLive: {},
+		dependencyConditionIfSend: {}, dependencyConditionIfSMTPAccepted: {},
+		dependencyConditionIfTransportClaimNeedsIMAPReconciliation: {},
+	}
+	manifest := capabilities()
+	seen := make(map[string]struct{}, len(manifest.Commands))
+	for _, command := range manifest.Commands {
+		if _, ok := seen[command.ID]; ok {
+			t.Fatalf("duplicate capability ID %q", command.ID)
 		}
-		if expected.credentials == nil {
-			expected.credentials = empty.credentials
+		seen[command.ID] = struct{}{}
+		expected, ok := want[command.ID]
+		if !ok {
+			t.Fatalf("capability %q has no audited dependency expectation", command.ID)
 		}
-		if expected.network == nil {
-			expected.network = empty.network
+		if command.Dependencies == nil || !reflect.DeepEqual(command.Dependencies, expected) {
+			t.Fatalf("%s dependencies = %+v, want %+v", command.ID, command.Dependencies, expected)
 		}
-		if !reflect.DeepEqual(command.CredentialDependencies, expected.credentials) ||
-			!reflect.DeepEqual(command.NetworkDependencies, expected.network) {
-			t.Fatalf("%s dependencies = credentials:%q network:%q, want credentials:%q network:%q",
-				command.ID, command.CredentialDependencies, command.NetworkDependencies,
-				expected.credentials, expected.network)
+		seenDependencies := make(map[commandDependency]struct{}, len(command.Dependencies))
+		for _, dependency := range command.Dependencies {
+			if _, ok := validKinds[dependency.Kind]; !ok {
+				t.Errorf("%s has unknown dependency kind %q", command.ID, dependency.Kind)
+			}
+			if _, ok := validTargets[dependency.Target]; !ok {
+				t.Errorf("%s has unknown dependency target %q", command.ID, dependency.Target)
+			}
+			if _, ok := validConditions[dependency.Condition]; !ok {
+				t.Errorf("%s has unknown dependency condition %q", command.ID, dependency.Condition)
+			}
+			if _, duplicate := seenDependencies[dependency]; duplicate {
+				t.Errorf("%s repeats dependency %+v", command.ID, dependency)
+			}
+			seenDependencies[dependency] = struct{}{}
+			switch dependency.Kind {
+			case dependencyKindNetwork:
+				if dependency.Target != dependencyTargetIMAP && dependency.Target != dependencyTargetSMTP && dependency.Target != dependencyTargetGitHubRelease {
+					t.Errorf("%s network dependency has incompatible target %q", command.ID, dependency.Target)
+				}
+			case dependencyKindCredential:
+				if dependency.Target != dependencyTargetKeychain {
+					t.Errorf("%s credential dependency has incompatible target %q", command.ID, dependency.Target)
+				}
+			case dependencyKindApp:
+				if dependency.Target != dependencyTargetMailApp && dependency.Target != dependencyTargetEditor && dependency.Target != dependencyTargetSystemComposeService {
+					t.Errorf("%s app dependency has incompatible target %q", command.ID, dependency.Target)
+				}
+			}
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("audited command count = %d, manifest count = %d", len(want), len(seen))
+	}
+	for id := range want {
+		if _, ok := seen[id]; !ok {
+			t.Errorf("audited command %q is missing from the manifest", id)
 		}
 	}
 }
@@ -284,68 +400,22 @@ func TestCommandCapabilityResultStatesAreIndependent(t *testing.T) {
 	}
 }
 
-// TestCapabilityMailAppDependencies pins every declared Mail.app dependency to an
-// audited value so label drift cannot reintroduce undeclared automation surfaces.
-// Evidence for each value lives in docs/tasks/done/027-correct-stale-mail-app-capability-labels.md.
-func TestCapabilityMailAppDependencies(t *testing.T) {
-	want := map[string]string{
-		"capabilities":             "none",
-		"version":                  "none",
-		"update":                   "none",
-		"doctor":                   "optional-automation",
-		"batch":                    "none",
-		"accounts.list":            "fallback-automation",
-		"mailboxes.list":           "none",
-		"mailboxes.resolve":        "none",
-		"messages.list":            "fallback-automation",
-		"messages.filter":          "none",
-		"messages.search":          "none",
-		"messages.get":             "none",
-		"messages.raw":             "none",
-		"messages.state":           "none",
-		"messages.thread":          "none",
-		"attachments.list":         "none",
-		"attachments.save":         "none",
-		"drafts.create":            "none",
-		"drafts.list":              "none",
-		"drafts.inspect":           "none",
-		"drafts.preview":           "none",
-		"drafts.edit":              "none",
-		"drafts.handoff":           "system-compose-service",
-		"drafts.update":            "none",
-		"drafts.save":              "none",
-		"drafts.open":              "none",
-		"drafts.adopt":             "none",
-		"drafts.send":              "none",
-		"send.setup":               "none",
-		"drafts.reconcile":         "none",
-		"drafts.discard":           "none",
-		"drafts.prune":             "none",
-		"messages.reply":           "none",
-		"messages.forward":         "none",
-		"messages.mark":            "none",
-		"messages.move":            "none",
-		"messages.copy":            "none",
-		"messages.delete":          "none",
-		"sync":                     "optional",
-		"drafts.handoff-reconcile": "none",
-	}
-	manifest := capabilities()
-	seen := make(map[string]struct{}, len(manifest.Commands))
-	for _, command := range manifest.Commands {
-		seen[command.ID] = struct{}{}
-		expected, audited := want[command.ID]
-		if !audited {
-			t.Fatalf("command %q has no audited mail_app_dependency expectation", command.ID)
-		}
-		if command.MailAppDependency != expected {
-			t.Fatalf("%s mail_app_dependency = %q, want %q", command.ID, command.MailAppDependency, expected)
+func TestCommandCapabilityDependenciesAreIndependent(t *testing.T) {
+	var contract *commandContract
+	for index := range commandContracts {
+		if commandContracts[index].ID == "messages.get" {
+			contract = &commandContracts[index]
+			break
 		}
 	}
-	for id := range want {
-		if _, declared := seen[id]; !declared {
-			t.Fatalf("audited command %q is missing from the manifest", id)
-		}
+	if contract == nil || len(contract.dependencies) == 0 {
+		t.Fatal("messages.get dependency contract is missing")
+	}
+	first := commandCapabilityFor(*contract)
+	first.Dependencies[0].Condition = "mutated"
+	second := commandCapabilityFor(*contract)
+	if second.Dependencies[0].Condition != dependencyConditionIfLocalSourceIncomplete {
+		t.Fatalf("later dependency contract = %+v, want independent source value", second.Dependencies[0])
 	}
 }
 

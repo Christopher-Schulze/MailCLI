@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,6 +26,41 @@ func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 	assertHelpClaims(t, help)
 	assertSharedDocumentationBounds(t)
 	assertQualifiedMailAppClaim(t, artifacts)
+}
+
+func TestCapabilityDependencyDocumentationMatchesRuntimeContract(t *testing.T) {
+	versions := []struct {
+		path    string
+		version string
+	}{
+		{path: "README.md", version: "nested `data.capabilities.schema_version` is 2"},
+		{path: "docs/documentation.md", version: "`data.capabilities.schema_version:2`"},
+		{path: "skills/mailcli/SKILL.md", version: "nested `data.capabilities.schema_version:2`"},
+	}
+	for _, test := range versions {
+		content := readRepositoryFile(t, test.path)
+		for _, required := range []string{test.version, "dependencies"} {
+			if !strings.Contains(content, required) {
+				t.Errorf("%s omits capability contract detail %q", test.path, required)
+			}
+		}
+		for _, removed := range []string{"mail_app_dependency", "credential_dependencies", "network_dependencies"} {
+			if strings.Contains(content, removed) {
+				t.Errorf("%s retains removed capability field %q", test.path, removed)
+			}
+		}
+	}
+	documentation := readRepositoryFile(t, "docs/documentation.md")
+	for _, condition := range []string{
+		"if-local-source-incomplete", "if-local-attachment-bytes-unavailable",
+		"if-local-store-unavailable", "if-batch-item-requires-imap", "if-sync-check",
+		"if-sync-default", "if-doctor-live", "if-send", "if-smtp-accepted",
+		"if-transport-claim-needs-imap-reconciliation",
+	} {
+		if !strings.Contains(documentation, condition) {
+			t.Errorf("docs/documentation.md omits dependency condition %q", condition)
+		}
+	}
 }
 
 func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
@@ -159,13 +195,20 @@ func assertCapabilitySemantics(t *testing.T, manifest capabilityManifest) {
 	t.Helper()
 	send := findCapability(t, manifest, "drafts.send")
 	if send.EffectClass != "smtp-send" || send.StoreDependency != "draft-store" ||
-		send.MailAppDependency != "none" || !containsAll(send.ResultStates, "sent", "sent_mirror_pending") {
+		!slices.Equal(send.Dependencies, []commandDependency{
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfSend},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetSMTP, Condition: dependencyConditionIfSend},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfSMTPAccepted},
+		}) || !containsAll(send.ResultStates, "sent", "sent_mirror_pending") {
 		t.Fatalf("drafts.send capability = %+v", send)
 	}
 	reconcile := findCapability(t, manifest, "drafts.reconcile")
 	if reconcile.EffectClass != "local-write+imap-write" ||
 		reconcile.StoreDependency != "draft-store+mail-store-if-baseline" ||
-		reconcile.MailAppDependency != "none" ||
+		!slices.Equal(reconcile.Dependencies, []commandDependency{
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfTransportClaimNeedsIMAPReconciliation},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfTransportClaimNeedsIMAPReconciliation},
+		}) ||
 		!containsAll(reconcile.ResultStates, "sent", "sent_mirror_pending", "outcome_unknown") {
 		t.Fatalf("drafts.reconcile capability = %+v", reconcile)
 	}

@@ -11,7 +11,49 @@ import (
 	"mailcli/internal/transport/imapclient"
 )
 
-const capabilitySchemaVersion = 1
+const capabilitySchemaVersion = 2
+
+type dependencyKind string
+
+const (
+	dependencyKindNetwork    dependencyKind = "network"
+	dependencyKindCredential dependencyKind = "credential"
+	dependencyKindApp        dependencyKind = "app"
+)
+
+type dependencyTarget string
+
+const (
+	dependencyTargetIMAP                 dependencyTarget = "imap"
+	dependencyTargetSMTP                 dependencyTarget = "smtp"
+	dependencyTargetGitHubRelease        dependencyTarget = "github-release"
+	dependencyTargetKeychain             dependencyTarget = "keychain"
+	dependencyTargetMailApp              dependencyTarget = "mail-app"
+	dependencyTargetEditor               dependencyTarget = "editor"
+	dependencyTargetSystemComposeService dependencyTarget = "system-compose-service"
+)
+
+type dependencyCondition string
+
+const (
+	dependencyConditionAlways                                  dependencyCondition = "always"
+	dependencyConditionIfLocalSourceIncomplete                 dependencyCondition = "if-local-source-incomplete"
+	dependencyConditionIfLocalAttachmentBytesUnavailable       dependencyCondition = "if-local-attachment-bytes-unavailable"
+	dependencyConditionIfLocalStoreUnavailable                 dependencyCondition = "if-local-store-unavailable"
+	dependencyConditionIfBatchItemRequiresIMAP                 dependencyCondition = "if-batch-item-requires-imap"
+	dependencyConditionIfSyncCheck                             dependencyCondition = "if-sync-check"
+	dependencyConditionIfSyncDefault                           dependencyCondition = "if-sync-default"
+	dependencyConditionIfDoctorLive                            dependencyCondition = "if-doctor-live"
+	dependencyConditionIfSend                                  dependencyCondition = "if-send"
+	dependencyConditionIfSMTPAccepted                          dependencyCondition = "if-smtp-accepted"
+	dependencyConditionIfTransportClaimNeedsIMAPReconciliation dependencyCondition = "if-transport-claim-needs-imap-reconciliation"
+)
+
+type commandDependency struct {
+	Kind      dependencyKind      `json:"kind"`
+	Target    dependencyTarget    `json:"target"`
+	Condition dependencyCondition `json:"condition"`
+}
 
 type capabilityManifest struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -38,15 +80,13 @@ type draftSavePolicy struct {
 }
 
 type commandCapability struct {
-	ID                     string          `json:"id"`
-	Schema                 json.RawMessage `json:"schema"`
-	EffectClass            string          `json:"effect_class"`
-	Confirmation           string          `json:"confirmation"`
-	StoreDependency        string          `json:"store_dependency"`
-	MailAppDependency      string          `json:"mail_app_dependency"`
-	CredentialDependencies []string        `json:"credential_dependencies"`
-	NetworkDependencies    []string        `json:"network_dependencies"`
-	ResultStates           []string        `json:"result_states"`
+	ID              string              `json:"id"`
+	Schema          json.RawMessage     `json:"schema"`
+	EffectClass     string              `json:"effect_class"`
+	Confirmation    string              `json:"confirmation"`
+	StoreDependency string              `json:"store_dependency"`
+	Dependencies    []commandDependency `json:"dependencies"`
+	ResultStates    []string            `json:"result_states"`
 }
 
 type capabilityLimits struct {
@@ -331,9 +371,9 @@ func writeCapabilities(stdout, stderr io.Writer, jsonOutput bool, manifest capab
 	}
 	for _, command := range manifest.Commands {
 		writeFormat(
-			stdout, "%s\t%s\tconfirmation=%s\tstore=%s\tmail_app=%s\tstates=%s\n",
+			stdout, "%s\t%s\tconfirmation=%s\tstore=%s\tdependencies=%v\tstates=%s\n",
 			command.ID, command.EffectClass, command.Confirmation, command.StoreDependency,
-			command.MailAppDependency, fmt.Sprint(command.ResultStates),
+			command.Dependencies, fmt.Sprint(command.ResultStates),
 		)
 	}
 	return 0

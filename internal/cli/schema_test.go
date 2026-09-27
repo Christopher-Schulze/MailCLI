@@ -25,7 +25,7 @@ func TestPublishedCommandSchemasAreComplete(t *testing.T) {
 			continue
 		}
 		schema := decodeTestCommandSchema(t, schemaForCommand(contract.ID))
-		if schema.ID != contract.ID+"@v1" || schema.Version != capabilitySchemaVersion {
+		if schema.ID != contract.ID+"@v1" || schema.Version != 1 {
 			t.Fatalf("%s schema identity = %q/%d", contract.ID, schema.ID, schema.Version)
 		}
 		if len(schema.Flags) == 0 {
