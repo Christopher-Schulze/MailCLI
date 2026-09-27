@@ -271,9 +271,6 @@ func (s *Service) ResolveMailbox(ctx context.Context, accountRef string, path []
 }
 
 func (s *Service) ListMessages(ctx context.Context, request ListMessagesRequest) (MessagePage, error) {
-	if request.MailboxRef == "" {
-		return MessagePage{}, validationError("mailbox ref is required")
-	}
 	limit, err := normalizeLimit(request.Limit)
 	if err != nil {
 		return MessagePage{}, err

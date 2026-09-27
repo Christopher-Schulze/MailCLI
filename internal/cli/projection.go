@@ -193,6 +193,7 @@ type searchPageMessageProjection struct {
 type messagePageItemProjection struct {
 	Ref             string                       `json:"ref"`
 	MailboxRef      string                       `json:"mailbox_ref"`
+	Account         string                       `json:"account,omitempty"`
 	MessageID       *string                      `json:"message_id,omitempty"`
 	Subject         *string                      `json:"subject,omitempty"`
 	Sender          *string                      `json:"sender,omitempty"`
@@ -632,7 +633,7 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 		return projectionFieldRegistry{core: []string{"ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error"},
 			optional: []string{"age_days", "created_at", "updated_at"}}
 	case projectionTargetListPage:
-		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref"},
+		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "account"},
 			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "staleness_note", "subject"}}
 	case projectionTargetSearchPage:
 		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref"},
@@ -701,7 +702,7 @@ func projectSearchPage(page mail.SearchPage, fields map[string]struct{}) *json.R
 }
 
 func projectMessageSummary(message mail.MessageSummary, fields map[string]struct{}) messagePageItemProjection {
-	projected := messagePageItemProjection{Ref: message.Ref, MailboxRef: message.MailboxRef}
+	projected := messagePageItemProjection{Ref: message.Ref, MailboxRef: message.MailboxRef, Account: message.Account}
 	if _, include := fields["message_id"]; include {
 		projected.MessageID = &message.MessageID
 	}

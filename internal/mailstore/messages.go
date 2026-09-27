@@ -64,12 +64,31 @@ func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesReque
 			"invalid_argument", fmt.Sprintf("limit must be between 1 and %d", mail.MaximumPageLimit),
 		)
 	}
+	if request.MailboxRef == "" {
+		return s.listUnifiedInbox(ctx, request)
+	}
+	if !strings.HasPrefix(request.MailboxRef, "mbx_") {
+		selected, err := s.selectedListMailboxes(ctx, request)
+		if err != nil {
+			return mail.MessagePage{}, err
+		}
+		request.MailboxRef = selected[0].Ref
+	}
 	mailbox, err := mailref.DecodeMailbox(request.MailboxRef)
 	if err != nil {
 		return mail.MessagePage{}, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
 	}
 	if !s.activeAccountID(mailbox.AccountID) {
 		return mail.MessagePage{}, operationError("stale_reference", "mailbox account is not active")
+	}
+	if request.AccountRef != "" {
+		accountID, err := s.requestedAccountID(request.AccountRef)
+		if err != nil {
+			return mail.MessagePage{}, err
+		}
+		if !strings.EqualFold(accountID, mailbox.AccountID) {
+			return mail.MessagePage{}, operationError("invalid_argument", "mailbox ref does not belong to --account")
+		}
 	}
 	cursor, err := decodeListCursor(request.Cursor, request.MailboxRef, s.storeUUID)
 	if err != nil {

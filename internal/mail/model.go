@@ -625,6 +625,7 @@ func (e *ServerMutationEvidence) OutcomeUnknown() bool {
 type MessageSummary struct {
 	Ref             string `json:"ref"`
 	MailboxRef      string `json:"mailbox_ref"`
+	Account         string `json:"account,omitempty"`
 	MessageID       string `json:"message_id"`
 	Subject         string `json:"subject"`
 	Sender          string `json:"sender"`
@@ -844,6 +845,7 @@ type ListMailboxesRequest struct {
 
 type ListMessagesRequest struct {
 	MailboxRef string
+	AccountRef string
 	Cursor     string
 	Limit      int
 }

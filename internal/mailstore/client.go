@@ -226,6 +226,10 @@ func (c *Client) ListMessages(
 	if c.store != nil {
 		return c.store.ListMessages(ctx, request)
 	}
+	if !strings.HasPrefix(request.MailboxRef, "mbx_") || request.AccountRef != "" {
+		return mail.MessagePage{}, operationErrorWithCause("safe_message_listing_unavailable",
+			"unified inbox and mailbox selectors require the supported local Mail store; no Apple Events global scan was attempted", c.readUnavailableError())
+	}
 	if c.fallback == nil {
 		return mail.MessagePage{}, c.readUnavailableError()
 	}

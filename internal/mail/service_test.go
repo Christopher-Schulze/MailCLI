@@ -103,10 +103,10 @@ func TestServiceValidationTable(t *testing.T) {
 		run     func(*Service) error
 		wantErr bool
 	}{
-		{name: "missing mailbox", run: func(service *Service) error {
+		{name: "default inbox", run: func(service *Service) error {
 			_, err := service.ListMessages(context.Background(), ListMessagesRequest{})
 			return err
-		}, wantErr: true},
+		}, wantErr: false},
 		{name: "missing message detail ref", run: func(service *Service) error {
 			_, err := service.GetMessage(context.Background(), "")
 			return err
@@ -143,6 +143,18 @@ func TestServiceNormalizesLimits(t *testing.T) {
 		MailboxRef: "mailbox", Limit: MaximumPageLimit + 1,
 	}); err == nil {
 		t.Fatal("ListMessages() error = nil, want maximum limit error")
+	}
+}
+
+func TestServiceDefaultInboxPreservesScopeAndCursor(t *testing.T) {
+	gateway := &gatewayStub{}
+	request := ListMessagesRequest{AccountRef: "account-ref", Cursor: "inbox-cursor"}
+	if _, err := NewService(gateway).ListMessages(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := ListMessagesRequest{AccountRef: request.AccountRef, Cursor: request.Cursor, Limit: DefaultPageLimit}
+	if gateway.listRequest != want {
+		t.Fatalf("request=%+v want=%+v", gateway.listRequest, want)
 	}
 }
 

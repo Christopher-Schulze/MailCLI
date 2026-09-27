@@ -119,6 +119,8 @@ Never infer recipient failure from an empty local search immediately after SMTP 
 
 ## CLI contract
 
+`messages list --json` defaults to the unified inbox across active accounts. One SQL statement selects physical and label membership, deduplicates message rows, and orders received dates descending with row ID as the tie breaker; NULL dates come last. Each item carries its account ref as `account` and its resolved `mailbox_ref`, retained under projections. `--account REF` narrows the inbox or mailbox selection. `--mailbox` accepts an opaque ref, a case-insensitive role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`), or an exact slash-separated path. The existing resolver uses proven Sent/Drafts cache attributes and its existing localized role names; unknown attribute bits are never guessed. Ambiguity returns `ambiguous_mailbox` with candidate refs instead of choosing an account. Inbox cursors bind the store UUID, account scope, resolved inbox set and date/row boundary; changing the selection requires a new cursor. This is best-effort keyset pagination across invocations, not a persistent snapshot. Unified inbox and role/path selection require the supported local store and never trigger a global Apple Events scan; explicit-ref legacy fallback remains available.
+
 The CLI is optimized for both humans and agents:
 
 - Stable nouns and verbs; no interactive menu.

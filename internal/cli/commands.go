@@ -309,7 +309,8 @@ func runMessages(
 
 func runMessagesList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages list", stderr)
-	mailboxRef := flags.String("mailbox", "", "mailbox ref")
+	mailboxRef := flags.String("mailbox", "", "mailbox ref, role, or exact path; omit for unified inbox")
+	accountRef := flags.String("account", "", "scope to an account ref")
 	cursor := flags.String("cursor", "", "pagination cursor")
 	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
 	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
@@ -332,7 +333,7 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
 	page, err := service.ListMessages(operationCtx, mail.ListMessagesRequest{
-		MailboxRef: *mailboxRef, Cursor: *cursor, Limit: *limit,
+		MailboxRef: *mailboxRef, AccountRef: *accountRef, Cursor: *cursor, Limit: *limit,
 	})
 	if err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)

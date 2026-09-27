@@ -4,11 +4,17 @@
   "flags": [
     {
       "name": "--mailbox",
+      "value_type": "mailbox_selector",
+      "takes_value": true,
+      "value_required": true,
+      "description": "mailbox ref, role, or exact path; omit for unified inbox"
+    },
+    {
+      "name": "--account",
       "value_type": "ref",
       "takes_value": true,
       "value_required": true,
-      "required": true,
-      "description": "mailbox reference"
+      "description": "scope to an account ref"
     },
     {
       "name": "--cursor",
