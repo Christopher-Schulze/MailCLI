@@ -76,9 +76,6 @@ func (s *Store) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 }
 
 func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, error) {
-	if s.accountIdentityCounters != nil {
-		s.accountIdentityCounters.fullCatalogBuilds.Add(1)
-	}
 	return s.listAccountCatalog(ctx, false)
 }
 
@@ -205,9 +202,6 @@ func (s *Store) listAccountsWithBindings(
 	ctx context.Context,
 	bindings mail.AccountBindingFile,
 ) ([]mail.Account, error) {
-	if s.accountIdentityCounters != nil {
-		s.accountIdentityCounters.fullCatalogBuilds.Add(1)
-	}
 	catalog, err := s.listAccountCatalogWithBindings(ctx, false, bindings)
 	return catalog.Accounts, err
 }
@@ -502,9 +496,6 @@ func (s *Store) querySenderIdentityRows(
 	limit int,
 ) (result []senderIdentity, observed int, resultErr error) {
 	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit, limit, 0)
-	if s.accountIdentityCounters != nil {
-		s.accountIdentityCounters.sentScanQueries.Add(1)
-	}
 	rows, err := s.database.QueryContext(ctx, cte+`
 		SELECT (SELECT count(*) FROM membership), sender.ROWID,
 			COALESCE(sender.address, ''), COALESCE(sender.comment, ''),
@@ -599,9 +590,6 @@ func (s *Store) hasMoreSenderIdentityRows(
 	limit int,
 ) (more bool, resultErr error) {
 	cte, arguments := senderIdentityMembershipQuery(mailboxIDs, limit+1, 1, limit)
-	if s.accountIdentityCounters != nil {
-		s.accountIdentityCounters.sentScanQueries.Add(1)
-	}
 	rows, err := s.database.QueryContext(ctx, cte+`
 		SELECT 1 FROM membership
 	`, arguments...)

@@ -168,9 +168,6 @@ func (s *Store) queryMailboxRecords(
 		if err := rows.Scan(&record.RowID, &record.URL, &record.MessageCount, &record.UnreadCount); err != nil {
 			return nil, fmt.Errorf("scan Envelope Index mailbox: %w", err)
 		}
-		if accountRoot != "" && s.accountIdentityCounters != nil {
-			s.accountIdentityCounters.mailboxRecordRowsScanned.Add(1)
-		}
 		location, err := parseMailboxURL(record.URL)
 		if err != nil {
 			return nil, operationError(

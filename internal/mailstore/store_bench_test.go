@@ -872,7 +872,7 @@ func writeMutationIdentityMailboxCache(
 func openMutationIdentityClient(
 	tb testing.TB,
 	fixture mutationIdentityFixture,
-) (*Store, *Client, *accountIdentityCounters, *countedMutationBindings, *countedMutationCredentials) {
+) (*Store, *Client, *countedMutationBindings, *countedMutationCredentials) {
 	tb.Helper()
 	bindings := &countedMutationBindings{AccountBindingStore: mail.NewAccountBindingStore(fixture.bindingPath)}
 	store, err := Open(context.Background(), Config{
@@ -882,8 +882,6 @@ func openMutationIdentityClient(
 	if err != nil {
 		tb.Fatalf("open generated mutation identity store: %v", err)
 	}
-	counters := &accountIdentityCounters{}
-	store.accountIdentityCounters = counters
 	credentials := &countedMutationCredentials{strictCredentials: strictCredentials{
 		"identity@gmail.com": "generated-test-password",
 	}}
@@ -896,7 +894,7 @@ func openMutationIdentityClient(
 			tb.Errorf("close generated mutation identity store: %v", err)
 		}
 	})
-	return store, client, counters, bindings, credentials
+	return store, client, bindings, credentials
 }
 
 func mutationTargetReferences(tb testing.TB, store *Store, fixture searchFixtureData, count int) []string {
@@ -935,23 +933,26 @@ func BenchmarkMutationAccountResolution(b *testing.B) {
 		{name: "items_100", items: 100},
 	} {
 		b.Run(benchmark.name, func(b *testing.B) {
-			store, client, counters, bindings, credentials := openMutationIdentityClient(b, fixture)
+			store, client, bindings, credentials := openMutationIdentityClient(b, fixture)
 			messageRefs := mutationTargetReferences(b, store, fixture.searchFixtureData, benchmark.items)
 			b.ReportAllocs()
 			b.ResetTimer()
+			var lastInvocationCtx context.Context
 			for b.Loop() {
-				invocationCtx := client.WithAccountBindingSnapshot(context.Background())
+				lastInvocationCtx = client.WithAccountBindingSnapshot(context.Background())
 				for _, messageRef := range messageRefs {
-					target, err := client.resolveImapTargetForMutation(invocationCtx, messageRef)
+					target, err := client.resolveImapTargetForMutation(lastInvocationCtx, messageRef)
 					if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
 						b.Fatalf("resolve generated mutation target: target=%+v error=%v", target, err)
 					}
 				}
 			}
+			b.StopTimer()
+			if lastInvocationCtx == nil {
+				b.Fatal("benchmark completed without an invocation context")
+			}
+			assertMutationMailboxRows(b, lastInvocationCtx, client, testAccountID, 3)
 			iterations := float64(b.N)
-			b.ReportMetric(float64(counters.fullCatalogBuilds.Load())/iterations, "catalog_builds/op")
-			b.ReportMetric(float64(counters.sentScanQueries.Load())/iterations, "sent_scan_queries/op")
-			b.ReportMetric(float64(counters.mailboxRecordRowsScanned.Load())/iterations, "mailbox_record_rows_scanned/op")
 			b.ReportMetric(float64(bindings.loadCalls.Load())/iterations, "binding_loads/op")
 			b.ReportMetric(float64(credentials.loadCalls.Load())/iterations, "credential_loads/op")
 			reportGeneratedStoreFixture(b, fixture.searchFixtureData)
