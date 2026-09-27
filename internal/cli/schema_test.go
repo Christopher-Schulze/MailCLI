@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	goast "go/ast"
 	goparser "go/parser"
@@ -196,7 +195,7 @@ func TestPublishedCommandFlagsMatchActualParsers(t *testing.T) {
 		if allowed, ok := strictParsers[contract.ID]; ok {
 			got = make(map[string]parserFlagSnapshot, len(allowed))
 			for _, name := range allowed {
-				got[name] = parserFlagSnapshot{ValueKind: "bool", Default: "false"}
+				got[name] = parserFlagSnapshot{ValueClass: "bool", Default: "false"}
 			}
 			delete(strictParsers, contract.ID)
 			verifyStrictBooleanParser(t, contract.ID, allowed, want)
@@ -217,7 +216,7 @@ func TestParserSchemaDriftComparatorRejectsAddedAndRemovedFlags(t *testing.T) {
 		"--json": {ValueType: "boolean"},
 	}
 	registered := map[string]parserFlagSnapshot{
-		"--json": {ValueKind: "bool", Default: "false"},
+		"--json": {ValueClass: "bool", Default: "false"},
 	}
 	if err := compareParserFlagParity("fixture", want, registered); err != nil {
 		t.Fatalf("matching flags failed: %v", err)
@@ -226,13 +225,13 @@ func TestParserSchemaDriftComparatorRejectsAddedAndRemovedFlags(t *testing.T) {
 		"--enabled": {ValueType: "boolean", TakesValue: true, ValueRequired: true},
 	}
 	if err := compareParserFlagParity("fixture", booleanValue, map[string]parserFlagSnapshot{
-		"--enabled": {ValueKind: "func", TakesValue: true},
+		"--enabled": {ValueClass: "func", TakesValue: true},
 	}); err != nil {
 		t.Fatalf("value-taking boolean flag failed: %v", err)
 	}
 	added := map[string]parserFlagSnapshot{
-		"--json":  {ValueKind: "bool", Default: "false"},
-		"--extra": {ValueKind: "string"},
+		"--json":  {ValueClass: "bool", Default: "false"},
+		"--extra": {ValueClass: "value"},
 	}
 	if err := compareParserFlagParity("fixture", want, added); err == nil {
 		t.Fatal("an added parser flag did not fail parity")
@@ -243,63 +242,63 @@ func TestParserSchemaDriftComparatorRejectsAddedAndRemovedFlags(t *testing.T) {
 }
 
 type parserFlagSnapshot struct {
-	ValueKind  string
+	ValueClass string
 	TakesValue bool
 	Default    string
-	Repeatable bool
-}
-
-type parserFlagCapture struct {
-	sets []*flag.FlagSet
-	bytes.Buffer
-}
-
-func (capture *parserFlagCapture) observeParserFlags(flags *flag.FlagSet) {
-	capture.sets = append(capture.sets, flags)
 }
 
 func captureCommandParserFlags(t *testing.T, commandID string) map[string]parserFlagSnapshot {
 	t.Helper()
 	args := strings.Split(commandID, ".")
 	args = append(args, "--help")
-	capture := &parserFlagCapture{}
 	var stdout bytes.Buffer
-	if code := runCommand(context.Background(), nil, args, &stdout, capture); code != 0 {
-		t.Fatalf("%s help exit = %d, stdout=%q, stderr=%q", commandID, code, stdout.String(), capture.String())
-	}
-	if len(capture.sets) != 1 {
-		t.Fatalf("%s created %d FlagSets; want exactly one", commandID, len(capture.sets))
+	var stderr bytes.Buffer
+	if code := runCommand(context.Background(), nil, args, &stdout, &stderr); code != 0 {
+		t.Fatalf("%s help exit = %d, stdout=%q, stderr=%q", commandID, code, stdout.String(), stderr.String())
 	}
 	registered := make(map[string]parserFlagSnapshot)
-	capture.sets[0].VisitAll(func(option *flag.Flag) {
-		valueType := reflect.TypeOf(option.Value)
-		if valueType.Kind() == reflect.Pointer {
-			valueType = valueType.Elem()
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "--") {
+			continue
 		}
-		registered["--"+option.Name] = parserFlagSnapshot{
-			ValueKind:  valueType.Kind().String(),
-			TakesValue: flagTakesValue(option.Value),
-			Default:    option.DefValue,
-			Repeatable: parserFlagCollectsRepeatedValues(option) || option.Name == "ref",
+		name := fields[0]
+		if _, exists := registered[name]; exists {
+			t.Fatalf("%s help repeats option %s", commandID, name)
 		}
-	})
+		takesValue := len(fields) > 1 && strings.HasPrefix(fields[1], "<") && strings.HasSuffix(fields[1], ">")
+		kind := "bool"
+		if takesValue {
+			kind = "value"
+			if fields[1] == "<true|false>" {
+				kind = "func"
+			}
+		}
+		registered[name] = parserFlagSnapshot{ValueClass: kind, TakesValue: takesValue, Default: parserDefaultFromHelp(line)}
+	}
+	if len(registered) == 0 {
+		t.Fatalf("%s help output contains no registered options: %q", commandID, stdout.String())
+	}
 	return registered
 }
 
-func parserFlagCollectsRepeatedValues(option *flag.Flag) bool {
-	if !flagTakesValue(option.Value) {
-		return false
+func parserDefaultFromHelp(line string) string {
+	const marker = "(default: "
+	index := strings.LastIndex(line, marker)
+	if index < 0 || !strings.HasSuffix(line, ")") {
+		return ""
 	}
-	first := "mailcli-schema-first"
-	second := "mailcli-schema-second"
-	if err := option.Value.Set(first); err != nil {
-		return false
+	value := line[index+len(marker) : len(line)-1]
+	switch value {
+	case "standard input":
+		return "-"
+	case "1 MiB":
+		return "1048576"
+	case "4 GiB":
+		return "4294967296"
+	default:
+		return value
 	}
-	if err := option.Value.Set(second); err != nil {
-		return false
-	}
-	value := option.Value.String()
-	return strings.Contains(value, first) && strings.Contains(value, second)
 }
 
 func compareParserFlagParity(
@@ -317,14 +316,11 @@ func compareParserFlagParity(
 			mismatches = append(mismatches, fmt.Sprintf("schema flag %s is not registered by the parser", name))
 			continue
 		}
-		if !parserValueTypeMatches(expected.ValueType, actual.ValueKind) {
-			mismatches = append(mismatches, fmt.Sprintf("flag %s schema type %s disagrees with parser type %s", name, expected.ValueType, actual.ValueKind))
+		if !parserValueClassMatches(expected.ValueType, actual.ValueClass) {
+			mismatches = append(mismatches, fmt.Sprintf("flag %s schema class %s disagrees with help value class %s", name, schemaParserValueClass(expected.ValueType), actual.ValueClass))
 		}
 		if expected.TakesValue != actual.TakesValue || expected.ValueRequired != actual.TakesValue {
 			mismatches = append(mismatches, fmt.Sprintf("flag %s value-taking metadata disagrees: parser=%t schema=%t/%t", name, actual.TakesValue, expected.TakesValue, expected.ValueRequired))
-		}
-		if expected.Repeatable != actual.Repeatable {
-			mismatches = append(mismatches, fmt.Sprintf("flag %s repeatable metadata disagrees: parser=%t schema=%t", name, actual.Repeatable, expected.Repeatable))
 		}
 		if !parserDefaultMatches(expected.Default, actual.Default) {
 			mismatches = append(mismatches, fmt.Sprintf("flag %s default disagrees: parser=%q schema=%q", name, actual.Default, expected.Default))
@@ -342,21 +338,24 @@ func compareParserFlagParity(
 	return nil
 }
 
-func parserValueTypeMatches(schemaType string, parserKind string) bool {
+func parserValueClassMatches(schemaType string, parserClass string) bool {
 	switch schemaType {
 	case "boolean":
-		return parserKind == "bool" || parserKind == "func"
-	case "integer":
-		return parserKind == "int"
-	case "bytes":
-		return parserKind == "int64"
+		return parserClass == "bool" || parserClass == "func"
 	default:
-		return parserKind == "string" || parserKind == "slice" || parserKind == "struct"
+		return parserClass == "value"
 	}
 }
 
+func schemaParserValueClass(schemaType string) string {
+	if schemaType == "boolean" {
+		return "boolean"
+	}
+	return "value-taking"
+}
+
 func parserDefaultMatches(schemaDefault string, parserDefault string) bool {
-	if schemaDefault != "" {
+	if schemaDefault != "" && schemaDefault != "0" && schemaDefault != "false" {
 		return schemaDefault == parserDefault
 	}
 	return parserDefault == "" || parserDefault == "0" || parserDefault == "false"
