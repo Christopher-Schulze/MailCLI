@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -194,6 +196,98 @@ func TestExecuteBatchReadAppliesConcurrentAdmissionDecisions(t *testing.T) {
 	}
 }
 
+type budgetReadGateway struct {
+	*gatewayStub
+	workers  int
+	started  atomic.Int32
+	exited   atomic.Int32
+	hydrated atomic.Int32
+	ready    chan struct{}
+}
+
+func (g *budgetReadGateway) GetMessage(ctx context.Context, ref string) (Message, error) {
+	ordinal := int(g.started.Add(1))
+	defer g.exited.Add(1)
+	if ordinal == g.workers+2 {
+		close(g.ready)
+	}
+	if ordinal == 3 {
+		select {
+		case <-g.ready:
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+		}
+	} else if ordinal > 3 {
+		<-ctx.Done()
+		return Message{}, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return Message{}, err
+	}
+	g.hydrated.Add(1)
+	return Message{Summary: MessageSummary{Ref: ref}, Content: "retained body"}, nil
+}
+
+func TestExecuteBatchReadBudgetStopsAndJoinsWorkers(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		workers int
+		content bool
+	}{
+		{name: "result/1", workers: 1}, {name: "result/2", workers: 2}, {name: "result/8", workers: MaximumBatchConcurrency},
+		{name: "content/1", workers: 1, content: true}, {name: "content/2", workers: 2, content: true}, {name: "content/8", workers: MaximumBatchConcurrency, content: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workers := test.workers
+			gateway := &budgetReadGateway{gatewayStub: &gatewayStub{}, workers: workers, ready: make(chan struct{})}
+			items := make([]BatchItem, MaximumBatchItems)
+			for index := range items {
+				items[index] = BatchItem{ID: strconv.Itoa(index), Ref: "ref-" + strconv.Itoa(index)}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			request := BatchRequest{
+				Operation: BatchOperationRead, Concurrency: workers, Items: items,
+				ReadResultAdmission: func(result BatchResult, _ int) bool { return result.Completed < 3 },
+			}
+			wantRetained := 3
+			if test.content {
+				wantRetained = 2
+				var admitted atomic.Int32
+				request.ReadResultAdmission = nil
+				request.ReadContentAdmission = func(string, string, bool, bool) BatchReadAdmission {
+					exceeded := admitted.Add(1) >= 3
+					return BatchReadAdmission{RetainContent: !exceeded, BudgetExceeded: exceeded}
+				}
+				for index := range items {
+					items[index].RetainReadContent = true
+				}
+			}
+			result, err := NewService(gateway).ExecuteBatch(ctx, request)
+			started := int(gateway.started.Load())
+			if err != nil || ctx.Err() != nil || started > 3+workers || int(gateway.exited.Load()) != started || gateway.hydrated.Load() != 3 {
+				t.Fatalf("read lifecycle: err=%v parent=%v started=%d exited=%d hydrated=%d", err, ctx.Err(), started, gateway.exited.Load(), gateway.hydrated.Load())
+			}
+			if result.Total != MaximumBatchItems || result.Completed != 3 || result.Failed != started-3 || result.Skipped != MaximumBatchItems-started || result.Uncertain != 0 {
+				t.Fatalf("budget counts = %+v", result)
+			}
+			retained := 0
+			for index, item := range result.Items {
+				if item.ID != strconv.Itoa(index) || (index >= started && item.State != BatchItemSkippedBudget) ||
+					(item.State == BatchItemCompleted && item.Message == nil) {
+					t.Fatalf("item %d lost ordering/outcome: %+v", index, item)
+				}
+				if item.Message != nil && item.Message.Content == "retained body" {
+					retained++
+				}
+			}
+			if retained != wantRetained {
+				t.Fatalf("retained completed bodies=%d, want %d", retained, wantRetained)
+			}
+		})
+	}
+}
+
 func TestExecuteBatchRejectsDuplicateMutationIDsAndDestinationsBeforeEffects(t *testing.T) {
 	gateway := &batchGateway{gatewayStub: &gatewayStub{}}
 	service := NewService(gateway)
@@ -324,6 +418,10 @@ func TestExecuteBatchAllowsIndependentMutationRefsInInputOrder(t *testing.T) {
 			}
 			result, err := NewService(gateway).ExecuteBatch(context.Background(), BatchRequest{
 				Operation: operation, Concurrency: concurrency, Items: items,
+				ReadResultAdmission: func(BatchResult, int) bool {
+					t.Error("mutation reached read output admission")
+					return false
+				},
 			})
 			if err != nil || !result.Complete() {
 				t.Fatalf("ExecuteBatch() = (%+v, %v), want complete result", result, err)

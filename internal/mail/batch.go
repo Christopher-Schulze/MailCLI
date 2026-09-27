@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -33,10 +34,11 @@ const (
 type BatchItemState = string
 
 const (
-	BatchItemCompleted = "completed"
-	BatchItemFailed    = "failed"
-	BatchItemSkipped   = "skipped"
-	BatchItemUncertain = "uncertain"
+	BatchItemCompleted     = "completed"
+	BatchItemFailed        = "failed"
+	BatchItemSkipped       = "skipped"
+	BatchItemSkippedBudget = "skipped_budget"
+	BatchItemUncertain     = "uncertain"
 )
 
 // BatchRequest is an explicit, bounded set of independent operations. Items
@@ -47,6 +49,9 @@ type BatchRequest struct {
 	Items                []BatchItem            `json:"items"`
 	Concurrency          int                    `json:"concurrency,omitempty"`
 	ReadContentAdmission BatchReadAdmissionFunc `json:"-"`
+	// ReadResultAdmission runs serially on completed-result snapshots. False
+	// stops only this read batch; the callback must not mutate the snapshot.
+	ReadResultAdmission func(BatchResult, int) bool `json:"-"`
 }
 
 // BatchReadDefaults selects the projection inherited by batch read items.
@@ -55,11 +60,13 @@ type BatchReadDefaults struct {
 	Fields *[]string `json:"fields,omitempty"`
 }
 
-// BatchReadAdmission carries only the content-retention decision made by the
-// caller after measuring its own output representation.
+// BatchReadAdmission carries content retention and an explicit output-budget
+// stop after the caller measures its own representation. A retention-only
+// rejection does not cancel reads.
 type BatchReadAdmission struct {
-	RetainContent bool
-	RetainHeaders bool
+	RetainContent  bool
+	RetainHeaders  bool
+	BudgetExceeded bool
 }
 
 // BatchReadAdmissionFunc returns the caller's requested-content retention
@@ -115,13 +122,16 @@ type BatchResult struct {
 }
 
 type batchExecution struct {
-	ctx     context.Context
-	service *Service
-	request BatchRequest
-	result  *BatchResult
-	jobs    chan int
-	wait    sync.WaitGroup
-	next    int
+	ctx            context.Context
+	service        *Service
+	request        BatchRequest
+	result         *BatchResult
+	jobs           chan int
+	wait           sync.WaitGroup
+	next           int
+	resultMu       sync.Mutex
+	readCancel     context.CancelFunc
+	budgetExceeded atomic.Bool
 }
 
 func (r BatchResult) Complete() bool {
@@ -152,6 +162,10 @@ func (s *Service) ExecuteBatch(ctx context.Context, request BatchRequest) (Batch
 		}
 	}
 	execution := batchExecution{ctx: ctx, service: s, request: request, result: &result}
+	if request.Operation == BatchOperationRead {
+		execution.ctx, execution.readCancel = context.WithCancel(ctx)
+		defer execution.readCancel()
+	}
 	execution.run()
 	return result, nil
 }
@@ -176,29 +190,61 @@ func (run *batchExecution) run() {
 	}
 	close(run.jobs)
 	run.wait.Wait()
-	for index := run.next; index < len(run.result.Items); index++ {
-		run.result.Items[index].State = BatchItemSkipped
-	}
-	for _, item := range run.result.Items {
-		switch item.State {
-		case BatchItemCompleted:
-			run.result.Completed++
-		case BatchItemFailed:
-			run.result.Failed++
-		case BatchItemUncertain:
-			run.result.Uncertain++
-		case BatchItemSkipped:
-			run.result.Skipped++
+	if run.budgetExceeded.Load() {
+		for index := range run.result.Items {
+			if run.result.Items[index].State == BatchItemSkipped {
+				run.result.Items[index].State = BatchItemSkippedBudget
+				run.result.Items[index].Error = nil
+			}
 		}
 	}
+	*run.result = summarizeBatchResult(*run.result)
+}
+
+func summarizeBatchResult(result BatchResult) BatchResult {
+	result.Completed, result.Failed, result.Uncertain, result.Skipped = 0, 0, 0, 0
+	for _, item := range result.Items {
+		switch item.State {
+		case BatchItemCompleted:
+			result.Completed++
+		case BatchItemFailed:
+			result.Failed++
+		case BatchItemUncertain:
+			result.Uncertain++
+		case BatchItemSkipped, BatchItemSkippedBudget:
+			result.Skipped++
+		}
+	}
+	return result
 }
 
 func (run *batchExecution) worker() {
 	defer run.wait.Done()
 	for index := range run.jobs {
 		if run.ctx.Err() == nil {
-			run.result.Items[index] = run.execute(run.request.Items[index])
+			run.recordResult(index, run.execute(run.request.Items[index]))
 		}
+	}
+}
+
+func (run *batchExecution) recordResult(index int, item BatchItemResult) {
+	run.resultMu.Lock()
+	defer run.resultMu.Unlock()
+	run.result.Items[index] = item
+	if run.request.Operation != BatchOperationRead || run.request.ReadResultAdmission == nil ||
+		run.budgetExceeded.Load() || run.ctx.Err() != nil {
+		return
+	}
+	snapshot := summarizeBatchResult(*run.result)
+	snapshot.Items = append([]BatchItemResult(nil), snapshot.Items...)
+	if !run.request.ReadResultAdmission(snapshot, index) {
+		run.stopReadBudget()
+	}
+}
+
+func (run *batchExecution) stopReadBudget() {
+	if run.readCancel != nil && !run.budgetExceeded.Swap(true) {
+		run.readCancel()
 	}
 }
 
@@ -444,6 +490,9 @@ func (run *batchExecution) admitReadMessage(message *Message, item BatchItem) {
 	admission := run.request.ReadContentAdmission(
 		message.Content, message.Headers, item.RetainReadContent, item.RetainReadHeaders,
 	)
+	if admission.BudgetExceeded {
+		run.stopReadBudget()
+	}
 	if !admission.RetainContent {
 		message.Content = ""
 	}

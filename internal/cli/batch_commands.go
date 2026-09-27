@@ -21,14 +21,20 @@ type batchReadBudgetResult struct {
 	exceeded      bool
 	limitBytes    int64
 	requiredBytes int64
+	measured      outputSizeMeasurement
+	failure       error
 }
 
 type batchReadContentBudget struct {
-	mu            sync.Mutex
-	limit         int64
-	remaining     int64
-	requiredBytes int64
-	exceeded      bool
+	mu             sync.Mutex
+	limit          int64
+	remaining      int64
+	requiredBytes  int64
+	exceeded       bool
+	itemExtraBytes int64
+	encodedBytes   int64
+	measured       outputSizeMeasurement
+	failure        error
 }
 
 func newBatchReadContentBudget(limit int64) *batchReadContentBudget {
@@ -49,9 +55,9 @@ func (budget *batchReadContentBudget) admit(
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
 	budget.requiredBytes += requiredBytes
-	if requiredBytes > budget.remaining {
+	if budget.exceeded || requiredBytes > budget.remaining {
 		budget.exceeded = true
-		return mail.BatchReadAdmission{}
+		return mail.BatchReadAdmission{BudgetExceeded: true}
 	}
 	budget.remaining -= requiredBytes
 	return mail.BatchReadAdmission{RetainContent: retainContent, RetainHeaders: retainHeaders}
@@ -60,9 +66,65 @@ func (budget *batchReadContentBudget) admit(
 func (budget *batchReadContentBudget) result() batchReadBudgetResult {
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	return batchReadBudgetResult{
-		exceeded: budget.exceeded, limitBytes: budget.limit, requiredBytes: budget.requiredBytes,
+	requiredBytes := budget.requiredBytes
+	if budget.measured != "" {
+		requiredBytes = budget.encodedBytes
 	}
+	return batchReadBudgetResult{
+		exceeded: budget.exceeded, limitBytes: budget.limit, requiredBytes: requiredBytes,
+		measured: budget.measured, failure: budget.failure,
+	}
+}
+
+func (budget *batchReadContentBudget) admitResult(result mail.BatchResult, index int, request mail.BatchRequest) bool {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if budget.exceeded {
+		return false
+	}
+	extra, err := batchReadItemExtraBytes(result.Items[index], index, request, budget.limit)
+	if err == nil {
+		budget.itemExtraBytes += extra
+		var size int64
+		size, err = batchReadSkeletonBytes(result, request, budget.limit)
+		if err == nil && size+budget.itemExtraBytes > budget.limit {
+			budget.exceeded = true
+			budget.encodedBytes = size + budget.itemExtraBytes
+			budget.measured = outputSizeLowerBound
+			if result.Skipped == 0 {
+				budget.measured = outputSizeExact
+			}
+		}
+	}
+	budget.failure = err
+	return err == nil && !budget.exceeded
+}
+
+func batchReadItemExtraBytes(item mail.BatchItemResult, index int, request mail.BatchRequest, limit int64) (int64, error) {
+	projected, err := projectBatchItem(item, index, mail.BatchOperationRead, request.Items, limit, true, true, true, true)
+	if err != nil {
+		return 0, err
+	}
+	payload, err := marshalCLIJSON(projected)
+	if err != nil {
+		return 0, err
+	}
+	projected.Message, projected.Error = nil, nil
+	skeleton, err := marshalCLIJSON(projected)
+	return int64(len(payload) - len(skeleton)), err
+}
+
+func batchReadSkeletonBytes(result mail.BatchResult, request mail.BatchRequest, limit int64) (int64, error) {
+	result.Items = append([]mail.BatchItemResult(nil), result.Items...)
+	for index := range result.Items {
+		result.Items[index].Message, result.Items[index].Error = nil, nil
+	}
+	data, err := batchResponseData(result, request, limit, true, true, true, true)
+	if err != nil {
+		return 0, err
+	}
+	payload, err := marshalEnvelope(batchJSONEnvelope(result, data))
+	return int64(len(payload)), err
 }
 
 func runBatch(
@@ -117,6 +179,9 @@ func runBatch(
 	if *jsonOutput && request.Operation == mail.BatchOperationRead {
 		readBudget = newBatchReadContentBudget(*maxBytes)
 		request.ReadContentAdmission = readBudget.admit
+		request.ReadResultAdmission = func(result mail.BatchResult, index int) bool {
+			return readBudget.admitResult(result, index, request)
+		}
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, batchTimeout)
 	defer cancel()
@@ -182,6 +247,9 @@ func writeBatchJSON(
 	maxBytes int64,
 	readBudget batchReadBudgetResult,
 ) int {
+	if readBudget.failure != nil {
+		return failCommand("batch", true, readBudget.failure, stdout, io.Discard)
+	}
 	if readBudget.exceeded {
 		return writeBatchOutputTooLarge(stdout, result, request, maxBytes, 0, readBudget)
 	}
@@ -189,12 +257,7 @@ func writeBatchJSON(
 	if err != nil {
 		return failCommand("batch", true, err, stdout, io.Discard)
 	}
-	response := envelope{SchemaVersion: schemaVersion, OK: result.Complete(), Command: "batch", Data: data}
-	if !result.Complete() {
-		response.Error = newErrorData("batch", response.Data, &commandError{
-			code: "batch_partial", message: "one or more batch items did not complete",
-		})
-	}
+	response := batchJSONEnvelope(result, data)
 	payload, err := marshalEnvelope(response)
 	if err != nil {
 		return failCommand("batch", true, &commandError{code: "serialization_failed", message: "could not serialize batch JSON response"}, stdout, io.Discard)
@@ -209,6 +272,16 @@ func writeBatchJSON(
 		return 0
 	}
 	return 1
+}
+
+func batchJSONEnvelope(result mail.BatchResult, data responseData) envelope {
+	response := envelope{SchemaVersion: schemaVersion, OK: result.Complete(), Command: "batch", Data: data}
+	if !result.Complete() {
+		response.Error = newErrorData("batch", response.Data, &commandError{
+			code: "batch_partial", message: "one or more batch items did not complete",
+		})
+	}
+	return response
 }
 
 func batchResponseData(
@@ -311,6 +384,9 @@ func batchOutputTooLargeError(
 	readBudget batchReadBudgetResult,
 ) error {
 	if readBudget.exceeded {
+		if readBudget.measured != "" {
+			return newOutputTooLargeError(readBudget.requiredBytes, readBudget.limitBytes, readBudget.measured, "batch read envelope")
+		}
 		return newOutputTooLargeError(
 			readBudget.requiredBytes, readBudget.limitBytes, outputSizeLowerBound, "batch read content",
 		)
@@ -327,8 +403,13 @@ func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error
 		Operation: request.Operation, Concurrency: concurrency, Total: len(request.Items),
 		Completed: len(request.Items), Items: make([]mail.BatchItemResult, len(request.Items)),
 	}
+	state := mail.BatchItemCompleted
+	if request.Operation == mail.BatchOperationRead {
+		state = mail.BatchItemSkippedBudget
+		result.Completed, result.Skipped = 0, len(request.Items)
+	}
 	for index, item := range request.Items {
-		result.Items[index] = mail.BatchItemResult{ID: item.ID, State: mail.BatchItemCompleted}
+		result.Items[index] = mail.BatchItemResult{ID: item.ID, State: state}
 	}
 	serializerSampleData, err := batchResponseData(result, request, maxBytes, false, false, false, false)
 	if err != nil {

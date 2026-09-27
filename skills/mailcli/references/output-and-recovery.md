@@ -10,7 +10,7 @@ Exports: complete exclusive absolute new 0600 files, verified size/SHA-256, neve
 
 `mailcli batch --input - --json`: exact-schema object <=16 MiB, refs/unique IDs. Duplicate/alias/unknown/trailing keys fail before dispatch. Move/copy need mailbox ref; move/delete accept allow_draft_mutation. Only delete accepts/requires --confirm. Results preserve order/effects; no successful/uncertain write replay.
 
-Batch: default 1 MiB, --max-bytes <=64 MiB. Reads default metadata; item view/fields overrides read-only defaults.view/fields, never both selectors. Overflow: data.required_bytes/data.limit_bytes/data.measured; exact includes newline, lower_bound counts encoded body/headers. Read overflow keeps first 10 item IDs and states/full counts: correct selectors/budget before replay. Mutation overflow keeps effects, replay_allowed:false.
+Batch: default 1 MiB, --max-bytes <=64 MiB. Reads default metadata; item view/fields overrides read-only defaults.view/fields, never both selectors. Overflow: data.required_bytes/data.limit_bytes/data.measured; exact includes newline, lower_bound counts encoded body/headers or retained projected outcomes. Read overflow stops admission, cancels/joins active reads and preserves completed outcomes; unstarted skipped_budget items count as skipped. Keeps first 10 item IDs and states and full counts: correct selectors/budget before replay. Mutation execution is unaffected; overflow keeps effects, replay_allowed:false.
 
 ```bash
 printf '%s' '{"operation":"read","items":[{"id":"meta","ref":"REF"},{"id":"body","ref":"REF","view":"plain"}]}' | mailcli batch --input - --json

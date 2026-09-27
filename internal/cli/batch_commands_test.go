@@ -380,7 +380,8 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 		response.Error.Guidance.EffectCertainty != mail.EffectNone ||
 		response.Data.BatchResult == nil || len(response.Data.BatchResult.Items) != maximumBatchReadOverflowItems ||
 		response.Data.BatchResult.Total != itemCount ||
-		response.Data.BatchResult.Completed != itemCount || gateway.getCalls != itemCount {
+		response.Data.BatchResult.Completed != gateway.getCalls || gateway.getCalls < 1 || gateway.getCalls > 3 ||
+		response.Data.BatchResult.Skipped != itemCount-gateway.getCalls || response.Data.BatchResult.Failed != 0 {
 		t.Fatalf("100-item overflow response = %+v", response)
 	}
 	if response.Data.RequiredBytes == nil || *response.Data.RequiredBytes <= 32768 || *response.Data.RequiredBytes > int64(completeOutput.Len()) ||
@@ -390,9 +391,76 @@ func TestBatchCommandHundredReadItemsStayWithinBudgetAndOrdered(t *testing.T) {
 			response.Data, response.Error, completeOutput.Len())
 	}
 	for index, item := range response.Data.BatchResult.Items {
-		if item.ID != fmt.Sprintf("item-%03d", index) || item.State != mail.BatchItemCompleted || item.Message != nil {
+		wantState := mail.BatchItemSkippedBudget
+		if index < gateway.getCalls {
+			wantState = mail.BatchItemCompleted
+		}
+		if item.ID != fmt.Sprintf("item-%03d", index) || item.State != wantState || item.Message != nil {
 			t.Fatalf("item %d = %+v", index, item)
 		}
+	}
+}
+
+func TestBatchReadAdmissionMatchesActualEncodedEnvelope(t *testing.T) {
+	for _, view := range []string{outputViewMetadata, outputViewPlain, outputViewFull} {
+		t.Run(view, func(t *testing.T) {
+			request := mail.BatchRequest{Operation: mail.BatchOperationRead, Concurrency: 1, Items: []mail.BatchItem{
+				{ID: "one", Ref: "msg_ref", View: &view},
+				{ID: "two", Ref: "msg_ref", View: &view},
+				{ID: "failed", Ref: "msg_ref", View: &view},
+			}}
+			message := projectionMessage()
+			message.Content = "quotes\"\\\t\n\x00<>&\u2028\u2029\xff"
+			message.Headers = strings.Repeat("X-Test: \\\"\n", 12)
+			message.Summary.Subject = strings.Repeat("subject<&\n", 30)
+			result := mail.BatchResult{Operation: mail.BatchOperationRead, Concurrency: 1, Total: 3, Completed: 2, Failed: 1, Items: []mail.BatchItemResult{
+				{ID: "one", State: mail.BatchItemCompleted, Message: &message},
+				{ID: "two", State: mail.BatchItemCompleted, Message: &message},
+				{ID: "failed", State: mail.BatchItemFailed, Message: &message, Error: &mail.BatchItemError{Code: "partial_source", Message: strings.Repeat("evidence<&\n", 100)}},
+			}}
+			data, err := batchResponseData(result, request, maximumJSONOutputBytes, true, true, true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := marshalEnvelope(batchJSONEnvelope(result, data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := newBatchReadContentBudget(int64(len(payload) - 1))
+			partial := result
+			partial.Items = []mail.BatchItemResult{{ID: "one", State: mail.BatchItemSkipped}, {ID: "two", State: mail.BatchItemSkipped}, {ID: "failed", State: mail.BatchItemSkipped}}
+			for index, item := range result.Items {
+				partial.Items[index] = item
+				partial.Completed, partial.Failed, partial.Skipped = min(index+1, 2), max(index-1, 0), 2-index
+				if got := budget.admitResult(partial, index, request); got != (index < 2) {
+					t.Fatalf("item %d admission=%t, result=%+v", index, got, budget.result())
+				}
+			}
+			evidence := budget.result()
+			if evidence.failure != nil || !evidence.exceeded || evidence.requiredBytes != int64(len(payload)) || evidence.measured != outputSizeExact {
+				t.Fatalf("admission evidence=%+v, actual encoded bytes=%d", evidence, len(payload))
+			}
+		})
+	}
+}
+
+func TestBatchMetadataOverflowStopsBeforeReadingRemainingItems(t *testing.T) {
+	items := make([]mail.BatchItem, mail.MaximumBatchItems)
+	for index := range items {
+		items[index] = mail.BatchItem{ID: fmt.Sprintf("item-%03d", index), Ref: "msg_ref"}
+	}
+	path := writeBatchInput(t, mail.BatchRequest{Operation: mail.BatchOperationRead, Concurrency: 1, Items: items})
+	message := projectionMessage()
+	message.Summary.Subject = strings.Repeat("<&\n", 4096)
+	gateway := &projectionGateway{message: message}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(gateway), []string{"batch", "--input", path, "--max-bytes", "32768", "--json"}, &stdout, &stderr)
+	var response envelope
+	if code != 1 || stderr.Len() != 0 || stdout.Len() > 32768 || json.Unmarshal(stdout.Bytes(), &response) != nil ||
+		response.Error == nil || response.Error.Code != "output_too_large" || gateway.getCalls < 1 || gateway.getCalls > 3 ||
+		response.Data.BatchResult == nil || response.Data.BatchResult.Completed != gateway.getCalls ||
+		response.Data.BatchResult.Skipped != len(items)-gateway.getCalls || response.Data.Measured != string(outputSizeLowerBound) {
+		t.Fatalf("metadata overflow: code=%d calls=%d stderr=%q output=%s", code, gateway.getCalls, stderr.String(), stdout.String())
 	}
 }
 
