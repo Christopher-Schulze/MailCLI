@@ -83,6 +83,7 @@ type responseData struct {
 	draftRef                 string                       `json:"-"`
 	searchRecoveryArgs       []string                     `json:"-"`
 	draftListRecovery        *mail.RecoveryGuidance       `json:"-"`
+	listRecovery             *mail.RecoveryGuidance       `json:"-"`
 }
 
 func rawResponsePage(value any) *json.RawMessage {
@@ -207,6 +208,9 @@ func draftInspectRecovery(ref string, includeFullView bool) mail.RecoveryGuidanc
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if data.listRecovery != nil && (errorCode(err) == "output_too_large" || errorCode(err) == "invalid_cursor") {
+		guidance.Recovery = *data.listRecovery
+	}
 	if command == "drafts.list" && errorCode(err) == "output_too_large" && data.draftListRecovery != nil {
 		guidance.Recovery = *data.draftListRecovery
 	}

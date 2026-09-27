@@ -272,7 +272,9 @@ func TestDraftListBudgetPreservesDefaultPayloadAndExactBoundary(t *testing.T) {
 	}
 	if response.Error.Guidance == nil || response.Error.Guidance.Recovery.Action != mail.RecoveryCorrect ||
 		response.Error.Guidance.Recovery.Command != "drafts.list" ||
-		!slices.Equal(response.Error.Guidance.Recovery.Args, []string{"--limit", "25", "--max-bytes", limitBelowBoundary, "--json"}) {
+		!slices.Equal(response.Error.Guidance.Recovery.Args, []string{
+			"--limit", strconv.Itoa(max(1, mail.DefaultDraftListLimit/2)), "--max-bytes", limitBelowBoundary, "--json",
+		}) {
 		t.Fatalf("one-byte-over recovery = %+v", response.Error.Guidance)
 	}
 	assertOutputSizeEvidence(t, response, int64(len(boundary)), int64(len(boundary)-1), string(outputSizeExact))
@@ -302,12 +304,8 @@ func TestDraftListOverflowRecoveryPreservesArguments(t *testing.T) {
 	code := Run(context.Background(), service, args, &stdout, &stderr)
 	var response envelope
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.OK || response.Error == nil || response.Error.Code != "output_too_large" ||
-		response.Data.Drafts != nil || response.Data.Page == nil || stderr.Len() != 0 {
-		t.Fatalf("oversized page was not reported with retained pagination: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
-	}
-	var pagination mail.DraftPagination
-	if err := json.Unmarshal(*response.Data.Page, &pagination); err != nil || pagination.Limit != 40 || pagination.Revision == "" {
-		t.Fatalf("oversized list lost pagination evidence: %v %+v", err, pagination)
+		response.Data.Drafts != nil || response.Data.Page != nil || stderr.Len() != 0 {
+		t.Fatalf("oversized page returned summaries or pagination: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
 	}
 	if response.Error.Guidance == nil {
 		t.Fatalf("oversized page omitted structured guidance: %+v", response.Error)
@@ -341,7 +339,7 @@ func TestDraftListLimitOneOverflowHasNoIdenticalRetry(t *testing.T) {
 	var response envelope
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.OK || response.Error == nil ||
 		response.Error.Code != "output_too_large" || response.Error.Guidance == nil ||
-		response.Data.Page == nil || stderr.Len() != 0 {
+		response.Data.Page != nil || stderr.Len() != 0 {
 		t.Fatalf("oversized minimum page was not reported: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
 	}
 	recovery := response.Error.Guidance.Recovery

@@ -913,7 +913,7 @@ func TestLimitValidationReturnsFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	code := Run(
 		context.Background(), newTestService(),
-		[]string{"messages", "list", "--mailbox", "mbx_ref", "--limit", "101", "--json"},
+		[]string{"messages", "list", "--mailbox", "mbx_ref", "--limit", "201", "--json"},
 		&stdout, &stderr,
 	)
 	if code != 2 || !strings.Contains(stdout.String(), `"code":"invalid_argument"`) || !strings.Contains(stdout.String(), "limit must be between") {

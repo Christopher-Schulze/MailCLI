@@ -45,8 +45,15 @@ func runMessagesQuery(
 	query := mail.Query{}
 	jsonOutput := defineSearchFlags(flags, &query, allowText)
 	fields := flags.String("fields", "", "comma-separated page fields; use all for the complete page")
+	maxOutputBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validatePageLimit(query.Limit); err != nil {
+		return failCommand(command, *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateOutputByteLimit(*maxOutputBytes); err != nil {
+		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	pageFields, projection, err := pageProjectionOptions(flags, projectionTargetSearchPage, *fields)
 	if err != nil {
@@ -68,7 +75,8 @@ func runMessagesQuery(
 		if projection != nil {
 			pageData = projectSearchPage(page, pageFields)
 		}
-		return writeSuccess(stdout, command, responseData{Page: pageData, Projection: projection})
+		return writeBoundedListSuccess(stdout, command, responseData{Page: pageData, Projection: projection},
+			*maxOutputBytes, listOutputRecovery(command))
 	}
 	writeSearchResults(stdout, page)
 	return 0
@@ -85,7 +93,7 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.StringVar(&query.Before, "before", "", "received before RFC3339 or YYYY-MM-DD")
 	flags.StringVar(&query.AccountRef, "account", "", "account ref")
 	flags.StringVar(&query.MailboxRef, "mailbox", "", "mailbox ref")
-	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size")
+	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size (1-200)")
 	flags.StringVar(&query.Cursor, "cursor", "", "pagination cursor")
 	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total")
 	if allowText {

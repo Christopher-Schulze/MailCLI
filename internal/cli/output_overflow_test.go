@@ -35,6 +35,7 @@ func TestOutputTooLargeConstructionSitesStayEnumerated(t *testing.T) {
 	}
 	want := map[string]int{
 		"projection.go:writeProjectedSuccess":          1,
+		"list_pagination.go:writeBoundedListSuccess":   1,
 		"draft_workflow.go:writeBoundedDraftPreview":   1,
 		"batch_commands.go:batchOutputTooLargeError":   2,
 		"batch_commands.go:preflightBatchOutputBudget": 1,

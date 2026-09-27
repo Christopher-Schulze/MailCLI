@@ -69,10 +69,10 @@
       "value_type": "integer",
       "takes_value": true,
       "value_required": true,
-      "default": "10",
+      "default": "20",
       "minimum": 1,
-      "maximum": 25,
-      "description": "page size"
+      "maximum": 200,
+      "description": "page size (1-200)"
     },
     {
       "name": "--mailbox",
@@ -80,6 +80,16 @@
       "takes_value": true,
       "value_required": true,
       "description": "mailbox reference"
+    },
+    {
+      "name": "--max-bytes",
+      "value_type": "bytes",
+      "takes_value": true,
+      "value_required": true,
+      "default": "1048576",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "maximum JSON response bytes"
     },
     {
       "name": "--max-messages",

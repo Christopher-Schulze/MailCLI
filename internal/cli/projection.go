@@ -1169,8 +1169,19 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 		// An error envelope must remain parseable even when the requested view is
 		// too large. Keep the identity and recovery evidence that fits without
 		// replaying the omitted body or headers.
-		if options.target == projectionTargetDraftList && errors.As(err, &oversized) {
-			fallback := responseData{Page: data.Page, draftListRecovery: data.draftListRecovery}
+		if data.listRecovery != nil {
+			fallback := responseData{
+				ContentSource: data.ContentSource, ContentComplete: data.ContentComplete,
+				MissingParts: data.MissingParts,
+				Projection:   &projectionInfo{View: options.view, Fields: []string{}},
+				listRecovery: data.listRecovery,
+			}
+			payload, marshalErr = marshalEnvelope(envelope{
+				SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
+				Error: newErrorData(command, fallback, err),
+			})
+		} else if options.target == projectionTargetDraftList {
+			fallback := responseData{draftListRecovery: data.draftListRecovery}
 			payload, marshalErr = marshalEnvelope(envelope{
 				SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
 				Error: newErrorData(command, fallback, err),

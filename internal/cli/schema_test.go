@@ -680,8 +680,11 @@ func TestSearchSchemaBoundsAreReachableThroughCLI(t *testing.T) {
 		*flags["--max-scan-bytes"].Minimum != 1 || *flags["--max-scan-bytes"].Maximum != mail.MaximumSearchMaxBytes {
 		t.Fatalf("search schema bounds = %+v/%+v", flags["--max-messages"], flags["--max-scan-bytes"])
 	}
-	if _, exists := flags["--max-bytes"]; exists {
-		t.Fatal("search schema still exposes the response-size flag for the scan budget")
+	maxBytesFlag := flags["--max-bytes"]
+	if maxBytesFlag.Name != "--max-bytes" || maxBytesFlag.Default != strconv.FormatInt(defaultJSONOutputBytes, 10) ||
+		maxBytesFlag.Minimum == nil || *maxBytesFlag.Minimum != 1 ||
+		maxBytesFlag.Maximum == nil || *maxBytesFlag.Maximum != maximumJSONOutputBytes {
+		t.Fatalf("search response-size schema = %+v", maxBytesFlag)
 	}
 	if !schemaHasConstraint(searchSchema, "ordered") {
 		t.Fatal("search schema omits after/before ordering constraint")

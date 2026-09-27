@@ -28,6 +28,21 @@ func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 	assertQualifiedMailAppClaim(t, artifacts)
 }
 
+func TestCatalogCursorDocumentationMatchesRuntimeContract(t *testing.T) {
+	documentation := readRepositoryFile(t, "docs/documentation.md")
+	for _, claim := range []string{
+		"Message-list cursors remain store/mailbox-bound",
+		"filter and search cursors remain store/query-bound",
+		"draft cursors remain directory-revision-bound",
+		"thread cursors retain their conversation binding under `data.thread`",
+		"account, mailbox, and attachment catalog cursors are versioned and bind the command, scope, and ordered stable identities",
+	} {
+		if !strings.Contains(documentation, claim) {
+			t.Errorf("docs/documentation.md omits cursor contract %q", claim)
+		}
+	}
+}
+
 func TestCapabilityDependencyDocumentationMatchesRuntimeContract(t *testing.T) {
 	versions := []struct {
 		path    string
@@ -385,11 +400,18 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "message page limit", expected: mail.MaximumPageLimit, unit: "messages",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `page sizes from 1 through (\d+)`, 1),
-			boundCheck("docs/documentation.md", `page sizes from 1 through (\d+)`, 1),
-			boundCheck("docs/documentation.md", `limits pages to (\d+) messages`, 1),
+			boundCheck("README.md", "`--limit` values from 1 through ([\\d,]+)", 1),
+			boundCheck("docs/documentation.md", "`--limit` values from 1 through ([\\d,]+)", 1),
+			boundCheck("docs/documentation.md", `limits list pages to (\d+) items`, 1),
 			boundCheck("docs/documentation.md", "`--limit` accepts 1 through (\\d+)", 1),
-			boundCheck("skills/mailcli/references/reading.md", `bounded to (\d+)`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `from 1 through (\d+)`, 1),
+		}},
+	{name: "default list page size", expected: mail.DefaultPageLimit, unit: "items",
+		checks: []documentedBoundCheck{
+			boundCheck("README.md", "list commands default to ([\\d,]+) items", 1),
+			boundCheck("docs/documentation.md", `List commands default to (\d+) items`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `default to (\d+) items`, 1),
+			boundCheck("skills/mailcli/references/drafts.md", `defaults to (\d+) entries`, 1),
 		}},
 	{name: "draft list page limit", expected: mail.MaximumDraftListLimit, unit: "drafts",
 		checks: []documentedBoundCheck{

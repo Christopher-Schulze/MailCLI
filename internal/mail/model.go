@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	DefaultPageLimit               = 10
-	MaximumPageLimit               = 25
+	DefaultPageLimit               = 20
+	MaximumPageLimit               = 200
 	DefaultSenderIdentityScanLimit = 2000
 	MaximumSenderIdentityScanLimit = 10000
 	MaximumDraftSubjectBytes       = 64 * 1024

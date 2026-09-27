@@ -162,17 +162,18 @@ func TestMessageThreadTruncatesAtLimit(t *testing.T) {
 }
 
 func TestMessageThreadPagesAllVisibleMembersFromSeedInBothDirections(t *testing.T) {
+	const pageLimit = 25
 	store, inboxRef := newThreadFixtureWithOptions(t, 30, threadStoreUUID)
 	closeTestResource(t, store, "thread store")
 	seedRef := threadSeedRef(t, store, inboxRef, "Thread start")
 	first, err := store.MessageThread(context.Background(), mail.MessageThreadRequest{
-		Ref: seedRef, Limit: mail.MaximumPageLimit,
+		Ref: seedRef, Limit: pageLimit,
 	})
 	if err != nil {
 		t.Fatalf("MessageThread(first) error = %v", err)
 	}
 	if first.Ref != seedRef || first.ConversationID != 42 || !first.Truncated || first.PrevCursor == "" || first.NextCursor != "" ||
-		len(first.Messages) != mail.MaximumPageLimit {
+		len(first.Messages) != pageLimit {
 		t.Fatalf("first page ref=%q conversation=%d truncated=%t cursor=%t members=%d",
 			first.Ref, first.ConversationID, first.Truncated, first.NextCursor != "", len(first.Messages))
 	}
@@ -180,7 +181,7 @@ func TestMessageThreadPagesAllVisibleMembersFromSeedInBothDirections(t *testing.
 		t.Fatalf("initial page does not contain its seed: %+v", first.Messages)
 	}
 	second, err := store.MessageThread(context.Background(), mail.MessageThreadRequest{
-		Ref: seedRef, Limit: mail.MaximumPageLimit, Cursor: first.PrevCursor,
+		Ref: seedRef, Limit: pageLimit, Cursor: first.PrevCursor,
 	})
 	if err != nil {
 		t.Fatalf("MessageThread(second) error = %v", err)
@@ -216,7 +217,7 @@ func TestMessageThreadPagesAllVisibleMembersFromSeedInBothDirections(t *testing.
 		t.Fatalf("seed occurrence = %d", seedCount)
 	}
 	roundTrip, err := store.MessageThread(context.Background(), mail.MessageThreadRequest{
-		Ref: seedRef, Limit: mail.MaximumPageLimit, Cursor: second.NextCursor,
+		Ref: seedRef, Limit: pageLimit, Cursor: second.NextCursor,
 	})
 	if err != nil || !reflect.DeepEqual(roundTrip.Messages, first.Messages) {
 		t.Fatalf("forward round trip = %+v, error = %v", roundTrip, err)

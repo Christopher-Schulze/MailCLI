@@ -249,8 +249,8 @@ func runDraftList(ctx context.Context, service *mail.Service, args []string, std
 		}
 		output.view = "custom"
 	}
-	if *limit < 1 || *limit > mail.MaximumDraftListLimit {
-		return failCommand("drafts.list", *jsonOutput, &commandError{code: "invalid_argument", message: "--limit must be between 1 and 200"}, stdout, stderr)
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()

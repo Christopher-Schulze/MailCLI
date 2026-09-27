@@ -122,7 +122,7 @@ func TestSearchBudgetTooSmallJSONIncludesRequiredBytesAndRecovery(t *testing.T) 
 		response.Error.Guidance.Retryability != "user_input_required" || response.Error.Guidance.ReplayAllowed ||
 		response.Error.Guidance.Recovery.Action != "correct" || response.Error.Guidance.Recovery.Command != "messages.search" ||
 		!reflect.DeepEqual(response.Error.Guidance.Recovery.Args, []string{
-			"--query", "needle", "--limit", "10", "--max-messages", "50000",
+			"--query", "needle", "--limit", fmt.Sprint(mail.DefaultPageLimit), "--max-messages", "50000",
 			"--max-scan-bytes", fmt.Sprint(requiredBytes), "--json",
 		}) {
 		t.Fatalf("search error response: code=%d response=%+v stderr=%q", code, response, stderr.String())
@@ -235,13 +235,16 @@ func decodeSearchRecoveryFailure(t *testing.T, output string) struct {
 	}{RequiredBytes: response.Error.RequiredBytes, Command: response.Error.Guidance.Recovery.Command, Args: response.Error.Guidance.Recovery.Args}
 }
 
-func TestSearchRejectsLegacyByteBudgetFlag(t *testing.T) {
+func TestSearchMaxBytesBoundsOutputWithoutChangingScanBudget(t *testing.T) {
 	gateway := &searchQueryCaptureGateway{}
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), mail.NewService(gateway),
-		[]string{"messages", "search", "--query", "needle", "--max-bytes", "10"}, &stdout, &stderr)
-	if code != 2 || gateway.query.Fingerprint != "" || !strings.Contains(stderr.String(), "flag provided but not defined: -max-bytes") {
-		t.Fatalf("legacy search flag: code=%d query=%+v stdout=%q stderr=%q", code, gateway.query, stdout.String(), stderr.String())
+		[]string{"messages", "search", "--query", "needle", "--max-bytes", "10", "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 || gateway.query.Fingerprint == "" ||
+		gateway.query.Query.MaxBytes != mail.DefaultSearchMaxBytes ||
+		!strings.Contains(stdout.String(), `"code":"output_too_large"`) ||
+		!strings.Contains(stdout.String(), `"limit_bytes":10`) {
+		t.Fatalf("search output budget: code=%d query=%+v stdout=%q stderr=%q", code, gateway.query, stdout.String(), stderr.String())
 	}
 }
 

@@ -41,9 +41,22 @@ func runAccounts(ctx context.Context, service *mail.Service, args []string, stdo
 
 func runAccountsList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("accounts list", stderr)
+	cursor := flags.String("cursor", "", "pagination cursor")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("accounts.list", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateOutputByteLimit(*maxBytes); err != nil {
+		return failCommand("accounts.list", *jsonOutput, err, stdout, stderr)
+	}
+	scope := listCursorScope("accounts")
+	if err := validateCatalogCursorScope(*cursor, "accounts.list", scope); err != nil {
+		return failCatalogCursor("accounts.list", *jsonOutput, stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -52,14 +65,23 @@ func runAccountsList(ctx context.Context, service *mail.Service, args []string, 
 	if err != nil {
 		return failCommand("accounts.list", *jsonOutput, err, stdout, stderr)
 	}
-	accounts := catalog.Accounts
-	complete := catalog.Complete && accountCatalogComplete(accounts)
-	identityCoverageComplete := accountIdentityCoverageComplete(accounts)
+	allAccounts := catalog.Accounts
+	complete := catalog.Complete && accountCatalogComplete(allAccounts)
+	identityCoverageComplete := accountIdentityCoverageComplete(allAccounts)
+	accounts, nextCursor, err := paginateCatalog(allAccounts, *limit, *cursor, "accounts.list", scope,
+		func(account mail.Account) string { return account.Ref })
+	if err != nil {
+		if errorCode(err) == "invalid_cursor" {
+			return failCatalogCursor("accounts.list", *jsonOutput, stdout, stderr)
+		}
+		return failCommand("accounts.list", *jsonOutput, err, stdout, stderr)
+	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "accounts.list", responseData{
+		return writeBoundedListSuccess(stdout, "accounts.list", responseData{
 			Accounts: &accounts, Complete: &complete,
 			IdentityCoverageComplete: &identityCoverageComplete,
-		})
+			Page:                     rawResponsePage(catalogPageMetadata{Limit: *limit, NextCursor: nextCursor}),
+		}, *maxBytes, listOutputRecovery("accounts.list"))
 	}
 	rows := make([][]string, 0, len(accounts))
 	for _, account := range accounts {
@@ -182,9 +204,22 @@ func runMailboxes(ctx context.Context, service *mail.Service, args []string, std
 func runMailboxesList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("mailboxes list", stderr)
 	accountRef := flags.String("account", "", "scope to an account ref")
+	cursor := flags.String("cursor", "", "pagination cursor")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("mailboxes.list", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateOutputByteLimit(*maxBytes); err != nil {
+		return failCommand("mailboxes.list", *jsonOutput, err, stdout, stderr)
+	}
+	scope := listCursorScope("account", *accountRef)
+	if err := validateCatalogCursorScope(*cursor, "mailboxes.list", scope); err != nil {
+		return failCatalogCursor("mailboxes.list", *jsonOutput, stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -193,8 +228,19 @@ func runMailboxesList(ctx context.Context, service *mail.Service, args []string,
 	if err != nil {
 		return failCommand("mailboxes.list", *jsonOutput, err, stdout, stderr)
 	}
+	mailboxes, nextCursor, err := paginateCatalog(mailboxes, *limit, *cursor, "mailboxes.list", scope,
+		func(mailbox mail.Mailbox) string { return mailbox.Ref })
+	if err != nil {
+		if errorCode(err) == "invalid_cursor" {
+			return failCatalogCursor("mailboxes.list", *jsonOutput, stdout, stderr)
+		}
+		return failCommand("mailboxes.list", *jsonOutput, err, stdout, stderr)
+	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "mailboxes.list", responseData{Mailboxes: &mailboxes})
+		return writeBoundedListSuccess(stdout, "mailboxes.list", responseData{
+			Mailboxes: &mailboxes,
+			Page:      rawResponsePage(catalogPageMetadata{Limit: *limit, NextCursor: nextCursor}),
+		}, *maxBytes, listOutputRecovery("mailboxes.list"))
 	}
 	rows := make([][]string, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
@@ -265,11 +311,18 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 	flags := newFlagSet("messages list", stderr)
 	mailboxRef := flags.String("mailbox", "", "mailbox ref")
 	cursor := flags.String("cursor", "", "pagination cursor")
-	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	fields := flags.String("fields", "", "comma-separated page fields; use all for the complete page")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateOutputByteLimit(*maxBytes); err != nil {
+		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	pageFields, projection, err := pageProjectionOptions(flags, projectionTargetListPage, *fields)
 	if err != nil {
@@ -285,9 +338,14 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput && projection != nil {
-		return writeSuccess(stdout, "messages.list", responseData{
+		return writeBoundedListSuccess(stdout, "messages.list", responseData{
 			Page: projectMessageListPage(page, pageFields), Projection: projection,
-		})
+		}, *maxBytes, listOutputRecovery("messages.list"))
+	}
+	if *jsonOutput {
+		return writeBoundedListSuccess(stdout, "messages.list", responseData{
+			Page: messageResponsePage(&page),
+		}, *maxBytes, listOutputRecovery("messages.list"))
 	}
 	return writeMessagePage(stdout, "messages.list", page, *jsonOutput)
 }
@@ -295,11 +353,18 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 func runMessageThread(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages thread", stderr)
 	ref := flags.String("ref", "", "message ref")
-	limit := flags.Int("limit", mail.DefaultPageLimit, "page size")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
 	cursor := flags.String("cursor", "", "next or previous cursor from this thread")
+	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateOutputByteLimit(*maxBytes); err != nil {
+		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
 	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -311,7 +376,8 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "messages.thread", responseData{Thread: &thread})
+		return writeBoundedListSuccess(stdout, "messages.thread", responseData{Thread: &thread}, *maxBytes,
+			listOutputRecovery("messages.thread"))
 	}
 	writeFormat(stdout, "conversation_id\t%d\ttruncated\t%t\n", thread.ConversationID, thread.Truncated)
 	rows := make([][]string, 0, len(thread.Messages))

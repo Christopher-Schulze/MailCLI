@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	DefaultDraftListLimit = 50
-	MaximumDraftListLimit = 200
+	DefaultDraftListLimit = DefaultPageLimit
+	MaximumDraftListLimit = MaximumPageLimit
 )
 
 type ListDraftsRequest struct {

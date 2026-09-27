@@ -11,6 +11,23 @@
       "description": "message reference"
     },
     {
+      "name": "--cursor",
+      "value_type": "cursor",
+      "takes_value": true,
+      "value_required": true,
+      "description": "pagination cursor"
+    },
+    {
+      "name": "--limit",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "20",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "page size (1-200)"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,
@@ -43,7 +60,7 @@
       "default": "1048576",
       "minimum": 1,
       "maximum": 67108864,
-      "description": "maximum bounded bytes"
+      "description": "maximum JSON response bytes"
     }
   ],
   "positional_arguments": [

@@ -53,7 +53,7 @@ func TestCapabilitiesJSONContract(t *testing.T) {
 		manifest.Limits.ProviderSupportDescription != transport.ProviderSupportDescription() {
 		t.Fatalf("provider support = %+v", manifest.Limits)
 	}
-	if manifest.Limits.MaximumPageSize != 25 || manifest.Limits.MaximumDraftInputBytes != 16*1024*1024 {
+	if manifest.Limits.MaximumPageSize != mail.MaximumPageLimit || manifest.Limits.MaximumDraftInputBytes != 16*1024*1024 {
 		t.Fatalf("manifest bounds = %+v", manifest.Limits)
 	}
 	if manifest.Limits.MaximumComposeBodyBytes != mail.MaximumComposeBodyBytes {

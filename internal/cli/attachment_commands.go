@@ -32,14 +32,23 @@ func runAttachmentsList(
 ) int {
 	flags := newFlagSet("attachments list", stderr)
 	ref := flags.String("ref", "", "message ref")
+	cursor := flags.String("cursor", "", "pagination cursor")
+	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetAttachment, outputViewMetadata, false)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
+	}
 	output, err := outputFlags.options(projectionTargetAttachment)
 	if err != nil {
 		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
+	}
+	scope := listCursorScope("message", *ref)
+	if err := validateCatalogCursorScope(*cursor, "attachments.list", scope); err != nil {
+		return failCatalogCursor("attachments.list", *jsonOutput, stdout, stderr)
 	}
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
@@ -50,20 +59,31 @@ func runAttachmentsList(
 		}
 		return failCommand("attachments.list", false, readErr, stdout, stderr)
 	}
+	attachments, nextCursor, err := paginateCatalog(message.Attachments, *limit, *cursor, "attachments.list", scope,
+		func(attachment mail.Attachment) string { return attachment.ID })
+	if err != nil {
+		if errorCode(err) == "invalid_cursor" {
+			return failCatalogCursor("attachments.list", *jsonOutput, stdout, stderr)
+		}
+		return failCommand("attachments.list", *jsonOutput, err, stdout, stderr)
+	}
 	if *jsonOutput {
 		complete := message.ContentComplete
 		missing := message.MissingParts
+		recovery := listOutputRecovery("attachments.list")
 		data := responseData{
-			Attachments: &message.Attachments, ContentSource: message.ContentSource,
+			Attachments: &attachments, ContentSource: message.ContentSource,
 			ContentComplete: &complete, MissingParts: &missing,
+			Page:         rawResponsePage(catalogPageMetadata{Limit: *limit, NextCursor: nextCursor}),
+			listRecovery: &recovery,
 		}
 		if readErr != nil {
 			return writeProjectedFailure(stdout, "attachments.list", data, output, readErr, false)
 		}
 		return writeProjectedSuccess(stdout, "attachments.list", data, output)
 	}
-	rows := make([][]string, 0, len(message.Attachments))
-	for _, attachment := range message.Attachments {
+	rows := make([][]string, 0, len(attachments))
+	for _, attachment := range attachments {
 		size := "unknown"
 		if attachment.SizeKnown {
 			size = fmt.Sprintf("%d", attachment.Size)
@@ -75,13 +95,16 @@ func runAttachmentsList(
 			stdout, "\nContent: source=%s, complete=%t, missing=%s\n",
 			message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
 		)
+		if nextCursor != "" {
+			writeFormat(stdout, "Next cursor: %s\n", nextCursor)
+		}
 		if readErr != nil {
 			writeLine(stderr, oneLine(readErr.Error()))
 			return commandExitCodeFor("attachments.list", readErr, false)
 		}
 		return 0
 	}
-	for _, attachment := range message.Attachments {
+	for _, attachment := range attachments {
 		size := "unknown"
 		if attachment.SizeKnown {
 			size = fmt.Sprintf("%d", attachment.Size)
@@ -95,6 +118,9 @@ func runAttachmentsList(
 		stdout, "content\tsource=%s\tcomplete=%t\tmissing=%s\n",
 		message.ContentSource, message.ContentComplete, oneLine(strings.Join(message.MissingParts, ",")),
 	)
+	if nextCursor != "" {
+		writeFormat(stdout, "next_cursor\t%s\n", nextCursor)
+	}
 	if readErr != nil {
 		writeLine(stderr, oneLine(readErr.Error()))
 		return commandExitCodeFor("attachments.list", readErr, false)
