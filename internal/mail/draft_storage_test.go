@@ -53,13 +53,13 @@ func TestDraftMutationWithoutDirectoryEnumeration(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			// Keep filename lookup available while forbidding the real pinned
-			// directory-enumeration boundary used by temporary recovery.
+			// Keep filename lookup available while forbidding root enumeration;
+			// the empty inventory proves cleanup does not reopen the directory.
 			if err := os.Chmod(root, 0o100); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := removeDraftTemporaryFiles(lease.storage, ref); !errors.Is(err, os.ErrPermission) {
-				t.Fatalf("directory enumeration = %v, want permission refusal", err)
+			if removed, err := removeDraftTemporaryFiles(lease.storage, ref, nil); err != nil || removed != 0 {
+				t.Fatalf("empty inventory cleanup = %d, %v; want no enumeration", removed, err)
 			}
 			draft, err := readDraftForMutation(lease, root, ref)
 			if err != nil || draft.Ref != ref || draft.Body != "complete draft bytes" {

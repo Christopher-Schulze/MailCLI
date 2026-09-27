@@ -1119,7 +1119,7 @@ func TestSweepOrphanDraftLocksRemovesUnheldMissingDraftLock(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 
-	swept, failures, err := sweepOrphanDraftLocks(root)
+	swept, failures, err := sweepOrphanDraftLocks(root, collectPruneTestInventory(t, root))
 	if err != nil {
 		t.Fatalf("sweepOrphanDraftLocks() error = %v", err)
 	}
@@ -1151,7 +1151,7 @@ func TestSweepOrphanDraftLocksLeavesHeldLock(t *testing.T) {
 	}
 	defer func() { _ = helper.Process.Kill(); _ = helper.Wait() }()
 
-	swept, failures, err := sweepOrphanDraftLocks(root)
+	swept, failures, err := sweepOrphanDraftLocks(root, collectPruneTestInventory(t, root))
 	if err != nil {
 		t.Fatalf("sweepOrphanDraftLocks() error = %v", err)
 	}

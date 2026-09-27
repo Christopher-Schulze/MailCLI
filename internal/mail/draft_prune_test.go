@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -375,7 +376,14 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 				if err := os.Symlink(sentinel, path); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := removeDraftTemporaryFiles(lease.storage, draft.Ref); err == nil {
+				expected, err := lease.storage.lstat(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries := []draftPruneDirectoryEntry{{
+					name: name, ref: draft.Ref, kind: pruneEntryKnownTemporary, identity: expected,
+				}}
+				if _, err := removeDraftTemporaryFiles(lease.storage, draft.Ref, entries); err == nil {
 					t.Fatal("symlink temporary was removed")
 				}
 				if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -406,21 +414,134 @@ func TestDraftJSONTemporaryRecoveryPreservesSymlinkAndReplacement(t *testing.T) 
 	}
 }
 
-func TestPruneCandidateSelectionVisitsEachGeneratedDirectoryEntryOnce(t *testing.T) {
+func TestPruneInventoryClassifiesEveryGeneratedDirectoryEntryOnce(t *testing.T) {
 	for _, count := range []int{10000, 100000} {
 		t.Run(fmt.Sprintf("entries-%d", count), func(t *testing.T) {
-			root, refs := draftSelectionFixture(t, count)
-			selection, err := collectPruneCandidates(context.Background(), root, time.Now())
+			root := t.TempDir()
+			for index := count - 1; index >= 0; index-- {
+				name := fmt.Sprintf("unknown-%06d", index)
+				if err := os.WriteFile(filepath.Join(root, name), nil, 0o600); err != nil {
+					t.Fatalf("write fixture %s: %v", name, err)
+				}
+			}
+			inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
 			if err != nil {
-				t.Fatalf("collectPruneCandidates() error = %v", err)
+				t.Fatalf("collectDraftPruneInventory() error = %v", err)
 			}
-			if selection.entryVisits != int64(count) || selection.entryVisits > 2*int64(count) {
-				t.Fatalf("entry visits = %d, want exactly %d and at most %d", selection.entryVisits, count, 2*count)
+			result, err := prepareDraftPruneResult(context.Background(), root, inventory, false)
+			if err != nil {
+				t.Fatalf("prepareDraftPruneResult() error = %v", err)
 			}
-			if len(selection.candidates) != 0 || selection.metadataBytes != 0 || len(refs) != count {
-				t.Fatalf("selection = %+v, fixture refs = %d; incomplete drafts must not become candidates", selection, len(refs))
+			if inventory.entryVisits != int64(count) || inventory.classificationVisits != int64(count) ||
+				len(inventory.entries) != count || inventory.metadataBytes > maximumPruneCandidateMetadataBytes {
+				t.Fatalf("inventory visits=%d classified=%d entries=%d metadata=%d", inventory.entryVisits, inventory.classificationVisits, len(inventory.entries), inventory.metadataBytes)
+			}
+			if len(result.Candidates) != 0 {
+				t.Fatalf("result = %+v; unknown entries must not become candidates", result)
 			}
 		})
+	}
+}
+
+type observedPruneDirectoryReader struct {
+	directory *os.File
+	calls     int
+	entries   int64
+}
+
+func collectPruneTestInventory(t testing.TB, root string) *draftPruneInventory {
+	t.Helper()
+	inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+	if err != nil {
+		t.Fatalf("collectDraftPruneInventory() error = %v", err)
+	}
+	return inventory
+}
+
+func (reader *observedPruneDirectoryReader) Readdirnames(count int) ([]string, error) {
+	reader.calls++
+	names, err := reader.directory.Readdirnames(count)
+	reader.entries += int64(len(names))
+	return names, err
+}
+
+func TestPruneInventoryUsesOneObservedDirectoryStream(t *testing.T) {
+	const count = 700
+	root, _ := draftSelectionFixture(t, count)
+	pinned, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := pinned.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	directory, err := pinned.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := directory.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	identity, err := directory.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := draftListRevision(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &observedPruneDirectoryReader{directory: directory}
+	inventory, err := collectDraftPruneInventoryFromReader(
+		context.Background(), root, time.Now(), time.Now().UTC(),
+		&draftStorage{rootName: root, root: pinned, directory: directory}, identity, revision, reader,
+	)
+	if err != nil {
+		t.Fatalf("collectDraftPruneInventoryFromReader() error = %v", err)
+	}
+	wantCalls := (count+draftPruneDirectoryBatchSize-1)/draftPruneDirectoryBatchSize + 1
+	if reader.calls != wantCalls || reader.entries != count || inventory.entryVisits != count || inventory.classificationVisits != count || len(inventory.entries) != count {
+		t.Fatalf("actual reads=%d entries=%d inventory reads=%d classified=%d retained=%d", reader.calls, reader.entries, inventory.entryVisits, inventory.classificationVisits, len(inventory.entries))
+	}
+}
+
+func TestPruneInventoryBoundsMixedEntryClassification(t *testing.T) {
+	const entriesPerClass = 2000
+	root := createPruneMixedDirectoryFixture(t)
+	inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+	if err != nil {
+		t.Fatalf("collectDraftPruneInventory() error = %v", err)
+	}
+	result, err := prepareDraftPruneResult(context.Background(), root, inventory, false)
+	if err != nil {
+		t.Fatalf("prepareDraftPruneResult() error = %v", err)
+	}
+	var drafts, receipts, artifacts, locks, knownTemporaries, unknowns int
+	for _, entry := range inventory.entries {
+		switch {
+		case entry.kind&pruneEntryDraftJSON != 0:
+			drafts++
+		case entry.kind&pruneEntryReceipt != 0:
+			receipts++
+		case entry.kind&pruneEntryArtifact != 0:
+			artifacts++
+		case entry.kind&pruneEntryLock != 0:
+			locks++
+		case entry.kind&pruneEntryKnownTemporary != 0:
+			knownTemporaries++
+		case entry.kind == 0:
+			unknowns++
+		}
+	}
+	if inventory.entryVisits != 10000 || inventory.classificationVisits != 10000 || len(inventory.entries) != 10000 ||
+		drafts != entriesPerClass || receipts != entriesPerClass || artifacts != entriesPerClass || locks != entriesPerClass ||
+		knownTemporaries != 1000 || unknowns != 1000 || len(result.TemporaryArtifacts) != 1000 ||
+		inventory.metadataBytes > maximumPruneCandidateMetadataBytes {
+		t.Fatalf("inventory=%+v classes draft=%d receipt=%d artifact=%d lock=%d known-temp=%d unknown=%d temporary-results=%d",
+			inventory, drafts, receipts, artifacts, locks, knownTemporaries, unknowns, len(result.TemporaryArtifacts))
 	}
 }
 
@@ -638,12 +759,123 @@ func BenchmarkDraftPruneCandidateSelection(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		selection, err := collectPruneCandidates(context.Background(), root, time.Now())
-		if err != nil || selection.entryVisits != count {
-			b.Fatalf("entry visits = %d, error = %v; want %d", selection.entryVisits, err, count)
+		inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+		if err != nil || inventory.entryVisits != count {
+			b.Fatalf("entry visits = %d, error = %v; want %d", inventory.entryVisits, err, count)
 		}
 	}
 	b.ReportMetric(float64(count), "entry_visits/op")
+}
+
+// BenchmarkDraftPruneLegacyMultiScan10K records the pre-inventory root-read pattern:
+// one candidate stream, five full scans, and one full temporary scan per ref.
+// It measures directory enumeration only; its allocation and byte totals are
+// lower bounds because it does not replay the old per-entry parsing work.
+func BenchmarkDraftPruneLegacyMultiScan10K(b *testing.B) {
+	const temporaryRefs = 100
+	root := createPruneMixedDirectoryFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		visits, err := benchmarkLegacyPruneRootEntryVisits(root, temporaryRefs)
+		if err != nil || visits != 1_060_000 {
+			b.Fatalf("legacy root-entry visits = %d, error = %v; want 1060000", visits, err)
+		}
+		b.ReportMetric(float64(visits), "root_entries/op")
+	}
+}
+
+func BenchmarkDraftPruneOnePassInventory10K(b *testing.B) {
+	const count = 10000
+	root := createPruneMixedDirectoryFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		inventory, err := collectDraftPruneInventory(context.Background(), root, time.Now())
+		if err != nil {
+			b.Fatal(err)
+		}
+		result, err := prepareDraftPruneResult(context.Background(), root, inventory, false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if inventory.entryVisits != count || inventory.classificationVisits != count || len(inventory.entries) != count || len(result.TemporaryArtifacts) != 1000 {
+			b.Fatalf("visits=%d classified=%d retained=%d temporary=%d", inventory.entryVisits, inventory.classificationVisits, len(inventory.entries), len(result.TemporaryArtifacts))
+		}
+		b.ReportMetric(float64(inventory.entryVisits), "root_entries/op")
+		b.ReportMetric(float64(inventory.classificationVisits), "classified_entries/op")
+	}
+}
+
+func createPruneMixedDirectoryFixture(t testing.TB) string {
+	t.Helper()
+	const entriesPerClass = 2000
+	const temporaryRefs = 100
+	root := t.TempDir()
+	for index := range entriesPerClass {
+		ref := fmt.Sprintf("draft_%024d", index)
+		for _, suffix := range []string{".json", ".send-receipt", ".lock", ".send-spool"} {
+			if err := os.WriteFile(filepath.Join(root, ref+suffix), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for index := range 1000 {
+		ref := fmt.Sprintf("draft_%024d", index%temporaryRefs)
+		name := fmt.Sprintf(".%s.send-spool.mailcli-%024x", ref, index)
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte("temporary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * draftTemporaryMinimumAge)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("unknown-%04d", index)), []byte("unknown"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func benchmarkLegacyPruneRootEntryVisits(root string, temporaryRefs int) (int64, error) {
+	var visits int64
+	directory, err := os.Open(root)
+	if err != nil {
+		return 0, err
+	}
+	for {
+		names, readErr := directory.Readdirnames(draftPruneDirectoryBatchSize)
+		visits += int64(len(names))
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return visits, errors.Join(readErr, directory.Close())
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	if err := directory.Close(); err != nil {
+		return visits, err
+	}
+	for range 5 {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return visits, err
+		}
+		visits += int64(len(entries))
+	}
+	for range temporaryRefs {
+		directory, err := os.Open(root)
+		if err != nil {
+			return visits, err
+		}
+		names, readErr := directory.Readdirnames(-1)
+		visits += int64(len(names))
+		if err := errors.Join(readErr, directory.Close()); err != nil {
+			return visits, err
+		}
+	}
+	return visits, nil
 }
 
 func ageDraftTemporary(t *testing.T, path string) {
@@ -814,6 +1046,12 @@ func TestPruneDraftTemporaryUnknownAndMalformedNames(t *testing.T) {
 		result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: confirm})
 		if err != nil || result.PreservedTemporaryCount != maximumPreservedTemporaryDiagnostics+5 || len(result.PreservedTemporaries) != maximumPreservedTemporaryDiagnostics || len(result.SweptArtifacts) != 0 {
 			t.Fatalf("unknown cleanup=%+v, %v", result, err)
+		}
+		for index, name := range result.PreservedTemporaries {
+			want := fmt.Sprintf(".%s.unknown.mailcli-%024x", ref, index)
+			if name != want {
+				t.Fatalf("preserved temporary %d = %q, want sorted name %q", index, name, want)
+			}
 		}
 		for _, name := range names {
 			if got, err := os.ReadFile(filepath.Join(root, name)); err != nil || string(got) != "preserve" {

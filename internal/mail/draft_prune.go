@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -59,24 +60,114 @@ const (
 	maximumPreservedTemporaryDiagnostics       = 20
 )
 
-type draftPruneCandidateSelection struct {
-	candidates        []PruneCandidate
-	directoryIdentity os.FileInfo
-	directoryRevision string
-	entryVisits       int64
-	metadataBytes     int64
+type pruneDirectoryEntryKind uint8
+
+const (
+	pruneEntryDraftJSON pruneDirectoryEntryKind = 1 << iota
+	pruneEntryReceipt
+	pruneEntryArtifact
+	pruneEntryLock
+	pruneEntryKnownTemporary
+	pruneEntryUnknownTemporary
+)
+
+type draftPruneDirectoryEntry struct {
+	name                     string
+	ref                      string
+	kind                     pruneDirectoryEntryKind
+	identity                 os.FileInfo
+	candidateSubject         string
+	candidateAgeDays         int
+	candidate                bool
+	receiptCandidate         bool
+	temporaryCandidate       bool
+	orphanTemporaryCandidate bool
+	orphanArtifactCandidate  bool
 }
 
-func (selection *draftPruneCandidateSelection) appendCandidate(candidate PruneCandidate) error {
-	metadataBytes := int64(unsafe.Sizeof(PruneCandidate{})) + int64(len(candidate.Ref)+len(candidate.Subject))
-	if metadataBytes > maximumPruneCandidateMetadataBytes-selection.metadataBytes {
-		return &OperationError{
-			Code:    "prune_candidate_limit_exceeded",
-			Message: "draft prune candidates exceed the 64 MiB metadata limit; no drafts were removed",
+type draftPruneDirectoryReader interface {
+	Readdirnames(int) ([]string, error)
+}
+
+type draftPruneInventory struct {
+	entries              []draftPruneDirectoryEntry
+	directoryIdentity    os.FileInfo
+	directoryRevision    string
+	entryVisits          int64
+	classificationVisits int64
+	metadataBytes        int64
+}
+
+const (
+	pruneRetainedStringOverheadBytes int64 = 16
+	pruneDirectoryBatchScratchBytes        = int64(draftPruneDirectoryBatchSize)*int64(unsafe.Sizeof("")) + int64(unsafe.Sizeof([]string{}))
+	pruneDirectoryFixedMetadataBytes       = int64(unsafe.Sizeof(draftPruneInventory{})) + int64(unsafe.Sizeof(PruneDraftsResult{})) + pruneDirectoryBatchScratchBytes
+)
+
+func pruneMetadataLimitError() error {
+	return &OperationError{
+		Code:    "prune_candidate_limit_exceeded",
+		Message: "draft prune classification exceeds the 64 MiB metadata limit; no drafts were removed",
+	}
+}
+
+func (inventory *draftPruneInventory) reserveMetadata(bytes int64) error {
+	if bytes < 0 || bytes > maximumPruneCandidateMetadataBytes-inventory.metadataBytes {
+		return pruneMetadataLimitError()
+	}
+	inventory.metadataBytes += bytes
+	return nil
+}
+
+func retainedPruneStringBytes(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	return int64(len(value)) + pruneRetainedStringOverheadBytes
+}
+
+func retainedPruneFileInfoBytes(info os.FileInfo, root string, name string) int64 {
+	infoType := reflect.TypeOf(info)
+	if infoType == nil {
+		return 0
+	}
+	infoBytes := infoType.Size()
+	if infoType.Kind() == reflect.Pointer {
+		infoBytes = infoType.Elem().Size()
+	}
+	return int64(infoBytes) + int64(len(root)+len(name)) + pruneRetainedStringOverheadBytes
+}
+
+func appendPruneMetadata[T any](inventory *draftPruneInventory, values []T, value T, retainedStringBytes int64) ([]T, error) {
+	newCapacity := cap(values)
+	if len(values) == cap(values) {
+		if newCapacity == 0 {
+			newCapacity = 16
+		} else {
+			newCapacity *= 2
 		}
 	}
-	selection.candidates = append(selection.candidates, candidate)
-	selection.metadataBytes += metadataBytes
+	var zero T
+	capacityBytes := int64(0)
+	if newCapacity > cap(values) {
+		capacityBytes = int64(newCapacity-cap(values)) * int64(unsafe.Sizeof(zero))
+	}
+	if err := inventory.reserveMetadata(capacityBytes + retainedStringBytes); err != nil {
+		return values, err
+	}
+	if newCapacity > cap(values) {
+		grown := make([]T, len(values), newCapacity)
+		copy(grown, values)
+		values = grown
+	}
+	return append(values, value), nil
+}
+
+func (inventory *draftPruneInventory) retainRef(entry *draftPruneDirectoryEntry, ref string) error {
+	if err := inventory.reserveMetadata(retainedPruneStringBytes(ref)); err != nil {
+		return err
+	}
+	entry.ref = ref
 	return nil
 }
 
@@ -109,62 +200,79 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		return PruneDraftsResult{}, err
 	}
 	cutoff := time.Now().Add(-request.OlderThan)
-	selection, err := collectPruneCandidates(ctx, root, cutoff)
+	return executeDraftPrune(ctx, root, cutoff, request.Confirm)
+}
+
+func executeDraftPrune(ctx context.Context, root string, cutoff time.Time, confirm bool) (PruneDraftsResult, error) {
+	inventory, err := collectDraftPruneInventory(ctx, root, cutoff)
 	if err != nil {
 		return PruneDraftsResult{}, classifyDraftContextError(ctx, err, "prune")
 	}
-	result := PruneDraftsResult{DryRun: !request.Confirm, Candidates: selection.candidates}
-	if !request.Confirm {
-		result.Revision = selection.directoryRevision
-	}
-	receiptCandidates, err := listExpiredSendReceipts(root, time.Now().UTC())
+	result, err := prepareDraftPruneResult(ctx, root, inventory, !confirm)
 	if err != nil {
-		return result, err
+		return PruneDraftsResult{}, classifyDraftContextError(ctx, err, "prune")
 	}
-	orphanRefs, err := listOrphanDraftArtifactRefs(root)
-	if err != nil {
-		return result, err
+	if !confirm {
+		return finalizeDraftPruneDryRun(ctx, root, inventory, result)
 	}
-	result.TemporaryArtifacts, result.PreservedTemporaries, result.PreservedTemporaryCount, err = listDraftTemporaryArtifacts(ctx, root)
-	if err != nil {
-		return result, err
-	}
-	if !request.Confirm {
-		if err := draftContextError(ctx, "prune"); err != nil {
-			return PruneDraftsResult{}, err
-		}
-		result.ExpiredReceipts = receiptCandidates
-		for _, ref := range orphanRefs {
-			busy, err := draftArtifactRefBusy(root, ref)
-			if err != nil {
-				return result, err
-			}
-			if busy {
-				continue
-			}
-			if _, err := os.Lstat(filepath.Join(root, ref+".json")); os.IsNotExist(err) {
-				result.OrphanArtifacts = append(result.OrphanArtifacts, ref)
-			} else if err != nil {
-				return result, err
-			}
-		}
-		identity, err := os.Stat(root)
-		if err != nil {
-			return result, errors.Join(pruneDraftRevisionChangedError(), fmt.Errorf("inspect dry-run draft directory: %w", err))
-		}
-		if !os.SameFile(selection.directoryIdentity, identity) {
-			return result, pruneDraftRevisionChangedError()
-		}
-		stable := selection.directoryIdentity.ModTime().Equal(identity.ModTime())
-		result.Stable = &stable
-		return result, nil
-	}
+	return confirmDraftPrune(ctx, root, cutoff, inventory, result)
+}
+
+func finalizeDraftPruneDryRun(
+	ctx context.Context,
+	root string,
+	inventory *draftPruneInventory,
+	result PruneDraftsResult,
+) (PruneDraftsResult, error) {
+	result.Revision = inventory.directoryRevision
 	if err := draftContextError(ctx, "prune"); err != nil {
 		return PruneDraftsResult{}, err
 	}
-	if err := verifyPruneDraftRevision(root, selection.directoryRevision); err != nil {
+	identity, err := os.Stat(root)
+	if err != nil {
+		return result, errors.Join(pruneDraftRevisionChangedError(), fmt.Errorf("inspect dry-run draft directory: %w", err))
+	}
+	if !os.SameFile(inventory.directoryIdentity, identity) {
+		return result, pruneDraftRevisionChangedError()
+	}
+	stable := inventory.directoryIdentity.ModTime().Equal(identity.ModTime())
+	result.Stable = &stable
+	return result, nil
+}
+
+func confirmDraftPrune(
+	ctx context.Context,
+	root string,
+	cutoff time.Time,
+	inventory *draftPruneInventory,
+	result PruneDraftsResult,
+) (PruneDraftsResult, error) {
+	if err := draftContextError(ctx, "prune"); err != nil {
 		return PruneDraftsResult{}, err
 	}
+	if err := verifyPruneDraftRevision(root, inventory.directoryRevision); err != nil {
+		return PruneDraftsResult{}, err
+	}
+	var err error
+	result, err = pruneListedDrafts(ctx, root, cutoff, result)
+	if err != nil {
+		return result, err
+	}
+	result, err = pruneListedReceipts(ctx, root, result)
+	if err != nil {
+		return result, err
+	}
+	result, err = sweepPruneInventory(ctx, root, inventory, result)
+	if err != nil {
+		return result, err
+	}
+	if len(result.Failed) > 0 {
+		return result, &OperationError{Code: "prune_failed", Message: "one or more drafts could not be pruned"}
+	}
+	return result, nil
+}
+
+func pruneListedDrafts(ctx context.Context, root string, cutoff time.Time, result PruneDraftsResult) (PruneDraftsResult, error) {
 	for _, candidate := range result.Candidates {
 		if err := draftContextError(ctx, "prune"); err != nil {
 			return result, err
@@ -179,6 +287,12 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		}
 		result.Removed = append(result.Removed, candidate.Ref)
 	}
+	return result, nil
+}
+
+func pruneListedReceipts(ctx context.Context, root string, result PruneDraftsResult) (PruneDraftsResult, error) {
+	receiptCandidates := result.ExpiredReceipts
+	result.ExpiredReceipts = result.ExpiredReceipts[:0]
 	for _, ref := range receiptCandidates {
 		if err := draftContextError(ctx, "prune"); err != nil {
 			return result, err
@@ -193,93 +307,467 @@ func (s *Service) PruneDraftsContext(ctx context.Context, request PruneDraftsReq
 		}
 		result.ExpiredReceipts = append(result.ExpiredReceipts, ref)
 	}
+	return result, nil
+}
+
+func sweepPruneInventory(
+	ctx context.Context,
+	root string,
+	inventory *draftPruneInventory,
+	result PruneDraftsResult,
+) (PruneDraftsResult, error) {
 	if err := draftContextError(ctx, "prune"); err != nil {
 		return result, err
 	}
-	sweptArtifacts, artifactFailures, err := sweepOrphanDraftArtifacts(ctx, root)
+	sweptArtifacts, artifactFailures, err := sweepOrphanDraftArtifacts(ctx, root, inventory)
 	result.SweptArtifacts = sweptArtifacts
 	result.Failed = append(result.Failed, artifactFailures...)
 	if err != nil {
 		return result, err
 	}
-	swept, failures, err := sweepOrphanDraftLocks(root)
+	swept, failures, err := sweepOrphanDraftLocks(root, inventory)
 	result.SweptLocks = swept
 	result.Failed = append(result.Failed, failures...)
 	if err != nil {
 		return result, err
 	}
-	if len(result.Failed) > 0 {
-		return result, &OperationError{Code: "prune_failed", Message: "one or more drafts could not be pruned"}
-	}
 	return result, nil
 }
 
-func collectPruneCandidates(ctx context.Context, root string, cutoff time.Time) (selection draftPruneCandidateSelection, resultErr error) {
+func collectDraftPruneInventory(ctx context.Context, root string, cutoff time.Time) (inventory *draftPruneInventory, resultErr error) {
 	pinned, err := os.OpenRoot(root)
 	if err != nil {
-		return draftPruneCandidateSelection{}, fmt.Errorf("open draft directory: %w", err)
+		return nil, fmt.Errorf("open draft directory: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, pinned.Close()) }()
 	directory, err := pinned.Open(".")
 	if err != nil {
-		return draftPruneCandidateSelection{}, fmt.Errorf("open draft listing: %w", err)
+		return nil, fmt.Errorf("open draft listing: %w", err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
 	state := &draftStorage{rootName: root, root: pinned, directory: directory}
 	identity, err := directory.Stat()
 	if err != nil {
-		return draftPruneCandidateSelection{}, fmt.Errorf("inspect draft directory: %w", err)
+		return nil, fmt.Errorf("inspect draft directory: %w", err)
 	}
-	selection.directoryIdentity = identity
-	selection.directoryRevision, err = draftListRevision(root, identity)
+	revision, err := draftListRevision(root, identity)
 	if err != nil {
-		return draftPruneCandidateSelection{}, err
+		return nil, err
+	}
+	return collectDraftPruneInventoryFromReader(ctx, root, cutoff, time.Now().UTC(), state, identity, revision, directory)
+}
+
+func collectDraftPruneInventoryFromReader(
+	ctx context.Context,
+	root string,
+	cutoff time.Time,
+	now time.Time,
+	state *draftStorage,
+	identity os.FileInfo,
+	revision string,
+	reader draftPruneDirectoryReader,
+) (inventory *draftPruneInventory, resultErr error) {
+	inventory = &draftPruneInventory{directoryIdentity: identity, directoryRevision: revision}
+	fixedBytes := pruneDirectoryFixedMetadataBytes + retainedPruneStringBytes(revision) + retainedPruneFileInfoBytes(identity, root, ".")
+	if err := inventory.reserveMetadata(fixedBytes); err != nil {
+		return nil, err
 	}
 	if err := draftContextError(ctx, "prune"); err != nil {
-		return draftPruneCandidateSelection{}, err
+		return nil, err
 	}
 	for {
 		if err := draftContextError(ctx, "prune"); err != nil {
-			return draftPruneCandidateSelection{}, err
+			return nil, err
 		}
-		names, err := directory.Readdirnames(draftPruneDirectoryBatchSize)
-		selection.entryVisits += int64(len(names))
+		names, err := reader.Readdirnames(draftPruneDirectoryBatchSize)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return draftPruneCandidateSelection{}, fmt.Errorf("list draft candidates: %w", err)
+			return nil, fmt.Errorf("list draft directory: %w", err)
 		}
-		for _, name := range names {
-			if !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".json") {
-				continue
-			}
-			ref := strings.TrimSuffix(name, ".json")
-			if !validDraftReference(ref) {
-				continue
-			}
-			draft, err := readDraftSummary(ctx, ref, state)
-			if err != nil {
-				if ctx.Err() != nil {
-					return draftPruneCandidateSelection{}, draftContextError(ctx, "prune")
-				}
-				continue
-			}
-			if draft.StateError != "" || !pruneEligible(draft, cutoff) {
-				continue
-			}
-			candidate := PruneCandidate{
-				Ref: draft.Ref, Subject: draft.Subject, AgeDays: pruneAgeDays(draft.UpdatedAt),
-			}
-			if err := selection.appendCandidate(candidate); err != nil {
-				return draftPruneCandidateSelection{}, err
-			}
+		if err := classifyDraftPruneBatch(ctx, root, cutoff, now, state, inventory, names); err != nil {
+			return nil, err
 		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
 	}
-	sort.Slice(selection.candidates, func(left int, right int) bool {
-		return selection.candidates[left].Ref < selection.candidates[right].Ref
+	sort.Slice(inventory.entries, func(left int, right int) bool {
+		return inventory.entries[left].name < inventory.entries[right].name
 	})
-	return selection, nil
+	return inventory, nil
+}
+
+func classifyDraftPruneBatch(
+	ctx context.Context,
+	root string,
+	cutoff time.Time,
+	now time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	names []string,
+) error {
+	inventory.entryVisits += int64(len(names))
+	batchNameBytes := int64(0)
+	for _, name := range names {
+		batchNameBytes += retainedPruneStringBytes(name)
+	}
+	if err := inventory.reserveMetadata(batchNameBytes); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := appendAndClassifyDraftPruneEntry(ctx, root, cutoff, now, state, inventory, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func appendAndClassifyDraftPruneEntry(
+	ctx context.Context,
+	root string,
+	cutoff time.Time,
+	now time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	name string,
+) error {
+	entry := draftPruneDirectoryEntry{name: name}
+	entries, err := appendPruneMetadata(inventory, inventory.entries, entry, 0)
+	if err != nil {
+		return err
+	}
+	inventory.entries = entries
+	current := &inventory.entries[len(inventory.entries)-1]
+	if err := classifyDraftPruneEntry(ctx, root, cutoff, now, state, inventory, current); err != nil {
+		return err
+	}
+	inventory.classificationVisits++
+	return nil
+}
+
+func classifyDraftPruneEntry(
+	ctx context.Context,
+	root string,
+	cutoff time.Time,
+	now time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	entry *draftPruneDirectoryEntry,
+) error {
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return err
+	}
+	if ref, known := draftTemporaryRef(entry.name); ref != "" {
+		return classifyDraftPruneTemporary(root, now, state, inventory, entry, ref, known)
+	}
+	if !strings.HasPrefix(entry.name, "draft_") {
+		return nil
+	}
+	switch {
+	case strings.HasSuffix(entry.name, ".json"):
+		return classifyDraftPruneJSON(ctx, cutoff, state, inventory, entry)
+	case strings.HasSuffix(entry.name, ".send-receipt"):
+		return classifyDraftPruneReceipt(root, now, state, inventory, entry)
+	case strings.HasSuffix(entry.name, ".lock"):
+		return classifyDraftPruneLock(inventory, entry)
+	default:
+		return classifyDraftPruneArtifact(state, inventory, entry)
+	}
+}
+
+func classifyDraftPruneTemporary(
+	root string,
+	now time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	entry *draftPruneDirectoryEntry,
+	ref string,
+	known bool,
+) error {
+	if err := inventory.retainRef(entry, ref); err != nil {
+		return err
+	}
+	if known {
+		entry.kind |= pruneEntryKnownTemporary
+	} else {
+		entry.kind |= pruneEntryUnknownTemporary
+		return nil
+	}
+	identity, err := state.lstat(entry.name)
+	if err != nil {
+		return fmt.Errorf("inspect draft temporary during prune: %w", err)
+	}
+	if err := inventory.reserveMetadata(retainedPruneFileInfoBytes(identity, root, entry.name)); err != nil {
+		return err
+	}
+	entry.identity = identity
+	staleOrUnsafe := !identity.Mode().IsRegular() || identity.ModTime().Before(now.Add(-draftTemporaryMinimumAge))
+	entry.orphanTemporaryCandidate = known && staleOrUnsafe
+	entry.orphanArtifactCandidate = entry.orphanTemporaryCandidate
+	if !identity.Mode().IsRegular() || !staleOrUnsafe {
+		return nil
+	}
+	busy, err := draftArtifactRefBusy(root, ref)
+	if err != nil {
+		return err
+	}
+	entry.temporaryCandidate = !busy
+	return nil
+}
+
+func classifyDraftPruneJSON(
+	ctx context.Context,
+	cutoff time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	entry *draftPruneDirectoryEntry,
+) error {
+	entry.kind = pruneEntryDraftJSON
+	ref := strings.TrimSuffix(entry.name, ".json")
+	if !validDraftReference(ref) {
+		return nil
+	}
+	if err := inventory.retainRef(entry, ref); err != nil {
+		return err
+	}
+	draft, err := readDraftSummary(ctx, ref, state)
+	if err != nil {
+		if ctx.Err() != nil {
+			return draftContextError(ctx, "prune")
+		}
+		return nil
+	}
+	if draft.StateError != "" || !pruneEligible(draft, cutoff) {
+		return nil
+	}
+	if err := inventory.reserveMetadata(retainedPruneStringBytes(draft.Subject)); err != nil {
+		return err
+	}
+	entry.candidate, entry.candidateSubject = true, draft.Subject
+	entry.candidateAgeDays = pruneAgeDays(draft.UpdatedAt)
+	return nil
+}
+
+func classifyDraftPruneReceipt(
+	root string,
+	now time.Time,
+	state *draftStorage,
+	inventory *draftPruneInventory,
+	entry *draftPruneDirectoryEntry,
+) error {
+	ref := strings.TrimSuffix(entry.name, ".send-receipt")
+	if !validDraftReference(ref) {
+		return nil
+	}
+	entry.kind = pruneEntryReceipt
+	if err := inventory.retainRef(entry, ref); err != nil {
+		return err
+	}
+	receipt, err := readSendReceipt(root, ref, state)
+	if err != nil || receipt == nil || now.Before(receipt.ExpiresAt) {
+		return nil
+	}
+	attempt, err := readSendAttempt(root, ref, state)
+	if err != nil || attempt != nil && !terminalSendOutcome(attempt.Outcome) {
+		return nil
+	}
+	if _, err := state.lstat(ref + ".json"); err == nil || !os.IsNotExist(err) {
+		return nil
+	}
+	entry.receiptCandidate = true
+	return nil
+}
+
+func classifyDraftPruneLock(inventory *draftPruneInventory, entry *draftPruneDirectoryEntry) error {
+	ref := strings.TrimSuffix(entry.name, ".lock")
+	if !validDraftReference(ref) {
+		return nil
+	}
+	entry.kind = pruneEntryLock
+	return inventory.retainRef(entry, ref)
+}
+
+func classifyDraftPruneArtifact(state *draftStorage, inventory *draftPruneInventory, entry *draftPruneDirectoryEntry) error {
+	ref, checkDirectory, ok := draftPruneArtifactRef(entry.name)
+	if !ok {
+		return nil
+	}
+	if checkDirectory {
+		identity, err := state.lstat(entry.name)
+		if err == nil && identity.IsDir() {
+			return nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect draft artifact during prune: %w", err)
+		}
+	}
+	entry.kind = pruneEntryArtifact
+	return inventory.retainRef(entry, ref)
+}
+
+func draftPruneArtifactRef(name string) (string, bool, bool) {
+	if !strings.HasPrefix(name, "draft_") {
+		return "", false, false
+	}
+	for _, suffix := range []string{handoffSnapshotSuffix, ".attachments"} {
+		if strings.HasSuffix(name, suffix) {
+			ref := strings.TrimSuffix(name, suffix)
+			return ref, false, validDraftReference(ref)
+		}
+	}
+	for _, suffix := range []string{".send-claim", ".send-spool", ".save-claim", handoffClaimSuffix} {
+		if strings.HasSuffix(name, suffix) {
+			ref := strings.TrimSuffix(name, suffix)
+			return ref, true, validDraftReference(ref)
+		}
+	}
+	return "", false, false
+}
+
+func prepareDraftPruneResult(
+	ctx context.Context,
+	root string,
+	inventory *draftPruneInventory,
+	dryRun bool,
+) (PruneDraftsResult, error) {
+	result := PruneDraftsResult{DryRun: dryRun}
+	for index := range inventory.entries {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return PruneDraftsResult{}, err
+		}
+		if err := appendDraftPruneEntryResults(inventory, &result, &inventory.entries[index]); err != nil {
+			return PruneDraftsResult{}, err
+		}
+	}
+	sort.Slice(inventory.entries, func(left int, right int) bool {
+		if inventory.entries[left].ref != inventory.entries[right].ref {
+			return inventory.entries[left].ref < inventory.entries[right].ref
+		}
+		return inventory.entries[left].name < inventory.entries[right].name
+	})
+	if dryRun {
+		if err := appendDraftPruneOrphanResults(ctx, root, inventory, &result); err != nil {
+			return PruneDraftsResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func appendDraftPruneEntryResults(inventory *draftPruneInventory, result *PruneDraftsResult, entry *draftPruneDirectoryEntry) error {
+	if entry.candidate {
+		candidate := PruneCandidate{Ref: entry.ref, Subject: entry.candidateSubject, AgeDays: entry.candidateAgeDays}
+		values, err := appendPruneMetadata(inventory, result.Candidates, candidate, 0)
+		if err != nil {
+			return err
+		}
+		result.Candidates, entry.candidateSubject = values, ""
+	}
+	if entry.receiptCandidate {
+		values, err := appendPruneMetadata(inventory, result.ExpiredReceipts, entry.ref, 0)
+		if err != nil {
+			return err
+		}
+		result.ExpiredReceipts = values
+	}
+	if entry.temporaryCandidate {
+		artifact := PruneTemporaryArtifact{Ref: entry.ref, Name: entry.name, Size: entry.identity.Size()}
+		values, err := appendPruneMetadata(inventory, result.TemporaryArtifacts, artifact, 0)
+		if err != nil {
+			return err
+		}
+		result.TemporaryArtifacts = values
+	}
+	return appendDraftPruneUnknownTemporary(inventory, result, entry)
+}
+
+func appendDraftPruneUnknownTemporary(
+	inventory *draftPruneInventory,
+	result *PruneDraftsResult,
+	entry *draftPruneDirectoryEntry,
+) error {
+	if entry.kind&pruneEntryUnknownTemporary == 0 {
+		return nil
+	}
+	result.PreservedTemporaryCount++
+	if len(result.PreservedTemporaries) >= maximumPreservedTemporaryDiagnostics {
+		return nil
+	}
+	values, err := appendPruneMetadata(inventory, result.PreservedTemporaries, entry.name, 0)
+	if err == nil {
+		result.PreservedTemporaries = values
+	}
+	return err
+}
+
+func appendDraftPruneOrphanResults(
+	ctx context.Context,
+	root string,
+	inventory *draftPruneInventory,
+	result *PruneDraftsResult,
+) error {
+	for start := 0; start < len(inventory.entries); {
+		if err := draftContextError(ctx, "prune"); err != nil {
+			return err
+		}
+		end := nextDraftPruneRefGroup(inventory.entries, start)
+		ref := inventory.entries[start].ref
+		if ref != "" {
+			if err := appendDraftPruneOrphanResult(root, ref, inventory.entries[start:end], inventory, result); err != nil {
+				return err
+			}
+		}
+		start = end
+	}
+	return nil
+}
+
+func appendDraftPruneOrphanResult(
+	root string,
+	ref string,
+	entries []draftPruneDirectoryEntry,
+	inventory *draftPruneInventory,
+	result *PruneDraftsResult,
+) error {
+	staleTemporary := hasOrphanPruneTemporary(entries)
+	if !staleTemporary && !hasPruneEntryKind(entries, pruneEntryArtifact) {
+		return nil
+	}
+	draftPath := filepath.Join(root, ref+".json")
+	if !staleTemporary {
+		if _, err := os.Lstat(draftPath); err == nil || !os.IsNotExist(err) {
+			return nil
+		}
+	}
+	busy, err := draftArtifactRefBusy(root, ref)
+	if err != nil || busy {
+		return err
+	}
+	if _, err := os.Lstat(draftPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	values, err := appendPruneMetadata(inventory, result.OrphanArtifacts, ref, 0)
+	if err == nil {
+		result.OrphanArtifacts = values
+	}
+	return err
+}
+
+func nextDraftPruneRefGroup(entries []draftPruneDirectoryEntry, start int) int {
+	end := start + 1
+	for end < len(entries) && entries[end].ref == entries[start].ref {
+		end++
+	}
+	return end
+}
+
+func hasOrphanPruneTemporary(entries []draftPruneDirectoryEntry) bool {
+	for _, entry := range entries {
+		if entry.orphanArtifactCandidate {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyPruneDraftRevision(root string, expectedRevision string) error {
@@ -299,45 +787,6 @@ func pruneDraftRevisionChangedError() error {
 		Code:    "prune_state_changed",
 		Message: "draft directory changed before prune cleanup; no drafts were removed",
 	}
-}
-
-func listExpiredSendReceipts(root string, now time.Time) ([]string, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, fmt.Errorf("list send receipts: %w", err)
-	}
-	refs := make([]string, 0)
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".send-receipt") {
-			continue
-		}
-		ref := strings.TrimSuffix(name, ".send-receipt")
-		if _, err := draftPath(root, ref); err != nil {
-			continue
-		}
-		receipt, err := readSendReceipt(root, ref)
-		if err != nil || receipt == nil || now.Before(receipt.ExpiresAt) {
-			continue
-		}
-		attempt, err := readSendAttempt(root, ref)
-		if err != nil {
-			continue
-		}
-		if attempt != nil && !terminalSendOutcome(attempt.Outcome) {
-			continue
-		}
-		draftFile, err := draftPath(root, ref)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Lstat(draftFile); err == nil || !os.IsNotExist(err) {
-			continue
-		}
-		refs = append(refs, ref)
-	}
-	sort.Strings(refs)
-	return refs, nil
 }
 
 func terminalSendOutcome(outcome SendOutcome) bool {
@@ -390,47 +839,63 @@ release:
 	return errors.Join(resultErr, lease.release())
 }
 
-func sweepOrphanDraftLocks(root string) ([]string, []PruneFailure, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, nil, fmt.Errorf("list draft locks: %w", err)
-	}
+func sweepOrphanDraftLocks(root string, inventory *draftPruneInventory) ([]string, []PruneFailure, error) {
+	sort.Slice(inventory.entries, func(left int, right int) bool {
+		if inventory.entries[left].ref != inventory.entries[right].ref {
+			return inventory.entries[left].ref < inventory.entries[right].ref
+		}
+		return inventory.entries[left].name < inventory.entries[right].name
+	})
 	var swept []string
 	var failures []PruneFailure
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "draft_") || !strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		ref := strings.TrimSuffix(name, ".lock")
-		if _, err := draftPath(root, ref); err != nil {
-			continue
-		}
-		draftFile, err := draftPath(root, ref)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Stat(draftFile); err == nil || !os.IsNotExist(err) {
-			continue
-		}
-		lockFile, err := openExistingDraftLockResource(root, ref)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
+	for start := 0; start < len(inventory.entries); {
+		end := nextDraftPruneRefGroup(inventory.entries, start)
+		ref := inventory.entries[start].ref
+		if ref != "" && hasPruneEntryKind(inventory.entries[start:end], pruneEntryLock) {
+			sweptLock, err := sweepOrphanDraftLockRef(root, ref)
+			if err != nil {
+				failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			} else if sweptLock {
+				swept = append(swept, ref)
 			}
-			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
-			continue
 		}
-		sweptLock, err := sweepOrphanDraftLock(root, ref, lockFile)
-		if err != nil {
-			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
-			continue
-		}
-		if sweptLock {
-			swept = append(swept, ref)
-		}
+		start = end
 	}
 	return swept, failures, nil
+}
+
+func sweepOrphanDraftLockRef(root string, ref string) (bool, error) {
+	if _, err := draftPath(root, ref); err != nil {
+		return false, nil
+	}
+	lockPath := filepath.Join(root, ref+".lock")
+	lockIdentity, err := os.Lstat(lockPath)
+	if os.IsNotExist(err) || err == nil && lockIdentity.IsDir() {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(filepath.Join(root, ref+".json")); err == nil || !os.IsNotExist(err) {
+		return false, nil
+	}
+	lockFile, err := openExistingDraftLockResource(root, ref)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweepOrphanDraftLock(root, ref, lockFile)
+}
+
+func hasPruneEntryKind(entries []draftPruneDirectoryEntry, kind pruneDirectoryEntryKind) bool {
+	for _, entry := range entries {
+		if entry.kind&kind != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneDraftOnce(ctx context.Context, root string, ref string, cutoff time.Time) error {
@@ -521,41 +986,26 @@ func removeDraftTemporaryFile(storage *draftStorage, name string, expected os.Fi
 	return removeDraftStorageFile(storage, name, expected, "draft temporary")
 }
 
-// removeDraftTemporaryFiles runs only while holding this draft's exclusive
-// lease. The pinned root fixes the parent identity; each file identity is
-// checked again immediately before unlink.
-func removeDraftTemporaryFiles(storage *draftStorage, ref string) (removed int, resultErr error) {
+// removeDraftTemporaryFiles uses only names classified by the root inventory.
+// The pinned root and retained file identity are rechecked immediately before unlink.
+func removeDraftTemporaryFiles(storage *draftStorage, ref string, entries []draftPruneDirectoryEntry) (removed int, resultErr error) {
 	if !validDraftReference(ref) {
 		return 0, validationError("invalid draft ref")
 	}
 	if storage == nil || storage.root == nil {
 		return 0, draftLockUnsafeError("draft temporary cleanup requires a pinned draft directory")
 	}
-	directory, err := storage.root.Open(".")
-	if err != nil {
-		return 0, fmt.Errorf("open pinned draft directory for temporary recovery: %w", err)
-	}
-	defer func() { resultErr = errors.Join(resultErr, directory.Close()) }()
-	entries, err := directory.ReadDir(-1)
-	if err != nil {
-		return 0, fmt.Errorf("list draft temporaries: %w", err)
-	}
 	for _, entry := range entries {
-		candidateRef, ok := draftTemporaryRef(entry.Name())
-		if !ok || candidateRef != ref {
+		if entry.kind&pruneEntryKnownTemporary == 0 || entry.ref != ref {
 			continue
 		}
-		identity, err := entry.Info()
-		if err != nil {
-			return removed, fmt.Errorf("inspect draft temporary: %w", err)
-		}
-		if !identity.Mode().IsRegular() {
+		if entry.identity == nil || !entry.identity.Mode().IsRegular() {
 			return removed, draftLockUnsafeError("draft temporary is not a regular file")
 		}
-		if !identity.ModTime().Before(time.Now().Add(-draftTemporaryMinimumAge)) {
+		if !entry.identity.ModTime().Before(time.Now().Add(-draftTemporaryMinimumAge)) {
 			continue
 		}
-		if err := removeDraftTemporaryFile(storage, entry.Name(), identity); err != nil {
+		if err := removeDraftTemporaryFile(storage, entry.name, entry.identity); err != nil {
 			return removed, err
 		}
 		removed++
@@ -563,98 +1013,59 @@ func removeDraftTemporaryFiles(storage *draftStorage, ref string) (removed int, 
 	return removed, nil
 }
 
-// listOrphanDraftArtifactRefs returns orphan sidecar refs and refs with known
-// aged or unsafe temporaries, including live drafts. Terminal send receipts
-// are excluded; they carry their own expiry path.
-func listOrphanDraftArtifactRefs(root string) ([]string, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, fmt.Errorf("list orphan draft artifacts: %w", err)
-	}
-	refs := make(map[string]struct{})
-	for _, entry := range entries {
-		name := entry.Name()
-		if ref, ok := draftTemporaryRef(name); ok {
-			info, err := entry.Info()
-			if err != nil {
-				return nil, err
-			}
-			if info.Mode().IsRegular() && !info.ModTime().Before(time.Now().Add(-draftTemporaryMinimumAge)) {
-				continue
-			}
-			refs[ref] = struct{}{}
-			continue
-		}
-		if !strings.HasPrefix(name, "draft_") {
-			continue
-		}
-		var ref string
-		switch {
-		case strings.HasSuffix(name, handoffSnapshotSuffix):
-			ref = strings.TrimSuffix(name, handoffSnapshotSuffix)
-		case strings.HasSuffix(name, ".attachments"):
-			ref = strings.TrimSuffix(name, ".attachments")
-		case entry.IsDir():
-			continue
-		case strings.HasSuffix(name, ".send-claim"):
-			ref = strings.TrimSuffix(name, ".send-claim")
-		case strings.HasSuffix(name, ".send-spool"):
-			ref = strings.TrimSuffix(name, ".send-spool")
-		case strings.HasSuffix(name, ".save-claim"):
-			ref = strings.TrimSuffix(name, ".save-claim")
-		case strings.HasSuffix(name, handoffClaimSuffix):
-			ref = strings.TrimSuffix(name, handoffClaimSuffix)
-		default:
-			continue
-		}
-		draftFile, err := draftPath(root, ref)
-		if err != nil {
-			continue
-		}
-		if _, err := os.Lstat(draftFile); err == nil || !os.IsNotExist(err) {
-			continue
-		}
-		refs[ref] = struct{}{}
-	}
-	out := make([]string, 0, len(refs))
-	for ref := range refs {
-		out = append(out, ref)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
 // sweepOrphanDraftArtifacts removes known inactive temporaries for every ref
 // and safe sidecars whose draft is gone. Handoff snapshots require a prepared claim;
 // dispatched or ambiguous evidence is retained under the same draft lease.
-func sweepOrphanDraftArtifacts(ctx context.Context, root string) ([]string, []PruneFailure, error) {
-	refs, err := listOrphanDraftArtifactRefs(root)
-	if err != nil {
-		return nil, nil, err
-	}
+func sweepOrphanDraftArtifacts(ctx context.Context, root string, inventory *draftPruneInventory) ([]string, []PruneFailure, error) {
 	var swept []string
 	var failures []PruneFailure
-	for _, ref := range refs {
+	for start := 0; start < len(inventory.entries); {
+		end := nextDraftPruneRefGroup(inventory.entries, start)
+		ref := inventory.entries[start].ref
+		if ref == "" {
+			start = end
+			continue
+		}
+		group := inventory.entries[start:end]
+		if !shouldSweepPruneArtifactGroup(root, ref, group) {
+			start = end
+			continue
+		}
 		if err := draftContextError(ctx, "prune"); err != nil {
 			return swept, failures, err
 		}
-		sweptRef, err := pruneOrphanDraftArtifactsOnce(ctx, root, ref)
+		sweptRef, err := pruneOrphanDraftArtifactsOnce(ctx, root, ref, group)
 		if err != nil {
 			var operation *OperationError
 			if errors.As(err, &operation) && operation.Code == "draft_operation_canceled" {
 				return swept, failures, err
 			}
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})
+			start = end
 			continue
 		}
 		if sweptRef {
 			swept = append(swept, ref)
 		}
+		start = end
 	}
 	return swept, failures, nil
 }
 
-func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string) (bool, error) {
+func shouldSweepPruneArtifactGroup(root string, ref string, entries []draftPruneDirectoryEntry) bool {
+	draftMissing := false
+	if _, err := os.Lstat(filepath.Join(root, ref+".json")); os.IsNotExist(err) {
+		draftMissing = true
+	}
+	for _, entry := range entries {
+		if entry.orphanTemporaryCandidate || draftMissing && entry.kind&pruneEntryArtifact != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string, entries []draftPruneDirectoryEntry) (bool, error) {
 	if busy, err := draftArtifactRefBusy(root, ref); err != nil || busy {
 		return false, err
 	}
@@ -668,39 +1079,42 @@ func pruneOrphanDraftArtifactsOnce(ctx context.Context, root string, ref string)
 		}
 		return false, classifyDraftContextError(ctx, err, "prune")
 	}
-	var resultErr error
-	var removedTemporaries int
-	swept := false
-	err = draftContextError(ctx, "prune")
-	if err != nil {
-		resultErr = err
-		goto release
-	}
-	removedTemporaries, resultErr = removeDraftTemporaryFiles(lease.storage, ref)
-	if resultErr != nil {
-		goto release
-	}
-	if _, err = lease.storage.lstat(ref + ".json"); err == nil || !os.IsNotExist(err) {
-		swept = err == nil && removedTemporaries > 0
-		if err != nil {
-			resultErr = err
-		}
-		goto release
-	}
-	resultErr = removeOrphanHandoffSnapshotTree(ctx, ref, lease.storage)
-	if resultErr != nil {
-		goto release
-	}
-	resultErr = removeOrphanDraftClaims(ctx, lease.storage, ref)
-	if resultErr == nil {
-		resultErr = removeDraftAttachmentDir(lease.storage, ref)
-	}
-	if resultErr == nil {
-		resultErr = lease.removeLock()
-		swept = resultErr == nil
-	}
-release:
+	swept, resultErr := cleanOrphanDraftArtifactsUnderLease(ctx, ref, lease, entries)
 	return swept, errors.Join(resultErr, lease.release())
+}
+
+func cleanOrphanDraftArtifactsUnderLease(
+	ctx context.Context,
+	ref string,
+	lease *draftLease,
+	entries []draftPruneDirectoryEntry,
+) (bool, error) {
+	if err := draftContextError(ctx, "prune"); err != nil {
+		return false, err
+	}
+	removedTemporaries, err := removeDraftTemporaryFiles(lease.storage, ref, entries)
+	if err != nil {
+		return false, err
+	}
+	if _, err := lease.storage.lstat(ref + ".json"); err == nil || !os.IsNotExist(err) {
+		if err != nil {
+			return false, err
+		}
+		return removedTemporaries > 0, nil
+	}
+	if err := removeOrphanHandoffSnapshotTree(ctx, ref, lease.storage); err != nil {
+		return false, err
+	}
+	if err := removeOrphanDraftClaims(ctx, lease.storage, ref); err != nil {
+		return false, err
+	}
+	if err := removeDraftAttachmentDir(lease.storage, ref); err != nil {
+		return false, err
+	}
+	if err := lease.removeLock(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Existing writers create the lock before exposing any temporary. This
@@ -721,46 +1135,4 @@ func draftArtifactRefBusy(root string, ref string) (bool, error) {
 		return false, errors.Join(err, lock.close())
 	}
 	return false, errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.close())
-}
-
-func listDraftTemporaryArtifacts(ctx context.Context, root string) ([]PruneTemporaryArtifact, []string, int, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	var candidates []PruneTemporaryArtifact
-	var preserved []string
-	var preservedCount int
-	cutoff := time.Now().Add(-draftTemporaryMinimumAge)
-	for _, entry := range entries {
-		if err := draftContextError(ctx, "prune"); err != nil {
-			return nil, nil, 0, err
-		}
-		ref, known := draftTemporaryRef(entry.Name())
-		if ref == "" {
-			continue
-		}
-		if !known {
-			preservedCount++
-			if len(preserved) < maximumPreservedTemporaryDiagnostics {
-				preserved = append(preserved, entry.Name())
-			}
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, nil, 0, err
-		}
-		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
-			continue
-		}
-		busy, err := draftArtifactRefBusy(root, ref)
-		if err != nil {
-			return nil, nil, 0, err
-		}
-		if !busy {
-			candidates = append(candidates, PruneTemporaryArtifact{Ref: ref, Name: entry.Name(), Size: info.Size()})
-		}
-	}
-	return candidates, preserved, preservedCount, nil
 }

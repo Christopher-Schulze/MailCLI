@@ -318,7 +318,8 @@ func TestSweepOrphanAdoptedAttachments(t *testing.T) {
 	if _, err := os.Stat(directory); err != nil {
 		t.Fatalf("adopted attachment directory missing before sweep: %v", err)
 	}
-	swept, failures, err := sweepOrphanDraftArtifacts(context.Background(), root)
+	inventory := collectPruneTestInventory(t, root)
+	swept, failures, err := sweepOrphanDraftArtifacts(context.Background(), root, inventory)
 	if err != nil || len(failures) != 0 {
 		t.Fatalf("sweepOrphanDraftArtifacts() = %v %v %v", swept, failures, err)
 	}
