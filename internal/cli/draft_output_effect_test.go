@@ -21,7 +21,12 @@ func TestDraftOutputLimitRetainsCompletedMutation(t *testing.T) {
 			args, previousRevision := draftEffectCommand(t, service, command)
 			args = append(args, "--max-bytes", "1", "--json")
 			var stdout, stderr bytes.Buffer
-			code := Run(context.Background(), service, args, &stdout, &stderr)
+			code := 0
+			if command == "edit" {
+				code = runDraftEditWithTestTerminal(t, root, args, &stdout, &stderr)
+			} else {
+				code = Run(context.Background(), service, args, &stdout, &stderr)
+			}
 			stored := onlyPersistedOutputDraft(t, service, root)
 			if stored.Subject != "After" || stored.Body != "Body" || stored.Revision == "" || stored.Revision == previousRevision {
 				t.Fatalf("mutation was not persisted correctly: %+v", stored)

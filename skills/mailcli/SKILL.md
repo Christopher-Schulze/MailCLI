@@ -22,7 +22,7 @@ Read only the guide needed for the current action. When a workflow changes actio
 | --- | --- | --- |
 | Find accounts or mailboxes | `accounts.list`, `mailboxes.list`, `mailboxes.resolve` | [Reading](references/reading.md) |
 | Find or read messages; save received files | `messages.list`, `messages.filter`, `messages.search`, `messages.get`, `messages.raw`, `messages.thread`, `attachments.list`, `attachments.save` | [Reading](references/reading.md) |
-| Create, reply, forward, inspect, or manage a draft | `drafts.create`, `drafts.list`, `drafts.inspect`, `drafts.preview`, `drafts.edit`, `drafts.update`, `drafts.open`, `drafts.adopt`, `drafts.discard`, `drafts.prune`, `messages.reply`, `messages.forward` | [Drafts](references/drafts.md) |
+| Create, reply, forward, inspect, or manage a draft | `drafts.create`, `drafts.list`, `drafts.inspect`, `drafts.preview`, `drafts.update`, `drafts.open`, `drafts.adopt`, `drafts.discard`, `drafts.prune`, `messages.reply`, `messages.forward` | [Drafts](references/drafts.md) |
 | Send reviewed content or reconcile a send | `drafts.send`, `drafts.reconcile` | [Sending](references/sending.md) |
 | Verify flags, mark, move, copy, delete, or synchronize | `messages.state`, `messages.mark`, `messages.move`, `messages.copy`, `messages.delete`, `sync` | [Mutations](references/mutations.md) |
 | Open a visible new compose or resolve a native claim | `drafts.handoff`, `drafts.handoff-reconcile`, `drafts.reconcile` | [Native handoff](references/native-handoff.md) |

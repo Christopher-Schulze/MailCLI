@@ -9,6 +9,7 @@ import (
 // executable dispatch.
 type commandContract struct {
 	ID                 string
+	audience           commandAudience
 	handler            commandRunner
 	familyHandler      commandRunner
 	helpDescription    string
@@ -23,6 +24,13 @@ type commandContract struct {
 	requiresSignal     bool
 	requiresMainThread bool
 }
+
+type commandAudience string
+
+const (
+	commandAudienceAgent commandAudience = "agent"
+	commandAudienceHuman commandAudience = "human"
+)
 
 type mailServiceRequirement uint8
 
@@ -63,8 +71,13 @@ func commandCapabilityFor(contract commandContract) (commandCapability, error) {
 	if err != nil {
 		return commandCapability{}, err
 	}
+	audience := contract.audience
+	if audience == "" {
+		audience = commandAudienceAgent
+	}
 	return commandCapability{
 		ID:              contract.ID,
+		Audience:        audience,
 		Schema:          schema,
 		EffectClass:     contract.effectClass,
 		Confirmation:    contract.confirmation,
@@ -286,6 +299,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.edit", handler: runDraftEdit,
+		audience:    commandAudienceHuman,
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "draft-store",
 		dependencies:    []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetEditor, Condition: dependencyConditionAlways}},

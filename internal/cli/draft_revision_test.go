@@ -96,7 +96,7 @@ func TestDraftEditorConflictPreservesConcurrentUpdateAndCandidate(t *testing.T) 
 	t.Setenv("MAILCLI_REVISION_EDITOR_REF", draft.Ref)
 	t.Setenv("MAILCLI_REVISION_EDITOR_EXPECTED", draft.Revision)
 	var stdout, stderr bytes.Buffer
-	code := Run(context.Background(), service, []string{
+	code := runDraftEditWithTestTerminal(t, root, []string{
 		"drafts", "edit", "--ref", draft.Ref, "--editor", os.Args[0],
 		"--editor-arg=-test.run=TestDraftRevisionEditorProcess", "--editor-arg=--", "--json",
 	}, &stdout, &stderr)

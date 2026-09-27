@@ -81,6 +81,7 @@ type draftSavePolicy struct {
 
 type commandCapability struct {
 	ID              string              `json:"id"`
+	Audience        commandAudience     `json:"audience"`
 	Schema          json.RawMessage     `json:"schema"`
 	EffectClass     string              `json:"effect_class"`
 	Confirmation    string              `json:"confirmation"`
@@ -381,8 +382,8 @@ func writeCapabilities(stdout, stderr io.Writer, jsonOutput bool, manifest capab
 	}
 	for _, command := range manifest.Commands {
 		writeFormat(
-			stdout, "%s\t%s\tconfirmation=%s\tstore=%s\tdependencies=%v\tstates=%s\n",
-			command.ID, command.EffectClass, command.Confirmation, command.StoreDependency,
+			stdout, "%s\t%s\taudience=%s\tconfirmation=%s\tstore=%s\tdependencies=%v\tstates=%s\n",
+			command.ID, command.EffectClass, command.Audience, command.Confirmation, command.StoreDependency,
 			command.Dependencies, fmt.Sprint(command.ResultStates),
 		)
 	}

@@ -208,6 +208,18 @@ func draftInspectRecovery(ref string, includeFullView bool) mail.RecoveryGuidanc
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	var interactive *draftInteractiveRequiredError
+	if errors.As(err, &interactive) {
+		guidance = mail.OperationGuidance{
+			Phase: mail.OperationPhaseValidation, EffectCertainty: mail.EffectNone,
+			Retryability: mail.RetryUserInputRequired, ReplayAllowed: false,
+			Recovery: mail.RecoveryGuidance{
+				Action: mail.RecoveryCorrect, Command: "drafts.update",
+				Args:        []string{"--ref", interactive.ref, "--expected-revision", interactive.revision, "--input", "-", "--json"},
+				Instruction: "Review the local draft with drafts inspect/preview, then supply only the authorized changes as JSON on stdin. A changed revision requires renewed review.",
+			},
+		}
+	}
 	if data.listRecovery != nil && (errorCode(err) == "output_too_large" || errorCode(err) == "invalid_cursor") {
 		guidance.Recovery = *data.listRecovery
 	}

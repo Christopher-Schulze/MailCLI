@@ -288,6 +288,12 @@ func writeHumanDraftPreview(writer io.Writer, preview draftPreview) {
 	}
 }
 
+type draftInteractiveRequiredError struct {
+	commandError
+	ref      string
+	revision string
+}
+
 func runDraftEdit(
 	ctx context.Context,
 	service *mail.Service,
@@ -315,6 +321,12 @@ func runDraftEdit(
 		return failProjectedEmpty("drafts.edit", *jsonOutput, output, err, stdout, stderr)
 	}
 	input := draftInputFromStored(draft)
+	if !writerIsTerminal(os.Stdin) {
+		return failProjectedEmpty("drafts.edit", *jsonOutput, output, &draftInteractiveRequiredError{
+			commandError: commandError{code: "interactive_required", message: "drafts edit requires an interactive terminal; agents must use drafts update with reviewed revision and JSON input"},
+			ref:          draft.Ref, revision: draft.Revision,
+		}, stdout, stderr)
+	}
 	streams := draftEditorStreams{stdin: os.Stdin, stdout: stdout, stderr: stderr, jsonOutput: *jsonOutput}
 	updated, err := editDraftInput(ctx, service, draft.Ref, draft.Revision, input, *editor, editorArgs, streams)
 	if err != nil {

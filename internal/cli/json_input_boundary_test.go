@@ -240,10 +240,18 @@ func TestDraftJSONEditorRejectsAmbiguityWithoutChangingStorage(t *testing.T) {
 		}
 		t.Setenv("MAILCLI_TEST_JSON_EDITOR", payload)
 		before := jsonInputDirectoryState(t, root)
-		assertJSONInputRejected(t, service, []string{
+		var stdout, stderr bytes.Buffer
+		code := runDraftEditWithTestTerminal(t, root, []string{
 			"drafts", "edit", "--ref", draft.Ref, "--editor", os.Args[0],
 			"--editor-arg=-test.run=TestDraftJSONEditorProcess", "--editor-arg=--", "--json",
-		}, "$")
+		}, &stdout, &stderr)
+		var response envelope
+		if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 2 || response.Error == nil || response.Error.Code != "invalid_input" || !strings.Contains(response.Error.Message, "$") || stderr.Len() != 0 {
+			t.Fatalf("editor input not rejected: code=%d err=%v output=%s stderr=%s", code, err, &stdout, &stderr)
+		}
+		if strings.Contains(stdout.String(), "PRIVATE_") || strings.Contains(stderr.String(), "PRIVATE_") {
+			t.Fatal("editor input leaked into diagnostics")
+		}
 		if after := jsonInputDirectoryState(t, root); !reflect.DeepEqual(before, after) {
 			t.Errorf("editor changed draft storage: before=%v after=%v", before, after)
 		}
