@@ -463,17 +463,11 @@ var documentedBounds = []documentedBound{
 			boundCheck("docs/documentation.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
 			boundCheck("skills/mailcli/references/reading.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
 		}},
-	{name: "external attachment pinned file stat limit", expected: 10_000, unit: "stats",
-		checks: []documentedBoundCheck{
-			boundCheck("README.md", `entries, ([\d,]+) pinned file stats`, 1),
-			boundCheck("docs/documentation.md", `entries, ([\d,]+) pinned file stats`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `entries, ([\d,]+) pinned file stats`, 1),
-		}},
 	{name: "external attachment ambiguity candidate limit", expected: 128, unit: "candidates",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `stats, ([\d,]+) hashed ambiguity candidates`, 1),
-			boundCheck("docs/documentation.md", `stats, ([\d,]+) hashed ambiguity candidates`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `stats, ([\d,]+) hashed ambiguity candidates`, 1),
+			boundCheck("README.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
+			boundCheck("docs/documentation.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
 		}},
 	{name: "external attachment cumulative hash input", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{

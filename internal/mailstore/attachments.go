@@ -26,14 +26,12 @@ type attachmentRecord struct {
 
 const (
 	maximumExternalAttachmentDirectoryEntries = 10_000
-	maximumPinnedExternalAttachmentFileStats  = 10_000
 	maximumExternalAttachmentHashCandidates   = 128
 	maximumExternalAttachmentHashBytes        = int64(1 << 30)
 )
 
 type externalAttachmentDiscoveryBudget struct {
 	directoryEntries          int
-	pinnedFileStats           int
 	hashedAmbiguityCandidates int
 	hashBytes                 int64
 }
@@ -285,7 +283,7 @@ func (s *Store) findExternalAttachment(
 	}
 	defer joinCloseError(&resultErr, directoryFile, "external attachment directory")
 	budget := &externalAttachmentDiscoveryBudget{}
-	entries := make([]os.DirEntry, 0, maximumExternalAttachmentDirectoryEntries)
+	entries := make([]os.DirEntry, 0)
 	directoryEnded := false
 	for len(entries) < maximumExternalAttachmentDirectoryEntries {
 		readSize := maximumExternalAttachmentDirectoryEntries - len(entries)
@@ -299,9 +297,6 @@ func (s *Store) findExternalAttachment(
 		if readErr != nil {
 			return externalAttachment{}, false, fmt.Errorf("list external attachment files: %w", readErr)
 		}
-		if len(batch) == 0 {
-			return externalAttachment{}, false, errors.New("external attachment directory listing made no progress")
-		}
 	}
 	if len(entries) == maximumExternalAttachmentDirectoryEntries && !directoryEnded {
 		extra, readErr := directoryFile.ReadDir(1)
@@ -311,31 +306,19 @@ func (s *Store) findExternalAttachment(
 				"directory entries", maximumExternalAttachmentDirectoryEntries,
 			)
 		}
-		if !errors.Is(readErr, io.EOF) {
-			if readErr != nil {
-				return externalAttachment{}, false, fmt.Errorf("finish listing external attachment files: %w", readErr)
-			}
-			return externalAttachment{}, false, errors.New("external attachment directory listing ended without EOF")
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return externalAttachment{}, false, fmt.Errorf("finish listing external attachment files: %w", readErr)
 		}
-	}
-	if len(entries) < maximumExternalAttachmentDirectoryEntries && !directoryEnded {
-		return externalAttachment{}, false, errors.New("external attachment directory listing ended without EOF")
 	}
 	files := make([]externalAttachment, 0, len(entries))
 	nameMatches := make([]externalAttachment, 0, 1)
 	wantedName := norm.NFC.String(record.Name)
 	for _, entry := range entries {
-		if budget.pinnedFileStats >= maximumPinnedExternalAttachmentFileStats {
-			return externalAttachment{}, false, externalAttachmentResourceLimit(
-				"pinned file stats", maximumPinnedExternalAttachmentFileStats,
-			)
-		}
 		path := filepath.Join(directory, entry.Name())
 		file, fileInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, path)
 		if err != nil {
 			return externalAttachment{}, false, externalAttachmentPathError("file", err)
 		}
-		budget.pinnedFileStats++
 		if err := file.Close(); err != nil {
 			return externalAttachment{}, false, fmt.Errorf("close external attachment file: %w", err)
 		}
@@ -400,11 +383,6 @@ func validAttachmentID(value string) bool {
 }
 
 func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalAttachment, bool, error) {
-	if len(files) > maximumExternalAttachmentHashCandidates {
-		return externalAttachment{}, false, externalAttachmentResourceLimit(
-			"hashed ambiguity candidates", maximumExternalAttachmentHashCandidates,
-		)
-	}
 	if len(files) == 0 {
 		return externalAttachment{}, false, operationError(
 			"ambiguous_attachment", "external attachment candidate set is empty",

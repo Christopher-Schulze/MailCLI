@@ -172,7 +172,7 @@ func TestExternalAttachmentOperationsRejectSelectedFileReplacement(t *testing.T)
 	}
 }
 
-func TestFindExternalAttachmentBoundsDirectoryEntriesAndPinnedStats(t *testing.T) {
+func TestFindExternalAttachmentBoundsDirectoryEntries(t *testing.T) {
 	store, _, resolved, directory := newExternalAttachmentFixture(t)
 	createExternalAttachmentHardLinks(t, store, directory, maximumExternalAttachmentDirectoryEntries)
 	selected, available, err := store.findExternalAttachment(
@@ -181,11 +181,9 @@ func TestFindExternalAttachmentBoundsDirectoryEntriesAndPinnedStats(t *testing.T
 	if err != nil || !available {
 		t.Fatalf("findExternalAttachment() available = %t, error = %v", available, err)
 	}
-	if selected.budget == nil ||
-		selected.budget.directoryEntries != maximumExternalAttachmentDirectoryEntries ||
-		selected.budget.pinnedFileStats != maximumPinnedExternalAttachmentFileStats {
-		t.Fatalf("discovery work = %+v, want %d entries and %d pinned stats",
-			selected.budget, maximumExternalAttachmentDirectoryEntries, maximumPinnedExternalAttachmentFileStats)
+	if selected.budget == nil || selected.budget.directoryEntries != maximumExternalAttachmentDirectoryEntries {
+		t.Fatalf("discovery work = %+v, want %d entries",
+			selected.budget, maximumExternalAttachmentDirectoryEntries)
 	}
 }
 
@@ -201,10 +199,9 @@ func TestFindExternalAttachmentBoundsHashedAmbiguityCandidates(t *testing.T) {
 		}
 		if selected.budget == nil ||
 			selected.budget.directoryEntries != maximumExternalAttachmentHashCandidates ||
-			selected.budget.pinnedFileStats != maximumExternalAttachmentHashCandidates ||
 			selected.budget.hashedAmbiguityCandidates != maximumExternalAttachmentHashCandidates ||
 			selected.budget.hashBytes != int64(maximumExternalAttachmentHashCandidates*len(contents)) {
-			t.Fatalf("discovery work = %+v, want %d entries, stats and hashes of %d bytes each",
+			t.Fatalf("discovery work = %+v, want %d entries and hashes of %d bytes each",
 				selected.budget, maximumExternalAttachmentHashCandidates, len(contents))
 		}
 	})
@@ -545,6 +542,7 @@ func BenchmarkExternalAttachmentDiscovery(b *testing.B) {
 		entries      int
 		matchingName bool
 	}{
+		{name: "unique_1_entry", entries: 1, matchingName: true},
 		{name: "unique_1024_entries", entries: 1024, matchingName: true},
 		{name: "identical_128_candidates", entries: 128},
 	}
@@ -575,7 +573,6 @@ func BenchmarkExternalAttachmentDiscovery(b *testing.B) {
 			}
 			if selected.budget != nil {
 				b.ReportMetric(float64(selected.budget.directoryEntries), "entries/op")
-				b.ReportMetric(float64(selected.budget.pinnedFileStats), "file_stats/op")
 				b.ReportMetric(float64(selected.budget.hashedAmbiguityCandidates), "hash_candidates/op")
 				b.ReportMetric(float64(selected.budget.hashBytes), "hash_bytes/op")
 			}
