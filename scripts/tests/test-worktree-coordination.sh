@@ -105,6 +105,53 @@ INTEGRATED="$(printf 'TASK 174: integrated worker change\n' | git -C "${PRIMARY}
 git -C "${PRIMARY}" checkout -q --detach "${INTEGRATED}"
 lease "${PRIMARY}" release "${FIRST_TOKEN}" >/dev/null
 [[ -z "$(find "${PRIMARY}/.git/mailcli-write-reservations" -type f -print)" ]]
+RECOVERY="${TEST_ROOT}/recovery-worker"
+KEEPER="${TEST_ROOT}/keeper-worker"
+RECOVERY_OUTPUT="$(lease "${PRIMARY}" start-worktree 176 recovery "${INTEGRATED}" "${RECOVERY}" second.txt)"
+RECOVERY_TOKEN="$(sed -n 's/^write_lease_token=//p' <<<"${RECOVERY_OUTPUT}")"
+KEEPER_OUTPUT="$(lease "${PRIMARY}" start-worktree 175 keeper "${INTEGRATED}" "${KEEPER}" first.txt)"
+KEEPER_TOKEN="$(sed -n 's/^write_lease_token=//p' <<<"${KEEPER_OUTPUT}")"
+KEEPER_RECORD="${PRIMARY}/.git/mailcli-write-reservations/${KEEPER_TOKEN}.json"
+KEEPER_HASH="$(shasum -a 256 "${KEEPER_RECORD}")"
+printf 'owner revised recovery contract\n' >>"${PRIMARY}/docs/tasks/176-third.md"
+reject 'contract or owner instructions changed' lease "${RECOVERY}" review "${RECOVERY_TOKEN}"
+reject 'contract or owner instructions changed' lease "${RECOVERY}" gate "${RECOVERY_TOKEN}" --checks scripts/tests/test-worker.sh
+reject 'contract or owner instructions changed' lease "${RECOVERY}" release "${RECOVERY_TOKEN}"
+mv "${PRIMARY}/AGENTS.local.md" "${TEST_ROOT}/recovery-rules"
+reject 'contract file is missing' lease "${RECOVERY}" review "${RECOVERY_TOKEN}"
+reject 'token does not match' lease "${RECOVERY}" abort "${KEEPER_TOKEN}" --recover-contract-drift
+printf 'pending recovery work\n' >"${RECOVERY}/second.txt"
+reject 'worktree changes remain' lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift
+git -C "${RECOVERY}" read-tree --reset -u "${INTEGRATED}^{tree}"
+git -C "${RECOVERY}" update-index --assume-unchanged second.txt
+reject 'hidden index verification flags' lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift
+git -C "${RECOVERY}" update-index --no-assume-unchanged second.txt
+RECOVERY_HEAD="$(printf 'unrelated recovery commit\n' | git -C "${RECOVERY}" commit-tree \
+  "$(git -C "${RECOVERY}" write-tree)" -p "${INTEGRATED}")"
+git -C "${RECOVERY}" checkout -q --detach "${RECOVERY_HEAD}"
+reject 'after HEAD changed' lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift
+git -C "${RECOVERY}" checkout -q --detach "${INTEGRATED}"
+mkdir "${RECOVERY}/ignored"
+printf 'unleased asset\n' >"${RECOVERY}/ignored/outside"
+reject 'Ignored asset changed outside' lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift
+rm "${RECOVERY}/ignored/outside"
+rmdir "${RECOVERY}/ignored"
+RECOVERY_GIT="$(git -C "${RECOVERY}" rev-parse --absolute-git-dir)"
+RECOVERY_REFERENCE="${RECOVERY_GIT}/mailcli-worktree-reference.json"
+jq '.paths = ["first.txt"]' "${RECOVERY_REFERENCE}" >"${TEST_ROOT}/changed-reference"
+mv "${RECOVERY_REFERENCE}" "${TEST_ROOT}/original-reference"
+mv "${TEST_ROOT}/changed-reference" "${RECOVERY_REFERENCE}"
+reject 'recovery reference differs' lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift
+mv "${RECOVERY_REFERENCE}" "${TEST_ROOT}/rejected-reference"
+mv "${TEST_ROOT}/original-reference" "${RECOVERY_REFERENCE}"
+lease "${RECOVERY}" abort "${RECOVERY_TOKEN}" --recover-contract-drift >"${TEST_ROOT}/recovery-abort"
+grep -qx 'write_lease=aborted' "${TEST_ROOT}/recovery-abort"
+[[ ! -e "${PRIMARY}/.git/mailcli-write-reservations/${RECOVERY_TOKEN}.json" &&
+  ! -e "${PRIMARY}/AGENTS.local.md" && "$(shasum -a 256 "${KEEPER_RECORD}")" == "${KEEPER_HASH}" ]]
+grep -qx 'owner revised recovery contract' "${PRIMARY}/docs/tasks/176-third.md"
+mv "${TEST_ROOT}/recovery-rules" "${PRIMARY}/AGENTS.local.md"
+lease "${KEEPER}" abort "${KEEPER_TOKEN}" >/dev/null
+[[ -z "$(find "${PRIMARY}/.git/mailcli-write-reservations" -type f -print)" ]]
 set +e
 lease "${PRIMARY}" start-worktree 175 race-one "${INTEGRATED}" "${TEST_ROOT}/race-one" second.txt >"${TEST_ROOT}/race-one-output" 2>&1 &
 RACE_ONE_PID=$!

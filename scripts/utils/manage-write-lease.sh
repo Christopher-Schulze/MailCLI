@@ -16,7 +16,7 @@ usage() {
     '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]' \
     '  manage-write-lease.sh push-check' \
     '  manage-write-lease.sh release TOKEN' \
-    '  manage-write-lease.sh abort TOKEN'
+    '  manage-write-lease.sh abort TOKEN [--recover-contract-drift]'
 }
 
 fail() {
@@ -43,6 +43,7 @@ PRIMARY_ROOT="$(git -C "${MAILCLI_ROOT}" worktree list --porcelain | sed -n '1s/
 PRIMARY_ROOT="$(cd "${PRIMARY_ROOT}" && pwd -P)"
 TASK_ROOT="${MAILCLI_ROOT}"
 INTEGRATION_TOKEN=''
+RECOVER_CONTRACT_DRIFT=false
 
 lease_file() {
   printf '%s/%s\n' "${LEASE_DIRECTORY}" "$1"
@@ -93,6 +94,18 @@ verify_worker_context() {
     all(.contracts[]; (.path == "AGENTS.local.md" or (.path | test("^docs/tasks/[0-9]{3}-[a-z0-9-]+\\.md$"))) and
       (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))
   ' "${WORKTREE_REFERENCE}" >/dev/null || fail 'Invalid worktree reference'
+  TASK_ROOT="${PRIMARY_ROOT}"
+  # Relinquishing unchanged work needs the original ownership identity, not
+  # restoration of private instructions that the owner has since updated.
+  if [[ "${COMMAND}" == abort && "${RECOVER_CONTRACT_DRIFT}" == true ]]; then
+    jq -e --arg base "$(<"$(lease_file baseline_head)")" \
+      --arg tree "$(git -C "${MAILCLI_ROOT}" rev-parse "$(<"$(lease_file baseline_head)")^{tree}")" \
+      --arg tasks "$(<"$(lease_file task)")" --rawfile paths "$(lease_file allowed_paths)" '
+      .base == $base and .tree == $tree and .tasks == $tasks and
+      (.paths | sort) == ($paths | split("\n") | map(select(length > 0)) | sort)
+    ' "${WORKTREE_REFERENCE}" >/dev/null || fail 'Worker recovery reference differs from the original lease'
+    return 0
+  fi
   local PATH_NAME EXPECTED_DIGEST ROOT
   while IFS=$'\t' read -r PATH_NAME EXPECTED_DIGEST; do
     for ROOT in "${PRIMARY_ROOT}" "${MAILCLI_ROOT}"; do
@@ -100,7 +113,6 @@ verify_worker_context() {
       [[ "$(shasum -a 256 "${ROOT}/${PATH_NAME}" | awk '{print $1}')" == "${EXPECTED_DIGEST}" ]] || fail 'Worktree task contract or owner instructions changed'
     done
   done < <(jq -r '.contracts[] | [.path,.sha256] | @tsv' "${WORKTREE_REFERENCE}")
-  TASK_ROOT="${PRIMARY_ROOT}"
 }
 
 verify_reservation() {
@@ -797,6 +809,8 @@ abort_lease() {
   BASELINE_HEAD="$(<"$(lease_file baseline_head)")"
   [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" ]] ||
     fail "Cannot abort a lease after HEAD changed"
+  [[ -z "$(git -C "${MAILCLI_ROOT}" ls-files -v | grep -E '^[a-zS] ' || true)" ]] ||
+    fail 'Cannot abort a lease with hidden index verification flags'
   [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] ||
     fail "Cannot abort a lease while worktree changes remain"
   report_allowed_path_changes
@@ -840,9 +854,15 @@ case "${COMMAND}" in
     [[ "$#" -eq 2 || ( "$#" -eq 3 && "$3" == --diff ) ]] || fail 'review requires a lease token and optional --diff'
     review_lease "$2" "${3:-}"
     ;;
-  release | abort)
+  release)
     [[ "$#" -eq 2 ]] || fail "${COMMAND} requires exactly one lease token"
-    "${COMMAND}_lease" "$2"
+    release_lease "$2"
+    ;;
+  abort)
+    [[ "$#" -eq 2 || ( "$#" -eq 3 && "$3" == --recover-contract-drift ) ]] ||
+      fail 'abort requires a lease token and optional --recover-contract-drift'
+    [[ "$#" -ne 3 ]] || RECOVER_CONTRACT_DRIFT=true
+    abort_lease "$2"
     ;;
   *)
     usage >&2
