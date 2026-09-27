@@ -130,8 +130,8 @@ validate_product_contract() {
   done
   SKILL_BYTES="$(wc -c <"${MAILCLI_ROOT}/skills/mailcli/SKILL.md")"
   SKILL_BYTES="${SKILL_BYTES//[[:space:]]/}"
-  if ((SKILL_BYTES > 9000)); then
-    printf 'Agent skill entrypoint exceeds its 9000-byte context budget: %s bytes\n' "${SKILL_BYTES}" >&2
+  if ((SKILL_BYTES > 4000)); then
+    printf 'Agent skill entrypoint exceeds its 4000-byte context budget: %s bytes\n' "${SKILL_BYTES}" >&2
     exit 1
   fi
 }

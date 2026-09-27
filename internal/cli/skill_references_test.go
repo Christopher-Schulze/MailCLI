@@ -20,6 +20,68 @@ func TestSkillDocumentationSelfContained(t *testing.T) {
 			if err := validateSkillReferences(root); err != nil {
 				t.Fatal(err)
 			}
+			if err := validateSkillBudgets(root); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func validateSkillBudgets(root string) error {
+	var total int64
+	foundEntrypoint := false
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("skill asset is not a regular file: %s", path)
+		}
+		if path == filepath.Join(root, "SKILL.md") {
+			foundEntrypoint = true
+			if info.Size() > 4000 {
+				return fmt.Errorf("skill entrypoint is %d bytes, budget 4000", info.Size())
+			}
+		}
+		if info.Size() > 25000-total {
+			return fmt.Errorf("complete skill exceeds 25000-byte budget at %s", path)
+		}
+		total += info.Size()
+		return nil
+	})
+	if err == nil && !foundEntrypoint {
+		return fmt.Errorf("skill entrypoint is missing")
+	}
+	return err
+}
+
+func TestSkillBudgetsEnforceExactBoundariesAndAllAssets(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		entryBytes int
+		extraBytes int
+		valid      bool
+	}{
+		{name: "entry boundary", entryBytes: 4000, valid: true},
+		{name: "entry overflow", entryBytes: 4001},
+		{name: "package boundary", entryBytes: 4000, extraBytes: 21000, valid: true},
+		{name: "package overflow", entryBytes: 4000, extraBytes: 21001},
+		{name: "non-Markdown assets count", entryBytes: 2000, extraBytes: 23001},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			for path, size := range map[string]int{"SKILL.md": test.entryBytes, "metadata.bin": test.extraBytes} {
+				if err := os.WriteFile(filepath.Join(root, path), []byte(strings.Repeat("x", size)), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := validateSkillBudgets(root); (err == nil) != test.valid {
+				t.Fatalf("validateSkillBudgets = %v, want valid=%t", err, test.valid)
+			}
 		})
 	}
 }

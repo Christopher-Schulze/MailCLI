@@ -73,7 +73,7 @@ func TestCapabilityDependencyDocumentationMatchesRuntimeContract(t *testing.T) {
 	}{
 		{path: "README.md", version: "nested `data.capabilities.schema_version` is 2"},
 		{path: "docs/documentation.md", version: "`data.capabilities.schema_version:2`"},
-		{path: "skills/mailcli/SKILL.md", version: "nested `data.capabilities.schema_version:2`"},
+		{path: "skills/mailcli/SKILL.md", version: "capabilities schema 2"},
 	}
 	for _, test := range versions {
 		content := readRepositoryFile(t, test.path)
@@ -119,7 +119,7 @@ func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
 		}
 	}
 	guide := readRepositoryFile(t, "skills/mailcli/references/output-and-recovery.md")
-	for _, claim := range []string{"view:\"metadata\"", "--max-bytes", "replay_allowed:false", "item IDs and states"} {
+	for _, claim := range []string{`"view":"plain"`, "Reads default metadata", "--max-bytes", "replay_allowed:false", "item IDs and states"} {
 		if !strings.Contains(guide, claim) {
 			t.Errorf("batch output guide omits %q", claim)
 		}
@@ -132,9 +132,8 @@ func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
 			}
 		}
 	}
-	skill := readRepositoryFile(t, "skills/mailcli/SKILL.md")
-	if !strings.Contains(skill, `"view":"metadata"`) {
-		t.Error("skill batch-read guidance omits the metadata-default example")
+	if !strings.Contains(guide, `"id":"meta","ref":"REF"`) {
+		t.Error("skill batch-read guide omits the implicit metadata-default example")
 	}
 }
 
@@ -305,12 +304,21 @@ func assertDocumentationClaims(t *testing.T, artifacts map[string]string) {
 func assertHelpClaims(t *testing.T, help string) {
 	t.Helper()
 	for _, claim := range []string{
-		"Mail.app",
-		"Direct SMTP send and IMAP mutations work without Mail.app",
-		"Mail 16 scripted draft save remains disabled",
+		"Details: mailcli <command> --help",
+		"Manual: docs/documentation.md#composition and #scope",
 	} {
 		if !strings.Contains(help, claim) {
 			t.Errorf("top-level help omits %q contract: %s", claim, help)
+		}
+	}
+	manual := readRepositoryFile(t, "docs/documentation.md")
+	for _, claim := range []string{
+		"bypasses Mail.app entirely",
+		"Mutations (`messages mark`, `messages move`, `messages copy`, `messages delete`) execute over IMAP directly",
+		"Scripted native composition remains disabled before baseline capture",
+	} {
+		if !strings.Contains(manual, claim) {
+			t.Errorf("linked manual omits execution-boundary contract %q", claim)
 		}
 	}
 }
@@ -321,6 +329,14 @@ func readOperationalDocumentation(t *testing.T) map[string]string {
 	artifacts := make(map[string]string, len(paths))
 	for _, path := range paths {
 		artifacts[path] = readRepositoryFile(t, path)
+		if path == "skills/mailcli/SKILL.md" {
+			if err := validateSkillReferences(filepath.Join(repositoryRoot(t), "skills/mailcli")); err != nil {
+				t.Fatal(err)
+			}
+			for _, guide := range []string{"reading", "sending"} {
+				artifacts[path] += "\n" + readRepositoryFile(t, "skills/mailcli/references/"+guide+".md")
+			}
+		}
 	}
 	return artifacts
 }
@@ -427,24 +443,24 @@ var documentedBounds = []documentedBound{
 			boundCheck("docs/documentation.md", "`--limit` values from 1 through ([\\d,]+)", 1),
 			boundCheck("docs/documentation.md", `limits list pages to (\d+) items`, 1),
 			boundCheck("docs/documentation.md", "`--limit` accepts 1 through (\\d+)", 1),
-			boundCheck("skills/mailcli/references/reading.md", `from 1 through (\d+)`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `limit 1\.\.(\d+)`, 1),
 		}},
 	{name: "default list page size", expected: mail.DefaultPageLimit, unit: "items",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", "list commands default to ([\\d,]+) items", 1),
 			boundCheck("docs/documentation.md", `List commands default to (\d+) items`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `default to (\d+) items`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `defaults to (\d+) entries`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `default (\d+), limit`, 1),
+			boundCheck("skills/mailcli/references/drafts.md", `default (\d+)/limit`, 1),
 		}},
 	{name: "draft list page limit", expected: mail.MaximumDraftListLimit, unit: "drafts",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `summaries and accepts 1 through (\d+)`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `accepts 1 through (\d+)`, 1),
+			boundCheck("skills/mailcli/references/drafts.md", `limit 1\.\.(\d+)`, 1),
 		}},
 	{name: "draft list default page size", expected: mail.DefaultDraftListLimit, unit: "drafts",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `defaults to (\d+) summaries`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `defaults to (\d+) entries`, 1),
+			boundCheck("skills/mailcli/references/drafts.md", `default (\d+)/limit`, 1),
 		}},
 	{name: "search default candidate bound", expected: mail.DefaultSearchMaxMessages, unit: "messages",
 		checks: []documentedBoundCheck{
@@ -484,19 +500,19 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
 			boundCheck("docs/documentation.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `Directory bounds: ([\d,]+) entries`, 1),
 		}},
 	{name: "external attachment ambiguity candidate limit", expected: 128, unit: "candidates",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
 			boundCheck("docs/documentation.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `entries/([\d,]+) ambiguity hashes`, 1),
 		}},
 	{name: "external attachment cumulative hash input", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
 			boundCheck("docs/documentation.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
-			boundCheck("skills/mailcli/references/reading.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
+			boundCheck("skills/mailcli/references/reading.md", `hashes/([\d]+) GiB hash input`, 1<<30),
 		}},
 	{name: "recovery spool cap", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
@@ -506,8 +522,8 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `capped at (\d+) MiB`, 1<<20),
 			boundCheck("docs/documentation.md", `at most (\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/output-and-recovery.md", `up to (\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `one object up to (\d+) MiB`, 1<<20),
+			boundCheck("skills/mailcli/references/output-and-recovery.md", `object <=(\d+) MiB`, 1<<20),
+			boundCheck("skills/mailcli/references/drafts.md", `one object <=(\d+) MiB`, 1<<20),
 		}},
 	{name: "batch item limit", expected: mail.MaximumBatchItems, unit: "items",
 		checks: []documentedBoundCheck{
@@ -534,20 +550,20 @@ var documentedBounds = []documentedBound{
 	{name: "IMAP mutation lock wait", expected: 30, unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `waits up to (\d+) seconds`, 1),
-			boundCheck("skills/mailcli/references/mutations.md", `bounded (\d+)-second lock`, 1),
+			boundCheck("skills/mailcli/references/mutations.md", `account lock: (\d+) s`, 1),
 		}},
 	{name: "installer lock wait", expected: 30, unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("scripts/release/install.sh", `lockf -s -t (\d+)`, 1),
 			boundCheck("docs/documentation.md", `wait at most (\d+) seconds`, 1),
-			boundCheck("skills/mailcli/references/setup.md", `wait at most (\d+) seconds`, 1),
+			boundCheck("skills/mailcli/references/setup.md", `Direct wait <=(\d+) s`, 1),
 		}},
 	{name: "preflight doctor cache", expected: 300, unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("scripts/utils/mailcli-preflight.sh", `DOCTOR_TTL_SECONDS=(\d+)`, 1),
 			boundCheck("README.md", `for (\w+) minutes`, 60),
 			boundCheck("docs/documentation.md", `(\w+)-minute freshness`, 60),
-			boundCheck("skills/mailcli/SKILL.md", `at most (\d+) seconds`, 1),
+			boundCheck("skills/mailcli/references/setup.md", `cache <=(\d+) s`, 1),
 		}},
 	{name: "transport command budget", expected: int64(transport.TransferCommandBudget / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
@@ -559,7 +575,7 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `capped at (\d+) minutes`, 60),
 			boundCheck("docs/documentation.md", `capped at (\d+) minutes`, 60),
-			boundCheck("skills/mailcli/references/sending.md", `capped at (\d+) minutes`, 60),
+			boundCheck("skills/mailcli/references/sending.md", `deadline <=(\d+) min`, 60),
 		}},
 	{name: "draft lock wait", expected: 2, unit: "seconds",
 		checks: []documentedBoundCheck{
@@ -625,7 +641,7 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `each bounded at (\d+) MiB`, 1<<20),
 			boundCheck("docs/documentation.md", `bodies to (\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `to (\d+) MiB each`, 1<<20),
+			boundCheck("skills/mailcli/references/drafts.md", `each (\d+) MiB`, 1<<20),
 		}},
 	{name: "draft content node limit", expected: 65536, unit: "nodes",
 		checks: []documentedBoundCheck{
@@ -635,12 +651,12 @@ var documentedBounds = []documentedBound{
 	{name: "draft content depth limit", expected: 512, unit: "levels",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `nodes and (\d+) levels`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `nodes and (\d+) levels`, 1),
+			boundCheck("skills/mailcli/references/drafts.md", `nodes/(\d+) levels`, 1),
 		}},
 	{name: "draft link label budget", expected: 4 * mail.MaximumDraftBodyBytes, unit: "bytes",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `limited to (\d+) MiB across`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `link-label text to (\d+) MiB`, 1<<20),
+			boundCheck("skills/mailcli/references/drafts.md", `link labels (\d+) MiB`, 1<<20),
 		}},
 	{name: "received HTML source limit", expected: 16 << 20, unit: "bytes",
 		checks: []documentedBoundCheck{
