@@ -151,8 +151,6 @@ run_go_checks() {
     exit 1
   fi
 
-  go run ./scripts/utils/generate-command-schemas.go --check || exit "$?"
-
   go mod verify || exit "$?"
 
   GOLANGCI_LINT_BIN="$(command -v golangci-lint || true)"

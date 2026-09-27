@@ -21,7 +21,7 @@ import (
 func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 	artifacts := readOperationalDocumentation(t)
 	help := renderTopLevelHelp(t)
-	assertCapabilitySemantics(t, capabilities())
+	assertCapabilitySemantics(t, mustCapabilities(t))
 	assertDocumentationClaims(t, artifacts)
 	assertHelpClaims(t, help)
 	assertSharedDocumentationBounds(t)

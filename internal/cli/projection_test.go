@@ -265,7 +265,7 @@ func TestRawProjectionAcceptsItsPublishedField(t *testing.T) {
 }
 
 func TestProjectionCapabilityPublishesSchemasAndLimits(t *testing.T) {
-	projection := capabilities().Limits.OutputProjection
+	projection := mustCapabilities(t).Limits.OutputProjection
 	if projection.ViewFlag != "--view" || projection.FieldsFlag != "--fields" ||
 		projection.MaxBytesFlag != "--max-bytes" || projection.ExportFlag != "--export" ||
 		projection.MessageDefaultView != outputViewMetadata || projection.DraftDefaultView != outputViewPlain ||
@@ -286,7 +286,7 @@ func TestProjectionCapabilityPublishesSchemasAndLimits(t *testing.T) {
 		!slices.Equal(projection.ExportCommands, []string{"messages.get", "messages.raw", "drafts.inspect"}) {
 		t.Fatalf("output projection schema = %+v", projection)
 	}
-	encoded, err := json.Marshal(capabilities())
+	encoded, err := json.Marshal(mustCapabilities(t))
 	if err != nil {
 		t.Fatal(err)
 	}

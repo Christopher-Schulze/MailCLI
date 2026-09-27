@@ -179,17 +179,21 @@ func imapOperationsWithConcurrency(
 	return operations
 }
 
-func capabilities() capabilityManifest {
+func capabilities() (capabilityManifest, error) {
 	return capabilitiesForScope("", "")
 }
 
-func capabilitiesForScope(command, family string) capabilityManifest {
+func capabilitiesForScope(command, family string) (capabilityManifest, error) {
+	commands, err := capabilityCommandsForScope(command, family)
+	if err != nil {
+		return capabilityManifest{}, err
+	}
 	imapContract := imapclient.OperationContracts()
 	manifest := capabilityManifest{
 		SchemaVersion: capabilitySchemaVersion,
 		Name:          name,
 		Version:       version,
-		Commands:      capabilityCommandsForScope(command, family),
+		Commands:      commands,
 		Limits: capabilityLimits{
 			Platform: "darwin", Architecture: "arm64",
 			OwnsMailIndex: false, BackgroundProcess: false,
@@ -297,11 +301,14 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 	} else if family != "" {
 		manifest.Scope = family
 	}
-	return manifest
+	return manifest, nil
 }
 
-func capabilitiesForCommands(selected []string) capabilityManifest {
-	manifest := capabilitiesForScope("", "")
+func capabilitiesForCommands(selected []string) (capabilityManifest, error) {
+	manifest, err := capabilitiesForScope("", "")
+	if err != nil {
+		return capabilityManifest{}, err
+	}
 	selectedSet := make(map[string]struct{}, len(selected))
 	for _, id := range selected {
 		selectedSet[id] = struct{}{}
@@ -313,7 +320,7 @@ func capabilitiesForCommands(selected []string) capabilityManifest {
 		}
 	}
 	manifest.Commands = commands
-	return manifest
+	return manifest, nil
 }
 
 func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -346,25 +353,24 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		if err != nil {
 			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 		}
-		manifest := capabilitiesForCommands(selected)
+		manifest, err := capabilitiesForCommands(selected)
+		if err != nil {
+			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
+		}
 		return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 	}
 	selectionCommand, selectionFamily, err := resolveCapabilityScope(*command, *family, *scope)
 	if err != nil {
 		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 	}
-	manifest := capabilitiesForScope(selectionCommand, selectionFamily)
+	manifest, err := capabilitiesForScope(selectionCommand, selectionFamily)
+	if err != nil {
+		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
+	}
 	return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 }
 
 func writeCapabilities(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest) int {
-	for _, command := range manifest.Commands {
-		if !json.Valid(command.Schema) {
-			return failCommand("capabilities", jsonOutput, &commandError{
-				code: "capability_schema_invalid", message: "command projection schema is invalid",
-			}, stdout, stderr)
-		}
-	}
 	if jsonOutput {
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,

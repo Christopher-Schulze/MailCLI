@@ -49,7 +49,7 @@ func TestSkillRouterMatchesCapabilityInventory(t *testing.T) {
 			routed[match[1]]++
 		}
 	}
-	for _, command := range capabilities().Commands {
+	for _, command := range mustCapabilities(t).Commands {
 		if command.ID == "capabilities" { // This is the router's preflight, not a routed action.
 			continue
 		}

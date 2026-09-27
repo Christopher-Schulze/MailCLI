@@ -70,7 +70,7 @@ func TestDraftProjectionPreservesRealHandoffEvidence(t *testing.T) {
 			}
 		})
 	}
-	if !slices.Contains(capabilities().Limits.OutputProjection.DraftFields, "handoff_attempt") {
+	if !slices.Contains(mustCapabilities(t).Limits.OutputProjection.DraftFields, "handoff_attempt") {
 		t.Fatal("capabilities omit the selectable handoff_attempt field")
 	}
 }

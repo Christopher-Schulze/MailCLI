@@ -13,6 +13,24 @@ import (
 	"mailcli/internal/transport/imapclient"
 )
 
+func mustCapabilities(t testing.TB) capabilityManifest {
+	t.Helper()
+	manifest, err := capabilities()
+	if err != nil {
+		t.Fatalf("capabilities() error = %v", err)
+	}
+	return manifest
+}
+
+func mustCommandCapability(t testing.TB, contract commandContract) commandCapability {
+	t.Helper()
+	capability, err := commandCapabilityFor(contract)
+	if err != nil {
+		t.Fatalf("commandCapabilityFor(%q) error = %v", contract.ID, err)
+	}
+	return capability
+}
+
 func TestCapabilitiesJSONContract(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -97,7 +115,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		"messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy",
 		"messages.delete", "sync", "drafts.handoff-reconcile",
 	}
-	manifest := capabilities()
+	manifest := mustCapabilities(t)
 	got := make([]string, 0, len(manifest.Commands))
 	seen := make(map[string]struct{}, len(manifest.Commands))
 	for _, command := range manifest.Commands {
@@ -324,7 +342,7 @@ func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 		dependencyConditionIfSend: {}, dependencyConditionIfSMTPAccepted: {},
 		dependencyConditionIfTransportClaimNeedsIMAPReconciliation: {},
 	}
-	manifest := capabilities()
+	manifest := mustCapabilities(t)
 	seen := make(map[string]struct{}, len(manifest.Commands))
 	for _, command := range manifest.Commands {
 		if _, ok := seen[command.ID]; ok {
@@ -392,12 +410,12 @@ func TestCommandCapabilityResultStatesAreIndependent(t *testing.T) {
 		if contract == nil {
 			t.Fatalf("command contract %q not found", id)
 		}
-		first := commandCapabilityFor(*contract)
+		first := mustCommandCapability(t, *contract)
 		if !slices.Equal(first.ResultStates, want) {
 			t.Fatalf("%s result states = %+v, want %+v", id, first.ResultStates, want)
 		}
 		first.ResultStates[0] = "mutated"
-		second := commandCapabilityFor(*contract)
+		second := mustCommandCapability(t, *contract)
 		if !slices.Equal(second.ResultStates, want) {
 			t.Fatalf("%s later result states = %+v, want %+v", id, second.ResultStates, want)
 		}
@@ -415,16 +433,16 @@ func TestCommandCapabilityDependenciesAreIndependent(t *testing.T) {
 	if contract == nil || len(contract.dependencies) == 0 {
 		t.Fatal("messages.get dependency contract is missing")
 	}
-	first := commandCapabilityFor(*contract)
+	first := mustCommandCapability(t, *contract)
 	first.Dependencies[0].Condition = "mutated"
-	second := commandCapabilityFor(*contract)
+	second := mustCommandCapability(t, *contract)
 	if second.Dependencies[0].Condition != dependencyConditionIfLocalSourceIncomplete {
 		t.Fatalf("later dependency contract = %+v, want independent source value", second.Dependencies[0])
 	}
 }
 
 func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
-	manifest := capabilities()
+	manifest := mustCapabilities(t)
 	published := 0
 	for _, contract := range commandContracts {
 		if commandIsPublished(contract) {
@@ -439,8 +457,9 @@ func TestCapabilityContractsMatchDispatchRequirements(t *testing.T) {
 		if !commandIsPublished(contract) {
 			continue
 		}
-		if got := manifest.Commands[index]; !reflect.DeepEqual(got, commandCapabilityFor(contract)) {
-			t.Fatalf("manifest command %d = %+v, contract = %+v", index, got, commandCapabilityFor(contract))
+		want := mustCommandCapability(t, contract)
+		if got := manifest.Commands[index]; !reflect.DeepEqual(got, want) {
+			t.Fatalf("manifest command %d = %+v, contract = %+v", index, got, want)
 		}
 		index++
 	}

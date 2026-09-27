@@ -2,47 +2,197 @@ package cli
 
 import (
 	"bytes"
-	"compress/gzip"
+	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/fs"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
+//go:embed schemas/*.json
+var commandSchemaFiles embed.FS
+
 var (
-	schemaPayloadOnce  sync.Once
-	schemaPayloadBytes []byte
+	commandSchemaCatalogOnce sync.Once
+	commandSchemaCatalog     map[string]json.RawMessage
+	commandSchemaCatalogErr  error
 )
 
-func schemaPayload() []byte {
-	schemaPayloadOnce.Do(func() {
-		reader, err := gzip.NewReader(strings.NewReader(schemaPayloadGZIP))
-		if err != nil {
-			return
-		}
-		decoded, readErr := io.ReadAll(reader)
-		closeErr := reader.Close()
-		if readErr != nil || closeErr != nil {
-			return
-		}
-		schemaPayloadBytes = decoded
+func embeddedCommandSchemaCatalog() (map[string]json.RawMessage, error) {
+	commandSchemaCatalogOnce.Do(func() {
+		commandSchemaCatalog, commandSchemaCatalogErr = loadCommandSchemas(commandSchemaFiles, publishedCommandSchemaIDs())
 	})
-	return schemaPayloadBytes
+	return commandSchemaCatalog, commandSchemaCatalogErr
 }
 
-func schemaForCommand(id string) json.RawMessage {
-	prefix := []byte(`{"id":"` + id + `@v`)
-	for _, line := range bytes.Split(schemaPayload(), []byte{'\n'}) {
-		if bytes.HasPrefix(line, prefix) {
-			schema, err := augmentProjectionSchema(id, line)
-			if err != nil {
-				return nil
-			}
-			return schema
+func publishedCommandSchemaIDs() []string {
+	ids := make([]string, 0, len(commandContracts))
+	for _, contract := range commandContracts {
+		if commandIsPublished(contract) {
+			ids = append(ids, contract.ID)
 		}
 	}
-	return emptyCommandSchema(id)
+	return ids
+}
+
+func loadCommandSchemas(files fs.FS, expectedIDs []string) (map[string]json.RawMessage, error) {
+	expected, err := expectedCommandSchemaIDs(expectedIDs)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := fs.ReadDir(files, "schemas")
+	if err != nil {
+		return nil, invalidEmbeddedCommandSchema("schemas", err)
+	}
+	schemas := make(map[string]json.RawMessage, len(entries))
+	for _, entry := range entries {
+		id, schema, err := readEmbeddedCommandSchema(files, entry, expected)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := schemas[id]; exists {
+			return nil, invalidEmbeddedCommandSchema("schemas/"+id+".json", fmt.Errorf("command %q has multiple schema files", id))
+		}
+		schemas[id] = schema
+	}
+	if err := validateCommandSchemaInventory(expected, schemas); err != nil {
+		return nil, err
+	}
+	return schemas, nil
+}
+
+func expectedCommandSchemaIDs(expectedIDs []string) (map[string]struct{}, error) {
+	expected := make(map[string]struct{}, len(expectedIDs))
+	for _, id := range expectedIDs {
+		if id == "" {
+			return nil, invalidEmbeddedCommandSchema("schemas", fmt.Errorf("published command ID is empty"))
+		}
+		if _, exists := expected[id]; exists {
+			return nil, invalidEmbeddedCommandSchema("schemas", fmt.Errorf("published command ID %q is repeated", id))
+		}
+		expected[id] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil, invalidEmbeddedCommandSchema("schemas", fmt.Errorf("published command inventory is empty"))
+	}
+	return expected, nil
+}
+
+func readEmbeddedCommandSchema(
+	files fs.FS,
+	entry fs.DirEntry,
+	expected map[string]struct{},
+) (string, json.RawMessage, error) {
+	filename, id, err := schemaFileIdentity(entry)
+	if err != nil {
+		return "", nil, err
+	}
+	path := "schemas/" + filename
+	compact, err := readNormalizedEmbeddedSchema(files, path)
+	if err != nil {
+		return "", nil, err
+	}
+	commandID, err := embeddedSchemaCommandID(path, filename, id, compact)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, published := expected[commandID]; !published {
+		return "", nil, invalidEmbeddedCommandSchema(path, fmt.Errorf("command %q is not in the published registry", commandID))
+	}
+	schema, err := augmentNormalizedProjectionSchema(commandID, compact)
+	if err != nil {
+		return "", nil, invalidEmbeddedCommandSchema(path, err)
+	}
+	return commandID, schema, nil
+}
+
+func schemaFileIdentity(entry fs.DirEntry) (string, string, error) {
+	filename := entry.Name()
+	id := strings.TrimSuffix(filename, ".json")
+	if entry.IsDir() || id == "" || id == filename {
+		return "", "", invalidEmbeddedCommandSchema("schemas/"+filename, fmt.Errorf("unexpected schema entry"))
+	}
+	return filename, id, nil
+}
+
+func readNormalizedEmbeddedSchema(files fs.FS, path string) (json.RawMessage, error) {
+	raw, err := fs.ReadFile(files, path)
+	if err != nil {
+		return nil, invalidEmbeddedCommandSchema(path, err)
+	}
+	compact, err := normalizeSchemaJSON(raw)
+	if err != nil {
+		return nil, invalidEmbeddedCommandSchema(path, err)
+	}
+	return compact, nil
+}
+
+func embeddedSchemaCommandID(path, filename, fileID string, source json.RawMessage) (string, error) {
+	var identity struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal(source, &identity); err != nil {
+		return "", invalidEmbeddedCommandSchema(path, err)
+	}
+	commandID, versionText, versioned := strings.Cut(identity.ID, "@v")
+	version, versionErr := strconv.Atoi(versionText)
+	if !versioned || commandID == "" || versionErr != nil || version <= 0 ||
+		strconv.Itoa(version) != versionText || identity.Version != version || commandID != fileID {
+		return "", invalidEmbeddedCommandSchema(path,
+			fmt.Errorf("schema identity %q/%d does not match filename %s", identity.ID, identity.Version, filename))
+	}
+	return commandID, nil
+}
+
+func validateCommandSchemaInventory(
+	expected map[string]struct{},
+	schemas map[string]json.RawMessage,
+) error {
+	missing := make([]string, 0)
+	for id := range expected {
+		if _, exists := schemas[id]; !exists {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return invalidEmbeddedCommandSchema("schemas", fmt.Errorf("missing published command schemas: %s", strings.Join(missing, ", ")))
+	}
+	return nil
+}
+
+func invalidEmbeddedCommandSchema(path string, cause error) error {
+	return &commandError{
+		code:    "capability_schema_invalid",
+		message: fmt.Sprintf("embedded command schema %s: %v", path, cause),
+		cause:   cause,
+	}
+}
+
+func checkedSchemaForCommand(id string) (json.RawMessage, error) {
+	schemas, err := embeddedCommandSchemaCatalog()
+	if err != nil {
+		return nil, err
+	}
+	schema, exists := schemas[id]
+	if !exists {
+		return nil, invalidEmbeddedCommandSchema("schemas/"+id+".json", fmt.Errorf("schema is not in the published inventory"))
+	}
+	return append(json.RawMessage(nil), schema...), nil
+}
+
+// schemaForCommand is a best-effort parser hint; capability publication uses
+// checkedSchemaForCommand so invalid embedded data cannot become a fallback schema.
+func schemaForCommand(id string) json.RawMessage {
+	schema, err := checkedSchemaForCommand(id)
+	if err != nil {
+		return nil
+	}
+	return schema
 }
 
 func projectionTargetForCommand(id string) (projectionTarget, bool) {
@@ -73,7 +223,10 @@ func augmentProjectionSchema(id string, source json.RawMessage) (json.RawMessage
 	if err != nil {
 		return nil, err
 	}
-	source = normalized
+	return augmentNormalizedProjectionSchema(id, normalized)
+}
+
+func augmentNormalizedProjectionSchema(id string, source json.RawMessage) (json.RawMessage, error) {
 	target, projected := projectionTargetForCommand(id)
 	if !projected && id != "batch" {
 		return append(json.RawMessage(nil), source...), nil
@@ -160,22 +313,14 @@ func projectionSchemaFields(source json.RawMessage, name string, target projecti
 	return encoded, nil
 }
 
-func emptyCommandSchema(id string) json.RawMessage {
-	encoded, err := marshalCLIJSON(id + "@v1")
-	if err != nil {
-		return json.RawMessage(`{"id":"unknown@v1","version":1,"flags":[],"positional_arguments":[],"constraints":[]}`)
-	}
-	output := append([]byte(`{"id":`), encoded...)
-	output = append(output, `,"version":1,"flags":[],"positional_arguments":[],"constraints":[]}`...)
-	return json.RawMessage(output)
-}
-
-// normalizeSchemaJSON removes only HTML Unicode escapes and preserves schema
-// property order and every other source escape.
+// normalizeSchemaJSON validates and compacts schema JSON, removes only HTML
+// Unicode escapes, and preserves property order and every other source escape.
 func normalizeSchemaJSON(source json.RawMessage) (json.RawMessage, error) {
-	if !json.Valid(source) {
-		return nil, fmt.Errorf("normalize command schema: invalid JSON")
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, source); err != nil {
+		return nil, fmt.Errorf("normalize command schema: %w", err)
 	}
+	source = compact.Bytes()
 	if !containsHTMLEscapedString(source) {
 		return append(json.RawMessage(nil), source...), nil
 	}

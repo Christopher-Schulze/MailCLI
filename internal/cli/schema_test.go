@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"mailcli/internal/mail"
 )
@@ -77,6 +78,80 @@ func TestCanonicalCommandSchemasMatchRuntimePayload(t *testing.T) {
 		if !bytes.Equal(canonicalMetadata, runtimeMetadata) {
 			t.Fatalf("%s runtime schema differs from canonical file", contract.ID)
 		}
+	}
+}
+
+func TestLoadCommandSchemasCompactsValidSource(t *testing.T) {
+	valid := `{
+  "id": "version@v1",
+  "version": 1
+}`
+	got, err := loadCommandSchemas(fstest.MapFS{
+		"schemas/version.json": &fstest.MapFile{Data: []byte(valid)},
+	}, []string{"version"})
+	if err != nil {
+		t.Fatalf("load valid schema: %v", err)
+	}
+	if want := `{"id":"version@v1","version":1}`; string(got["version"]) != want {
+		t.Fatalf("compacted schema = %s, want %s", got["version"], want)
+	}
+}
+
+func TestLoadCommandSchemasRejectsInvalidSources(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		files fstest.MapFS
+		path  string
+	}{
+		{
+			name:  "malformed JSON",
+			files: fstest.MapFS{"schemas/version.json": &fstest.MapFile{Data: []byte("{")}},
+			path:  "schemas/version.json",
+		},
+		{
+			name:  "identity mismatch",
+			files: fstest.MapFS{"schemas/version.json": &fstest.MapFile{Data: []byte(`{"id":"other@v1","version":1}`)}},
+			path:  "schemas/version.json",
+		},
+		{
+			name:  "missing inventory",
+			files: fstest.MapFS{},
+			path:  "schemas",
+		},
+		{
+			name: "unpublished schema",
+			files: fstest.MapFS{
+				"schemas/version.json": &fstest.MapFile{Data: []byte(`{"id":"version@v1","version":1}`)},
+				"schemas/extra.json":   &fstest.MapFile{Data: []byte(`{"id":"extra@v1","version":1}`)},
+			},
+			path: "schemas/extra.json",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertInvalidCommandSchemaError(t, test.files, test.path)
+		})
+	}
+}
+
+func assertInvalidCommandSchemaError(t *testing.T, files fstest.MapFS, wantPath string) {
+	t.Helper()
+	_, err := loadCommandSchemas(files, []string{"version"})
+	if err == nil {
+		t.Fatal("invalid schema inventory was accepted")
+	}
+	if got := errorCode(err); got != "capability_schema_invalid" || !strings.Contains(err.Error(), wantPath) {
+		t.Fatalf("schema error = %v (code %q), want path %q and capability_schema_invalid", err, got, wantPath)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := failCommand("capabilities", true, err, &stdout, &stderr); code != 1 || stderr.Len() != 0 {
+		t.Fatalf("capabilities failure exit = %d, stderr = %q", code, stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode capabilities error: %v; output = %s", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "capability_schema_invalid" {
+		t.Fatalf("capabilities error response = %+v", response)
 	}
 }
 
@@ -171,7 +246,7 @@ func TestEveryProjectionSchemaEnumMatchesItsTargetRegistry(t *testing.T) {
 }
 
 func TestBatchV2SchemaIsVisibleInCapabilities(t *testing.T) {
-	for _, command := range capabilities().Commands {
+	for _, command := range mustCapabilities(t).Commands {
 		if command.ID != "batch" {
 			continue
 		}
@@ -491,7 +566,7 @@ func verifyStrictBooleanParser(
 }
 
 func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
-	full := capabilities()
+	full := mustCapabilities(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run(context.Background(), nil, []string{"capabilities", "--scope", "messages.search", "--json"}, &stdout, &stderr); code != 0 {
@@ -544,7 +619,7 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 }
 
 func TestCapabilitiesSelectedCommandsPreserveFullContract(t *testing.T) {
-	full := capabilities()
+	full := mustCapabilities(t)
 	code, output, response := captureCapabilitiesJSON(t,
 		"--commands", "messages.get,messages.search", "--json",
 	)

@@ -58,16 +58,20 @@ func commandNeedsMainThreadFor(contract commandContract) bool {
 	return contract.requiresMainThread
 }
 
-func commandCapabilityFor(contract commandContract) commandCapability {
+func commandCapabilityFor(contract commandContract) (commandCapability, error) {
+	schema, err := checkedSchemaForCommand(contract.ID)
+	if err != nil {
+		return commandCapability{}, err
+	}
 	return commandCapability{
 		ID:              contract.ID,
-		Schema:          schemaForCommand(contract.ID),
+		Schema:          schema,
 		EffectClass:     contract.effectClass,
 		Confirmation:    contract.confirmation,
 		StoreDependency: contract.storeDependency,
 		Dependencies:    capabilityDependencyList(contract.dependencies),
 		ResultStates:    slices.Clone(contract.resultStates),
-	}
+	}, nil
 }
 
 func capabilityDependencyList(dependencies []commandDependency) []commandDependency {
@@ -583,7 +587,7 @@ func commandRootContracts() []commandContract {
 	return roots
 }
 
-func capabilityCommandsForScope(command, family string) []commandCapability {
+func capabilityCommandsForScope(command, family string) ([]commandCapability, error) {
 	commands := make([]commandCapability, 0, len(commandContracts))
 	for _, contract := range commandContracts {
 		if !commandIsPublished(contract) {
@@ -595,7 +599,11 @@ func capabilityCommandsForScope(command, family string) []commandCapability {
 		if family != "" && !strings.HasPrefix(contract.ID, family+".") && contract.ID != family {
 			continue
 		}
-		commands = append(commands, commandCapabilityFor(contract))
+		capability, err := commandCapabilityFor(contract)
+		if err != nil {
+			return nil, err
+		}
+		commands = append(commands, capability)
 	}
-	return commands
+	return commands, nil
 }
