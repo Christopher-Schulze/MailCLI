@@ -32,9 +32,6 @@ const (
 	updatePhasePackageCleanup = "package_cleanup"
 	updatePhaseLockValidation = "update_lock_validation"
 	updatePhaseLockClose      = "update_lock_close"
-	updateMetadataStageName   = "release.json"
-	updateChecksumsStageName  = "SHA256SUMS"
-	updateSignatureStageName  = "SHA256SUMS.sig"
 )
 
 type updateResult struct {
@@ -247,80 +244,76 @@ func performUpdate(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
-) (result updateResult, resultErr error) {
+) (updateResult, error) {
 	if environment.operatingSystem != "darwin" || environment.architecture != "arm64" {
 		return updateResult{}, updateFailure(
 			"update_unsupported_platform", "self-update requires darwin/arm64",
 		)
 	}
-	result, staged, err := prepareUpdate(ctx, environment, reporter)
+	result, archive, err := prepareUpdate(ctx, environment, reporter)
 	if err != nil {
 		return updateResult{}, err
 	}
-	if staged.root == "" {
+	if archive == nil {
 		return result, nil
 	}
-	defer cleanupStagedUpdate(staged, &result, &resultErr)
-	return installStagedUpdate(ctx, environment, reporter, result, staged)
+	return installUpdate(ctx, environment, reporter, result, archive)
 }
 
 func prepareUpdate(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
-) (updateResult, stagedUpdate, error) {
+) (updateResult, []byte, error) {
 	var release updateRelease
-	var metadata []byte
 	if err := reporter.step("Checking for updates", func() error {
 		var fetchErr error
-		release, metadata, fetchErr = fetchLatestRelease(ctx, environment)
+		release, _, fetchErr = fetchLatestRelease(ctx, environment)
 		return fetchErr
 	}); err != nil {
-		return updateResult{}, stagedUpdate{}, err
+		return updateResult{}, nil, err
 	}
 	latestVersion, comparison, err := compareReleaseVersions(environment.currentVersion, release.TagName)
 	if err != nil {
-		return updateResult{}, stagedUpdate{}, err
+		return updateResult{}, nil, err
 	}
 	result := updateResult{
 		CurrentVersion: environment.currentVersion, LatestVersion: latestVersion,
 		ReleaseURL: release.HTMLURL, BinaryPath: environment.executablePath,
 	}
 	if comparison >= 0 {
-		return result, stagedUpdate{}, nil
+		return result, nil, nil
 	}
-	staged, err := stageUpdateResources(
-		ctx, environment, reporter, release, latestVersion, metadata,
+	archive, err := downloadUpdateAssets(
+		ctx, environment, reporter, release, latestVersion,
 	)
 	if err != nil {
-		return updateResult{}, stagedUpdate{}, err
+		return updateResult{}, nil, err
 	}
-	staged.latestVersion = latestVersion
-	staged.release = release
-	return result, staged, nil
+	return result, archive, nil
 }
 
-func installStagedUpdate(
+func installUpdate(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
 	result updateResult,
-	staged stagedUpdate,
+	archive []byte,
 ) (resultOut updateResult, resultErr error) {
 	installationLock, err := acquireUpdateLock(ctx, environment.homeDirectory)
 	if err != nil {
 		return updateResult{}, err
 	}
 	defer finishUpdateLock(environment, installationLock, &resultOut, &resultErr)
-	return installStagedUpdateWithLock(ctx, environment, reporter, result, staged, installationLock)
+	return installUpdateWithLock(ctx, environment, reporter, result, archive, installationLock)
 }
 
-func installStagedUpdateWithLock(
+func installUpdateWithLock(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
 	result updateResult,
-	staged stagedUpdate,
+	archive []byte,
 	installationLock *os.File,
 ) (updateResult, error) {
 	installedVersion, err := environment.readInstalledVersion(ctx, environment.executablePath)
@@ -328,31 +321,26 @@ func installStagedUpdateWithLock(
 		return updateResult{}, updateFailure("update_install_failed", "read installed version: %v", err)
 	}
 	result.CurrentVersion = installedVersion
-	_, installedComparison, err := compareReleaseVersions(installedVersion, staged.release.TagName)
+	_, installedComparison, err := compareReleaseVersions(installedVersion, result.LatestVersion)
 	if err != nil {
 		return updateResult{}, err
 	}
 	if installedComparison >= 0 {
 		return result, nil
 	}
-	archive, err := revalidateStagedUpdate(staged, environment)
-	if err != nil {
-		return result, err
-	}
-	return installVerifiedStagedArchive(ctx, environment, reporter, result, staged, archive, installationLock)
+	return installUpdateArchive(ctx, environment, reporter, result, archive, installationLock)
 }
 
-func installVerifiedStagedArchive(
+func installUpdateArchive(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
 	result updateResult,
-	staged stagedUpdate,
 	archive []byte,
 	installationLock *os.File,
 ) (updateResult, error) {
 	outcome, err := installVerifiedArchive(
-		ctx, environment, reporter, archive, staged.latestVersion, installationLock,
+		ctx, environment, reporter, archive, result.LatestVersion, installationLock,
 	)
 	result.FailedPhase = outcome.failedPhase
 	if outcome.verified {
@@ -392,71 +380,23 @@ func finishUpdateLock(
 	*resultErr = errors.Join(*resultErr, validationErr, closeErr)
 }
 
-func cleanupStagedUpdate(staged stagedUpdate, result *updateResult, resultErr *error) {
-	if cleanupErr := os.RemoveAll(staged.root); cleanupErr != nil {
-		if result.Updated && result.FailedPhase == "" {
-			result.FailedPhase = updatePhasePackageCleanup
-		}
-		*resultErr = errors.Join(
-			*resultErr,
-			updateFailure("update_install_failed", "remove private staged update: %v", cleanupErr),
-		)
-	}
-}
-
-func stageUpdateResources(
-	ctx context.Context,
-	environment updateEnvironment,
-	reporter *updateReporter,
-	release updateRelease,
-	latestVersion string,
-	metadata []byte,
-) (staged stagedUpdate, resultErr error) {
-	staged, err := downloadUpdateAssets(ctx, environment, reporter, release, latestVersion, metadata)
-	if err != nil {
-		return stagedUpdate{}, err
-	}
-	temporaryRoot, err := os.MkdirTemp("", "mailcli-update-stage-*")
-	if err != nil {
-		return stagedUpdate{}, updateFailure("update_install_failed", "create private update staging: %v", err)
-	}
-	staged.root = temporaryRoot
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, os.RemoveAll(temporaryRoot))
-		}
-	}()
-	if err := writeStagedUpdateFiles(staged); err != nil {
-		return stagedUpdate{}, err
-	}
-	return staged, nil
-}
-
 func downloadUpdateAssets(
 	ctx context.Context,
 	environment updateEnvironment,
 	reporter *updateReporter,
 	release updateRelease,
 	latestVersion string,
-	metadata []byte,
-) (stagedUpdate, error) {
+) ([]byte, error) {
 	archiveName := fmt.Sprintf("mailcli_%s_darwin_arm64.tar.gz", latestVersion)
 	archiveURL, checksumURL, signatureURL, err := validatedUpdateAssetURLs(environment, release, archiveName)
 	if err != nil {
-		return stagedUpdate{}, err
+		return nil, err
 	}
-	checksums, signature, err := downloadAndVerifyUpdateManifest(ctx, environment, checksumURL, signatureURL, reporter)
+	checksums, _, err := downloadAndVerifyUpdateManifest(ctx, environment, checksumURL, signatureURL, reporter)
 	if err != nil {
-		return stagedUpdate{}, err
+		return nil, err
 	}
-	archive, err := downloadAndVerifyUpdateArchive(ctx, environment, archiveURL, archiveName, latestVersion, checksums, reporter)
-	if err != nil {
-		return stagedUpdate{}, err
-	}
-	return stagedUpdate{
-		archiveName: archiveName, metadata: metadata, checksums: checksums,
-		signature: signature, archive: archive,
-	}, nil
+	return downloadAndVerifyUpdateArchive(ctx, environment, archiveURL, archiveName, latestVersion, checksums, reporter)
 }
 
 func validatedUpdateAssetURLs(
@@ -531,43 +471,6 @@ func downloadAndVerifyUpdateArchive(
 		return nil, err
 	}
 	return archive, nil
-}
-
-func writeStagedUpdateFiles(staged stagedUpdate) error {
-	for _, artifact := range []struct {
-		name     string
-		contents []byte
-	}{
-		{name: updateMetadataStageName, contents: staged.metadata},
-		{name: updateChecksumsStageName, contents: staged.checksums},
-		{name: updateSignatureStageName, contents: staged.signature},
-		{name: staged.archiveName, contents: staged.archive},
-	} {
-		if err := writeStagedUpdateFile(staged.root, artifact.name, artifact.contents); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func writeStagedUpdateFile(root string, name string, contents []byte) error {
-	file, err := os.OpenFile(filepath.Join(root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return updateFailure("update_install_failed", "stage release artifact %s: %v", name, err)
-	}
-	written, writeErr := file.Write(contents)
-	if writeErr == nil && written != len(contents) {
-		writeErr = io.ErrShortWrite
-	}
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		return errors.Join(
-			updateFailure("update_install_failed", "stage release artifact %s", name),
-			writeErr,
-			closeErr,
-		)
-	}
-	return nil
 }
 
 func validateUpdateURL(value string, allowInsecure bool) error {

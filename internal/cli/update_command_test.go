@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,7 +85,50 @@ func TestPerformUpdateInstallsVerifiedRelease(t *testing.T) {
 	}
 }
 
-func TestPerformUpdateStagesNetworkBeforeLockAndSerializesConcurrentUpdates(t *testing.T) {
+func TestPerformUpdateLockHoldMeasurement(t *testing.T) {
+	installer, err := os.ReadFile(filepath.Join("..", "..", "scripts", "release", "install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 32*1024*1024)
+	state := uint64(1)
+	for index := range payload {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		payload[index] = byte(state)
+	}
+	root := "mailcli_1.0.5_darwin_arm64"
+	archive := buildUpdateArchive(t, map[string]updateArchiveFile{
+		root + "/bin/mailcli":                       {content: testUpdateBinary("1.0.5"), mode: 0o755},
+		root + "/skills/mailcli/SKILL.md":           {content: "new skill\n", mode: 0o600},
+		root + "/skills/mailcli/agents/openai.yaml": {content: "new agent\n", mode: 0o600},
+		root + "/install.sh":                        {content: string(installer), mode: 0o755},
+		root + "/README.md":                         {content: string(payload), mode: 0o600},
+	})
+	server := newUpdateTestServer(t, "1.0.5", archive, checksumFile(root+".tar.gz", archive))
+	defer server.Close()
+	durations := make([]time.Duration, 0, 3)
+	for attempt := range 3 {
+		environment := updateTestEnvironment(t, server, "1.0.4")
+		createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
+		intervals := recordUpdateLockIntervals(&environment)
+		result, err := performUpdate(context.Background(), environment, newUpdateReporter(io.Discard, false, false))
+		if err != nil || !result.Updated || len(intervals.starts) != 1 || len(intervals.ends) != 1 {
+			t.Fatalf("measured install %d = %+v, %v; intervals=%+v", attempt, result, err, intervals)
+		}
+		assertInstalledUpdatePayload(t, environment)
+		duration := intervals.ends[0].Sub(intervals.starts[0])
+		if duration <= 0 {
+			t.Fatalf("invalid installation lock interval: %s", duration)
+		}
+		durations = append(durations, duration)
+	}
+	sort.Slice(durations, func(left, right int) bool { return durations[left] < durations[right] })
+	t.Logf("archive_sha256=%x archive_bytes=%d lock_hold_samples=%v lock_hold_median=%s", sha256.Sum256(archive), len(archive), durations, durations[1])
+}
+
+func TestPerformUpdateDownloadsBeforeLockAndSerializesConcurrentUpdates(t *testing.T) {
 	fixture := newGatedUpdateFixture(t, "1.0.4", 2)
 	installCount := countUpdateInstalls(&fixture.environment)
 	lockIntervals := recordUpdateLockIntervals(&fixture.environment)
@@ -104,15 +148,15 @@ func TestPerformUpdateStagesNetworkBeforeLockAndSerializesConcurrentUpdates(t *t
 	lockIntervals.assertExcludesNetworkDelay(t, startedAt, networkStart, networkEnd)
 }
 
-func TestPerformUpdateSkipsWhenSameOrNewerVersionWasInstalledDuringStaging(t *testing.T) {
+func TestPerformUpdateSkipsWhenSameOrNewerVersionWasInstalledDuringDownload(t *testing.T) {
 	for _, installedVersion := range []string{"1.0.5", "1.0.6"} {
 		t.Run(installedVersion, func(t *testing.T) {
-			assertConcurrentVersionSkipsStagedUpdate(t, installedVersion)
+			assertConcurrentVersionSkipsUpdate(t, installedVersion)
 		})
 	}
 }
 
-func assertConcurrentVersionSkipsStagedUpdate(t *testing.T, installedVersion string) {
+func assertConcurrentVersionSkipsUpdate(t *testing.T, installedVersion string) {
 	t.Helper()
 	fixture := newGatedUpdateFixture(t, "1.0.4", 1)
 	installCount := countUpdateInstalls(&fixture.environment)
@@ -138,68 +182,81 @@ func assertConcurrentVersionSkipsStagedUpdate(t *testing.T, installedVersion str
 	}
 }
 
-func TestRevalidateStagedUpdateRejectsChangedArtifacts(t *testing.T) {
+func TestPrepareUpdateKeepsVerifiedArchiveInMemory(t *testing.T) {
 	archive := buildTestUpdateArchive(t, "1.0.5")
-	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)
-	server := newUpdateTestServer(t, "1.0.5", archive, checksums)
+	server := newUpdateTestServer(t, "1.0.5", archive, checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive))
 	defer server.Close()
 	environment := updateTestEnvironment(t, server, "1.0.4")
-	release, metadata, err := fetchLatestRelease(context.Background(), environment)
-	if err != nil {
-		t.Fatal(err)
+	unavailableTemporaryRoot := filepath.Join(t.TempDir(), "not-created")
+	t.Setenv("TMPDIR", unavailableTemporaryRoot)
+	result, verifiedArchive, err := prepareUpdate(context.Background(), environment, newUpdateReporter(io.Discard, false, false))
+	if err != nil || result.LatestVersion != "1.0.5" || !bytes.Equal(verifiedArchive, archive) {
+		t.Fatalf("in-memory preparation = %+v, %v; archive matches=%v", result, err, bytes.Equal(verifiedArchive, archive))
 	}
-	latestVersion, comparison, err := compareReleaseVersions(environment.currentVersion, release.TagName)
-	if err != nil || comparison >= 0 {
-		t.Fatalf("compare staged release: version=%s comparison=%d error=%v", latestVersion, comparison, err)
-	}
-	staged, err := stageUpdateResources(
-		context.Background(), environment, newUpdateReporter(io.Discard, false, false), release, latestVersion, metadata,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(staged.root); err != nil {
-			t.Errorf("remove staged update fixture: %v", err)
-		}
-	})
-	for _, artifact := range []struct {
-		name     string
-		filename string
-		contents []byte
-	}{
-		{name: "metadata", filename: updateMetadataStageName, contents: metadata},
-		{name: "checksums", filename: updateChecksumsStageName, contents: checksums},
-		{name: "signature", filename: updateSignatureStageName, contents: staged.signature},
-		{name: "archive", filename: staged.archiveName, contents: archive},
-	} {
-		t.Run(artifact.name, func(t *testing.T) {
-			assertChangedStagedArtifactRejected(t, staged, environment, artifact.filename, artifact.contents)
-		})
+	if _, err := os.Lstat(unavailableTemporaryRoot); !os.IsNotExist(err) {
+		t.Fatalf("preparation created temporary staging: %v", err)
 	}
 }
 
-func assertChangedStagedArtifactRejected(
-	t *testing.T,
-	staged stagedUpdate,
-	environment updateEnvironment,
-	filename string,
-	original []byte,
-) {
-	t.Helper()
-	path := filepath.Join(staged.root, filename)
-	changed := append([]byte(nil), original...)
-	changed[len(changed)/2] ^= 0xff
-	if err := os.WriteFile(path, changed, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.WriteFile(path, original, 0o600); err != nil {
-			t.Errorf("restore staged %q fixture: %v", filename, err)
-		}
-	}()
-	if _, err := revalidateStagedUpdate(staged, environment); updateErrorCodeForTest(err) != "update_package_invalid" {
-		t.Fatalf("changed staged %q error = %v", filename, err)
+func TestPerformUpdateRejectsTamperedDownloadsBeforeLock(t *testing.T) {
+	archive := buildTestUpdateArchive(t, "1.0.5")
+	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)
+	for _, test := range []struct {
+		name             string
+		archive          []byte
+		checksums        []byte
+		corruptSignature bool
+		code             string
+	}{
+		{name: "archive", archive: append([]byte(nil), archive...), checksums: checksums, code: "update_checksum_mismatch"},
+		{name: "checksums", archive: archive, checksums: append([]byte(nil), checksums...), code: "update_checksum_mismatch"},
+		{name: "signature", archive: archive, checksums: checksums, corruptSignature: true, code: "update_signature_invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			switch test.name {
+			case "archive":
+				test.archive[len(test.archive)/2] ^= 0xff
+			case "checksums":
+				if test.checksums[0] == '0' {
+					test.checksums[0] = '1'
+				} else {
+					test.checksums[0] = '0'
+				}
+			}
+			server := newUpdateTestServerWithSignature(t, "1.0.5", test.archive, test.checksums, test.corruptSignature)
+			defer server.Close()
+			environment := updateTestEnvironment(t, server, "1.0.4")
+			createInstalledUpdateFixture(t, environment, "1.0.4", "old skill")
+			installs := countUpdateInstalls(&environment)
+			lock, err := acquireUpdateLock(context.Background(), environment.homeDirectory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := lock.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			result, err := performUpdate(ctx, environment, newUpdateReporter(io.Discard, false, false))
+			if updateErrorCodeForTest(err) != test.code || result.Updated || installs.Load() != 0 {
+				t.Fatalf("tampered update = %+v, %v; installer calls=%d", result, err, installs.Load())
+			}
+			if err := validateUpdateLock(lock); err != nil {
+				t.Fatal(err)
+			}
+			for path, wanted := range map[string]string{
+				environment.executablePath: testUpdateBinary("1.0.4"),
+				filepath.Join(environment.homeDirectory, ".agents", "skills", "mailcli", "SKILL.md"):              "old skill\n",
+				filepath.Join(environment.homeDirectory, ".agents", "skills", "mailcli", "agents", "openai.yaml"): "old agent\n",
+			} {
+				actual, err := os.ReadFile(path)
+				if err != nil || string(actual) != wanted {
+					t.Errorf("tampering changed installed payload at %s: %v", path, err)
+				}
+			}
+		})
 	}
 }
 
@@ -792,7 +849,7 @@ func (intervals *updateLockIntervals) assertExcludesNetworkDelay(
 	var lockDuration time.Duration
 	for index := range starts {
 		if starts[index].Before(networkEnd) || ends[index].Before(starts[index]) {
-			t.Fatalf("lock interval %d overlaps network staging: %s to %s", index, starts[index], ends[index])
+			t.Fatalf("lock interval %d overlaps network download: %s to %s", index, starts[index], ends[index])
 		}
 		lockDuration += ends[index].Sub(starts[index])
 	}
@@ -808,7 +865,7 @@ func assertInstallerLockAvailable(t *testing.T, homeDirectory string) {
 	defer cancel()
 	lock, err := acquireUpdateLock(ctx, homeDirectory)
 	if err != nil {
-		t.Fatalf("installation lock unavailable during staged download: %v", err)
+		t.Fatalf("installation lock unavailable during download: %v", err)
 	}
 	if err := lock.Close(); err != nil {
 		t.Fatalf("close installation lock probe: %v", err)
@@ -1096,7 +1153,13 @@ func buildUpdateArchive(t *testing.T, files map[string]updateArchiveFile) []byte
 	var archive bytes.Buffer
 	gzipWriter := gzip.NewWriter(&archive)
 	tarWriter := tar.NewWriter(gzipWriter)
-	for name, file := range files {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		file := files[name]
 		header := &tar.Header{Name: name, Mode: file.mode, Size: int64(len(file.content)), Typeflag: tar.TypeReg}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatal(err)
