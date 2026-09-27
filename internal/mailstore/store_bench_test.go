@@ -391,9 +391,9 @@ func openGeneratedStoreFixture(tb testing.TB, fixture searchFixtureData) *Store 
 	return store
 }
 
-// BenchmarkGeneratedStoreInitialOpen times the first Store open on an
-// unopened generated fixture. Close is excluded from this measurement.
-func BenchmarkGeneratedStoreInitialOpen(b *testing.B) {
+// BenchmarkGeneratedStoreOpenWarmCache times Store.Open after creating the
+// fixture without evicting OS page-cache entries. Close is excluded.
+func BenchmarkGeneratedStoreOpenWarmCache(b *testing.B) {
 	fixture := newGeneratedStoreFixture(b)
 	config := Config{MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs}
 	ctx := context.Background()

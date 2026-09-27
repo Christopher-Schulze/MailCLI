@@ -106,10 +106,10 @@ run_group \
   '^BenchmarkSearchFixture603$' \
   20x
 run_group \
-  generated-store-open \
-  'first Open of a generated 600-message SQLite/EMLX fixture; new files do not imply a cold OS page cache' \
+  open_warm_cache \
+  'first Store.Open after writing a generated 600-message SQLite/EMLX fixture; OS page-cache entries are not evicted' \
   ./internal/mailstore \
-  '^BenchmarkGeneratedStoreInitialOpen$' \
+  '^BenchmarkGeneratedStoreOpenWarmCache$' \
   1x
 run_group \
   generated-store-lifecycle \
