@@ -101,6 +101,9 @@ func runInvocation(
 	transport *invocationTransport,
 	store *mailstore.Client,
 ) int {
+	if store != nil {
+		ctx = store.WithAccountBindingSnapshot(ctx)
+	}
 	var stdout bytes.Buffer
 	output := io.Writer(os.Stdout)
 	if jsonOutput {

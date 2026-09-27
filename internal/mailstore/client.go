@@ -29,6 +29,65 @@ type Client struct {
 	copyAttempts      map[string]transport.MutationEvidence
 }
 
+type accountBindingSnapshotContextKey struct{}
+
+type accountBindingSnapshot struct {
+	client           *Client
+	once             sync.Once
+	bindings         mail.AccountBindingFile
+	err              error
+	mailboxRecordsMu sync.Mutex
+	mailboxRecords   map[string]accountMailboxRecordCacheEntry
+}
+
+type accountMailboxRecordCacheEntry struct {
+	records []mailboxRecord
+	err     error
+}
+
+// WithAccountBindingSnapshot scopes one lazily loaded binding document to an invocation context.
+func (c *Client) WithAccountBindingSnapshot(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c == nil {
+		return ctx
+	}
+	if snapshot, ok := ctx.Value(accountBindingSnapshotContextKey{}).(*accountBindingSnapshot); ok && snapshot.client == c {
+		return ctx
+	}
+	return context.WithValue(ctx, accountBindingSnapshotContextKey{}, &accountBindingSnapshot{client: c})
+}
+
+func (c *Client) accountBindingsForResolution(ctx context.Context) (mail.AccountBindingFile, error) {
+	if snapshot, ok := ctx.Value(accountBindingSnapshotContextKey{}).(*accountBindingSnapshot); ok && snapshot.client == c {
+		snapshot.once.Do(func() {
+			snapshot.bindings, snapshot.err = c.loadAccountBindingsForResolution()
+		})
+		return snapshot.bindings, snapshot.err
+	}
+	return c.loadAccountBindingsForResolution()
+}
+
+func accountMailboxRecordsCache(ctx context.Context, store *Store) (*accountBindingSnapshot, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	snapshot, ok := ctx.Value(accountBindingSnapshotContextKey{}).(*accountBindingSnapshot)
+	return snapshot, ok && snapshot.client.store == store
+}
+
+func (c *Client) loadAccountBindingsForResolution() (mail.AccountBindingFile, error) {
+	bindingStore := c.send.AccountBindings
+	if bindingStore == nil && c.store != nil {
+		bindingStore = c.store.accountBindings
+	}
+	if bindingStore == nil {
+		return mail.AccountBindingFile{Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{}}, nil
+	}
+	return bindingStore.LoadAccountBindings()
+}
+
 func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config, send mail.SendTransport) *Client {
 	started := time.Now()
 	if config.AccountBindings == nil && send.AccountBindings != nil {

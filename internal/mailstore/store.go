@@ -14,8 +14,9 @@ import (
 )
 
 type accountIdentityCounters struct {
-	fullCatalogBuilds atomic.Int64
-	sentScanQueries   atomic.Int64
+	fullCatalogBuilds        atomic.Int64
+	sentScanQueries          atomic.Int64
+	mailboxRecordRowsScanned atomic.Int64
 }
 
 type Store struct {

@@ -308,7 +308,12 @@ func credentialSetupCommand(sender, credential string) string {
 }
 
 func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (string, string, *mail.AccountBinding, error) {
-	account, found, err := c.store.accountForIdentity(ctx, accountID)
+	ctx = c.WithAccountBindingSnapshot(ctx)
+	bindings, err := c.accountBindingsForResolution(ctx)
+	if err != nil {
+		return "", "", nil, err
+	}
+	account, found, err := c.store.accountForIdentity(ctx, accountID, bindings)
 	if err != nil {
 		return "", "", nil, operationErrorWithCause(
 			"account_catalog_incomplete",
@@ -318,7 +323,7 @@ func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (
 	}
 	accounts := []mail.Account{account}
 	if !found {
-		accounts, err = c.store.ListAccounts(ctx)
+		accounts, err = c.store.listAccountsWithBindings(ctx, bindings)
 		if err != nil {
 			return "", "", nil, operationErrorWithCause(
 				"account_catalog_incomplete",
@@ -326,19 +331,6 @@ func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (
 				err,
 			)
 		}
-	}
-	var bindings mail.AccountBindingFile
-	bindingStore := c.send.AccountBindings
-	if bindingStore == nil && c.store != nil {
-		bindingStore = c.store.accountBindings
-	}
-	if bindingStore != nil {
-		bindings, err = bindingStore.LoadAccountBindings()
-		if err != nil {
-			return "", "", nil, err
-		}
-	} else {
-		bindings = mail.AccountBindingFile{Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{}}
 	}
 	return resolveAccountIdentityFromCatalog(accounts, accountID, c.send.Credentials, bindings)
 }

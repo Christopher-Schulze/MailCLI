@@ -940,8 +940,9 @@ func BenchmarkMutationAccountResolution(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
+				invocationCtx := client.WithAccountBindingSnapshot(context.Background())
 				for _, messageRef := range messageRefs {
-					target, err := client.resolveImapTargetForMutation(context.Background(), messageRef)
+					target, err := client.resolveImapTargetForMutation(invocationCtx, messageRef)
 					if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
 						b.Fatalf("resolve generated mutation target: target=%+v error=%v", target, err)
 					}
@@ -950,6 +951,7 @@ func BenchmarkMutationAccountResolution(b *testing.B) {
 			iterations := float64(b.N)
 			b.ReportMetric(float64(counters.fullCatalogBuilds.Load())/iterations, "catalog_builds/op")
 			b.ReportMetric(float64(counters.sentScanQueries.Load())/iterations, "sent_scan_queries/op")
+			b.ReportMetric(float64(counters.mailboxRecordRowsScanned.Load())/iterations, "mailbox_record_rows_scanned/op")
 			b.ReportMetric(float64(bindings.loadCalls.Load())/iterations, "binding_loads/op")
 			b.ReportMetric(float64(credentials.loadCalls.Load())/iterations, "credential_loads/op")
 			reportGeneratedStoreFixture(b, fixture.searchFixtureData)

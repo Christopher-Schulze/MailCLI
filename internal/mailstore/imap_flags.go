@@ -13,6 +13,7 @@ func (c *Client) MarkMessage(ctx context.Context, request mail.MarkMessageReques
 	if c.store == nil {
 		return mail.MessageSummary{}, c.safeWriteUnavailableError()
 	}
+	ctx = c.WithAccountBindingSnapshot(ctx)
 	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
 		return mail.MessageSummary{}, err
 	}

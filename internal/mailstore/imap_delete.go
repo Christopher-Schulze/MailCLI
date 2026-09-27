@@ -23,6 +23,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 	if c.store == nil {
 		return mail.DeleteResult{}, c.safeWriteUnavailableError()
 	}
+	ctx = c.WithAccountBindingSnapshot(ctx)
 	if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
 		return mail.DeleteResult{}, err
 	}

@@ -82,7 +82,11 @@ func (s *Store) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, er
 	return s.listAccountCatalog(ctx, false)
 }
 
-func (s *Store) accountForIdentity(ctx context.Context, accountID string) (mail.Account, bool, error) {
+func (s *Store) accountForIdentity(
+	ctx context.Context,
+	accountID string,
+	bindings mail.AccountBindingFile,
+) (mail.Account, bool, error) {
 	var location mailboxLocation
 	found := false
 	for _, activeAccount := range s.activeAccounts {
@@ -96,22 +100,16 @@ func (s *Store) accountForIdentity(ctx context.Context, accountID string) (mail.
 		return mail.Account{}, false, nil
 	}
 
-	records, err := s.mailboxRecords(ctx)
+	records, err := s.mailboxRecordsForAccount(ctx, location.rootKey())
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return mail.Account{}, true, contextErr
 		}
 		return mail.Account{}, true, accountCatalogError("", err)
 	}
-	bindings, err := s.loadAccountBindings()
-	if err != nil {
-		return mail.Account{}, true, err
-	}
-	recordsByPath := make(map[string]mailboxRecord)
+	recordsByPath := make(map[string]mailboxRecord, len(records))
 	for _, record := range records {
-		if record.Location.rootKey() == location.rootKey() {
-			recordsByPath[record.pathKey] = record
-		}
+		recordsByPath[record.pathKey] = record
 	}
 	account, err := s.loadAccountWithBindings(ctx, location, recordsByPath, bindings, false)
 	if err != nil {
@@ -147,6 +145,30 @@ func (s *Store) listAccountCatalog(ctx context.Context, skipBoundIdentityScan bo
 	if err != nil {
 		return mail.AccountCatalog{}, err
 	}
+	return s.listAccountCatalogFromRecords(ctx, skipBoundIdentityScan, bindings, records)
+}
+
+func (s *Store) listAccountCatalogWithBindings(
+	ctx context.Context,
+	skipBoundIdentityScan bool,
+	bindings mail.AccountBindingFile,
+) (mail.AccountCatalog, error) {
+	records, err := s.mailboxRecords(ctx)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return mail.AccountCatalog{}, contextErr
+		}
+		return mail.AccountCatalog{}, accountCatalogError("", err)
+	}
+	return s.listAccountCatalogFromRecords(ctx, skipBoundIdentityScan, bindings, records)
+}
+
+func (s *Store) listAccountCatalogFromRecords(
+	ctx context.Context,
+	skipBoundIdentityScan bool,
+	bindings mail.AccountBindingFile,
+	records []mailboxRecord,
+) (mail.AccountCatalog, error) {
 	recordsByPath := make(map[string]mailboxRecord, len(records))
 	for _, record := range records {
 		recordsByPath[record.pathKey] = record
@@ -177,6 +199,17 @@ func (s *Store) listAccountCatalog(ctx context.Context, skipBoundIdentityScan bo
 		}
 	}
 	return mail.AccountCatalog{Accounts: accounts, Complete: complete}, nil
+}
+
+func (s *Store) listAccountsWithBindings(
+	ctx context.Context,
+	bindings mail.AccountBindingFile,
+) ([]mail.Account, error) {
+	if s.accountIdentityCounters != nil {
+		s.accountIdentityCounters.fullCatalogBuilds.Add(1)
+	}
+	catalog, err := s.listAccountCatalogWithBindings(ctx, false, bindings)
+	return catalog.Accounts, err
 }
 
 func (s *Store) loadAccountBindings() (mail.AccountBindingFile, error) {

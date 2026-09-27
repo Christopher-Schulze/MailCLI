@@ -120,17 +120,44 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 func (s *Store) mailboxRecords(ctx context.Context) ([]mailboxRecord, error) {
 	s.mailboxCatalogOnce.Do(func() {
 		s.mailboxCatalogQueries++
-		s.mailboxCatalog, s.mailboxCatalogErr = s.queryMailboxRecords(ctx)
+		s.mailboxCatalog, s.mailboxCatalogErr = s.queryMailboxRecords(ctx, "")
 	})
 	return s.mailboxCatalog, s.mailboxCatalogErr
 }
 
-func (s *Store) queryMailboxRecords(ctx context.Context) (result []mailboxRecord, resultErr error) {
-	rows, err := s.database.QueryContext(ctx, `
+func (s *Store) mailboxRecordsForAccount(ctx context.Context, accountRoot string) ([]mailboxRecord, error) {
+	snapshot, scoped := accountMailboxRecordsCache(ctx, s)
+	if !scoped {
+		return s.queryMailboxRecords(ctx, accountRoot)
+	}
+	snapshot.mailboxRecordsMu.Lock()
+	defer snapshot.mailboxRecordsMu.Unlock()
+	if cached, ok := snapshot.mailboxRecords[accountRoot]; ok {
+		return cached.records, cached.err
+	}
+	records, err := s.queryMailboxRecords(ctx, accountRoot)
+	if snapshot.mailboxRecords == nil {
+		snapshot.mailboxRecords = make(map[string]accountMailboxRecordCacheEntry)
+	}
+	snapshot.mailboxRecords[accountRoot] = accountMailboxRecordCacheEntry{records: records, err: err}
+	return records, err
+}
+
+func (s *Store) queryMailboxRecords(
+	ctx context.Context,
+	accountRoot string,
+) (result []mailboxRecord, resultErr error) {
+	query := `
 		SELECT ROWID, url, total_count, unread_count
 		FROM mailboxes
-		ORDER BY url
-	`)
+	`
+	arguments := []any(nil)
+	if accountRoot != "" {
+		query += "WHERE " + mailboxAccountRootSQLName + "(url) = ?\n"
+		arguments = append(arguments, accountRoot)
+	}
+	query += "ORDER BY url"
+	rows, err := s.database.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("list Envelope Index mailboxes: %w", err)
 	}
@@ -140,6 +167,9 @@ func (s *Store) queryMailboxRecords(ctx context.Context) (result []mailboxRecord
 		var record mailboxRecord
 		if err := rows.Scan(&record.RowID, &record.URL, &record.MessageCount, &record.UnreadCount); err != nil {
 			return nil, fmt.Errorf("scan Envelope Index mailbox: %w", err)
+		}
+		if accountRoot != "" && s.accountIdentityCounters != nil {
+			s.accountIdentityCounters.mailboxRecordRowsScanned.Add(1)
 		}
 		location, err := parseMailboxURL(record.URL)
 		if err != nil {

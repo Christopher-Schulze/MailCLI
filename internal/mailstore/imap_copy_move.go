@@ -15,6 +15,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 	if c.store == nil {
 		return mail.MessageSummary{}, c.safeWriteUnavailableError()
 	}
+	ctx = c.WithAccountBindingSnapshot(ctx)
 	if !request.Copy {
 		if err := c.rejectUnconfirmedDraftMutation(ctx, request.Ref, request.AllowDraftMutation); err != nil {
 			return mail.MessageSummary{}, err

@@ -184,6 +184,9 @@ func TestMutationAccountResolutionLoadsOnlyTargetAccount(t *testing.T) {
 	if binding == nil || binding.AccountID != testAccountID {
 		t.Fatalf("resolveAccountIdentity() binding = %+v, want target account binding", binding)
 	}
+	if got, want := counters.mailboxRecordRowsScanned.Load(), int64(3); got != want {
+		t.Fatalf("target mailbox record rows scanned = %d, want %d for the target account only", got, want)
+	}
 	if got := counters.fullCatalogBuilds.Load(); got != 0 {
 		t.Fatalf("full catalog builds = %d, want 0", got)
 	}
@@ -196,12 +199,14 @@ func TestMutationAccountResolutionLoadsOnlyTargetAccount(t *testing.T) {
 		{name: "one hundred mutations", items: 100},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			invocationCtx := client.WithAccountBindingSnapshot(context.Background())
 			counters.fullCatalogBuilds.Store(0)
 			counters.sentScanQueries.Store(0)
+			counters.mailboxRecordRowsScanned.Store(0)
 			bindings.loadCalls.Store(0)
 			credentials.loadCalls.Store(0)
 			for _, messageRef := range messageRefs[:test.items] {
-				target, err := client.resolveImapTargetForMutation(context.Background(), messageRef)
+				target, err := client.resolveImapTargetForMutation(invocationCtx, messageRef)
 				if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
 					t.Fatalf("resolve mutation target: target=%+v error=%v", target, err)
 				}
@@ -212,13 +217,44 @@ func TestMutationAccountResolutionLoadsOnlyTargetAccount(t *testing.T) {
 			if got, want := counters.sentScanQueries.Load(), int64(2*test.items); got != want {
 				t.Fatalf("Sent scan queries = %d, want %d for the target account only", got, want)
 			}
-			if got, want := bindings.loadCalls.Load(), int64(2*test.items); got != want {
-				t.Fatalf("binding loads = %d, want %d across account and client freshness boundaries", got, want)
+			if got := bindings.loadCalls.Load(); got != 1 {
+				t.Fatalf("binding loads = %d, want 1 shared load for the invocation", got)
+			}
+			if got := counters.mailboxRecordRowsScanned.Load(); got != 3 {
+				t.Fatalf("target mailbox record rows scanned = %d, want only 3 target-account rows", got)
 			}
 			if got, want := credentials.loadCalls.Load(), int64(2*test.items); got != want {
 				t.Fatalf("credential loads = %d, want %d across account resolution and IMAP setup", got, want)
 			}
 		})
+	}
+}
+
+func TestMutationAccountBindingSnapshotIsFreshPerInvocation(t *testing.T) {
+	fixture := newMutationIdentityFixture(t)
+	_, client, _, bindings, _ := openMutationIdentityClient(t, fixture)
+	firstInvocation := client.WithAccountBindingSnapshot(context.Background())
+	if sender, _, _, err := client.resolveAccountIdentity(firstInvocation, testAccountID); err != nil || sender != "identity@gmail.com" {
+		t.Fatalf("first invocation identity = %q, error = %v", sender, err)
+	}
+	if err := mail.NewAccountBindingStore(fixture.bindingPath).UpsertAccountBinding(mail.AccountBinding{
+		AccountID: testAccountID, SenderAliases: []string{"identity@gmail.com"}, CredentialAccount: "changed@gmail.com",
+	}); err != nil {
+		t.Fatalf("change binding for next invocation: %v", err)
+	}
+	if sender, _, _, err := client.resolveAccountIdentity(firstInvocation, testAccountID); err != nil || sender != "identity@gmail.com" {
+		t.Fatalf("same-invocation identity = %q, error = %v; want original coherent snapshot", sender, err)
+	}
+	if got := bindings.loadCalls.Load(); got != 1 {
+		t.Fatalf("same-invocation binding loads = %d, want 1", got)
+	}
+
+	secondInvocation := client.WithAccountBindingSnapshot(context.Background())
+	if _, _, _, err := client.resolveAccountIdentity(secondInvocation, testAccountID); errorCodeForTest(err) != accountIdentityMissingCode {
+		t.Fatalf("next-invocation error = %v, want fresh binding failure %s", err, accountIdentityMissingCode)
+	}
+	if got := bindings.loadCalls.Load(); got != 2 {
+		t.Fatalf("binding loads across two invocations = %d, want 2", got)
 	}
 }
 
@@ -285,8 +321,8 @@ func TestMutationAccountResolutionPreservesSentSenderEvidence(t *testing.T) {
 	if got := counters.sentScanQueries.Load(); got != 2 {
 		t.Fatalf("Sent scan queries = %d, want 2 for the target account", got)
 	}
-	if got := emptyBindings.loadCalls.Load(); got != 2 {
-		t.Fatalf("binding loads = %d, want 2 across account and client freshness boundaries", got)
+	if got := emptyBindings.loadCalls.Load(); got != 1 {
+		t.Fatalf("binding loads = %d, want 1 shared load for the invocation", got)
 	}
 	if got := credentials.loadCalls.Load(); got != 1 {
 		t.Fatalf("credential loads = %d, want 1 for identity verification", got)
@@ -307,6 +343,9 @@ func TestMutationAccountResolutionFallsBackForInactiveTarget(t *testing.T) {
 	}
 	if got := counters.fullCatalogBuilds.Load(); got != 1 {
 		t.Fatalf("full catalog builds = %d, want 1 fallback for an inactive target", got)
+	}
+	if got := bindings.loadCalls.Load(); got != 1 {
+		t.Fatalf("binding loads = %d, want 1 shared load for the inactive fallback", got)
 	}
 }
 
