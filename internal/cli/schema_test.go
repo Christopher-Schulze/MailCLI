@@ -569,7 +569,7 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 	full := mustCapabilities(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if code := Run(context.Background(), nil, []string{"capabilities", "--for", "messages.search", "--json"}, &stdout, &stderr); code != 0 {
+	if code := Run(context.Background(), nil, []string{"capabilities", "--for", "messages.search", "--schemas", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("scoped capabilities exit = %d, stderr = %q", code, stderr.String())
 	}
 	var response envelope
@@ -589,7 +589,7 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run(context.Background(), nil, []string{"capabilities", "--for", "messages.*", "--json"}, &stdout, &stderr); code != 0 {
+	if code := Run(context.Background(), nil, []string{"capabilities", "--for", "messages.*", "--schemas", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("family capabilities exit = %d, stderr = %q", code, stderr.String())
 	}
 	response = envelope{}
@@ -622,7 +622,7 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 func TestCapabilitiesSelectedCommandsPreserveFullContract(t *testing.T) {
 	full := mustCapabilities(t)
 	code, output, response := captureCapabilitiesJSON(t,
-		"--for", "messages.get,messages.search", "--json",
+		"--for", "messages.get,messages.search", "--schemas", "--json",
 	)
 	if code != 0 || !response.OK || response.Data.Capabilities == nil {
 		t.Fatalf("selected capabilities exit = %d, response = %+v, output = %s", code, response, output)

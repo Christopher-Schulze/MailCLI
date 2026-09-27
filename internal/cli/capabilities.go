@@ -79,15 +79,16 @@ type draftSavePolicy struct {
 }
 
 type commandCapability struct {
-	ID              string              `json:"id"`
-	Audience        commandAudience     `json:"audience"`
-	Schema          json.RawMessage     `json:"schema"`
-	EffectClass     string              `json:"effect_class"`
-	Confirmation    string              `json:"confirmation"`
-	StoreDependency string              `json:"store_dependency"`
-	Dependencies    []commandDependency `json:"dependencies"`
-	ResultStates    []string            `json:"result_states"`
-	LimitRefs       []string            `json:"limit_refs"`
+	ID              string                     `json:"id"`
+	Audience        commandAudience            `json:"audience"`
+	Schema          json.RawMessage            `json:"schema,omitempty"`
+	SchemaRef       *capabilitySchemaReference `json:"schema_ref,omitempty"`
+	EffectClass     string                     `json:"effect_class"`
+	Confirmation    string                     `json:"confirmation"`
+	StoreDependency string                     `json:"store_dependency"`
+	Dependencies    []commandDependency        `json:"dependencies"`
+	ResultStates    []string                   `json:"result_states"`
+	LimitRefs       []string                   `json:"limit_refs"`
 }
 
 type capabilityLimits struct {
@@ -334,9 +335,15 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	var selectors repeatableStringFlag
 	flags.Var(&selectors, "for", "command IDs, comma lists, or family.* wildcards to describe")
 	limitsOnly := flags.Bool("limits", false, "print the full limit set without command contracts")
+	includeSchemas := flags.Bool("schemas", false, "include complete parameter schemas with --for")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *includeSchemas && len(selectors) == 0 {
+		return failCommand("capabilities", *jsonOutput, &commandError{
+			code: "invalid_argument", message: "--schemas requires --for",
+		}, stdout, stderr)
 	}
 	if len(selectors) > 0 {
 		if len(selectors) != 1 || *limitsOnly {
@@ -354,6 +361,11 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		if len(selected) == 1 {
 			manifest.Scope = selected[0]
+		}
+		if !*includeSchemas {
+			if err := referenceCapabilitySchemas(manifest.Commands); err != nil {
+				return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
+			}
 		}
 		return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 	}

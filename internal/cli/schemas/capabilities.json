@@ -16,6 +16,12 @@
       "description": "print the full limit set without command contracts"
     },
     {
+      "name": "--schemas",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "include complete parameter schemas with --for"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,
@@ -31,6 +37,11 @@
         "--limits"
       ],
       "description": "supply --for once; --for and --limits are mutually exclusive"
+    },
+    {
+      "kind": "conditional",
+      "flags": ["--schemas", "--for"],
+      "description": "--schemas requires --for"
     }
   ]
 }

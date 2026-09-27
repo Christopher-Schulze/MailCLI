@@ -22,8 +22,10 @@ local inbox coverage does not prove remote freshness.
 
 JSON is the default for pipes and files, human text for terminals. Explicit
 `--json` or `--human` overrides `MAILCLI_OUTPUT=json|human`. Use
-`mailcli capabilities --for COMMAND_ID --json` for exact flags, dependencies,
-effects and limits before choosing an operation. Help remains human text.
+`mailcli capabilities --for COMMAND_ID --json` for dependencies, effects,
+limits and schema retrieval references before choosing an operation. Follow
+`schema_ref.resolve` with the same executable for exact parameter contracts,
+or add `--schemas` to inline them. Help remains human text.
 
 ## Install
 
@@ -71,7 +73,7 @@ flags, field registries and incompatible combinations.
 
 ### Discovery and maintenance
 
-- `capabilities`: discover contracts; main flags `--for`, `--limits`.
+- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--limits`.
   Example: `mailcli capabilities --for messages.get --json`.
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.
@@ -1127,6 +1129,8 @@ still abort the search. Pagination over body hits also reports page-level incomp
 filter/search keep the complete coverage object. Use `--fields all` alone to retain every default page field; unknown or duplicate fields fail before a store read. Omitting `--fields` preserves the current page schema.
 
 ### Setup and usage
+
+Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas. Execute that argv with the retained binary before using uninspected parameters, or request `--for IDS --schemas --json` to inline complete canonical schemas. Effects, confirmation, dependencies, result states, referenced limits and shared policies remain directly available. Unscoped discovery retains all inline schemas; `--schemas` requires `--for`.
 
 The companion skill uses a compact `skills/mailcli/SKILL.md` entrypoint and seven portable operational guides under `skills/mailcli/references/`. Read the guide for the current action and request `capabilities --for COMMAND_ID --json` for one command or `capabilities --for ID,ID,... --json` for a known multi-command workflow; use family discovery only when the exact command set is
 unknown and retain inspected contracts for the same binary identity. Follow each command's credential, network, store, and Mail.app dependencies; local draft work and direct sending do not trigger unrelated store diagnostics. Default detail views retain completeness and replay evidence; explicit field projections return selected values and any required evidence fields. Header-only

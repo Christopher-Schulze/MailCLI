@@ -23,6 +23,7 @@ func TestCapabilityLimitReferencesMatchSelectedWireKeys(t *testing.T) {
 				t.Fatalf("code=%d output=%s", code, output)
 			}
 			selected := response.Data.Capabilities.Commands[0]
+			selected = resolveCapabilitySchema(t, selected)
 			if !reflect.DeepEqual(selected, command) {
 				t.Fatalf("selected contract changed: %+v vs %+v", selected, command)
 			}

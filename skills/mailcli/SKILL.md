@@ -7,7 +7,7 @@ description: Read/search, draft/reply/forward/send, save attachments, organize a
 
 Use only MailCLI. Keep private content out of logs; never ask the user to paste account passwords or tokens. Credentials: Keychain via `mailcli send setup`.
 
-Keep the executable from `command -v mailcli`. Query `mailcli capabilities --for ID --json` (comma-separated IDs or `NAME.*`); require ok, envelope schema 1, capabilities schema 2, compatible identity. Obey schemas/dependencies. Cache by binary SHA-256; invalidate on replacement, contract change or failure.
+Keep `command -v mailcli`'s executable. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. Cache by binary SHA-256; invalidate on replacement/contract change/failure.
 
 Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; reuse refs/cursors/revisions exactly, refresh refs after mutation/sync. Never replay successful/uncertain writes.
 
