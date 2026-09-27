@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -117,7 +118,7 @@ func TestHelpAndFamilyChoicesComeFromCommandContracts(t *testing.T) {
 	}
 	for _, contract := range commandRootContracts() {
 		command := strings.SplitN(contract.ID, ".", 2)[0]
-		entry := fmt.Sprintf("  %-13s %s", command, contract.helpDescription)
+		entry := fmt.Sprintf("%s: %s", command, contract.helpDescription)
 		if contract.helpDescription == "" || !strings.Contains(topLevel.String(), entry) {
 			t.Errorf("top-level help is missing contract entry %q", entry)
 		}
@@ -150,14 +151,34 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 			t.Fatalf("help does not contain %q: %s", command, stdout.String())
 		}
 	}
-	if !strings.Contains(stdout.String(), "Mail 16 scripted draft save remains disabled") {
-		t.Fatalf("help omits the Mail 16 compose limitation: %s", stdout.String())
+	if stdout.Len() > 900 {
+		t.Fatalf("help has %d bytes, want at most 900: %s", stdout.Len(), stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "send ") {
+	t.Logf("top-level help: %d bytes", stdout.Len())
+	if !strings.Contains(stdout.String(), "send: ") {
 		t.Fatalf("help omits the send command: %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), transport.ProviderSupportDescription()) {
-		t.Fatalf("help omits provider support boundary: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "Output: human by default; --json for JSON.") {
+		t.Fatalf("help omits the output rule: %s", stdout.String())
+	}
+	manual, err := os.ReadFile("../../docs/documentation.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, topic := range []struct{ anchor, heading string }{
+		{"#composition", "## Composition\n"},
+		{"#scope", "## Scope\n"},
+	} {
+		if !strings.Contains(stdout.String(), topic.anchor) || !bytes.Contains(manual, []byte(topic.heading)) {
+			t.Fatalf("help manual topic %s is missing or unreachable", topic.anchor)
+		}
+	}
+	_, composition, _ := strings.Cut(string(manual), "## Composition\n")
+	composition, _, _ = strings.Cut(composition, "\n## ")
+	for _, caveat := range []string{"Mail 16", "transport_unsupported_provider", "handoff"} {
+		if !strings.Contains(composition, caveat) {
+			t.Fatalf("linked composition topic omits caveat %q", caveat)
+		}
 	}
 }
 

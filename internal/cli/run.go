@@ -1070,20 +1070,17 @@ func helpOnly(args []string) bool {
 
 func writeHelp(writer io.Writer) {
 	writeRaw(writer, `MailCLI
-Local Apple Mail access for the shell and coding agents.
-
-Usage:
-  mailcli <command> [flags]
+Usage: mailcli <command> [flags]
 Commands:
 `)
 	for _, contract := range commandRootContracts() {
 		command := strings.SplitN(contract.ID, ".", 2)[0]
-		writeFormat(writer, "  %-13s %s\n", command, contract.helpDescription)
+		writeFormat(writer, "%s: %s\n", command, contract.helpDescription)
 	}
-	writeLine(writer, "  help          Show this command overview")
+	writeLine(writer, "help: Show this command overview")
 	writeRaw(writer, `
-Mail 16 scripted draft save remains disabled; visible handoff never sends.
-Direct SMTP send and IMAP mutations work without Mail.app: run 'mailcli send setup' once.
+Output: human by default; --json for JSON.
+Details: mailcli <command> --help
+Manual: docs/documentation.md#composition and #scope
 `)
-	writeFormat(writer, "%s\nRun 'mailcli <command> --help' for focused usage and flags.\n", transport.ProviderSupportDescription())
 }
