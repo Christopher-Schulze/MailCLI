@@ -152,6 +152,8 @@ type outputProjectionCapability struct {
 	AttachmentFields          []string `json:"attachment_fields"`
 	RawFields                 []string `json:"raw_fields"`
 	DraftListFields           []string `json:"draft_list_fields"`
+	DraftListCoreFields       []string `json:"draft_list_core_fields"`
+	DraftListOptionalFields   []string `json:"draft_list_optional_fields"`
 	ListPageFields            []string `json:"list_page_fields"`
 	SearchPageFields          []string `json:"search_page_fields"`
 	MessageDefaultView        string   `json:"message_default_view"`
@@ -231,6 +233,8 @@ func capabilitiesForScope(command, family string) capabilityManifest {
 				AttachmentFields:          projectionFieldNames(projectionTargetAttachment),
 				RawFields:                 projectionFieldNames(projectionTargetRaw),
 				DraftListFields:           projectionFieldNames(projectionTargetDraftList),
+				DraftListCoreFields:       projectionCoreFieldNames(projectionTargetDraftList),
+				DraftListOptionalFields:   projectionOptionalFieldNames(projectionTargetDraftList),
 				ListPageFields:            projectionFieldNames(projectionTargetListPage),
 				SearchPageFields:          projectionFieldNames(projectionTargetSearchPage),
 				MessageDefaultView:        defaultMessageOutputView,

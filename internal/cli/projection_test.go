@@ -172,17 +172,14 @@ func TestProjectionRegistriesValidateAllSevenTargets(t *testing.T) {
 	} {
 		t.Run(string(target), func(t *testing.T) {
 			registry := projectionRegistry(target)
-			names := projectionFieldNames(target)
+			names := projectionOutputFieldNames(target)
+			inputNames := projectionFieldNames(target)
 			seen := make(map[string]bool)
 			for _, name := range names {
 				if seen[name] {
 					t.Fatalf("duplicate registry field %q", name)
 				}
 				seen[name] = true
-				fields, err := parseProjectionFields(target, name)
-				if err != nil || len(fields) != 1 {
-					t.Fatalf("published field %q rejected: %v", name, err)
-				}
 				if name != "all" && requiredProjectionField(target, name, false) != slices.Contains(registry.core, name) {
 					t.Fatalf("core policy differs for %q", name)
 				}
@@ -190,7 +187,26 @@ func TestProjectionRegistriesValidateAllSevenTargets(t *testing.T) {
 			if !seen["all"] || len(names) != len(registry.core)+len(registry.optional)+1 {
 				t.Fatalf("incomplete registry: %+v", names)
 			}
-			for _, value := range []string{"", "unknown", names[0] + "," + names[0], "all," + names[0]} {
+			for _, name := range inputNames {
+				fields, err := parseProjectionFields(target, name)
+				if err != nil || len(fields) != 1 {
+					t.Fatalf("published selector %q rejected: %v", name, err)
+				}
+			}
+			if target == projectionTargetDraftList {
+				want := append(slices.Clone(registry.optional), "all")
+				if !slices.Equal(inputNames, want) {
+					t.Fatalf("draft list selectors=%v, want optional fields plus all: %v", inputNames, want)
+				}
+				for _, field := range registry.core {
+					if _, err := parseProjectionFields(target, field); err == nil {
+						t.Fatalf("fixed core field %q was accepted as a selector", field)
+					}
+				}
+			} else if !slices.Equal(inputNames, names) {
+				t.Fatalf("%s selectors differ from registry: got %v, want %v", target, inputNames, names)
+			}
+			for _, value := range []string{"", "unknown", inputNames[0] + "," + inputNames[0], "all," + inputNames[0]} {
 				if _, err := parseProjectionFields(target, value); err == nil {
 					t.Fatalf("invalid selector %q accepted", value)
 				}
@@ -263,10 +279,34 @@ func TestProjectionCapabilityPublishesSchemasAndLimits(t *testing.T) {
 		!slices.Equal(projection.AttachmentFields, projectionFieldNames(projectionTargetAttachment)) ||
 		!slices.Equal(projection.RawFields, projectionFieldNames(projectionTargetRaw)) ||
 		!slices.Equal(projection.DraftListFields, projectionFieldNames(projectionTargetDraftList)) ||
+		!slices.Equal(projection.DraftListCoreFields, projectionCoreFieldNames(projectionTargetDraftList)) ||
+		!slices.Equal(projection.DraftListOptionalFields, projectionOptionalFieldNames(projectionTargetDraftList)) ||
 		!slices.Equal(projection.ListPageFields, projectionFieldNames(projectionTargetListPage)) ||
 		!slices.Equal(projection.SearchPageFields, projectionFieldNames(projectionTargetSearchPage)) ||
 		!slices.Equal(projection.ExportCommands, []string{"messages.get", "messages.raw", "drafts.inspect"}) {
 		t.Fatalf("output projection schema = %+v", projection)
+	}
+	encoded, err := json.Marshal(capabilities())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published struct {
+		Limits struct {
+			OutputProjection struct {
+				DraftListFields         []string `json:"draft_list_fields"`
+				DraftListCoreFields     []string `json:"draft_list_core_fields"`
+				DraftListOptionalFields []string `json:"draft_list_optional_fields"`
+			} `json:"output_projection"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(encoded, &published); err != nil {
+		t.Fatal(err)
+	}
+	wireProjection := published.Limits.OutputProjection
+	if !slices.Equal(wireProjection.DraftListFields, projectionFieldNames(projectionTargetDraftList)) ||
+		!slices.Equal(wireProjection.DraftListCoreFields, projectionCoreFieldNames(projectionTargetDraftList)) ||
+		!slices.Equal(wireProjection.DraftListOptionalFields, projectionOptionalFieldNames(projectionTargetDraftList)) {
+		t.Fatalf("serialized draft-list field capability = %+v", wireProjection)
 	}
 }
 

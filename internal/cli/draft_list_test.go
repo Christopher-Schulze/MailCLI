@@ -106,6 +106,18 @@ func TestDraftListCLIRejectsInvalidAndCanceledRequests(t *testing.T) {
 	}
 }
 
+func TestDraftListFieldsRejectFixedCoreAndReportAllowedSelectors(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "absent"))
+	want := "--fields contains unknown draft list field \"ref\"; allowed fields: " + strings.Join(projectionFieldNames(projectionTargetDraftList), ", ")
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), service, []string{"drafts", "list", "--fields", "ref", "--json"}, &stdout, &stderr)
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 2 || response.OK || response.Error == nil ||
+		response.Error.Code != "invalid_argument" || response.Error.Message != want || stderr.Len() != 0 {
+		t.Fatalf("fixed field selector: code=%d, decode=%v, stdout=%s, stderr=%s", code, err, stdout.String(), stderr.String())
+	}
+}
+
 func TestDraftListCLIShowsRecordErrorsWithoutLeakingContent(t *testing.T) {
 	root := t.TempDir()
 	ref := "draft_000000000000000000000000"
@@ -132,7 +144,7 @@ func TestDraftListSchemaBoundsMatchExecutable(t *testing.T) {
 	fields := flags["--fields"]
 	if limit.Default != strconv.Itoa(mail.DefaultDraftListLimit) || limit.Minimum == nil || *limit.Minimum != 1 || limit.Maximum == nil || *limit.Maximum != int64(mail.MaximumDraftListLimit) || flags["--cursor"].ValueType != "cursor" ||
 		maxBytes.Default != strconv.FormatInt(defaultJSONOutputBytes, 10) || maxBytes.Minimum == nil || *maxBytes.Minimum != 1 || maxBytes.Maximum == nil || *maxBytes.Maximum != maximumJSONOutputBytes ||
-		fields.ValueType != "field_list" || !slices.Contains(fields.Values, "age_days") || !slices.Contains(fields.Values, "send_attempt") {
+		fields.ValueType != "field_list" || !slices.Equal(fields.Values, projectionFieldNames(projectionTargetDraftList)) {
 		t.Fatalf("incomplete pagination schema: %+v", schema)
 	}
 	previewFlags := schemaFlagsByName(decodeTestCommandSchema(t, schemaForCommand("drafts.preview")))
@@ -184,6 +196,15 @@ func TestDraftListCustomFieldsPreserveReviewAndCursorState(t *testing.T) {
 		}
 		if pageNumber == 0 {
 			revision = pagination.Revision
+			var allOutput, allStderr bytes.Buffer
+			allArgs := []string{"drafts", "list", "--limit", "2", "--fields", "all", "--json"}
+			if code := Run(context.Background(), service, allArgs, &allOutput, &allStderr); code != 0 || allStderr.Len() != 0 {
+				t.Fatalf("all-fields listing failed: code=%d, stdout=%s, stderr=%s", code, allOutput.String(), allStderr.String())
+			}
+			if stdout.Len() >= allOutput.Len() {
+				t.Fatalf("optional projection did not reduce JSON bytes: age_days=%d all=%d", stdout.Len(), allOutput.Len())
+			}
+			t.Logf("draft-list projection bytes: age_days=%d, all=%d, omitted optional fields save=%d", stdout.Len(), allOutput.Len(), allOutput.Len()-stdout.Len())
 		}
 		if pagination.Revision != revision || (pagination.NextCursor == "") != (pageNumber == 1) {
 			t.Fatalf("projection changed listing continuation: %+v", pagination)

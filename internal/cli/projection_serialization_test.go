@@ -160,7 +160,7 @@ func TestDefaultProjectionKeysPreserveTargetPolicies(t *testing.T) {
 }
 
 func TestDraftListRegistryKeepsCorruptStateEvidence(t *testing.T) {
-	for _, field := range []string{"all", "age_days", "ref"} {
+	for _, field := range []string{"all", "age_days", "created_at"} {
 		fields, err := parseProjectionFields(projectionTargetDraftList, field)
 		if err != nil {
 			t.Fatal(err)

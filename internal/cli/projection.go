@@ -609,13 +609,29 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 	}
 }
 
+// projectionFieldNames lists the accepted values for each target's --fields selector.
 func projectionFieldNames(target projectionTarget) []string {
+	if target == projectionTargetDraftList {
+		return append(slices.Clone(projectionRegistry(target).optional), "all")
+	}
+	return projectionOutputFieldNames(target)
+}
+
+func projectionOutputFieldNames(target projectionTarget) []string {
 	registry := projectionRegistry(target)
 	if len(registry.core)+len(registry.optional) == 0 {
 		return nil
 	}
 	fields := append(slices.Clone(registry.core), registry.optional...)
 	return append(fields, "all")
+}
+
+func projectionCoreFieldNames(target projectionTarget) []string {
+	return slices.Clone(projectionRegistry(target).core)
+}
+
+func projectionOptionalFieldNames(target projectionTarget) []string {
+	return slices.Clone(projectionRegistry(target).optional)
 }
 
 func projectMessageListPage(page mail.MessagePage, fields map[string]struct{}) *json.RawMessage {
@@ -761,7 +777,7 @@ func (o outputOptions) includes(field string) bool {
 }
 
 func projectionFields(target projectionTarget, options outputOptions, contentRetained bool) []string {
-	names := projectionFieldNames(target)
+	names := projectionOutputFieldNames(target)
 	fields := make([]string, 0, len(names))
 	for _, field := range names {
 		if field == "all" {
