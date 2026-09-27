@@ -444,16 +444,12 @@ func TestFileAccessGateRejectsFIFOWithoutBlockingOpen(t *testing.T) {
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFileAccessGateFIFOHelper$")
-	command.Env = append(os.Environ(), "MAILCLI_GATE_FIFO_HELPER=1", "MAILCLI_GATE_PATH="+path)
-	output, err := command.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("opening a FIFO blocked past the bound: %s", output)
-	}
-	if err != nil || string(output) != "rejected\nPASS\n" {
-		t.Fatalf("FIFO helper output = %q, error = %v", output, err)
+	command, output := startAccessGateTestProcess(t, "TestFileAccessGateFIFOHelper",
+		"MAILCLI_GATE_FIFO_HELPER=1", "MAILCLI_GATE_PATH="+path)
+	assertAccessGateTestLine(t, output, "rejected\n")
+	assertAccessGateTestLine(t, output, "PASS\n")
+	if err := command.Wait(); err != nil {
+		t.Fatalf("FIFO helper exit: %v", err)
 	}
 }
 
