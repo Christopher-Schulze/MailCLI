@@ -2,13 +2,16 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: report-task-ci.sh FULL_40_HEX_TASK_COMMIT | --pending|--completion --run-task NNN\n' >&2
+  printf 'Usage: report-task-ci.sh [--manual] FULL_40_HEX_TASK_COMMIT | --pending|--completion|--local-completion --run-task NNN\n' >&2
 }
 
 MODE=single
-if [[ "$#" == 3 && ( "$1" == --pending || "$1" == --completion ) && "$2" == --run-task && "$3" =~ ^[0-9]{3}$ ]]; then
+if [[ "$#" == 3 && ( "$1" == --pending || "$1" == --completion || "$1" == --local-completion ) && "$2" == --run-task && "$3" =~ ^[0-9]{3}$ ]]; then
   MODE="$1"
   RUN_TASK="$3"
+elif [[ "$#" == 2 && "$1" == --manual && "$2" =~ ^[0-9a-f]{40}$ ]]; then
+  MODE=manual
+  TASK_COMMIT="$2"
 elif [[ "$#" == 1 && "$1" =~ ^[0-9a-f]{40}$ ]]; then
   TASK_COMMIT="$1"
 else
@@ -21,7 +24,9 @@ unknown() {
   exit 3
 }
 
-for REQUIRED_COMMAND in gh jq; do
+REQUIRED_COMMANDS=(jq)
+[[ "${MODE}" == --local-completion ]] || REQUIRED_COMMANDS=(gh jq)
+for REQUIRED_COMMAND in "${REQUIRED_COMMANDS[@]}"; do
   if ! command -v "${REQUIRED_COMMAND}" >/dev/null 2>&1; then
     printf 'ci_receipt=unavailable\nci_reason=missing_%s\n' "${REQUIRED_COMMAND}"
     exit 69
@@ -30,6 +35,7 @@ done
 
 query_ci() (
 TASK_COMMIT="$1"
+CI_EVENT="${2:-push}"
 CI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 CI_REMOTE="$(git -C "${CI_ROOT}" remote get-url origin 2>/dev/null)" || unknown missing_origin
 case "${CI_REMOTE}" in
@@ -41,7 +47,7 @@ CI_REPOSITORY="${CI_REPOSITORY%.git}"
 [[ "${CI_REPOSITORY}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || unknown invalid_origin
 printf 'ci_commit=%s\n' "${TASK_COMMIT}"
 RUNS="$(gh run list --repo "${CI_REPOSITORY}" --commit "${TASK_COMMIT}" --workflow ci.yml \
-  --event push --branch main --limit 20 \
+  --event "${CI_EVENT}" --branch main --limit 20 \
   --json databaseId,headSha,status,conclusion,createdAt,url,event,headBranch,name,attempt,workflowDatabaseId)" ||
   unknown run_list_unavailable
 RUN_COUNT="$(jq -er 'if type == "array" then length else error("run list is not an array") end' \
@@ -52,9 +58,9 @@ fi
 if [[ "${RUN_COUNT}" -ne 1 ]]; then
   unknown ambiguous_runs
 fi
-if ! jq -e --arg sha "${TASK_COMMIT}" '
+if ! jq -e --arg sha "${TASK_COMMIT}" --arg event "${CI_EVENT}" '
   .[0] |
-  .headSha == $sha and .event == "push" and .headBranch == "main" and
+  .headSha == $sha and .event == $event and .headBranch == "main" and
   .name == "ci" and (.databaseId | type == "number") and
   (.databaseId > 0) and (.databaseId | floor == .) and (.attempt | type == "number") and
   (.attempt > 0) and (.attempt | floor == .) and
@@ -70,9 +76,9 @@ RUN="$(gh run view "${RUN_ID}" --repo "${CI_REPOSITORY}" \
   --json databaseId,headSha,status,conclusion,url,event,headBranch,name,attempt,workflowDatabaseId)" ||
   unknown run_view_unavailable
 if ! jq -e --arg sha "${TASK_COMMIT}" --argjson id "${RUN_ID}" \
-  --argjson min_attempt "${LIST_ATTEMPT}" --argjson workflow "${WORKFLOW_ID}" --arg repository "${CI_REPOSITORY}" '
+  --argjson min_attempt "${LIST_ATTEMPT}" --argjson workflow "${WORKFLOW_ID}" --arg repository "${CI_REPOSITORY}" --arg event "${CI_EVENT}" '
   type == "object" and .databaseId == $id and .headSha == $sha and
-  .event == "push" and .headBranch == "main" and .name == "ci" and
+  .event == $event and .headBranch == "main" and .name == "ci" and
   .workflowDatabaseId == $workflow and (.attempt | type == "number") and
   (.attempt | floor == .) and .attempt >= $min_attempt and
   (.status | type == "string") and (.conclusion == null or
@@ -130,6 +136,10 @@ report_run() {
     ((.initial_done - .initial_open) | length) == (.initial_done | length)
   ' <<<"${WINDOW}" >/dev/null 2>&1 || unknown malformed_run_window
   BASE="$(jq -r '.base_sha' <<<"${WINDOW}")"
+  if [[ "${MODE}" == --local-completion ]] &&
+    ! jq -e '.completion_policy == "local_full"' <<<"${WINDOW}" >/dev/null; then
+    unknown local_policy_required
+  fi
   INITIAL_DONE="$(jq -c '.initial_done' <<<"${WINDOW}")"
   git -C "${ROOT}" merge-base --is-ancestor "${BASE}" HEAD || unknown unrelated_run_baseline
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-ci-report.XXXXXX")"
@@ -141,13 +151,14 @@ report_run() {
     ID="${FILE##*/}"; ID="${ID:0:3}"
     if jq -e --arg id "${ID}" 'index($id) != null' <<<"${INITIAL_DONE}" >/dev/null; then continue; fi
     RECORD="$(sed -n 's/^- ci_record: //p' "${FILE}")"
-    jq -e --arg base "${BASE}" --arg id "${ID}" '
+    jq -e --arg base "${BASE}" --arg id "${ID}" --arg mode "${MODE}" '
       def sha: type == "string" and test("^[0-9a-f]{40}$");
       .schema == 1 and .run_base == $base and .task_id == $id and (.closed_head | sha) and
       ((.product_commit == null and .group_head == null and .ci_state == "not_required" and
         .run_id == null and .attempt == null and .url == null) or
        ((.product_commit | sha) and
-        ((.group_head == null and .ci_state == "unpublished" and .run_id == null and .attempt == null and .url == null) or
+        ((.group_head == null and (.ci_state == "unpublished" or
+          ($mode == "--local-completion" and .ci_state == "not_required")) and .run_id == null and .attempt == null and .url == null) or
          ((.group_head | sha) and (.ci_state | IN("pending", "success", "failed", "unknown")) and
           (if .ci_state == "success" then
             (.run_id | type == "number" and . > 0 and floor == .) and
@@ -210,6 +221,26 @@ report_run() {
         unknown "uncovered_product_commit_${MEMBER}"
     done
   done < <(git -C "${ROOT}" log --format='%H%x09%s' "${BASE}..HEAD")
+  if [[ "${MODE}" == --local-completion ]]; then
+    STATUS=0
+    if ! jq -se --argjson expected "$(jq -c '.initial_open' <<<"${WINDOW}")" \
+      'map(.task_id) as $done | ($expected - $done) | length == 0' "${TEST_ROOT}/records" >/dev/null; then
+      printf 'ci_reason=incomplete_run_closure_set\n'
+      STATUS=2
+    fi
+    OPEN_COUNT="$(grep -Ec '^- \[[ ~!]\] [0-9]{3} ' "${ROOT}/docs/tasks.md" || true)"
+    if [[ "${OPEN_COUNT}" != 0 ]]; then
+      printf 'ci_reason=open_task_board\n'
+      STATUS=2
+    fi
+    [[ "${STATUS}" == 0 ]] || return "${STATUS}"
+    if [[ ! -x "${ROOT}/scripts/tests/test.sh" ]] ||
+      ! "${ROOT}/scripts/tests/test.sh" --push-check; then
+      unknown invalid_local_full_proof
+    fi
+    printf 'verification_policy=local_full\nhosted_ci=optional\nci_run_base=%s\nci_report_status=0\n' "${BASE}"
+    return 0
+  fi
   STATUS=0
   while IFS= read -r GROUP; do
     GROUP_STATUS=0
@@ -263,6 +294,8 @@ report_run() {
 
 if [[ "${MODE}" == single ]]; then
   query_ci "${TASK_COMMIT}"
+elif [[ "${MODE}" == manual ]]; then
+  query_ci "${TASK_COMMIT}" workflow_dispatch
 else
   report_run
 fi

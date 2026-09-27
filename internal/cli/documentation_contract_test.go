@@ -144,6 +144,16 @@ func TestBatchOutputDocumentationMatchesRuntimeContract(t *testing.T) {
 func TestCIRunnerDocumentationMatchesWorkflow(t *testing.T) {
 	workflow := strings.ReplaceAll(readRepositoryFile(t, ".github/workflows/ci.yml"), "\r\n", "\n")
 	paragraph := ciDocumentationParagraph(t, readRepositoryFile(t, "docs/documentation.md"))
+	_, triggers, found := strings.Cut(workflow, "\non:\n")
+	events, _, ended := strings.Cut(triggers, "\npermissions:\n")
+	if !found || !ended || strings.TrimSpace(events) != "workflow_dispatch:" {
+		t.Error("online CI must start only by manual dispatch")
+	}
+	for _, claim := range []string{"manual `workflow_dispatch`", "no automatic push or pull-request runs", "final integrated local full proof"} {
+		if !strings.Contains(paragraph, claim) {
+			t.Errorf("CI documentation omits local/manual policy %q", claim)
+		}
+	}
 	runners := ciWorkflowRunners(t, workflow)
 	if len(runners) == 0 {
 		t.Fatal("CI workflow declares no runner label")

@@ -23,7 +23,7 @@ printf '%s\n' \
   '    fi' \
   '    [[ " $* " == *" --commit ${MAILCLI_CI_TEST_SHA} "* ]] || exit 91' \
   '    [[ " $* " == *" --workflow ci.yml "* ]] || exit 91' \
-  '    [[ " $* " == *" --event push "* ]] || exit 91' \
+  '    [[ " $* " == *" --event ${MAILCLI_CI_TEST_EVENT:-push} "* ]] || exit 91' \
   '    [[ " $* " == *" --branch main "* ]] || exit 91' \
   '    printf "%s\n" "${MAILCLI_CI_TEST_LIST}" ;;' \
   '  "run view")' \
@@ -55,9 +55,11 @@ check_case() {
   local RUN_VIEW="$5"
   local OUTPUT
   local ACTUAL_EXIT=0
+  local ARGUMENTS=("${SHA}")
+  [[ "${MAILCLI_CI_TEST_EVENT:-push}" != workflow_dispatch ]] || ARGUMENTS=(--manual "${SHA}")
   OUTPUT="$(MAILCLI_ROOT="${QUERY_ROOT}" MAILCLI_CI_TEST_SHA="${SHA}" MAILCLI_CI_TEST_LIST="${RUN_LIST}" \
     MAILCLI_CI_TEST_VIEW="${RUN_VIEW}" PATH="${TEST_ROOT}:${PATH}" \
-    "${REPORT}" "${SHA}" 2>&1)" || ACTUAL_EXIT=$?
+    "${REPORT}" "${ARGUMENTS[@]}" 2>&1)" || ACTUAL_EXIT=$?
   if [[ "${ACTUAL_EXIT}" -ne "${EXPECTED_EXIT}" ||
     "${OUTPUT}" != *"${EXPECTED_MARKER}"* ]]; then
     printf '%s: exit %s, output %s\n' "${NAME}" "${ACTUAL_EXIT}" "${OUTPUT}" >&2
@@ -66,6 +68,10 @@ check_case() {
 }
 
 check_case success 0 'ci_receipt=success' "${LIST}" "${VIEW}"
+MAILCLI_CI_TEST_EVENT=workflow_dispatch check_case manual_success 0 'ci_receipt=success' \
+  "$(jq '.[0].event = "workflow_dispatch"' <<<"${LIST}")" "$(jq '.event = "workflow_dispatch"' <<<"${VIEW}")"
+MAILCLI_CI_TEST_EVENT=workflow_dispatch check_case manual_wrong_event 3 'ci_reason=view_identity_mismatch' \
+  "$(jq '.[0].event = "workflow_dispatch"' <<<"${LIST}")" "${VIEW}"
 check_case mismatched_sha 3 'ci_reason=list_identity_mismatch' \
   "$(jq --arg sha "${OLD_SHA}" '.[0].headSha = $sha' <<<"${LIST}")" "${VIEW}"
 check_case missing_run 3 'ci_reason=missing_run' '[]' "${VIEW}"
@@ -231,4 +237,22 @@ git -C "${REPOSITORY}" checkout -q --detach "${SECOND}"
 printf '# TASK 529: No change\n\n- ci_record: %s\n' "$(jq -c . <<<"${NO_CHANGE}")" >"${REPOSITORY}/docs/tasks/done/529-no-change.md"
 printf -- '- [ ] 500 Unfinished -> tasks/500-unfinished.md\n' >>"${REPOSITORY}/docs/tasks.md"
 check_run --completion 2 open_task_board
+check_run --local-completion 3 local_policy_required
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
+WINDOW="$(jq -c '.completion_policy = "local_full"' <<<"${WINDOW}")"
+printf '# TASK 512: Fixture window\n\n- ci_run_window: %s\n' "${WINDOW}" >"${REPOSITORY}/docs/tasks/done/512-window.md"
+check_run --local-completion 2 open_task_board
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
+printf '# Tasks\n\n## Active\n\n## Queue\n\n## Blocked\n\n## Done\n' >"${REPOSITORY}/docs/tasks.md"
+INCOMPLETE_WINDOW="$(jq -c '.initial_open += ["538"]' <<<"${WINDOW}")"
+printf '# TASK 512: Fixture window\n\n- ci_run_window: %s\n' "${INCOMPLETE_WINDOW}" >"${REPOSITORY}/docs/tasks/done/512-window.md"
+check_run --local-completion 2 incomplete_run_closure_set
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
+printf '# TASK 512: Fixture window\n\n- ci_run_window: %s\n' "${WINDOW}" >"${REPOSITORY}/docs/tasks/done/512-window.md"
+LOCAL_RECORD="$(jq -c '.ci_state = "not_required" | .group_head = null | .run_id = null | .attempt = null | .url = null | del(.previous_failed_receipt)' <<<"${REPAIRED}")"
+printf '# TASK 513: Local acceptance\n\n- ci_record: %s\n' "${LOCAL_RECORD}" >"${REPOSITORY}/docs/tasks/done/513-fixture.md"
+check_run --completion 3 missing_or_malformed_task_513
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
+check_run --local-completion 3 invalid_local_full_proof
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
 printf 'Task CI receipt passed: exit classes, exact run identity, grouped ancestry/deduplication, complete closure mappings, unpublished and no-change state\n'

@@ -116,7 +116,7 @@ printf 'old skill\n' >"${SKILL_DESTINATION}/SKILL.md"
 WAIT_ENV="${TEST_ROOT}/record-installer-entry.sh"
 # shellcheck disable=SC2016
 printf '%s\n' \
-  'if [[ "$0" == */scripts/release/install.sh ]]; then' \
+  'if [[ -n "${MAILCLI_INSTALL_PACKAGE_ROOT:-}" ]]; then' \
   '  : > "$MAILCLI_TEST_INSTALLER_ENTERED"' \
   'fi' >"${WAIT_ENV}"
 exec 9<>"${TEST_HOME}/Library/Application Support/MailCLI/update.lock"
