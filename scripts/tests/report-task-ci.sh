@@ -201,9 +201,13 @@ report_run() {
     [[ "${SUBJECT}" =~ ^TASK\ ([0-9]{3}(,\ [0-9]{3})*):\  ]] || continue
     MEMBERS="${BASH_REMATCH[1]}"
     for MEMBER in ${MEMBERS//,/ }; do
-      jq -se --arg id "${MEMBER}" --arg commit "${COMMIT}" \
-        'map(select(.task_id == $id and .product_commit == $commit)) | length == 1' \
-        "${TEST_ROOT}/records" >/dev/null || unknown "missing_product_mapping_${MEMBER}"
+      local ACCEPTED_PRODUCT
+      ACCEPTED_PRODUCT="$(jq -ser --arg id "${MEMBER}" \
+        'map(select(.task_id == $id and .product_commit != null)) |
+         if length == 1 then .[0].product_commit else error("missing accepted product") end' \
+        "${TEST_ROOT}/records")" || unknown "missing_product_mapping_${MEMBER}"
+      git -C "${ROOT}" merge-base --is-ancestor "${COMMIT}" "${ACCEPTED_PRODUCT}" ||
+        unknown "uncovered_product_commit_${MEMBER}"
     done
   done < <(git -C "${ROOT}" log --format='%H%x09%s' "${BASE}..HEAD")
   STATUS=0

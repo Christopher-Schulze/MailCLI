@@ -212,6 +212,23 @@ done
 check_run --completion 0 ci_report_status=0
 [[ "$(wc -l <"${TEST_ROOT}/calls.log" | tr -d ' ')" == 2 ]]
 grep -Fq 'previous_failed_receipt' "${REPOSITORY}/docs/tasks/done/508-fixture.md"
+# A final accepted product covers earlier same-task implementations, not sibling commits.
+INTERMEDIATE_PRODUCT="$(printf 'TASK 529: Intermediate implementation\n' | git -C "${REPOSITORY}" commit-tree "${TREE}" -p "${SECOND}")"
+FINAL_PRODUCT="$(printf 'TASK 529: Final accepted implementation\n' | git -C "${REPOSITORY}" commit-tree "${TREE}" -p "${INTERMEDIATE_PRODUCT}")"
+git -C "${REPOSITORY}" checkout -q --detach "${FINAL_PRODUCT}"
+FINAL_RECORD="$(jq --arg sha "${FINAL_PRODUCT}" \
+  '.product_commit = $sha | .closed_head = $sha | .group_head = null | .ci_state = "unpublished" |
+   .run_id = null | .attempt = null | .url = null' <<<"${NO_CHANGE}")"
+printf '# TASK 529: Final implementation\n\n- ci_record: %s\n' "$(jq -c . <<<"${FINAL_RECORD}")" >"${REPOSITORY}/docs/tasks/done/529-no-change.md"
+check_run --pending 2 ci_unpublished=true
+[[ "$(wc -l <"${TEST_ROOT}/calls.log" | tr -d ' ')" == 2 ]]
+SIBLING_PRODUCT="$(printf 'TASK 529: Unaccepted sibling implementation\n' | git -C "${REPOSITORY}" commit-tree "${TREE}" -p "${INTERMEDIATE_PRODUCT}")"
+MERGED_PRODUCT="$(printf 'Merge fixture branches\n' | git -C "${REPOSITORY}" commit-tree "${TREE}" -p "${FINAL_PRODUCT}" -p "${SIBLING_PRODUCT}")"
+git -C "${REPOSITORY}" checkout -q --detach "${MERGED_PRODUCT}"
+check_run --pending 3 uncovered_product_commit_529
+[[ ! -s "${TEST_ROOT}/calls.log" ]]
+git -C "${REPOSITORY}" checkout -q --detach "${SECOND}"
+printf '# TASK 529: No change\n\n- ci_record: %s\n' "$(jq -c . <<<"${NO_CHANGE}")" >"${REPOSITORY}/docs/tasks/done/529-no-change.md"
 printf -- '- [ ] 500 Unfinished -> tasks/500-unfinished.md\n' >>"${REPOSITORY}/docs/tasks.md"
 check_run --completion 2 open_task_board
 printf 'Task CI receipt passed: exit classes, exact run identity, grouped ancestry/deduplication, complete closure mappings, unpublished and no-change state\n'
