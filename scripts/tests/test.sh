@@ -8,6 +8,7 @@ export MAILCLI_ROOT
 SHELL_TESTS=(
   scripts/tests/test-preflight-cache.sh
   scripts/tests/test-bootstrap.sh
+  scripts/tests/test-benchmark-summary.sh
   scripts/tests/test-install-local.sh
   scripts/tests/test-skill-drift.sh
   scripts/tests/test-write-coordination.sh
@@ -189,6 +190,7 @@ fi
 if [[ "${1:-}" != --core-only ]]; then
   run_shell_test scripts/tests/test-preflight-cache.sh
   run_shell_test scripts/tests/test-bootstrap.sh
+  run_shell_test scripts/tests/test-benchmark-summary.sh
   run_shell_test scripts/tests/test-install-local.sh
   run_shell_test scripts/tests/test-skill-drift.sh
 fi

@@ -8,6 +8,7 @@ RESULT_DIRECTORY="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-performance-evidence.XXXX
 SELECTED_GROUP=""
 SELECTED_GROUP_FOUND=false
 trap 'rm -rf "${RESULT_DIRECTORY}"' EXIT
+source "${MAILCLI_ROOT}/scripts/benchmarks/summarize-performance-evidence.sh"
 
 usage() {
   printf '%s\n' \
@@ -25,126 +26,6 @@ if [[ "$#" -gt 0 ]]; then
   [[ "$#" -eq 2 && "$1" == "--group" && -n "$2" ]] || { usage >&2; exit 2; }
   SELECTED_GROUP="$2"
 fi
-
-summarize_results() {
-  local RESULT_PATH="$1"
-  local EXPECTED_REPETITIONS="$2"
-  local SAMPLE_PATH="${RESULT_PATH}.samples"
-
-  awk '
-    /^Benchmark/ {
-      name = $1
-      sub(/-[0-9]+$/, "", name)
-      ns = ""
-      bytes = ""
-      allocs = ""
-      messages = "-"
-      index_bytes = "-"
-      source_bytes = "-"
-      catalog_builds = "-"
-      sent_scan_queries = "-"
-      binding_loads = "-"
-      credential_loads = "-"
-      for (field = 2; field < NF; field++) {
-        if ($(field + 1) == "ns/op") ns = $field
-        if ($(field + 1) == "B/op") bytes = $field
-        if ($(field + 1) == "allocs/op") allocs = $field
-        if ($(field + 1) == "messages") messages = $field
-        if ($(field + 1) == "index_B") index_bytes = $field
-        if ($(field + 1) == "source_B") source_bytes = $field
-        if ($(field + 1) == "catalog_builds/op") catalog_builds = $field
-        if ($(field + 1) == "sent_scan_queries/op") sent_scan_queries = $field
-        if ($(field + 1) == "binding_loads/op") binding_loads = $field
-        if ($(field + 1) == "credential_loads/op") credential_loads = $field
-      }
-      if (ns != "" && bytes != "" && allocs != "") {
-        printf "%s\t%.3f\t%.3f\t%.3f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-          name, ns, bytes, allocs, messages, index_bytes, source_bytes,
-          catalog_builds, sent_scan_queries, binding_loads, credential_loads
-      }
-    }
-  ' "${RESULT_PATH}" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n >"${SAMPLE_PATH}"
-
-  [[ -s "${SAMPLE_PATH}" ]] || {
-    printf 'No benchmark samples were recorded in %s\n' "${RESULT_PATH}" >&2
-    return 1
-  }
-
-  awk -F '\t' -v expected="${EXPECTED_REPETITIONS}" '
-    function percentile_metric(values, name, samples, rank, ordered, sample, position, value) {
-      for (sample = 1; sample <= samples; sample++) {
-        value = values[name, sample] + 0
-        for (position = sample; position > 1 && ordered[position - 1] > value; position--) {
-          ordered[position] = ordered[position - 1]
-        }
-        ordered[position] = value
-      }
-      return ordered[rank]
-    }
-    BEGIN { failed = 0 }
-    {
-      name = $1
-      if (!(name in seen)) {
-        seen[name] = 1
-        names[++name_count] = name
-      }
-      count[name]++
-      sample = count[name]
-      ns[name, sample] = $2
-      bytes[name, sample] = $3
-      allocs[name, sample] = $4
-      if (sample == 1) {
-        fixture_messages[name] = $5
-        fixture_index_bytes[name] = $6
-        fixture_source_bytes[name] = $7
-        catalog_builds[name, sample] = $8
-        sent_scan_queries[name, sample] = $9
-        binding_loads[name, sample] = $10
-        credential_loads[name, sample] = $11
-      } else if (fixture_messages[name] != $5 || fixture_index_bytes[name] != $6 ||
-        fixture_source_bytes[name] != $7 || catalog_builds[name, 1] != $8 ||
-        sent_scan_queries[name, 1] != $9 || binding_loads[name, 1] != $10 ||
-        credential_loads[name, 1] != $11) {
-        printf "Benchmark %s changed its fixture metrics between repetitions\n", name > "/dev/stderr"
-        failed = 1
-      }
-    }
-    END {
-      for (name_index = 1; name_index <= name_count; name_index++) {
-        name = names[name_index]
-        samples = count[name]
-        if (samples != expected) {
-          printf "Benchmark %s recorded %d samples, want %d\n", name, samples, expected > "/dev/stderr"
-          failed = 1
-          continue
-        }
-        if (name ~ /^BenchmarkMutationAccountResolution\// &&
-          (catalog_builds[name, 1] == "-" || sent_scan_queries[name, 1] == "-" ||
-            binding_loads[name, 1] == "-" || credential_loads[name, 1] == "-")) {
-          printf "Benchmark %s is missing account resolution counters\n", name > "/dev/stderr"
-          failed = 1
-          continue
-        }
-        p50 = int((samples + 1) / 2)
-        p95 = int((95 * samples + 99) / 100)
-        summary = sprintf("summary benchmark=%s repetitions=%d p50_ns/op=%.0f p95_ns/op=%.0f p50_B/op=%.0f p50_allocs/op=%.0f",
-          name, samples, ns[name, p50], ns[name, p95],
-          percentile_metric(bytes, name, samples, p50), percentile_metric(allocs, name, samples, p50))
-        if (name ~ /^BenchmarkMutationAccountResolution\//) {
-          summary = summary sprintf(" catalog_builds/op=%.0f sent_scan_queries/op=%.0f binding_loads/op=%.0f credential_loads/op=%.0f",
-            catalog_builds[name, 1], sent_scan_queries[name, 1],
-            binding_loads[name, 1], credential_loads[name, 1])
-        }
-        if (fixture_messages[name] != "-") {
-          summary = summary sprintf(" fixture_messages=%.0f index_B=%.0f source_B=%.0f",
-            fixture_messages[name], fixture_index_bytes[name], fixture_source_bytes[name])
-        }
-        print summary
-      }
-      exit failed
-    }
-  ' "${SAMPLE_PATH}"
-}
 
 run_group() {
   local NAME="$1"
@@ -164,7 +45,7 @@ run_group() {
   go test -run '^$' -bench "${REGEX}" -benchmem -benchtime "${BENCHTIME}" \
     -count "${BENCHMARK_REPETITIONS}" -cpu "${BENCHMARK_CPUS}" -timeout 10m "${PACKAGE}" |
     tee "${RESULT_PATH}"
-  summarize_results "${RESULT_PATH}" "${BENCHMARK_REPETITIONS}"
+  summarize_benchmark_results "${RESULT_PATH}" "${BENCHMARK_REPETITIONS}"
 }
 
 cd "${MAILCLI_ROOT}"

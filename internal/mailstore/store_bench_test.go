@@ -187,7 +187,6 @@ func BenchmarkListAccountsSenderIdentity50K(b *testing.B) {
 	store := openSenderIdentityBenchmarkStore(b)
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		if _, err := store.ListAccounts(ctx); err != nil {
 			b.Fatalf("list accounts with bounded sender identities: %v", err)
@@ -199,7 +198,6 @@ func BenchmarkListAccountsSenderIdentity50KUnbounded(b *testing.B) {
 	store := openSenderIdentityBenchmarkStore(b)
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		if err := listAccountsUnboundedSenderIdentityBenchmark(ctx, store); err != nil {
 			b.Fatalf("list accounts with unbounded sender identities: %v", err)
@@ -238,7 +236,6 @@ func BenchmarkLoadSenderIdentities50K(b *testing.B) {
 	store := openSenderIdentityBenchmarkStore(b)
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		if _, err := store.loadSenderIdentities(ctx, []int64{1}); err != nil {
 			b.Fatalf("load bounded sender identities: %v", err)
@@ -250,7 +247,6 @@ func BenchmarkLoadSenderIdentities50KUnbounded(b *testing.B) {
 	store := openSenderIdentityBenchmarkStore(b)
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		if _, err := loadSenderIdentitiesUnboundedBenchmark(ctx, store.database); err != nil {
 			b.Fatalf("load unbounded sender identities: %v", err)
@@ -365,7 +361,6 @@ func BenchmarkSearchFixture603(b *testing.B) {
 			}
 			ctx := context.Background()
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
 				page, err := store.SearchMessages(ctx, prepared)
 				if err != nil {
@@ -403,7 +398,6 @@ func BenchmarkGeneratedStoreInitialOpen(b *testing.B) {
 	config := Config{MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs}
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		store, err := Open(ctx, config)
 		if err != nil {
@@ -441,7 +435,6 @@ func newGeneratedStoreFixture(b testing.TB) searchFixtureData {
 
 func benchmarkGeneratedStoreOpenClose(b *testing.B, fixture searchFixtureData) {
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		store := openGeneratedStoreFixture(b, fixture)
 		if err := store.Close(); err != nil {
@@ -460,7 +453,6 @@ func benchmarkGeneratedStoreListAccounts(b *testing.B, fixture searchFixtureData
 	})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		accounts, err := store.ListAccounts(ctx)
 		if err != nil {
@@ -482,7 +474,6 @@ func benchmarkGeneratedStoreListMailboxes(b *testing.B, fixture searchFixtureDat
 	})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		mailboxes, err := store.ListMailboxes(
 			ctx, mail.ListMailboxesRequest{AccountRef: fixture.accountRef},
@@ -517,7 +508,6 @@ func benchmarkGeneratedStoreListMessages(b *testing.B, fixture searchFixtureData
 		}
 	})
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		page, err := store.ListMessages(ctx, mail.ListMessagesRequest{
 			MailboxRef: fixture.inboxRef, Limit: 25,
@@ -563,7 +553,6 @@ func BenchmarkListSummaryRead(b *testing.B) {
 			}
 			assertGeneratedStorePage(b, fixture, page)
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
 				page, err := store.ListMessages(ctx, request)
 				if err != nil || len(page.Messages) != 25 || page.NextCursor == "" {
@@ -601,7 +590,6 @@ func benchmarkGeneratedStoreGetMessage(b *testing.B, fixture searchFixtureData) 
 		}
 	})
 	b.ReportAllocs()
-	b.ResetTimer()
 	for b.Loop() {
 		message, err := store.GetMessage(ctx, messageRef)
 		if err != nil {
@@ -634,7 +622,6 @@ func BenchmarkSearchTextRepresentations(b *testing.B) {
 		b.Run(benchmark.name, func(b *testing.B) {
 			terms := normalizedSearchTerms(benchmark.term)
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
 				representations := newSearchTextRepresentations(benchmark.value)
 				matched, firstTerm := containsAllFoldedSearchTerms(representations.folded, terms)
@@ -936,7 +923,6 @@ func BenchmarkMutationAccountResolution(b *testing.B) {
 			store, client, bindings, credentials := openMutationIdentityClient(b, fixture)
 			messageRefs := mutationTargetReferences(b, store, fixture.searchFixtureData, benchmark.items)
 			b.ReportAllocs()
-			b.ResetTimer()
 			var lastInvocationCtx context.Context
 			for b.Loop() {
 				lastInvocationCtx = client.WithAccountBindingSnapshot(context.Background())
@@ -1005,7 +991,6 @@ func BenchmarkRawSourceBuilder(b *testing.B) {
 			}
 			runtime.GC()
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
 				raw, err := store.GetRawSource(ctx, messageRef)
 				if err != nil {
