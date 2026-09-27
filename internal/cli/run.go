@@ -105,6 +105,7 @@ type errorData struct {
 	Code                  string                          `json:"code"`
 	Message               string                          `json:"message"`
 	Guidance              *mail.OperationGuidance         `json:"guidance"`
+	Data                  *unknownSubcommandData          `json:"data,omitempty"`
 	IMAPRejection         *transport.IMAPCommandRejection `json:"imap_rejection,omitempty"`
 	ValidSubcommands      []string                        `json:"valid_subcommands,omitempty"`
 	RequiredBytes         *int64                          `json:"required_bytes,omitempty"`
@@ -114,6 +115,11 @@ type errorData struct {
 	DraftEditor           *draftEditorEvidence            `json:"draft_editor,omitempty"`
 	UnclaimedSpool        *mail.UnclaimedSpoolObservation `json:"unclaimed_spool,omitempty"`
 	outputSize            *outputSizeEvidence             `json:"-"`
+}
+
+type unknownSubcommandData struct {
+	Requested string   `json:"requested"`
+	Choices   []string `json:"choices"`
 }
 
 func newErrorData(command string, data responseData, err error) *errorData {
@@ -485,8 +491,12 @@ func runJSONCommand(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	if errorCode, message, command, validSubcommands := jsonSubcommandFailure(args); errorCode != "" {
-		if writeFailureEnvelope(stdout, command, errorCode, message, validSubcommands) != 0 {
+	if errorCode, message, command, validSubcommands, requested := jsonSubcommandFailure(args); errorCode != "" {
+		var details *unknownSubcommandData
+		if requested != "" {
+			details = &unknownSubcommandData{Requested: requested, Choices: validSubcommands}
+		}
+		if writeFailureEnvelope(stdout, command, errorCode, message, validSubcommands, details) != 0 {
 			return 1
 		}
 		return 2
@@ -519,37 +529,27 @@ func runJSONCommand(
 	return code
 }
 
-func jsonSubcommandFailure(args []string) (string, string, string, []string) {
+func jsonSubcommandFailure(args []string) (string, string, string, []string, string) {
 	if len(args) == 0 {
-		return "", "", "", nil
+		return "", "", "", nil, ""
 	}
-	prefix := args[0] + "."
-	validSubcommands := make([]string, 0)
-	for _, contract := range commandContracts {
-		if !strings.HasPrefix(contract.ID, prefix) {
-			continue
-		}
-		subcommand := strings.TrimPrefix(contract.ID, prefix)
-		if !strings.Contains(subcommand, ".") {
-			validSubcommands = append(validSubcommands, subcommand)
-		}
-	}
+	validSubcommands := commandFamilyChoices(args[0])
 	if len(validSubcommands) == 0 {
-		return "", "", "", nil
+		return "", "", "", nil, ""
 	}
 	if len(args) == 1 || args[1] == "--json" {
-		return "invalid_argument", args[0] + " requires a subcommand", args[0], validSubcommands
+		return "invalid_argument", args[0] + " requires a subcommand", args[0], validSubcommands, ""
 	}
 	if isHelpArgument(args[1]) {
-		return "", "", "", nil
+		return "", "", "", nil, ""
 	}
 	for _, validSubcommand := range validSubcommands {
 		if args[1] == validSubcommand {
-			return "", "", "", nil
+			return "", "", "", nil, ""
 		}
 	}
 	return "unknown_command", fmt.Sprintf("unknown %s command %q", args[0], args[1]),
-		AttemptedCommand(args), validSubcommands
+		args[0], validSubcommands, args[1]
 }
 
 type countingWriter struct {
@@ -611,72 +611,11 @@ func (w *countingWriter) Write(payload []byte) (int, error) {
 
 type commandRunner func(context.Context, *mail.Service, []string, io.Writer, io.Writer) int
 
-type commandSpec struct {
-	run commandRunner
-}
-
 // invocationStoreProfile carries the opened Mail-store profile into every
 // envelope written by this invocation. It is set once by Run before dispatch
 // and cleared on return; the CLI is a single-shot process and tests invoke Run
 // serially, so no command can observe another invocation's profile.
 var invocationStoreProfile *mail.StoreProfile
-
-var commandRegistry = map[string]commandSpec{
-	"help": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
-		writeHelp(stdout)
-		return 0
-	}},
-	"--help": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
-		writeHelp(stdout)
-		return 0
-	}},
-	"-h": {run: func(_ context.Context, _ *mail.Service, _ []string, stdout, _ io.Writer) int {
-		writeHelp(stdout)
-		return 0
-	}},
-	"version": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runVersion(args, stdout, stderr)
-	}},
-	"--version": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runVersion(args, stdout, stderr)
-	}},
-	"update": {run: func(ctx context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runUpdate(ctx, args, stdout, stderr)
-	}},
-	"capabilities": {run: func(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runCapabilities(args, stdout, stderr)
-	}},
-	"doctor": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runDoctor(ctx, service, args, stdout, stderr)
-	}},
-	"batch": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runBatch(ctx, service, args, stdout, stderr)
-	}},
-	"accounts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runAccounts(ctx, service, args, stdout, stderr)
-	}},
-	"mailboxes": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runMailboxes(ctx, service, args, stdout, stderr)
-	}},
-	"messages": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runMessages(ctx, service, args, stdout, stderr)
-	}},
-	"attachments": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runAttachments(ctx, service, args, stdout, stderr)
-	}},
-	"drafts": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runDrafts(ctx, service, args, stdout, stderr)
-	}},
-	"send": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		if service == nil {
-			return runSendWithBindingsContext(ctx, args, stdout, stderr, nil, nil)
-		}
-		return runSendWithBindingsContext(ctx, args, stdout, stderr, service.InvalidateCredentials, service.AccountBindingStore())
-	}},
-	"sync": {run: func(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-		return runSync(ctx, service, args, stdout, stderr)
-	}},
-}
 
 func runCommand(
 	ctx context.Context,
@@ -685,12 +624,117 @@ func runCommand(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	spec, ok := commandRegistry[args[0]]
-	if !ok {
-		writeFormat(stderr, "unknown command %q\nRun 'mailcli help' to list available commands.\n", args[0])
+	if len(args) == 0 || isHelpArgument(args[0]) {
+		writeHelp(stdout)
+		return 0
+	}
+	if args[0] == "--version" {
+		args = append([]string(nil), args...)
+		args[0] = "version"
+	}
+	if family := commandFamilyContract(args[0]); family != nil {
+		return family.familyHandler(ctx, mailService, args[1:], stdout, stderr)
+	}
+	contract, commandArgs := commandContractForArgs(args)
+	if contract != nil {
+		return contract.handler(ctx, mailService, commandArgs, stdout, stderr)
+	}
+	if len(commandFamilyChoices(args[0])) > 0 {
+		return runCommandFamily(ctx, mailService, args[0], args[1:], stdout, stderr, nil)
+	}
+	writeFormat(stderr, "unknown command %q\nRun 'mailcli help' to list available commands.\n", args[0])
+	return 2
+}
+
+func runCommandFamily(
+	ctx context.Context,
+	service *mail.Service,
+	family string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	handlerOverride commandRunner,
+) int {
+	choices := commandFamilyChoices(family)
+	if len(choices) == 0 {
+		writeFormat(stderr, "unknown command %q\nRun 'mailcli help' to list available commands.\n", family)
 		return 2
 	}
-	return spec.run(ctx, mailService, args[1:], stdout, stderr)
+	if len(args) == 0 {
+		if commandFamilyShowsHelpWhenEmpty(family) {
+			writeCommandFamilyUsage(stdout, family, choices)
+			return 0
+		}
+		writeCommandFamilyUsage(stderr, family, choices)
+		return 2
+	}
+	if isHelpArgument(args[0]) {
+		writeCommandFamilyUsage(stdout, family, choices)
+		return 0
+	}
+	contract := commandContractForFamily(family, args[0])
+	if contract == nil {
+		writeFormat(stderr, "unknown %s command %q\n", family, args[0])
+		return 2
+	}
+	handler := contract.handler
+	if handlerOverride != nil {
+		handler = handlerOverride
+	}
+	return handler(ctx, service, args[1:], stdout, stderr)
+}
+
+func writeCommandFamilyUsage(writer io.Writer, family string, choices []string) {
+	if family == "send" {
+		writeFormat(
+			writer,
+			"Usage:\n  mailcli send %s --from <email> [--account <ref>] [--credential-account <email>] [--smtp-host <host> --smtp-port <port>] [--imap-host <host> --imap-port <port>] [--remove] [--json]\n\n%s\n",
+			strings.Join(choices, "|"),
+			transport.ProviderSupportDescription(),
+		)
+		return
+	}
+	choiceText := strings.Join(choices, "|")
+	if len(choices) > 1 {
+		choiceText = "<" + choiceText + ">"
+	}
+	writeFormat(writer, "Usage:\n  mailcli %s %s [options]\n", family, choiceText)
+}
+
+func runCapabilitiesCommand(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runCapabilities(args, stdout, stderr)
+}
+
+func runSendCommandFamily(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runCommandFamily(ctx, service, "send", args, stdout, stderr, nil)
+}
+
+func runVersionCommand(_ context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runVersion(args, stdout, stderr)
+}
+
+func runUpdateCommand(ctx context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runUpdate(ctx, args, stdout, stderr)
+}
+
+func runDraftInspectCommand(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runDraftInspect(service, args, stdout, stderr)
+}
+
+func runDraftPreviewCommand(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runDraftPreview(service, args, stdout, stderr)
+}
+
+func runAttachmentsSaveCommand(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runAttachmentsSave(ctx, service, args, stdout, stderr)
+}
+
+func runMessageMove(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runMessageTransfer(ctx, service, false, args, stdout, stderr)
+}
+
+func runMessageCopy(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runMessageTransfer(ctx, service, true, args, stdout, stderr)
 }
 
 // NormalizeGlobalJSON moves a global --json flag to the command tail.
@@ -947,7 +991,7 @@ func writeJSON(writer io.Writer, value envelope) int {
 
 //go:noinline
 func WriteFailureEnvelope(writer io.Writer, command string, code string, message string) int {
-	return writeFailureEnvelope(writer, command, code, message, nil)
+	return writeFailureEnvelope(writer, command, code, message, nil, nil)
 }
 
 func writeFailureEnvelope(
@@ -956,9 +1000,11 @@ func writeFailureEnvelope(
 	code string,
 	message string,
 	validSubcommands []string,
+	details *unknownSubcommandData,
 ) int {
 	failure := newErrorData(command, responseData{}, &commandError{code: code, message: message})
 	failure.ValidSubcommands = validSubcommands
+	failure.Data = details
 	return writeJSON(writer, envelope{
 		SchemaVersion: schemaVersion,
 		OK:            false,
@@ -1018,20 +1064,13 @@ Local Apple Mail access for the shell and coding agents.
 Usage:
   mailcli <command> [flags]
 Commands:
-  accounts      List configured accounts and sender identities
-  mailboxes     List and resolve exact mailbox paths
-  messages      List, search, read, reply, forward, and organize messages
-  attachments   List and save received attachments
-  batch         Execute bounded explicit reads, attachment saves, and marks
-  drafts        Create, preview, edit, hand off, and prune drafts
-  send          Store or remove app-specific SMTP send credentials
-  sync          Synchronize with Mail.app or check server status over IMAP (--check)
-  update        Check GitHub and install the latest verified release
-  doctor        Verify the local MailCLI environment
-  capabilities  Print the machine-readable command contract
-  version       Print the installed version
-  help          Show this command overview
-
+`)
+	for _, contract := range commandRootContracts() {
+		command := strings.SplitN(contract.ID, ".", 2)[0]
+		writeFormat(writer, "  %-13s %s\n", command, contract.helpDescription)
+	}
+	writeLine(writer, "  help          Show this command overview")
+	writeRaw(writer, `
 Mail 16 scripted draft save remains disabled; visible handoff never sends.
 Direct SMTP send and IMAP mutations work without Mail.app: run 'mailcli send setup' once.
 `)

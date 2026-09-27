@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -89,6 +90,49 @@ func TestHelpContractTable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCommandContractsAreUniqueAndDispatchable(t *testing.T) {
+	seen := make(map[string]struct{}, len(commandContracts))
+	for _, contract := range commandContracts {
+		if _, exists := seen[contract.ID]; exists {
+			t.Errorf("duplicate command contract %q", contract.ID)
+		}
+		seen[contract.ID] = struct{}{}
+		if contract.handler == nil {
+			t.Errorf("command contract %q has no handler", contract.ID)
+		}
+		if len(commandFamilyChoices(strings.SplitN(contract.ID, ".", 2)[0])) > 0 &&
+			commandFamilyContract(strings.SplitN(contract.ID, ".", 2)[0]).familyHandler == nil {
+			t.Errorf("command family %q has no table router", strings.SplitN(contract.ID, ".", 2)[0])
+		}
+	}
+}
+
+func TestHelpAndFamilyChoicesComeFromCommandContracts(t *testing.T) {
+	var topLevel bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run(context.Background(), newTestService(), []string{"help"}, &topLevel, &stderr); code != 0 {
+		t.Fatalf("top-level help code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, contract := range commandRootContracts() {
+		command := strings.SplitN(contract.ID, ".", 2)[0]
+		entry := fmt.Sprintf("  %-13s %s", command, contract.helpDescription)
+		if contract.helpDescription == "" || !strings.Contains(topLevel.String(), entry) {
+			t.Errorf("top-level help is missing contract entry %q", entry)
+		}
+		choices := commandFamilyChoices(command)
+		if len(choices) == 0 {
+			continue
+		}
+		var familyHelp bytes.Buffer
+		if code := Run(context.Background(), newTestService(), []string{command, "--help"}, &familyHelp, &stderr); code != 0 {
+			t.Errorf("%s help code = %d, stderr = %q", command, code, stderr.String())
+		}
+		if !strings.Contains(familyHelp.String(), strings.Join(choices, "|")) {
+			t.Errorf("%s help = %q, want table choices %q", command, familyHelp.String(), choices)
+		}
 	}
 }
 

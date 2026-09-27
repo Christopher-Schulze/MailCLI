@@ -70,23 +70,32 @@ func runSendWithBindingsContext(
 	invalidateCredentials func(string),
 	bindings mail.AccountBindingStore,
 ) int {
-	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli send <setup> [options]")
-		return 2
-	}
-	switch args[0] {
-	case "help", "--help", "-h":
-		writeFormat(stdout, "Usage:\n  mailcli send setup --from <email> [--account <ref>] [--credential-account <email>] [--smtp-host <host> --smtp-port <port>] [--imap-host <host> --imap-port <port>] [--remove] [--json]\n\n%s\n", transport.ProviderSupportDescription())
-		return 0
-	case "setup":
+	handler := func(ctx context.Context, _ *mail.Service, args []string, stdout, stderr io.Writer) int {
 		if bindings == nil {
 			bindings = sendSetupBindings()
 		}
-		return runSendSetup(ctx, args[1:], stdout, stderr, invalidateCredentials, bindings)
-	default:
-		writeFormat(stderr, "unknown send command %q\n", args[0])
-		return 2
+		return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings)
 	}
+	return runCommandFamily(ctx, nil, "send", args, stdout, stderr, handler)
+}
+
+func runSendSetupCommand(
+	ctx context.Context,
+	service *mail.Service,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	var invalidateCredentials func(string)
+	var bindings mail.AccountBindingStore
+	if service != nil {
+		invalidateCredentials = service.InvalidateCredentials
+		bindings = service.AccountBindingStore()
+	}
+	if bindings == nil {
+		bindings = sendSetupBindings()
+	}
+	return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings)
 }
 
 func runSendSetup(

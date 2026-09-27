@@ -36,17 +36,13 @@ type codedError interface {
 }
 
 func runAccounts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	if len(args) > 0 && isHelpArgument(args[0]) {
-		writeLine(stdout, "Usage:\n  mailcli accounts list [--json]")
-		return 0
-	}
-	if len(args) == 0 || args[0] != "list" {
-		writeLine(stderr, "Usage:\n  mailcli accounts list [--json]")
-		return 2
-	}
+	return runCommandFamily(ctx, service, "accounts", args, stdout, stderr, nil)
+}
+
+func runAccountsList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("accounts list", stderr)
 	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if code := parseFlags(flags, args[1:], stdout, stderr); code >= 0 {
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 
@@ -180,21 +176,14 @@ func writeAccountCatalogWarnings(writer io.Writer, accounts []mail.Account) {
 }
 
 func runMailboxes(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		writeLine(stdout, "Usage:\n  mailcli mailboxes <list|resolve> [options]")
-		return 0
-	}
-	if args[0] == "resolve" {
-		return runMailboxResolve(ctx, service, args[1:], stdout, stderr)
-	}
-	if args[0] != "list" {
-		writeLine(stderr, "Usage:\n  mailcli mailboxes <list|resolve> [options]")
-		return 2
-	}
+	return runCommandFamily(ctx, service, "mailboxes", args, stdout, stderr, nil)
+}
+
+func runMailboxesList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("mailboxes list", stderr)
 	accountRef := flags.String("account", "", "scope to an account ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
-	if code := parseFlags(flags, args[1:], stdout, stderr); code >= 0 {
+	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 
@@ -269,44 +258,7 @@ func runMessages(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|thread|reply|forward|mark|move|copy|delete> [options]")
-		return 2
-	}
-	switch args[0] {
-	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli messages <list|filter|search|get|raw|state|thread|reply|forward|mark|move|copy|delete> [options]")
-		return 0
-	case "list":
-		return runMessagesList(ctx, mailService, args[1:], stdout, stderr)
-	case "filter":
-		return runMessagesFilter(ctx, mailService, args[1:], stdout, stderr)
-	case "search":
-		return runMessagesSearch(ctx, mailService, args[1:], stdout, stderr)
-	case "get":
-		return runMessagesGet(ctx, mailService, args[1:], stdout, stderr)
-	case "raw":
-		return runMessagesRaw(ctx, mailService, args[1:], stdout, stderr)
-	case "state":
-		return runMessageState(ctx, mailService, args[1:], stdout, stderr)
-	case "thread":
-		return runMessageThread(ctx, mailService, args[1:], stdout, stderr)
-	case "reply":
-		return runMessageReply(ctx, mailService, args[1:], stdout, stderr)
-	case "forward":
-		return runMessageForward(ctx, mailService, args[1:], stdout, stderr)
-	case "mark":
-		return runMessageMark(ctx, mailService, args[1:], stdout, stderr)
-	case "move":
-		return runMessageTransfer(ctx, mailService, false, args[1:], stdout, stderr)
-	case "copy":
-		return runMessageTransfer(ctx, mailService, true, args[1:], stdout, stderr)
-	case "delete":
-		return runMessageDelete(ctx, mailService, args[1:], stdout, stderr)
-	default:
-		writeFormat(stderr, "unknown messages command %q\n", args[0])
-		return 2
-	}
+	return runCommandFamily(ctx, mailService, "messages", args, stdout, stderr, nil)
 }
 
 func runMessagesList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

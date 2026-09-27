@@ -554,11 +554,12 @@ func assertJSONGroupSubcommandFailure(t *testing.T, group string, validSubcomman
 	wantCommand := group
 	wantCode := "invalid_argument"
 	wantMessage := group + " requires a subcommand"
+	wantRequested := ""
 	if !missing {
 		args = append(args, "missing")
-		wantCommand = group + ".missing"
 		wantCode = "unknown_command"
 		wantMessage = fmt.Sprintf("unknown %s command %q", group, "missing")
+		wantRequested = "missing"
 	}
 	args = append(args, "--json")
 	var stdout bytes.Buffer
@@ -577,6 +578,16 @@ func assertJSONGroupSubcommandFailure(t *testing.T, group string, validSubcomman
 	if response.OK || response.Command != wantCommand || response.Error.Code != wantCode ||
 		response.Error.Message != wantMessage || !slices.Equal(response.Error.ValidSubcommands, validSubcommands) {
 		t.Fatalf("response = %+v, valid_subcommands = %q", response, response.Error.ValidSubcommands)
+	}
+	if wantRequested == "" {
+		if response.Error.Data != nil {
+			t.Fatalf("missing-subcommand error data = %+v, want none", response.Error.Data)
+		}
+		return
+	}
+	if response.Error.Data == nil || response.Error.Data.Requested != wantRequested ||
+		!slices.Equal(response.Error.Data.Choices, validSubcommands) {
+		t.Fatalf("unknown-subcommand error data = %+v, want requested %q and choices %q", response.Error.Data, wantRequested, validSubcommands)
 	}
 }
 

@@ -47,48 +47,7 @@ func (e *commandError) Unwrap() error {
 }
 
 func runDrafts(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
-	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|adopt|send|reconcile|discard|prune> [options]")
-		return 2
-	}
-	switch args[0] {
-	case "help", "--help", "-h":
-		writeLine(stdout, "Usage:\n  mailcli drafts <create|list|inspect|preview|edit|handoff|handoff-reconcile|update|save|open|adopt|send|reconcile|discard|prune> [options]")
-		return 0
-	case "create":
-		return runDraftCreateContext(ctx, service, args[1:], stdout, stderr)
-	case "list":
-		return runDraftList(ctx, service, args[1:], stdout, stderr)
-	case "inspect":
-		return runDraftInspect(service, args[1:], stdout, stderr)
-	case "preview":
-		return runDraftPreview(service, args[1:], stdout, stderr)
-	case "edit":
-		return runDraftEdit(ctx, service, args[1:], stdout, stderr)
-	case "handoff":
-		return runDraftHandoff(ctx, service, args[1:], stdout, stderr)
-	case "handoff-reconcile":
-		return runDraftHandoffReconcile(ctx, service, args[1:], stdout, stderr)
-	case "update":
-		return runDraftUpdate(ctx, service, args[1:], stdout, stderr)
-	case "save":
-		return runDraftSave(ctx, service, args[1:], stdout, stderr)
-	case "open":
-		return runMailDraftOpen(ctx, service, args[1:], stdout, stderr)
-	case "adopt":
-		return runDraftAdopt(ctx, service, args[1:], stdout, stderr)
-	case "send":
-		return runDraftSend(ctx, service, args[1:], stdout, stderr)
-	case "reconcile":
-		return runDraftReconcile(ctx, service, args[1:], stdout, stderr)
-	case "discard":
-		return runDraftDiscard(ctx, service, args[1:], stdout, stderr)
-	case "prune":
-		return runDraftPrune(ctx, service, args[1:], stdout, stderr)
-	default:
-		writeFormat(stderr, "unknown drafts command %q\n", args[0])
-		return 2
-	}
+	return runCommandFamily(ctx, service, "drafts", args, stdout, stderr, nil)
 }
 
 func runDraftHandoffReconcile(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {

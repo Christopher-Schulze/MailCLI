@@ -20,22 +20,7 @@ func runAttachments(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
-	if len(args) > 0 && isHelpArgument(args[0]) {
-		writeLine(stdout, "Usage:\n  mailcli attachments <list|save> [options]")
-		return 0
-	}
-	if len(args) == 0 {
-		writeLine(stderr, "Usage:\n  mailcli attachments <list|save> [options]")
-		return 2
-	}
-	if args[0] == "list" {
-		return runAttachmentsList(ctx, service, args[1:], stdout, stderr)
-	}
-	if args[0] == "save" {
-		return runAttachmentsSave(ctx, service, args[1:], stdout, stderr)
-	}
-	writeFormat(stderr, "unknown attachments command %q\n", args[0])
-	return 2
+	return runCommandFamily(ctx, service, "attachments", args, stdout, stderr, nil)
 }
 
 func runAttachmentsList(
