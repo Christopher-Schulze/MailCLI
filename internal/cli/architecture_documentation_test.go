@@ -23,12 +23,12 @@ func validateArchitectureSourceReferences(content string) error {
 
 func TestArchitectureDocumentationUsesResponsibilities(t *testing.T) {
 	documentation := readRepositoryFile(t, "docs/documentation.md")
-	start := strings.Index(documentation, "\n## Architecture\n")
-	end := strings.Index(documentation, "\n## Platform and freshness boundaries\n")
+	start := strings.Index(documentation, "\n### Architecture\n")
+	end := strings.Index(documentation, "\n### Platform and freshness boundaries\n")
 	if start < 0 || end <= start {
 		t.Fatal("architecture section boundaries are missing")
 	}
-	architecture := documentation[start:end]
+	architecture := strings.Join(strings.Fields(documentation[start:end]), " ")
 	if err := validateArchitectureSourceReferences(architecture); err != nil {
 		t.Fatal(err)
 	}

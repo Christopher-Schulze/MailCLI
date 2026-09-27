@@ -166,15 +166,15 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, topic := range []struct{ anchor, heading string }{
-		{"#composition", "## Composition\n"},
-		{"#scope", "## Scope\n"},
+		{"#composition", "### Composition\n"},
+		{"#scope", "### Scope\n"},
 	} {
 		if !strings.Contains(stdout.String(), topic.anchor) || !bytes.Contains(manual, []byte(topic.heading)) {
 			t.Fatalf("help manual topic %s is missing or unreachable", topic.anchor)
 		}
 	}
-	_, composition, _ := strings.Cut(string(manual), "## Composition\n")
-	composition, _, _ = strings.Cut(composition, "\n## ")
+	_, composition, _ := strings.Cut(string(manual), "### Composition\n")
+	composition, _, _ = strings.Cut(composition, "\n### ")
 	for _, caveat := range []string{"Mail 16", "transport_unsupported_provider", "handoff"} {
 		if !strings.Contains(composition, caveat) {
 			t.Fatalf("linked composition topic omits caveat %q", caveat)

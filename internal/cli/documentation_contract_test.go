@@ -29,7 +29,7 @@ func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 }
 
 func TestCatalogCursorDocumentationMatchesRuntimeContract(t *testing.T) {
-	documentation := readRepositoryFile(t, "docs/documentation.md")
+	documentation := strings.Join(strings.Fields(readRepositoryFile(t, "docs/documentation.md")), " ")
 	for _, claim := range []string{
 		"Message-list cursors remain store/mailbox-bound",
 		"filter and search cursors remain store/query-bound",
@@ -238,7 +238,7 @@ func ciDocumentationParagraph(t *testing.T, documentation string) string {
 	t.Helper()
 	for _, paragraph := range strings.Split(documentation, "\n\n") {
 		if strings.Contains(paragraph, "`.github/workflows/ci.yml`") {
-			return paragraph
+			return strings.Join(strings.Fields(paragraph), " ")
 		}
 	}
 	t.Fatal("product documentation has no paragraph describing .github/workflows/ci.yml")
@@ -271,6 +271,7 @@ func assertCapabilitySemantics(t *testing.T, manifest capabilityManifest) {
 func assertDocumentationClaims(t *testing.T, artifacts map[string]string) {
 	t.Helper()
 	for name, content := range artifacts {
+		content = strings.Join(strings.Fields(content), " ")
 		lower := strings.ToLower(content)
 		for _, stale := range []string{
 			"keep the last uid",
@@ -311,7 +312,7 @@ func assertHelpClaims(t *testing.T, help string) {
 			t.Errorf("top-level help omits %q contract: %s", claim, help)
 		}
 	}
-	manual := readRepositoryFile(t, "docs/documentation.md")
+	manual := strings.Join(strings.Fields(readRepositoryFile(t, "docs/documentation.md")), " ")
 	for _, claim := range []string{
 		"bypasses Mail.app entirely",
 		"Mutations (`messages mark`, `messages move`, `messages copy`, `messages delete`) execute over IMAP directly",
@@ -701,6 +702,9 @@ func assertSharedDocumentationBounds(t *testing.T) {
 			content, ok := contents[check.path]
 			if !ok {
 				content = readRepositoryFile(t, check.path)
+				if strings.HasSuffix(check.path, ".md") {
+					content = strings.Join(strings.Fields(content), " ")
+				}
 				contents[check.path] = content
 			}
 			matches := check.pattern.FindAllStringSubmatch(content, -1)
