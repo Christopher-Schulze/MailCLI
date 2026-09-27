@@ -210,7 +210,7 @@ The published release binary is ad-hoc signed but not Apple-notarized because no
 
 ### Grant permissions
 
-MailCLI uses the permissions of the process that launches it. Grant permissions to Terminal, Codex, or the relevant agent host in **System Settings > Privacy & Security**.
+MailCLI uses the permissions of the process that launches it. Grant permissions to the terminal or agent host that runs MailCLI in **System Settings > Privacy & Security**.
 
 | Permission | Required for |
 |---|---|
@@ -411,7 +411,26 @@ Skill-drift tests always build a fresh binary in their own temporary root, indep
 
 The repository includes a companion skill at [`skills/mailcli/SKILL.md`](skills/mailcli/SKILL.md). Its compact entrypoint maps user intent to scoped capabilities and seven portable guides under `references/`. Agents load only the guide for the current action, request only needed detail fields, and assess only that command's dependencies. The common entrypoint retains pagination, content completeness, reviewed draft revisions, transport evidence, and replay rules. Both installation paths include every guide; tests follow all skill links from isolated installations and reject missing, escaping, or unreachable documents. The repository product manual remains separate from the packaged operational guides.
 
-The release installer and `scripts/build/install-local.sh` place the matching skill at `~/.agents/skills/mailcli`, the personal skill location discovered by Codex. The source installer can redirect it with `MAILCLI_SKILL_DESTINATION`; it stages and verifies the binary and skill together. Use `scripts/tests/report-skill-drift.sh` for a separate read-only comparison of a user installation: pass `--repository PATH --installed PATH` for explicit inputs, and it reports `match`, `missing`, `mismatch`, or `unstable` plus a reconciliation command without installing anything. The implementation gate validates repository/package identity only in temporary installation roots. Start a new agent session after either installation method.
+The release installer and `scripts/build/install-local.sh` stage and verify the matching binary and skill together. Their default skill destination is `~/.agents/skills/mailcli`; discovery depends on the agent host:
+
+| Local host | Documented personal skill location | MailCLI setup |
+| --- | --- | --- |
+| [Codex](https://learn.chatgpt.com/docs/build-skills) | `~/.agents/skills/mailcli` | Default installation |
+| [Claude Code](https://code.claude.com/docs/en/skills) | `~/.claude/skills/mailcli` | Link this entry to the default installation; Claude Code supports symlinked skill folders |
+
+After a verified default installation, expose it to local Claude Code without creating a second copy. Run these commands only when `~/.claude/skills/mailcli` is absent; inspect any existing entry instead of replacing it:
+
+```bash
+test -f "$HOME/.agents/skills/mailcli/SKILL.md" &&
+  mkdir -p "$HOME/.claude/skills" &&
+  test ! -e "$HOME/.claude/skills/mailcli" &&
+  test ! -L "$HOME/.claude/skills/mailcli" &&
+  ln -s "$HOME/.agents/skills/mailcli" "$HOME/.claude/skills/mailcli"
+```
+
+Direct source/release installers also accept an absolute `MAILCLI_SKILL_DESTINATION`, for example `MAILCLI_SKILL_DESTINATION="$HOME/.claude/skills/mailcli" ./scripts/build/install-local.sh`. Self-update deliberately ignores this override and updates only the canonical skill destination, so refresh a separate copy through its original installer with the same override. The linked default installation follows canonical updates automatically. These are documented local discovery paths, not a claim that every agent host or cloud session loads the same directory. Start a new agent session if discovery does not refresh.
+
+Use `scripts/tests/report-skill-drift.sh` for a separate read-only comparison of a user installation: pass `--repository PATH --installed PATH` for explicit inputs, and it reports `match`, `missing`, `mismatch`, or `unstable` plus a reconciliation command without installing anything. For a Claude Code link, compare the canonical target directory. The implementation gate validates repository/package identity only in temporary installation roots.
 
 ## Safety model
 
