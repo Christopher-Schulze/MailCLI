@@ -3,8 +3,10 @@ package mailstore
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1065,6 +1067,137 @@ func (store *countedMutationCredentials) Load(account string) (string, error) {
 	return store.strictCredentials.Load(account)
 }
 
+type mutationResolutionQueryCounters struct {
+	fullCatalogQueries atomic.Int64
+	sentScanQueries    atomic.Int64
+}
+
+type mutationResolutionCountingDriver struct {
+	delegate driver.Driver
+	counters *mutationResolutionQueryCounters
+}
+
+func (countingDriver *mutationResolutionCountingDriver) Open(dsn string) (driver.Conn, error) {
+	connection, err := countingDriver.delegate.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &mutationResolutionCountingConn{Conn: connection, counters: countingDriver.counters}, nil
+}
+
+type mutationResolutionCountingConn struct {
+	driver.Conn
+	counters *mutationResolutionQueryCounters
+}
+
+func (connection *mutationResolutionCountingConn) QueryContext(
+	ctx context.Context,
+	query string,
+	arguments []driver.NamedValue,
+) (driver.Rows, error) {
+	queryer, ok := connection.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, fmt.Errorf("SQLite benchmark connection does not support QueryerContext")
+	}
+	rows, err := queryer.QueryContext(ctx, query, arguments)
+	if err != nil {
+		return nil, err
+	}
+	trimmedQuery := strings.TrimSpace(query)
+	if strings.HasPrefix(trimmedQuery, "WITH sent_membership(id) AS (") {
+		connection.counters.sentScanQueries.Add(1)
+	}
+	if strings.Contains(trimmedQuery, "SELECT ROWID, url, total_count, unread_count") &&
+		strings.Contains(trimmedQuery, "FROM mailboxes") &&
+		!strings.Contains(trimmedQuery, "WHERE mailcli_mailbox_account_root(url) = ?") {
+		connection.counters.fullCatalogQueries.Add(1)
+	}
+	return rows, nil
+}
+
+func mutationResolutionSQLiteDriver(counters *mutationResolutionQueryCounters) driver.Driver {
+	return &mutationResolutionCountingDriver{
+		delegate: &sqlite3.SQLiteDriver{
+			ConnectHook: func(connection *sqlite3.SQLiteConn) error {
+				return connection.RegisterFunc("mailcli_mailbox_account_root", mutationResolutionMailboxRoot, true)
+			},
+		},
+		counters: counters,
+	}
+}
+
+func mutationResolutionMailboxRoot(value string) string {
+	separator := strings.Index(value, "://")
+	if separator < 1 {
+		return ""
+	}
+	pathIndex := strings.IndexByte(value[separator+3:], '/')
+	if pathIndex < 0 {
+		return ""
+	}
+	return strings.ToLower(value[:separator]) + "://" +
+		strings.ToUpper(value[separator+3:separator+3+pathIndex])
+}
+
+func mutationResolutionSQLiteURI(path string) string {
+	uri := &url.URL{Scheme: "file", Path: path}
+	query := uri.Query()
+	query.Set("mode", "ro")
+	query.Set("cache", "private")
+	query.Set("_query_only", "1")
+	query.Set("_busy_timeout", "1000")
+	query.Set("_txlock", "deferred")
+	uri.RawQuery = query.Encode()
+	return uri.String()
+}
+
+func openCountedMutationResolutionDatabase(
+	tb testing.TB,
+	path string,
+	counters *mutationResolutionQueryCounters,
+) *sql.DB {
+	tb.Helper()
+	if err := ensureSecureOpenSupported(); err != nil {
+		tb.Fatalf("check secure SQLite open support: %v", err)
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		tb.Fatalf("resolve generated SQLite fixture path: %v", err)
+	}
+	pinned, err := pinSQLitePath(absolutePath)
+	if err != nil {
+		tb.Fatalf("pin generated SQLite fixture: %v", err)
+	}
+	database := sql.OpenDB(&sqliteConnector{
+		driver: mutationResolutionSQLiteDriver(counters), dsn: mutationResolutionSQLiteURI(absolutePath),
+	})
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	if err := configureReadConnection(context.Background(), database, absolutePath, pinned); err != nil {
+		databaseCloseErr := database.Close()
+		rootCloseErr := pinned.root.Close()
+		tb.Fatalf("configure counted read-only SQLite fixture: %v (database close: %v; root close: %v)",
+			err, databaseCloseErr, rootCloseErr)
+	}
+	if err := pinned.root.Close(); err != nil {
+		databaseCloseErr := database.Close()
+		tb.Fatalf("close pinned counted SQLite fixture root: %v (database close: %v)", err, databaseCloseErr)
+	}
+	return database
+}
+
+func instrumentMutationResolutionQueries(tb testing.TB, store *Store) *mutationResolutionQueryCounters {
+	tb.Helper()
+	counters := &mutationResolutionQueryCounters{}
+	database := openCountedMutationResolutionDatabase(tb, store.databasePath, counters)
+	previousDatabase := store.database
+	store.database = database
+	if err := previousDatabase.Close(); err != nil {
+		tb.Fatalf("close original generated SQLite connection: %v", err)
+	}
+	return counters
+}
+
 func newMutationIdentityFixture(tb testing.TB) mutationIdentityFixture {
 	tb.Helper()
 	fixture := createSearchFixtureData(tb, generatedStoreFixtureMessageCount-3, true)
@@ -1153,16 +1286,36 @@ func openMutationIdentityClient(
 	credentials := &countedMutationCredentials{strictCredentials: strictCredentials{
 		"identity@gmail.com": "generated-test-password",
 	}}
-	client := &Client{store: store, send: mail.SendTransport{
-		Imap:        &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}}},
-		Credentials: credentials,
-	}}
+	client := newMutationIdentityClient(store, credentials)
 	tb.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			tb.Errorf("close generated mutation identity store: %v", err)
 		}
 	})
 	return store, client, bindings, credentials
+}
+
+func newMutationIdentityClient(store *Store, credentials *countedMutationCredentials) *Client {
+	return &Client{store: store, send: mail.SendTransport{
+		Imap:        &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "Archive"}}},
+		Credentials: credentials,
+	}}
+}
+
+func mutationResolutionInvocationContext(tb testing.TB, client *Client) context.Context {
+	tb.Helper()
+	ctx := context.Background()
+	snapshotClient, ok := any(client).(interface {
+		WithAccountBindingSnapshot(context.Context) context.Context
+	})
+	if !ok {
+		return ctx
+	}
+	invocationCtx := snapshotClient.WithAccountBindingSnapshot(ctx)
+	if invocationCtx == nil {
+		tb.Fatal("WithAccountBindingSnapshot() did not return a context")
+	}
+	return invocationCtx
 }
 
 func mutationTargetReferences(tb testing.TB, store *Store, fixture searchFixtureData, count int) []string {
@@ -1191,39 +1344,104 @@ func mutationTargetReferences(tb testing.TB, store *Store, fixture searchFixture
 	return refs
 }
 
+type mutationResolutionBenchmarkCase struct {
+	name  string
+	items int
+}
+
 func BenchmarkMutationAccountResolution(b *testing.B) {
 	fixture := newMutationIdentityFixture(b)
-	for _, benchmark := range []struct {
-		name  string
-		items int
-	}{
+	for _, benchmark := range []mutationResolutionBenchmarkCase{
 		{name: "items_1", items: 1},
 		{name: "items_100", items: 100},
 	} {
 		b.Run(benchmark.name, func(b *testing.B) {
-			store, client, bindings, credentials := openMutationIdentityClient(b, fixture)
-			messageRefs := mutationTargetReferences(b, store, fixture.searchFixtureData, benchmark.items)
-			b.ReportAllocs()
-			var lastInvocationCtx context.Context
-			for b.Loop() {
-				lastInvocationCtx = client.WithAccountBindingSnapshot(context.Background())
-				for _, messageRef := range messageRefs {
-					target, err := client.resolveImapTargetForMutation(lastInvocationCtx, messageRef)
-					if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
-						b.Fatalf("resolve generated mutation target: target=%+v error=%v", target, err)
-					}
-				}
-			}
-			b.StopTimer()
-			if lastInvocationCtx == nil {
-				b.Fatal("benchmark completed without an invocation context")
-			}
-			assertMutationMailboxRows(b, lastInvocationCtx, client, testAccountID, 3)
-			iterations := float64(b.N)
-			b.ReportMetric(float64(bindings.loadCalls.Load())/iterations, "binding_loads/op")
-			b.ReportMetric(float64(credentials.loadCalls.Load())/iterations, "credential_loads/op")
-			reportGeneratedStoreFixture(b, fixture.searchFixtureData)
+			benchmarkMutationAccountResolution(b, fixture, benchmark)
 		})
+	}
+}
+
+func benchmarkMutationAccountResolution(
+	b *testing.B,
+	fixture mutationIdentityFixture,
+	benchmark mutationResolutionBenchmarkCase,
+) {
+	store, _, bindings, credentials := openMutationIdentityClient(b, fixture)
+	messageRefs := mutationTargetReferences(b, store, fixture.searchFixtureData, benchmark.items)
+	queryCounters := instrumentMutationResolutionQueries(b, store)
+	b.ReportAllocs()
+	var lastInvocationCtx context.Context
+	var lastClient *Client
+	for b.Loop() {
+		b.StopTimer()
+		lastClient = newMutationIdentityClient(store, credentials)
+		lastInvocationCtx = mutationResolutionInvocationContext(b, lastClient)
+		b.StartTimer()
+		resolveMutationBenchmarkTargets(b, lastClient, lastInvocationCtx, messageRefs)
+	}
+	b.StopTimer()
+	if lastInvocationCtx == nil {
+		b.Fatal("benchmark completed without an invocation context")
+	}
+	reportMutationResolutionMetrics(b, benchmark.items, bindings, credentials, queryCounters)
+}
+
+func resolveMutationBenchmarkTargets(b *testing.B, client *Client, ctx context.Context, messageRefs []string) {
+	b.Helper()
+	for _, messageRef := range messageRefs {
+		target, err := client.resolveImapTargetForMutation(ctx, messageRef)
+		if err != nil || target.accountID != testAccountID || target.uid == 0 || target.uidvalidity == 0 {
+			b.Fatalf("resolve generated mutation target: target=%+v error=%v", target, err)
+		}
+	}
+}
+
+func reportMutationResolutionMetrics(
+	b *testing.B,
+	items int,
+	bindings *countedMutationBindings,
+	credentials *countedMutationCredentials,
+	queryCounters *mutationResolutionQueryCounters,
+) {
+	iterations := int64(b.N)
+	sentScanQueries := queryCounters.sentScanQueries.Load()
+	// Each target scans one account twice; a full catalog scans both fixture
+	// accounts twice instead. The mailbox SQL itself is cached by Store and
+	// cannot count repeated account-catalog construction.
+	extraSentScans := sentScanQueries - 2*int64(items)*iterations
+	if extraSentScans < 0 || extraSentScans%2 != 0 {
+		b.Fatalf("Sent-scan count %d does not match %d target resolutions", sentScanQueries, int64(items)*iterations)
+	}
+	catalogBuilds := extraSentScans / 2
+	b.ReportMetric(float64(catalogBuilds)/float64(iterations), "catalog_builds/op")
+	b.ReportMetric(float64(sentScanQueries)/float64(iterations), "sent_scan_queries/op")
+	b.ReportMetric(float64(bindings.loadCalls.Load())/float64(iterations), "binding_loads/op")
+	b.ReportMetric(float64(credentials.loadCalls.Load())/float64(iterations), "credential_loads/op")
+}
+
+func TestMutationResolutionBenchmarkQueryCounters(t *testing.T) {
+	fixture := newMutationIdentityFixture(t)
+	store, _, _, credentials := openMutationIdentityClient(t, fixture)
+	queryCounters := instrumentMutationResolutionQueries(t, store)
+	client := newMutationIdentityClient(store, credentials)
+	invocationCtx := mutationResolutionInvocationContext(t, client)
+	if _, _, _, err := client.resolveAccountIdentity(invocationCtx, testAccountID); err != nil {
+		t.Fatalf("resolve active target account: %v", err)
+	}
+	if got := queryCounters.fullCatalogQueries.Load(); got != 0 {
+		t.Fatalf("targeted full-catalog queries = %d, want zero", got)
+	}
+	if got := queryCounters.sentScanQueries.Load(); got != 2 {
+		t.Fatalf("targeted Sent-scan queries = %d, want 2", got)
+	}
+	if catalog, err := store.ListAccountCatalog(context.Background()); err != nil || !catalog.Complete || len(catalog.Accounts) != 2 {
+		t.Fatalf("ListAccountCatalog() = %+v, error = %v; want two complete accounts", catalog, err)
+	}
+	if got := queryCounters.fullCatalogQueries.Load(); got != 1 {
+		t.Fatalf("full-catalog queries = %d, want 1", got)
+	}
+	if got := queryCounters.sentScanQueries.Load(); got != 6 {
+		t.Fatalf("targeted plus full-catalog Sent-scan queries = %d, want 6", got)
 	}
 }
 

@@ -123,7 +123,7 @@ run_group \
   'generated 600-message/two-account store; one or 100 per-item mutation target resolutions with file-backed bindings and a fake IMAP boundary' \
   ./internal/mailstore \
   '^BenchmarkMutationAccountResolution$' \
-  1x
+  500ms
 run_group \
   search-fold \
   '1 MiB lowercase and mixed ASCII plus decomposed Unicode; the shared SQL and body search folding policy' \
