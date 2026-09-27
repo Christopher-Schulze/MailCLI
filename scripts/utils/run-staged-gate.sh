@@ -86,8 +86,29 @@ git -C "${PRODUCT_ROOT}" read-tree --reset -u "${INDEX_TREE}"
 cd "${PRODUCT_ROOT}"
 PRODUCT_REFS_BEFORE="$(git -C "${PRODUCT_ROOT}" for-each-ref --format='%(refname) %(objectname)')"
 mkdir "${BASELINE_ROOT}"
-git -C "${SOURCE_ROOT}" archive "${BASELINE_HEAD}" scripts/tests |
+BASELINE_PATHS=(scripts/tests)
+# Tests honoring MAILCLI_ROOT inspect the staged product. The summary test
+# instead sources this support file relative to its own archived script path.
+# Missing baseline support stays missing, even if another tree supplies it.
+BASELINE_SUPPORT_FILES=(scripts/benchmarks/summarize-performance-evidence.sh)
+for SUPPORT_PATH in "${BASELINE_SUPPORT_FILES[@]}"; do
+  SUPPORT_ENTRY="$(git -C "${SOURCE_ROOT}" ls-tree "${BASELINE_HEAD}" -- "${SUPPORT_PATH}")"
+  [[ -n "${SUPPORT_ENTRY}" ]] || continue
+  read -r SUPPORT_MODE SUPPORT_TYPE SUPPORT_BLOB SUPPORT_NAME <<<"${SUPPORT_ENTRY}"
+  [[ "${SUPPORT_TYPE}" == blob && "${SUPPORT_NAME}" == "${SUPPORT_PATH}" &&
+    ( "${SUPPORT_MODE}" == 100644 || "${SUPPORT_MODE}" == 100755 ) ]] ||
+    fail "Baseline support must be a regular tracked file: ${SUPPORT_PATH}"
+  BASELINE_PATHS+=("${SUPPORT_PATH}")
+done
+git -C "${SOURCE_ROOT}" archive "${BASELINE_HEAD}" "${BASELINE_PATHS[@]}" |
   tar -x -C "${BASELINE_ROOT}"
+for SUPPORT_PATH in "${BASELINE_PATHS[@]:1}"; do
+  SUPPORT_BLOB="$(git -C "${SOURCE_ROOT}" rev-parse "${BASELINE_HEAD}:${SUPPORT_PATH}")"
+  [[ -f "${BASELINE_ROOT}/${SUPPORT_PATH}" && ! -L "${BASELINE_ROOT}/${SUPPORT_PATH}" &&
+    "$(git -C "${SOURCE_ROOT}" hash-object --no-filters "${BASELINE_ROOT}/${SUPPORT_PATH}")" == "${SUPPORT_BLOB}" ]] ||
+    fail "Archived baseline support differs from its Git object: ${SUPPORT_PATH}"
+  printf 'baseline_support_file=%s:%s:%s\n' "${BASELINE_HEAD}" "${SUPPORT_BLOB}" "${SUPPORT_PATH}"
+done
 HARNESS="${PRODUCT_ROOT}/scripts/tests/test.sh"
 [[ -f "${HARNESS}" && ! -L "${HARNESS}" && -x "${HARNESS}" ]] ||
   fail 'Staged gate orchestrator must remain a regular executable file'

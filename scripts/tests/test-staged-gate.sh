@@ -298,6 +298,68 @@ stage_all
 run_gate 1 'Baseline shell test removed or made opt-in' 509
 reset_fixture
 
+# Archived support must use baseline bytes, while assertions still inspect the
+# isolated staged product. Deliberately divergent index/worktree helpers prove
+# that neither tree can substitute for the baseline-owned dependency.
+ORIGINAL_BASELINE_HEAD="${BASELINE_HEAD}"
+ORIGINAL_BASELINE_TREE="${BASELINE_TREE}"
+mkdir -p "${REPOSITORY}/scripts/benchmarks"
+cat >"${REPOSITORY}/scripts/benchmarks/summarize-performance-evidence.sh" <<'FIXTURE'
+baseline_support_identity() { printf 'baseline\n'; }
+FIXTURE
+cat >"${REPOSITORY}/scripts/tests/test-baseline-support.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "${SCRIPT_ROOT}/scripts/benchmarks/summarize-performance-evidence.sh"
+[[ "$(baseline_support_identity)" == baseline ]]
+[[ "$(cat "${MAILCLI_ROOT}/product.txt")" == required ]] || {
+  printf 'baseline support product invariant violated\n' >&2
+  exit 1
+}
+printf 'baseline-support-ran\n'
+FIXTURE
+chmod 755 "${REPOSITORY}/scripts/tests/test-baseline-support.sh"
+printf 'scripts/tests/test-baseline-support.sh\n' >>"${REPOSITORY}/scripts/tests/cases"
+stage_all
+BASELINE_TREE="$(git -C "${REPOSITORY}" write-tree)"
+BASELINE_HEAD="$(printf 'external baseline support fixture\n' |
+  git -C "${REPOSITORY}" commit-tree "${BASELINE_TREE}")"
+printf 'baseline_support_identity() { printf "staged\\n"; }\n' \
+  >"${REPOSITORY}/scripts/benchmarks/summarize-performance-evidence.sh"
+sed 's/== baseline/== staged/' "${REPOSITORY}/scripts/tests/test-baseline-support.sh" \
+  >"${TEST_ROOT}/staged-support-test"
+cp "${TEST_ROOT}/staged-support-test" "${REPOSITORY}/scripts/tests/test-baseline-support.sh"
+stage_all
+printf 'baseline_support_identity() { printf "worktree\\n"; }\n' \
+  >"${REPOSITORY}/scripts/benchmarks/summarize-performance-evidence.sh"
+run_gate 0 gate_harness=staged+baseline 544 --checks scripts/tests/test-baseline-support.sh
+grep -Fq "baseline_support_file=${BASELINE_HEAD}:" "${TEST_ROOT}/output"
+[[ "$(grep -c '^baseline-support-ran$' "${TEST_ROOT}/output")" == 2 ]]
+printf 'broken\n' >"${REPOSITORY}/product.txt"
+printf '#!/usr/bin/env bash\nexit 0\n' >"${REPOSITORY}/scripts/tests/test-baseline-support.sh"
+stage_all
+run_gate 1 'baseline support product invariant violated' 544 --checks scripts/tests/test-baseline-support.sh
+reset_fixture
+
+git -C "${REPOSITORY}" update-index --force-remove scripts/benchmarks/summarize-performance-evidence.sh
+MISSING_SUPPORT_TREE="$(git -C "${REPOSITORY}" write-tree)"
+BASELINE_HEAD="$(printf 'baseline missing external support\n' |
+  git -C "${REPOSITORY}" commit-tree "${MISSING_SUPPORT_TREE}")"
+# A staged-only dependency cannot repair an absent baseline dependency.
+printf '\nprintf "changed support test\\n"\n' >>"${REPOSITORY}/scripts/tests/test-baseline-support.sh"
+stage_all
+run_gate 1 'No such file or directory' 544 --checks scripts/tests/test-baseline-support.sh
+# Nor can an unstaged worktree-only dependency repair it, even when the staged
+# test is weakened enough to finish without loading any helper.
+printf '#!/usr/bin/env bash\nexit 0\n' >"${REPOSITORY}/scripts/tests/test-baseline-support.sh"
+stage_all
+git -C "${REPOSITORY}" update-index --force-remove scripts/benchmarks/summarize-performance-evidence.sh
+run_gate 1 'No such file or directory' 544 --checks scripts/tests/test-baseline-support.sh
+BASELINE_HEAD="${ORIGINAL_BASELINE_HEAD}"
+BASELINE_TREE="${ORIGINAL_BASELINE_TREE}"
+reset_fixture
+
 # Outer lease integration uses the committed marker/helper in this independent
 # repository: a staged newly failing test must not produce commit evidence.
 ACQUIRE="$(MAILCLI_WRITE_ROOT="${REPOSITORY}" \
