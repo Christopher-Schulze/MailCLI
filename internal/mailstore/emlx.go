@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
 
@@ -73,7 +74,7 @@ func (s *Store) openMessageSource(ctx context.Context, ref string) (resolvedMess
 func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessage, error) {
 	ref, err := mailref.DecodeMessage(value)
 	if err != nil {
-		return resolvedMessage{}, operationError("invalid_reference", fmt.Sprintf("invalid message ref: %v", err))
+		return resolvedMessage{}, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid message ref: %v", err)}
 	}
 	if !ref.IsStoreBound() {
 		return resolvedMessage{}, operationError(

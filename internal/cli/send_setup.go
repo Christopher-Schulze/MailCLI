@@ -362,7 +362,7 @@ func failSendSetupBindingUpdate(
 		writeLine(stderr, "warning: lock_release: failed; the binding publication status is unchanged")
 	}
 	writeLine(stderr, "recovery: run `mailcli accounts list --json` to observe the binding, then make an explicit send setup decision. MailCLI will not retry or roll back the Keychain credential automatically.")
-	return commandExitCode(err)
+	return commandExitCodeFor("send.setup", err, true)
 }
 
 func loadSendBinding(store mail.AccountBindingStore, accountID string) (mail.AccountBinding, bool, error) {

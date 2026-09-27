@@ -147,8 +147,8 @@ func TestPrepareQueryCursorAllowsPageBoundsAndRetainsFilters(t *testing.T) {
 			test.change(&query)
 			prepared, err := PrepareQuery(query)
 			if !test.valid {
-				var operation *OperationError
-				if !errors.As(err, &operation) || operation.Code != "invalid_cursor" {
+				var validation *ValidationError
+				if !errors.As(err, &validation) || validation.ErrorCode() != "invalid_cursor" {
 					t.Fatalf("changed filter accepted: query=%+v, error=%v", query, err)
 				}
 				return

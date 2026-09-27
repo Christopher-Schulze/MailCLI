@@ -183,7 +183,7 @@ func decodeDraftListCursor(cursor string) (string, string, error) {
 	if cursor == "" {
 		return "", "", nil
 	}
-	invalid := &OperationError{Code: "invalid_cursor", Message: "invalid draft list cursor; restart drafts list without --cursor"}
+	invalid := &ValidationError{Code: "invalid_cursor", Message: "invalid draft list cursor; restart drafts list without --cursor"}
 	if len(cursor) > 512 {
 		return "", "", invalid
 	}

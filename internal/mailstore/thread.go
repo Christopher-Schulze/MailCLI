@@ -71,7 +71,7 @@ func (s *Store) MessageThread(
 	}
 	if resolved.Record.ConversationID <= 0 {
 		if request.Cursor != "" {
-			return mail.MessageThread{}, operationError("invalid_cursor", "ungrouped messages do not have a continuation cursor")
+			return mail.MessageThread{}, &mail.ValidationError{Code: "invalid_cursor", Message: "ungrouped messages do not have a continuation cursor"}
 		}
 		summary, err := s.threadSummary(resolved.Record)
 		if err != nil {
@@ -293,7 +293,7 @@ func decodeThreadCursor(
 	}
 	payload, err := mailref.DecodeTokenPayload(threadCursorPrefix, value)
 	if err != nil {
-		return nil, operationError("invalid_cursor", err.Error())
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: err.Error()}
 	}
 	compact, err := mailref.DecodeCompactPayload(payload, threadCursorVersion)
 	maximumFlags := threadCursorDateNull | threadCursorOlder
@@ -302,11 +302,11 @@ func decodeThreadCursor(
 		maximumFlags = threadCursorDateNull
 	}
 	if err != nil {
-		return nil, operationError("invalid_cursor", err.Error())
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: err.Error()}
 	}
 	if compact.Flags > maximumFlags || compact.RowID < 1 || compact.StoreUUID != storeUUID ||
 		compact.Fingerprint != threadCursorFingerprint(seedRef, conversationID) {
-		return nil, operationError("invalid_cursor", "thread cursor does not match this conversation, Mail store, or keyset")
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: "thread cursor does not match this conversation, Mail store, or keyset"}
 	}
 	return &threadCursor{
 		dateReceived: compact.DateReceived, dateReceivedNull: compact.Flags&threadCursorDateNull != 0,

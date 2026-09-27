@@ -50,7 +50,7 @@ type searchJob struct {
 
 func (s *Store) SearchMessages(ctx context.Context, prepared mail.PreparedQuery) (mail.SearchPage, error) {
 	if prepared.Cursor != nil && prepared.Cursor.StoreUUID != s.storeUUID {
-		return mail.SearchPage{}, operationError("invalid_cursor", "search cursor belongs to a different Mail store")
+		return mail.SearchPage{}, &mail.ValidationError{Code: "invalid_cursor", Message: "search cursor belongs to a different Mail store"}
 	}
 	indexRevision, err := s.searchIndexRevision(ctx)
 	if err != nil {
@@ -166,7 +166,7 @@ func (s *Store) resolveSearchScope(
 	}
 	mailbox, err := mailref.DecodeMailbox(query.MailboxRef)
 	if err != nil {
-		return "", nil, 0, false, operationError("invalid_reference", fmt.Sprintf("invalid mailbox ref: %v", err))
+		return "", nil, 0, false, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
 	}
 	if !s.activeAccountID(mailbox.AccountID) {
 		return "", nil, 0, false, operationError("stale_reference", "mailbox account is not active")

@@ -245,7 +245,7 @@ func (s *Store) requestedAccountID(accountRef string) (string, error) {
 	}
 	account, err := mailref.DecodeAccount(accountRef)
 	if err != nil {
-		return "", operationError("invalid_reference", fmt.Sprintf("invalid account ref: %v", err))
+		return "", &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid account ref: %v", err)}
 	}
 	accountID := strings.ToUpper(account.AccountID)
 	if !s.activeAccountID(accountID) {

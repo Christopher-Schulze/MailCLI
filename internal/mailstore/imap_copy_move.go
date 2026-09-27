@@ -28,7 +28,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 
 	dstRef, err := mailref.DecodeMailbox(request.DestinationMailbox)
 	if err != nil {
-		return mail.MessageSummary{}, operationError("invalid_reference", "invalid destination mailbox ref: "+err.Error())
+		return mail.MessageSummary{}, &mail.ValidationError{Code: "invalid_reference", Message: "invalid destination mailbox ref: " + err.Error()}
 	}
 	if dstRef.AccountID != target.accountID {
 		return mail.MessageSummary{}, &transport.TransportError{

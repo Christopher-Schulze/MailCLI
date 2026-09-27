@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+
+	"mailcli/internal/mail"
 )
 
 func (s *Store) messageInSpecialMailbox(ctx context.Context, messageRef string, attribute int) (bool, error) {
@@ -78,7 +80,7 @@ func (s *Store) messageHasMembership(
 ) (bool, error) {
 	rowID, err := strconv.ParseInt(libraryID, 10, 64)
 	if err != nil || rowID < 1 {
-		return false, operationError("invalid_reference", "message ref has an invalid ROWID")
+		return false, &mail.ValidationError{Code: "invalid_reference", Message: "message ref has an invalid ROWID"}
 	}
 	var present bool
 	err = s.database.QueryRowContext(ctx, `

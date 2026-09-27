@@ -299,7 +299,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 		case BatchOperationMark, BatchOperationMove, BatchOperationDelete:
 			identity, err := mailref.MessageIdentityKey(item.Ref)
 			if err != nil {
-				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
+				return 0, &ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
 			}
 			if prior, exists := mutationSources[identity]; exists {
 				return 0, validationError(fmt.Sprintf(
@@ -310,11 +310,11 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 		case BatchOperationCopy:
 			source, err := mailref.MessageIdentityKey(item.Ref)
 			if err != nil {
-				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
+				return 0, &ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid message reference", item.ID)}
 			}
 			mailbox, err := mailref.MailboxIdentityKey(item.Mailbox)
 			if err != nil {
-				return 0, &OperationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid mailbox reference", item.ID)}
+				return 0, &ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("batch item %q has an invalid mailbox reference", item.ID)}
 			}
 			key := copyDestination{sourceRef: source, mailbox: mailbox}
 			if prior, exists := copyDestinations[key]; exists {

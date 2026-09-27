@@ -85,6 +85,7 @@ type Service struct {
 }
 
 type ValidationError struct {
+	Code    string
 	Message string
 }
 
@@ -133,6 +134,9 @@ func (e *ValidationError) Error() string {
 }
 
 func (e *ValidationError) ErrorCode() string {
+	if e.Code != "" {
+		return e.Code
+	}
 	return "invalid_argument"
 }
 

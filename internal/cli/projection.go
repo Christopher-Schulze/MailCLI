@@ -1049,9 +1049,11 @@ func failProjectedDraft(
 ) int {
 	if !jsonOutput {
 		writeLine(stderr, err)
-		return commandExitCode(err)
+		return commandExitCodeFor(command, err, options.draftMutationCompleted)
 	}
-	return writeProjectedFailure(stdout, command, responseData{Draft: &draft}, options, err, false)
+	return writeProjectedFailure(stdout, command, responseData{
+		Draft: &draft, draftMutationCompleted: options.draftMutationCompleted,
+	}, options, err, false)
 }
 
 func failProjectedEmpty(
@@ -1142,7 +1144,7 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 	if code := writeEnvelopeBytes(stdout, payload); code != 0 {
 		return code
 	}
-	return commandExitCode(err)
+	return commandExitCodeFor(command, err, len(data.PartialEffects) > 0 || data.draftMutationCompleted)
 }
 
 func errorCode(err error) string {

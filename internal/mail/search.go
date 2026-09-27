@@ -153,7 +153,7 @@ func PrepareQuery(query Query) (PreparedQuery, error) {
 	if query.Cursor != "" {
 		prepared.Cursor, err = DecodeSearchCursor(query.Cursor, fingerprint)
 		if err != nil {
-			return PreparedQuery{}, &OperationError{Code: "invalid_cursor", Message: err.Error()}
+			return PreparedQuery{}, &ValidationError{Code: "invalid_cursor", Message: err.Error()}
 		}
 	}
 	return prepared, nil

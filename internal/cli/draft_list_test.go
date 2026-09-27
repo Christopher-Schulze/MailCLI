@@ -81,7 +81,7 @@ func TestDraftListCLIRejectsInvalidAndCanceledRequests(t *testing.T) {
 		{"negative limit", []string{"--limit", "-1"}, false, 2, "invalid_argument"},
 		{"excessive limit", []string{"--limit", "201"}, false, 2, "invalid_argument"},
 		{"malformed limit", []string{"--limit", "nope"}, false, 2, "invalid_argument"},
-		{"malformed cursor", []string{"--cursor", "wrong"}, false, 1, "invalid_cursor"},
+		{"malformed cursor", []string{"--cursor", "wrong"}, false, 2, "invalid_cursor"},
 		{"canceled", nil, true, 1, "draft_operation_canceled"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

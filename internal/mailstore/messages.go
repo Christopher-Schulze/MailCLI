@@ -66,7 +66,7 @@ func (s *Store) ListMessages(ctx context.Context, request mail.ListMessagesReque
 	}
 	mailbox, err := mailref.DecodeMailbox(request.MailboxRef)
 	if err != nil {
-		return mail.MessagePage{}, operationError("invalid_reference", fmt.Sprintf("invalid mailbox ref: %v", err))
+		return mail.MessagePage{}, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
 	}
 	if !s.activeAccountID(mailbox.AccountID) {
 		return mail.MessagePage{}, operationError("stale_reference", "mailbox account is not active")
@@ -376,15 +376,15 @@ func decodeListCursor(value string, mailboxRef string, storeUUID string) (*listC
 	}
 	payload, err := mailref.DecodeTokenPayload("lcur_", value)
 	if err != nil {
-		return nil, operationError("invalid_cursor", err.Error())
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: err.Error()}
 	}
 	cursor, err := decodeListCursorPayload(payload)
 	if err != nil {
-		return nil, operationError("invalid_cursor", err.Error())
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: err.Error()}
 	}
 	if (cursor.Version != listCursorVersion && cursor.Version != legacyListCursorVersion) || cursor.StoreUUID != storeUUID ||
 		cursor.MailboxRef != mailboxRef || cursor.RowID < 1 {
-		return nil, operationError("invalid_cursor", "list cursor does not match this mailbox")
+		return nil, &mail.ValidationError{Code: "invalid_cursor", Message: "list cursor does not match this mailbox"}
 	}
 	return cursor, nil
 }

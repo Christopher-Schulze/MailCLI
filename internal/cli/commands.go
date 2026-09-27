@@ -444,7 +444,7 @@ func failMessageRead(
 	if message.Hydration == nil {
 		if !jsonOutput {
 			writeLine(stderr, oneLine(publicFailureMessage(err)))
-			return commandExitCode(err)
+			return commandExitCodeFor(command, err, false)
 		}
 		if jsonOutput && output.target == projectionTargetMessage {
 			if messageHasRecoveryData(message) {
@@ -465,7 +465,7 @@ func failMessageRead(
 		return 1
 	}
 	writeLine(stderr, oneLine(safeErr.Error()))
-	return commandExitCode(safeErr)
+	return commandExitCodeFor(command, safeErr, false)
 }
 
 func messageHasRecoveryData(message mail.Message) bool {
@@ -840,9 +840,10 @@ func failCommandWithData(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
+	hasPartialEffects := len(data.PartialEffects) > 0 || data.draftMutationCompleted
 	if !jsonOutput {
 		writeLine(stderr, publicFailureMessage(err))
-		return commandExitCode(err)
+		return commandExitCodeFor(command, err, hasPartialEffects)
 	}
 	writeJSON(stdout, envelope{
 		SchemaVersion: schemaVersion,
@@ -851,22 +852,42 @@ func failCommandWithData(
 		Data:          data,
 		Error:         newErrorData(command, data, err),
 	})
-	return commandExitCode(err)
+	return commandExitCodeFor(command, err, hasPartialEffects)
 }
 
-// commandExitCode maps error codes to exit codes:
-// usage errors (invalid_argument, invalid_input, missing_required,
-// unknown_command) return 2; all other errors return 1.
+// commandExitCode preserves the context-free exit-code contract for callers
+// that do not carry a command name.
 func commandExitCode(err error) int {
-	var typed codedError
-	if errors.As(err, &typed) {
-		switch typed.ErrorCode() {
-		case "invalid_argument", "invalid_input", "missing_required",
-			"unknown_command":
-			return 2
-		}
+	return commandExitCodeFor("", err, false)
+}
+
+func commandExitCodeFor(command string, err error, hasPartialEffects bool) int {
+	if hasPartialEffects || !isCallerInputError(err) {
+		return 1
 	}
-	return 1
+	guidance := mail.GuidanceForError(command, err)
+	if guidance.EffectCertainty != mail.EffectNone ||
+		guidance.Retryability != mail.RetryUserInputRequired ||
+		guidance.Recovery.Action != mail.RecoveryCorrect {
+		return 1
+	}
+	return 2
+}
+
+func isCallerInputError(err error) bool {
+	var typed codedError
+	if !errors.As(err, &typed) {
+		return false
+	}
+	switch code := typed.ErrorCode(); code {
+	case "invalid_argument", "invalid_input", "missing_required", "unknown_command":
+		return true
+	case "invalid_reference", "invalid_cursor":
+		var validation *mail.ValidationError
+		return errors.As(err, &validation) && validation.ErrorCode() == code
+	default:
+		return false
+	}
 }
 
 func writeSuccess(stdout io.Writer, command string, data responseData) int {

@@ -92,7 +92,7 @@ func runAttachmentsList(
 		)
 		if readErr != nil {
 			writeLine(stderr, oneLine(readErr.Error()))
-			return commandExitCode(readErr)
+			return commandExitCodeFor("attachments.list", readErr, false)
 		}
 		return 0
 	}
@@ -112,7 +112,7 @@ func runAttachmentsList(
 	)
 	if readErr != nil {
 		writeLine(stderr, oneLine(readErr.Error()))
-		return commandExitCode(readErr)
+		return commandExitCodeFor("attachments.list", readErr, false)
 	}
 	return 0
 }
