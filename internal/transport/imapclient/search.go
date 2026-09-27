@@ -447,10 +447,7 @@ func (c *Client) doUIDSearchCriteriaBounded(
 				}
 				return uids, nil
 			}
-			return nil, &transport.TransportError{
-				Code:    transport.CodeIMAPMutationFailed,
-				Message: "IMAP UID SEARCH failed: " + status,
-			}
+			return nil, rejectedTaggedCompletion(line, tag, "UID SEARCH", status)
 		}
 		if strings.HasPrefix(line, "* SEARCH") {
 			if line != "* SEARCH" && !strings.HasPrefix(line, "* SEARCH ") {

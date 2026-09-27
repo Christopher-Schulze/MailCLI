@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"mailcli/internal/transport"
 )
@@ -316,6 +318,89 @@ func parseTaggedCompletionStatus(line, tag string) (string, error) {
 	default:
 		return "", fmt.Errorf("IMAP tagged completion has invalid status %q", fields[1])
 	}
+}
+
+const maxTaggedIMAPRejectionTextBytes = 512
+
+func rejectedTaggedCompletion(line, tag, command, status string) *transport.TransportError {
+	return taggedCommandRejection(command, status, taggedCompletionText(line, tag))
+}
+
+func taggedCompletionText(line, tag string) string {
+	rest, found := strings.CutPrefix(line, tag+" ")
+	if !found {
+		return ""
+	}
+	_, text, found := strings.Cut(rest, " ")
+	if !found {
+		return ""
+	}
+	return text
+}
+
+func taggedCommandRejection(command, status, responseText string) *transport.TransportError {
+	responseCode := leadingTaggedResponseCode(responseText)
+	evidence := &transport.IMAPCommandRejection{
+		Command: command, Status: status, ResponseCode: responseCode,
+		Text: boundedTaggedResponseText(responseText),
+	}
+	code := transport.CodeIMAPCommandRejected
+	if command == "LOGIN" && status == "NO" {
+		code = transport.CodeIMAPAuthFailed
+	}
+	if status == "NO" && responseCode != nil {
+		switch {
+		case *responseCode == "NONEXISTENT" && (command == "STATUS" || command == "SELECT" || command == "APPEND"):
+			code = transport.CodeIMAPMailboxNotFound
+		case *responseCode == "OVERQUOTA" && command == "APPEND":
+			code = transport.CodeIMAPQuotaExceeded
+		}
+	}
+	return &transport.TransportError{
+		Code: code, Message: "IMAP " + command + " was rejected with " + status,
+		IMAPRejection: evidence,
+	}
+}
+
+func leadingTaggedResponseCode(responseText string) *string {
+	if !strings.HasPrefix(responseText, "[") {
+		return nil
+	}
+	end := strings.IndexByte(responseText[1:], ']')
+	if end < 1 {
+		return nil
+	}
+	end++
+	if end+1 < len(responseText) && responseText[end+1] != ' ' {
+		return nil
+	}
+	codeText := responseText[1:end]
+	codeAtom, _, _ := strings.Cut(codeText, " ")
+	if codeAtom == "" {
+		return nil
+	}
+	for _, r := range codeAtom {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || strings.ContainsRune("(){}%*\\\"[]", r) {
+			return nil
+		}
+	}
+	code := strings.ToUpper(codeAtom)
+	return &code
+}
+
+func boundedTaggedResponseText(responseText string) string {
+	var bounded strings.Builder
+	bounded.Grow(min(len(responseText), maxTaggedIMAPRejectionTextBytes))
+	for _, r := range responseText {
+		if unicode.IsControl(r) {
+			continue
+		}
+		if bounded.Len()+utf8.RuneLen(r) > maxTaggedIMAPRejectionTextBytes {
+			break
+		}
+		bounded.WriteRune(r)
+	}
+	return bounded.String()
 }
 
 func malformedTaggedCommandResponse(sess *session, command string, err error) *transport.TransportError {

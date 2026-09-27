@@ -57,10 +57,7 @@ func (c *Client) doStatus(ctx context.Context, sess *session, tag, mailbox strin
 				}
 				return status, nil
 			}
-			return status, &transport.TransportError{
-				Code:    transport.CodeIMAPMailboxNotFound,
-				Message: "IMAP STATUS failed: " + st,
-			}
+			return status, rejectedTaggedCompletion(line, tag, "STATUS", st)
 		}
 		if strings.HasPrefix(line, "* STATUS ") {
 			if seenStatus {

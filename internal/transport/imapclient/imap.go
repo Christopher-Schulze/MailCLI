@@ -217,18 +217,22 @@ func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg tra
 	if err := c.writeLineBytes(sess, cmd); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPAuthFailed, "IMAP LOGIN write")
 	}
-	status, _, err := c.readFinal(ctx, sess, tag)
+	status, responseText, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		return err
+	}
+	statusLine := tag + " " + status
+	if responseText != "" {
+		statusLine += " " + responseText
+	}
+	status, statusErr := parseTaggedCompletionStatus(statusLine, tag)
+	if statusErr != nil {
+		return malformedTaggedCommandResponse(sess, "LOGIN", statusErr)
 	}
 	if status == "OK" {
 		return nil
 	}
-	return &transport.TransportError{
-		Code:    transport.CodeIMAPAuthFailed,
-		Message: "IMAP LOGIN failed",
-		Err:     fmt.Errorf("server returned %s", status),
-	}
+	return taggedCommandRejection("LOGIN", status, responseText)
 }
 
 type session struct {
@@ -316,6 +320,16 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 		if remaining < 0 {
 			break
 		}
+		isTaggedCompletion := strings.HasPrefix(line, tag+" ")
+		if isTaggedCompletion {
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return info, malformedTaggedCommandResponse(sess, "SELECT", statusErr)
+			}
+			if status != "OK" {
+				return info, rejectedTaggedCompletion(line, tag, "SELECT", status)
+			}
+		}
 		code, err := flagResponseCode(line, tag)
 		if err == nil {
 			err = info.observeFlagCode(code)
@@ -324,18 +338,8 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 			sess.dirty = true
 			return info, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP SELECT metadata malformed", Err: err}
 		}
-		if strings.HasPrefix(line, tag+" ") {
-			status, statusErr := parseTaggedCompletionStatus(line, tag)
-			if statusErr != nil {
-				return info, malformedTaggedCommandResponse(sess, "SELECT", statusErr)
-			}
-			if status == "OK" {
-				return info, nil
-			}
-			return info, &transport.TransportError{
-				Code:    transport.CodeIMAPMailboxNotFound,
-				Message: "IMAP SELECT failed: " + status,
-			}
+		if isTaggedCompletion {
+			return info, nil
 		}
 		if strings.HasPrefix(line, "* ") {
 			if strings.HasSuffix(line, " EXISTS") {

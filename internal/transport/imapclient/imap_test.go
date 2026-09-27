@@ -115,7 +115,7 @@ func TestAppendToSent(t *testing.T) {
 		{
 			name:             "append fails",
 			cfg:              fakeServerConfig{authOK: true, sentMboxes: []string{"Sent"}, appendOK: false},
-			wantErrCode:      transport.CodeIMAPAppendFailed,
+			wantErrCode:      transport.CodeIMAPCommandRejected,
 			wantAppendCalled: true,
 		},
 	}
@@ -1443,7 +1443,7 @@ func TestSearchUIDRejectsMalformedResponses(t *testing.T) {
 		{
 			name:     "tagged failure",
 			response: []string{"<tag> BAD invalid search"},
-			wantCode: transport.CodeIMAPMutationFailed,
+			wantCode: transport.CodeIMAPCommandRejected,
 		},
 	}
 	for _, test := range tests {
@@ -2229,7 +2229,7 @@ func TestCheckStatusStrictResponses(t *testing.T) {
 		{
 			name:      "tagged failure",
 			response:  "<tag> NO STATUS failed\r\n",
-			wantError: transport.CodeIMAPMailboxNotFound,
+			wantError: transport.CodeIMAPCommandRejected,
 		},
 	}
 	for _, test := range tests {

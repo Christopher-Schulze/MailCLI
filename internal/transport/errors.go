@@ -10,8 +10,18 @@ type TransportError struct {
 	Code            string
 	Message         string
 	Err             error
+	IMAPRejection   *IMAPCommandRejection
 	Limit           *ResourceLimit
 	ObservedAtLeast int64
+}
+
+// IMAPCommandRejection retains bounded evidence from a tagged NO or BAD
+// completion without exposing the command tag or unbounded server text.
+type IMAPCommandRejection struct {
+	Command      string  `json:"command"`
+	Status       string  `json:"status"`
+	ResponseCode *string `json:"response_code"`
+	Text         string  `json:"text"`
 }
 
 // ResourceLimit identifies the operation bound exceeded by an IMAP response.
@@ -144,6 +154,8 @@ const (
 	CodeIMAPAccountBusy          = "imap_account_busy"
 	CodeIMAPLockUnavailable      = "imap_mutation_lock_unavailable"
 	CodeIMAPMailboxNotFound      = "imap_mailbox_not_found"
+	CodeIMAPCommandRejected      = "imap_command_rejected"
+	CodeIMAPQuotaExceeded        = "imap_quota_exceeded"
 	CodeIMAPMessageNotFound      = "imap_message_not_found"
 	CodeIMAPAmbiguousMailbox     = "imap_ambiguous_mailbox"
 	CodeIMAPMutationFailed       = "imap_mutation_failed"

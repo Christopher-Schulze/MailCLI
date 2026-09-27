@@ -53,6 +53,45 @@ func IsTransientTransportFailure(err error) bool {
 	return IsTransientReadFailure(err)
 }
 
+// TaggedIMAPRejection returns the first retained tagged NO/BAD response in an
+// error chain.
+func TaggedIMAPRejection(err error) (*IMAPCommandRejection, bool) {
+	if err == nil {
+		return nil, false
+	}
+	var transportError *TransportError
+	if errors.As(err, &transportError) && transportError != nil && transportError.IMAPRejection != nil {
+		return transportError.IMAPRejection, true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, cause := range wrapped.Unwrap() {
+			if rejection, ok := TaggedIMAPRejection(cause); ok {
+				return rejection, true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return TaggedIMAPRejection(wrapped.Unwrap())
+	}
+	return nil, false
+}
+
+// IsTransientIMAPReadRejection reports a tagged UNAVAILABLE rejection from a
+// read-only IMAP command. APPEND is deliberately excluded because accepted
+// SMTP submission must be reconciled through its durable mirror workflow.
+func IsTransientIMAPReadRejection(err error) bool {
+	rejection, ok := TaggedIMAPRejection(err)
+	if !ok || rejection.Status != "NO" || rejection.ResponseCode == nil || *rejection.ResponseCode != "UNAVAILABLE" {
+		return false
+	}
+	switch rejection.Command {
+	case "LIST", "SEARCH", "UID SEARCH", "STATUS", "SELECT":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsTLSVerificationFailure reports a failed IMAP certificate or hostname check.
 // Outcome uncertainty takes precedence over the wrapped verification cause.
 func IsTLSVerificationFailure(err error) bool {

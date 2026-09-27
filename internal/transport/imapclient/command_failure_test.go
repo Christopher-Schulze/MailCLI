@@ -6,42 +6,57 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"mailcli/internal/transport"
 )
 
 type wireCommandFailureCase struct {
 	name          string
+	command       string
 	rejectionCode string
 	call          func(context.Context, *Client, *session) error
 }
 
 func wireCommandFailureCases() []wireCommandFailureCase {
 	return []wireCommandFailureCase{
-		{name: "LIST", rejectionCode: transport.CodeIMAPSentMailboxNotFound, call: func(ctx context.Context, client *Client, sess *session) error {
+		{name: "LIST", command: "LIST", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
 			_, err := client.doList(ctx, sess, "A001")
 			return err
 		}},
-		{name: "STATUS", rejectionCode: transport.CodeIMAPMailboxNotFound, call: func(ctx context.Context, client *Client, sess *session) error {
+		{name: "STATUS", command: "STATUS", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
 			_, err := client.doStatus(ctx, sess, "A001", "INBOX")
 			return err
 		}},
-		{name: "SELECT", rejectionCode: transport.CodeIMAPMailboxNotFound, call: func(ctx context.Context, client *Client, sess *session) error {
+		{name: "SELECT", command: "SELECT", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
 			_, err := client.doSelectInfo(ctx, sess, "A001", "INBOX")
 			return err
 		}},
-		{name: "SEARCH", rejectionCode: transport.CodeIMAPAppendFailed, call: func(ctx context.Context, client *Client, sess *session) error {
+		{name: "SEARCH", command: "SEARCH", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
 			_, err := client.doSearch(ctx, sess, "A001", "<wire@example.com>")
 			return err
 		}},
-		{name: "UID SEARCH", rejectionCode: transport.CodeIMAPMutationFailed, call: func(ctx context.Context, client *Client, sess *session) error {
+		{name: "UID SEARCH", command: "UID SEARCH", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
 			_, err := client.doUIDSearchCriteria(ctx, sess, "A001", "ALL")
 			return err
 		}},
 	}
+}
+
+func taggedRejectionCommandCases() []wireCommandFailureCase {
+	commands := wireCommandFailureCases()
+	return append(commands,
+		wireCommandFailureCase{name: "LOGIN", command: "LOGIN", rejectionCode: transport.CodeIMAPAuthFailed, call: func(ctx context.Context, client *Client, sess *session) error {
+			return client.doLogin(ctx, sess, "A001", transport.ImapConfig{Username: "user", Password: "pass"})
+		}},
+		wireCommandFailureCase{name: "APPEND continuation", command: "APPEND", rejectionCode: transport.CodeIMAPCommandRejected, call: func(ctx context.Context, client *Client, sess *session) error {
+			return client.doAppend(ctx, sess, "A001", "Sent", strings.NewReader(""), 0)
+		}},
+	)
 }
 
 func newWireCommandFailureSession(t *testing.T) (*session, net.Conn, func() error) {
@@ -127,15 +142,23 @@ func TestWireCommandReadErrorsUseDisconnectedCode(t *testing.T) {
 }
 
 func TestTaggedServerRejectionsRequireNOorBAD(t *testing.T) {
-	for _, command := range wireCommandFailureCases() {
+	for _, command := range taggedRejectionCommandCases() {
 		for _, status := range []string{"NO", "BAD"} {
 			t.Run(command.name+"/"+status, func(t *testing.T) {
 				sess, peer, closePeer := newWireCommandFailureSession(t)
-				peerDone := serveOneWireCommand(peer, closePeer, "A001 "+status+" rejected\r\n")
+				peerDone := serveOneWireCommand(peer, closePeer, "A001 "+status+" [UNAVAILABLE] server temporarily unavailable\r\n")
 				err := command.call(context.Background(), New(), sess)
 				requireFakePeerComplete(t, peerDone)
-				if got := transport.ErrorCode(err); got != command.rejectionCode {
-					t.Fatalf("%s %s error code = %q, want %q: %v", command.name, status, got, command.rejectionCode, err)
+				wantCode := command.rejectionCode
+				if status == "BAD" {
+					wantCode = transport.CodeIMAPCommandRejected
+				}
+				if got := transport.ErrorCode(err); got != wantCode {
+					t.Fatalf("%s %s error code = %q, want %q: %v", command.name, status, got, wantCode, err)
+				}
+				rejection, ok := transport.TaggedIMAPRejection(err)
+				if !ok || rejection.Command != command.command || rejection.Status != status || rejection.ResponseCode == nil || *rejection.ResponseCode != "UNAVAILABLE" || rejection.Text != "[UNAVAILABLE] server temporarily unavailable" {
+					t.Fatalf("%s %s rejection evidence = %+v, present=%t", command.name, status, rejection, ok)
 				}
 				if sess.dirty {
 					t.Fatalf("%s %s rejection dirtied the session", command.name, status)
@@ -145,8 +168,136 @@ func TestTaggedServerRejectionsRequireNOorBAD(t *testing.T) {
 	}
 }
 
+func TestTaggedRejectionMappingsRequireCommandContext(t *testing.T) {
+	tests := []struct {
+		command string
+		status  string
+		code    string
+		want    string
+	}{
+		{command: "STATUS", code: "NONEXISTENT", want: transport.CodeIMAPMailboxNotFound},
+		{command: "SELECT", code: "NONEXISTENT", want: transport.CodeIMAPMailboxNotFound},
+		{command: "APPEND", code: "NONEXISTENT", want: transport.CodeIMAPMailboxNotFound},
+		{command: "APPEND", code: "OVERQUOTA", want: transport.CodeIMAPQuotaExceeded},
+		{command: "LIST", code: "NONEXISTENT", want: transport.CodeIMAPCommandRejected},
+		{command: "SEARCH", code: "OVERQUOTA", want: transport.CodeIMAPCommandRejected},
+		{command: "SEARCH", code: "FUTURECODE", want: transport.CodeIMAPCommandRejected},
+		{command: "STATUS", status: "BAD", code: "NONEXISTENT", want: transport.CodeIMAPCommandRejected},
+		{command: "APPEND", status: "BAD", code: "OVERQUOTA", want: transport.CodeIMAPCommandRejected},
+		{command: "SEARCH", status: "BAD", code: "UNAVAILABLE", want: transport.CodeIMAPCommandRejected},
+		{command: "SELECT", code: "UIDVALIDITY", want: transport.CodeIMAPCommandRejected},
+	}
+	commands := taggedRejectionCommandCases()
+	for _, test := range tests {
+		t.Run(test.command+"/"+test.code, func(t *testing.T) {
+			var selected *wireCommandFailureCase
+			for i := range commands {
+				if commands[i].command == test.command {
+					selected = &commands[i]
+					break
+				}
+			}
+			if selected == nil {
+				t.Fatalf("missing fake command case for %s", test.command)
+			}
+			status := test.status
+			if status == "" {
+				status = "NO"
+			}
+			sess, peer, closePeer := newWireCommandFailureSession(t)
+			peerDone := serveOneWireCommand(peer, closePeer, "A001 "+status+" ["+test.code+"] rejected\r\n")
+			err := selected.call(context.Background(), New(), sess)
+			requireFakePeerComplete(t, peerDone)
+			if got := transport.ErrorCode(err); got != test.want {
+				t.Fatalf("%s %s [%s] error code = %q, want %q: %v", test.command, status, test.code, got, test.want, err)
+			}
+			rejection, ok := transport.TaggedIMAPRejection(err)
+			if !ok || rejection.Status != status || rejection.ResponseCode == nil || *rejection.ResponseCode != test.code {
+				t.Fatalf("%s %s [%s] response-code evidence = %+v, present=%t", test.command, status, test.code, rejection, ok)
+			}
+		})
+	}
+}
+
+func TestTaggedIMAPRejectionFindsEvidenceThroughTransportWrappers(t *testing.T) {
+	rejection := &transport.IMAPCommandRejection{Command: "LIST", Status: "NO", Text: "temporarily unavailable"}
+	inner := &transport.TransportError{Code: transport.CodeIMAPCommandRejected, IMAPRejection: rejection}
+	outer := &transport.TransportError{Code: transport.CodeIMAPTimeout, Err: inner}
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "typed wrapper", err: outer},
+		{name: "joined wrapper", err: errors.Join(&transport.TransportError{Code: transport.CodeIMAPDisconnected}, inner)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := transport.TaggedIMAPRejection(test.err)
+			if !ok || got != rejection {
+				t.Fatalf("TaggedIMAPRejection() = (%+v, %t), want retained evidence %+v", got, ok, rejection)
+			}
+		})
+	}
+}
+
+func TestSelectTaggedRejectionPrecedesMetadataParsing(t *testing.T) {
+	sess, peer, closePeer := newWireCommandFailureSession(t)
+	response := "A001 NO [UIDVALIDITY not-a-number] mailbox state changed\r\n"
+	peerDone := serveOneWireCommand(peer, closePeer, response)
+	_, err := New().doSelectInfo(context.Background(), sess, "A001", "INBOX")
+	requireFakePeerComplete(t, peerDone)
+	if got := transport.ErrorCode(err); got != transport.CodeIMAPCommandRejected {
+		t.Fatalf("SELECT tagged rejection error code = %q, want %q: %v", got, transport.CodeIMAPCommandRejected, err)
+	}
+	rejection, ok := transport.TaggedIMAPRejection(err)
+	if !ok || rejection.Command != "SELECT" || rejection.Status != "NO" || rejection.ResponseCode == nil || *rejection.ResponseCode != "UIDVALIDITY" || rejection.Text != "[UIDVALIDITY not-a-number] mailbox state changed" {
+		t.Fatalf("SELECT tagged rejection evidence = %+v, present=%t", rejection, ok)
+	}
+	if sess.dirty {
+		t.Fatal("definite SELECT rejection dirtied the session")
+	}
+}
+
+func TestTaggedRejectionParserUsesOnlyLeadingResponseCode(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{text: "[OVERQUOTA] over limit", want: "OVERQUOTA"},
+		{text: "[future-code argument] detail", want: "FUTURE-CODE"},
+		{text: "server says [OVERQUOTA] later", want: ""},
+		{text: "[OVERQUOTA]suffix", want: ""},
+		{text: "[] empty code", want: ""},
+		{text: "[OVERQUOTA]", want: "OVERQUOTA"},
+	}
+	for _, test := range tests {
+		t.Run(test.text, func(t *testing.T) {
+			got := leadingTaggedResponseCode(test.text)
+			if test.want == "" {
+				if got != nil {
+					t.Fatalf("leadingTaggedResponseCode(%q) = %q, want no code", test.text, *got)
+				}
+				return
+			}
+			if got == nil || *got != test.want {
+				t.Fatalf("leadingTaggedResponseCode(%q) = %v, want %q", test.text, got, test.want)
+			}
+		})
+	}
+}
+
+func TestTaggedRejectionTextStripsControlsAndTruncatesOnUTF8Boundary(t *testing.T) {
+	if got := boundedTaggedResponseText("a\x00b\tc\r\n\u0085d"); got != "abcd" {
+		t.Fatalf("boundedTaggedResponseText() = %q, want control-free text %q", got, "abcd")
+	}
+	got := boundedTaggedResponseText(strings.Repeat("é", maxTaggedIMAPRejectionTextBytes/2) + "x")
+	if len(got) != maxTaggedIMAPRejectionTextBytes || !strings.HasSuffix(got, "é") || !utf8.ValidString(got) {
+		t.Fatalf("boundedTaggedResponseText() length=%d valid=%t suffix=%q", len(got), utf8.ValidString(got), got[len(got)-3:])
+	}
+}
+
 func TestUnknownTaggedStatusIsMalformed(t *testing.T) {
-	for _, command := range wireCommandFailureCases() {
+	for _, command := range taggedRejectionCommandCases() {
 		t.Run(command.name, func(t *testing.T) {
 			sess, peer, closePeer := newWireCommandFailureSession(t)
 			peerDone := serveOneWireCommand(peer, closePeer, "A001 BYE closing\r\n")

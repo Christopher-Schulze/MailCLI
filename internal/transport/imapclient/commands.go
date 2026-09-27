@@ -44,10 +44,7 @@ func (c *Client) doList(ctx context.Context, sess *session, tag string) ([]mailb
 			if status == "OK" {
 				return mailboxes, nil
 			}
-			return nil, &transport.TransportError{
-				Code:    transport.CodeIMAPSentMailboxNotFound,
-				Message: "IMAP LIST failed: " + status,
-			}
+			return nil, rejectedTaggedCompletion(line, tag, "LIST", status)
 		}
 		if strings.HasPrefix(line, "* LIST ") && len(mailboxes) >= MaxListOperationMailboxes {
 			return nil, listResponseLimitExceeded(sess, "parsed mailboxes", int64(MaxListOperationMailboxes))
@@ -108,10 +105,7 @@ func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID str
 			if status == "OK" {
 				return matchCount, nil
 			}
-			return 0, &transport.TransportError{
-				Code:    transport.CodeIMAPAppendFailed,
-				Message: "IMAP SEARCH failed: " + status,
-			}
+			return 0, rejectedTaggedCompletion(line, tag, "SEARCH", status)
 		}
 		if strings.HasPrefix(line, "* SEARCHING") {
 			return 0, &transport.TransportError{
@@ -191,19 +185,23 @@ func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, 
 		sess.dirty = true
 		return appendOutcomeUnknown(wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP APPEND final reply deadline"))
 	}
-	status, _, err := c.readFinal(ctx, sess, tag)
+	status, responseText, err := c.readFinal(ctx, sess, tag)
 	if err != nil {
 		sess.dirty = true
 		return appendOutcomeUnknown(err)
 	}
+	statusLine := tag + " " + status
+	if responseText != "" {
+		statusLine += " " + responseText
+	}
+	status, statusErr := parseTaggedCompletionStatus(statusLine, tag)
+	if statusErr != nil {
+		return malformedTaggedCommandResponse(sess, "APPEND", statusErr)
+	}
 	if status == "OK" {
 		return nil
 	}
-	return &transport.TransportError{
-		Code:    transport.CodeIMAPAppendFailed,
-		Message: "IMAP APPEND failed",
-		Err:     fmt.Errorf("server returned %s", status),
-	}
+	return taggedCommandRejection("APPEND", status, responseText)
 }
 
 const maxAppendContinuationLines = 100
@@ -250,7 +248,7 @@ func (c *Client) readAppendContinuation(ctx context.Context, sess *session, tag 
 				return malformedTaggedCommandResponse(sess, "APPEND", err)
 			}
 			if status == "NO" || status == "BAD" {
-				return &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "IMAP APPEND rejected: " + line}
+				return rejectedTaggedCompletion(line, tag, "APPEND", status)
 			}
 		}
 		sess.dirty = true

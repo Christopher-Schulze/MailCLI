@@ -63,4 +63,6 @@ Every JSON call returns one envelope:
 
 Check `ok`, `error.code`, `error.message`, and `error.guidance`: `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `recovery`. Only `safe` with replay allowed permits an immediate retry. `observe_required` requires observation first; `replay_allowed:false` forbids replay; `user_input_required` requires correcting the named input/environment; `terminal` means stop. For `messages get` `not_found`, get a fresh valid ref; never replay the same ref. Follow the emitted recovery command and retain its operation ID. Never invent a retry from prose.
 
+For tagged IMAP `NO`/`BAD`, inspect `error.imap_rejection` (`command`, `status`, `response_code`, `text`) together with guidance. Only `NO [UNAVAILABLE]` permits retry for reads; `BAD` is never automatically retryable. `NO [NONEXISTENT]` and APPEND `NO [OVERQUOTA]` require correcting the mailbox or quota. After SMTP acceptance, use `drafts.reconcile` for every mirror rejection and never replay `drafts.send`.
+
 Exit 0 normally indicates success, 1 operation failure, and 2 usage failure. A partial JSON batch returns exit 1 with `ok:false` and `batch_partial`; inspect its envelope and items. Only `sync --check --require-complete` may return exit 3 with `ok:true` for valid incomplete coverage. Read the output guide for teardown failures and retained partial evidence.

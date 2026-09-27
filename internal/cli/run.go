@@ -104,6 +104,7 @@ type errorData struct {
 	Code                  string                          `json:"code"`
 	Message               string                          `json:"message"`
 	Guidance              *mail.OperationGuidance         `json:"guidance"`
+	IMAPRejection         *transport.IMAPCommandRejection `json:"imap_rejection,omitempty"`
 	ValidSubcommands      []string                        `json:"valid_subcommands,omitempty"`
 	RequiredBytes         *int64                          `json:"required_bytes,omitempty"`
 	Limit                 *transport.ResourceLimit        `json:"limit,omitempty"`
@@ -183,8 +184,9 @@ func newErrorData(command string, data responseData, err error) *errorData {
 	if errors.As(err, &operation) {
 		unclaimedSpool = operation.UnclaimedSpool
 	}
+	imapRejection, _ := transport.TaggedIMAPRejection(err)
 	return &errorData{
-		Code: code, Message: publicFailureMessage(err), Guidance: &guidance,
+		Code: code, Message: publicFailureMessage(err), Guidance: &guidance, IMAPRejection: imapRejection,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
 		Limit: limit, ObservedAtLeast: observedAtLeast, UnclaimedSpool: unclaimedSpool,
 		outputSize: outputSize,

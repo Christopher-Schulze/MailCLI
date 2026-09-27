@@ -101,6 +101,44 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		(mutation.Evidence.IsStore() || mutation.Evidence.Command == "COPY" || mutation.Evidence.Command == "MOVE") {
 		return guidanceForMutationUnknown(err)
 	}
+	if rejection, rejected := transport.TaggedIMAPRejection(err); rejected {
+		if command == "drafts.send" || command == "drafts.reconcile" {
+			guidance := guidanceForMirrorUnknown()
+			switch {
+			case code == transport.CodeIMAPQuotaExceeded:
+				guidance.Recovery.Instruction = "Free space in the Sent mailbox or correct its quota, then run drafts.reconcile; never repeat SMTP."
+			case code == transport.CodeIMAPMailboxNotFound:
+				guidance.Recovery.Instruction = "Restore or select the correct Sent mailbox, then run drafts.reconcile; never repeat SMTP."
+			case code == transport.CodeIMAPAuthFailed:
+				guidance.Recovery.Instruction = "Correct the bound IMAP credentials, then run drafts.reconcile; never repeat SMTP."
+			case rejection.Status == "NO" && rejection.ResponseCode != nil && *rejection.ResponseCode == "UNAVAILABLE":
+				guidance.Recovery.Instruction = "Wait for the IMAP service to recover, then run drafts.reconcile; never repeat SMTP."
+			default:
+				guidance.Recovery.Instruction = "Inspect error.imap_rejection, correct the server-side cause, then run drafts.reconcile; never repeat SMTP."
+			}
+			return guidance
+		}
+		if transport.IsTransientIMAPReadRejection(err) {
+			return guidanceForRead()
+		}
+		switch code {
+		case transport.CodeIMAPAuthFailed:
+			// Preserve the existing credential-correction guidance below.
+		case transport.CodeIMAPMailboxNotFound:
+			return guidanceForReadCorrection("Correct the requested mailbox on the IMAP server, then retry the operation.")
+		case transport.CodeIMAPQuotaExceeded:
+			return OperationGuidance{
+				Phase: OperationPhaseValidation, EffectCertainty: EffectNone,
+				Retryability: RetryUserInputRequired, ReplayAllowed: false,
+				Recovery: RecoveryGuidance{
+					Action:      RecoveryCorrect,
+					Instruction: "Free space in the target mailbox or choose a destination with sufficient quota, then finish the retained Sent mirror with drafts.reconcile; do not resubmit SMTP.",
+				},
+			}
+		default:
+			return guidanceForTerminalRead()
+		}
+	}
 	if isMailboxMutationCommand(command) && transport.IsAmbiguousMailbox(err) {
 		return OperationGuidance{
 			Phase: OperationPhaseValidation, EffectCertainty: EffectNone,

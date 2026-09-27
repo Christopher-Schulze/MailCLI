@@ -1233,3 +1233,86 @@ func TestEnvelopeOmitsStoreProfileWarningWhenVerified(t *testing.T) {
 		t.Fatalf("stderr warned on verified profile: %q", stderr.String())
 	}
 }
+
+func TestTaggedIMAPRejectionJSONCarriesEvidenceAndSafeGuidance(t *testing.T) {
+	unavailable := "UNAVAILABLE"
+	overquota := "OVERQUOTA"
+	authenticationFailed := "AUTHENTICATIONFAILED"
+	tests := []struct {
+		name          string
+		command       string
+		code          string
+		rejection     *transport.IMAPCommandRejection
+		phase         mail.OperationPhase
+		effect        mail.EffectCertainty
+		retryability  mail.Retryability
+		replayAllowed bool
+		recovery      mail.RecoveryAction
+		instruction   string
+	}{
+		{
+			name: "transient read rejection", command: "mailboxes.list", code: transport.CodeIMAPCommandRejected,
+			rejection: &transport.IMAPCommandRejection{Command: "LIST", Status: "NO", ResponseCode: &unavailable, Text: "[UNAVAILABLE] try again"},
+			phase:     mail.OperationPhaseRead, effect: mail.EffectNone, retryability: mail.RetrySafe,
+			replayAllowed: true, recovery: mail.RecoveryRetry,
+		},
+		{
+			name: "BAD is not retryable even with UNAVAILABLE", command: "mailboxes.list", code: transport.CodeIMAPCommandRejected,
+			rejection: &transport.IMAPCommandRejection{Command: "LIST", Status: "BAD", ResponseCode: &unavailable, Text: "[UNAVAILABLE] inconsistent BAD"},
+			phase:     mail.OperationPhaseRead, effect: mail.EffectNone, retryability: mail.RetryTerminal,
+			recovery: mail.RecoveryInspect,
+		},
+		{
+			name: "unclassified read rejection", command: "messages.get", code: transport.CodeIMAPCommandRejected,
+			rejection: &transport.IMAPCommandRejection{Command: "UID SEARCH", Status: "BAD", Text: "invalid search"},
+			phase:     mail.OperationPhaseRead, effect: mail.EffectNone, retryability: mail.RetryTerminal,
+			recovery: mail.RecoveryInspect,
+		},
+		{
+			name: "append quota after accepted submission", command: "drafts.send", code: transport.CodeIMAPQuotaExceeded,
+			rejection: &transport.IMAPCommandRejection{Command: "APPEND", Status: "NO", ResponseCode: &overquota, Text: "[OVERQUOTA] quota reached"},
+			phase:     mail.OperationPhaseMirror, effect: mail.EffectPartial, retryability: mail.RetryObserveRequired,
+			recovery: mail.RecoveryReconcile, instruction: "correct its quota",
+		},
+		{
+			name: "login rejection retains auth code and response", command: "messages.get", code: transport.CodeIMAPAuthFailed,
+			rejection: &transport.IMAPCommandRejection{Command: "LOGIN", Status: "NO", ResponseCode: &authenticationFailed, Text: "[AUTHENTICATIONFAILED] credentials rejected"},
+			phase:     mail.OperationPhaseRead, effect: mail.EffectNone, retryability: mail.RetryUserInputRequired,
+			recovery: mail.RecoveryCorrect, instruction: "credentials",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cause := &transport.TransportError{Code: test.code, Message: "IMAP server rejected command", IMAPRejection: test.rejection}
+			err := &transport.TransportError{Code: test.code, Message: "IMAP operation failed", Err: cause}
+			encoded, marshalErr := json.Marshal(newErrorData(test.command, responseData{}, err))
+			if marshalErr != nil {
+				t.Fatalf("marshal error data: %v", marshalErr)
+			}
+			var response struct {
+				Code          string                          `json:"code"`
+				IMAPRejection *transport.IMAPCommandRejection `json:"imap_rejection"`
+				Guidance      mail.OperationGuidance          `json:"guidance"`
+			}
+			if err := json.Unmarshal(encoded, &response); err != nil {
+				t.Fatalf("decode error data: %v; json=%s", err, encoded)
+			}
+			guidance := response.Guidance
+			if response.Code != test.code || response.IMAPRejection == nil ||
+				response.IMAPRejection.Command != test.rejection.Command || response.IMAPRejection.Status != test.rejection.Status ||
+				response.IMAPRejection.Text != test.rejection.Text || guidance.Phase != test.phase ||
+				guidance.EffectCertainty != test.effect || guidance.Retryability != test.retryability ||
+				guidance.ReplayAllowed != test.replayAllowed || guidance.Recovery.Action != test.recovery ||
+				(test.instruction != "" && !strings.Contains(guidance.Recovery.Instruction, test.instruction)) {
+				t.Fatalf("error data = %+v; json=%s", response, encoded)
+			}
+			if test.rejection.ResponseCode == nil {
+				if response.IMAPRejection.ResponseCode != nil || !strings.Contains(string(encoded), `"response_code":null`) {
+					t.Fatalf("absent response code was not serialized as null: %s", encoded)
+				}
+			} else if response.IMAPRejection.ResponseCode == nil || *response.IMAPRejection.ResponseCode != *test.rejection.ResponseCode {
+				t.Fatalf("response code evidence = %+v; want %q", response.IMAPRejection, *test.rejection.ResponseCode)
+			}
+		})
+	}
+}

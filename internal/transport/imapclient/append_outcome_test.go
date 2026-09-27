@@ -37,8 +37,8 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 		{name: "ALERT", lines: []string{"* OK [ALERT] maintenance"}},
 		{name: "line boundary", lines: lineBoundary},
 		{name: "byte boundary", lines: []string{byteBoundary}},
-		{name: "NO", lines: []string{"* 3 EXISTS"}, rejection: "NO [OVERQUOTA] quota exceeded", wantCode: transport.CodeIMAPAppendFailed, wantText: "[OVERQUOTA] quota exceeded"},
-		{name: "BAD", rejection: "BAD invalid literal", wantCode: transport.CodeIMAPAppendFailed, wantText: "invalid literal"},
+		{name: "NO", lines: []string{"* 3 EXISTS"}, rejection: "NO [OVERQUOTA] quota exceeded", wantCode: transport.CodeIMAPQuotaExceeded, wantText: "[OVERQUOTA] quota exceeded"},
+		{name: "BAD", rejection: "BAD invalid literal", wantCode: transport.CodeIMAPCommandRejected, wantText: "invalid literal"},
 		{name: "line flood", lines: append(append([]string(nil), lineBoundary...), "* 3 EXISTS"), wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation untagged responses", limit: maxAppendContinuationLines},
 		{name: "byte flood", lines: []string{byteBoundary + "x"}, wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation response bytes", limit: maxAppendContinuationBytes},
 		{name: "oversized line", lines: []string{"* OK " + strings.Repeat("x", maxIMAPResponseLineBytes)}, wantCode: transport.CodeIMAPResourceLimitExceeded, limitName: "APPEND continuation response bytes", limit: maxAppendContinuationBytes},
@@ -58,8 +58,11 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 			if code := transport.ErrorCode(err); code != test.wantCode {
 				t.Fatalf("APPEND error = %v, want code %q", err, test.wantCode)
 			}
-			if test.wantText != "" && !strings.Contains(err.Error(), test.wantText) {
-				t.Fatalf("APPEND error = %v, want server text %q", err, test.wantText)
+			if test.wantText != "" {
+				rejection, ok := transport.TaggedIMAPRejection(err)
+				if !ok || rejection.Text != test.wantText {
+					t.Fatalf("APPEND rejection evidence = %+v, present=%t, want server text %q", rejection, ok, test.wantText)
+				}
 			}
 			if test.limitName != "" {
 				var overflow *transport.TransportError
@@ -84,6 +87,62 @@ func TestAppendToSentContinuationResponses(t *testing.T) {
 				t.Fatalf("APPEND committed=%v data=%q evidence=%+v", called, data, evidence)
 			}
 		})
+	}
+}
+
+func TestDoAppendSurfacesFinalTaggedRejection(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	sess := &session{
+		conn: clientConn,
+		br:   bufio.NewReader(clientConn),
+		bw:   bufio.NewWriter(clientConn),
+	}
+	peerDone := make(chan error, 1)
+	go func() {
+		var peerErr error
+		defer func() { peerDone <- errors.Join(peerErr, serverConn.Close()) }()
+		reader := bufio.NewReader(serverConn)
+		command, err := reader.ReadString('\n')
+		if err != nil {
+			peerErr = err
+			return
+		}
+		if !strings.Contains(command, " APPEND ") {
+			peerErr = errors.New("fake IMAP peer expected APPEND")
+			return
+		}
+		if _, err := io.WriteString(serverConn, "+ continue\r\n"); err != nil {
+			peerErr = err
+			return
+		}
+		literal := make([]byte, 3)
+		if _, err := io.ReadFull(reader, literal); err != nil {
+			peerErr = err
+			return
+		}
+		if string(literal) != "x\r\n" {
+			peerErr = errors.New("fake IMAP peer received an unexpected APPEND literal")
+			return
+		}
+		_, peerErr = io.WriteString(serverConn, "A001 NO [OVERQUOTA] quota reached\r\n")
+	}()
+	defer func() { _ = clientConn.Close() }()
+
+	err := (&Client{}).doAppend(context.Background(), sess, "A001", "Sent", strings.NewReader("x"), 1)
+	if err == nil || transport.ErrorCode(err) != transport.CodeIMAPQuotaExceeded {
+		t.Fatalf("final APPEND rejection = %v, want %s", err, transport.CodeIMAPQuotaExceeded)
+	}
+	rejection, ok := transport.TaggedIMAPRejection(err)
+	if !ok || rejection.Command != "APPEND" || rejection.Status != "NO" ||
+		rejection.ResponseCode == nil || *rejection.ResponseCode != "OVERQUOTA" ||
+		rejection.Text != "[OVERQUOTA] quota reached" {
+		t.Fatalf("final APPEND rejection evidence = %+v, present=%t", rejection, ok)
+	}
+	if sess.dirty {
+		t.Fatal("definitive final APPEND rejection dirtied the session")
+	}
+	if err := <-peerDone; err != nil {
+		t.Fatalf("fake IMAP peer: %v", err)
 	}
 }
 
