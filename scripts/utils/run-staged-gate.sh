@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Executed from the lease baseline, never from the staged patch itself.
 [[ "$#" -eq 4 || ( "$#" -eq 5 && ( "$5" == --fast || "$5" == --full ) ) || ( "$#" -ge 6 && "$5" == --checks ) ]] || {
-  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--fast|--full|--checks REGISTERED_PATH...]\n' >&2; exit 2;
+  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]\n' >&2; exit 2;
 }
 SOURCE_ROOT="$1"
 BASELINE_HEAD="$2"
@@ -25,7 +25,41 @@ if [[ "${1:-}" == --fast ]]; then
 fi
 GATE_TIER=full
 SELECTED_CASES=()
-if [[ "${1:-}" == --checks ]]; then GATE_TIER=targeted; shift; SELECTED_CASES=("$@"); fi
+EXPECTED_BASELINE_FAILURE_PATH=''
+EXPECTED_BASELINE_DIAGNOSTIC=''
+if [[ "${1:-}" == --expect-baseline-failure ]]; then
+  printf 'Expected baseline failure is only valid after --checks\n' >&2
+  exit 2
+fi
+if [[ "${1:-}" == --checks ]]; then
+  GATE_TIER=targeted
+  shift
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --expect-baseline-failure)
+        [[ "$#" -eq 3 ]] || {
+          printf 'Expected-baseline-failure option requires PATH and one exact final diagnostic line\n' >&2
+          exit 2
+        }
+        EXPECTED_BASELINE_FAILURE_PATH="$2"
+        EXPECTED_BASELINE_DIAGNOSTIC="$3"
+        break
+        ;;
+      --*)
+        printf 'Unknown targeted gate option: %s\n' "$1" >&2
+        exit 2
+        ;;
+      *)
+        SELECTED_CASES+=("$1")
+        shift
+        ;;
+    esac
+  done
+  [[ "${#SELECTED_CASES[@]}" -gt 0 ]] || {
+    printf 'Targeted gate requires at least one registered check\n' >&2
+    exit 2
+  }
+fi
 [[ "${FAST_SHELL_ONLY}" == false ]] || GATE_TIER=targeted
 for VARIABLE in $(git rev-parse --local-env-vars); do unset "${VARIABLE}"; done
 unset MAILCLI_WRITE_ROOT MAILCLI_GATE_RECEIPTS
@@ -40,6 +74,12 @@ RECEIPTS="${TEST_ROOT}/receipts"
 : >"${RECEIPTS}"
 
 fail() { printf '%s\n' "$1" >&2; exit 1; }
+if [[ -n "${EXPECTED_BASELINE_FAILURE_PATH}" ]]; then
+  [[ "${EXPECTED_BASELINE_FAILURE_PATH}" =~ ^scripts/tests/test-[a-z0-9-]+\.sh$ ]] ||
+    fail 'Expected baseline failure path must be a canonical registered shell test'
+  [[ -n "${EXPECTED_BASELINE_DIAGNOSTIC}" && "${EXPECTED_BASELINE_DIAGNOSTIC}" != *$'\n'* ]] ||
+    fail 'Expected baseline diagnostic must be one non-empty line'
+fi
 git clone -q --shared --no-checkout --no-tags "${SOURCE_ROOT}" "${PRODUCT_ROOT}"
 git -C "${PRODUCT_ROOT}" checkout -q --detach "${BASELINE_HEAD}"
 git -C "${PRODUCT_ROOT}" read-tree --reset -u "${INDEX_TREE}"
@@ -125,6 +165,18 @@ if [[ "${GATE_TIER}" == targeted ]]; then
   while IFS= read -r CASE_PATH; do
     grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-cases" || fail "Unregistered selected check: ${CASE_PATH}"
   done <"${TEST_ROOT}/executed-cases"
+  if [[ -n "${EXPECTED_BASELINE_FAILURE_PATH}" ]]; then
+    grep -Fxq "${EXPECTED_BASELINE_FAILURE_PATH}" "${TEST_ROOT}/baseline-cases" ||
+      fail 'Expected baseline failure path is not registered at the lease baseline'
+    grep -Fxq "${EXPECTED_BASELINE_FAILURE_PATH}" "${TEST_ROOT}/staged-cases" ||
+      fail 'Expected baseline failure path is not registered in the staged suite'
+    grep -Fxq "${EXPECTED_BASELINE_FAILURE_PATH}" "${TEST_ROOT}/executed-cases" ||
+      fail 'Expected baseline failure path must also be selected for staged execution'
+    BASELINE_TEST_HASH="$(shasum -a 256 "${BASELINE_ROOT}/${EXPECTED_BASELINE_FAILURE_PATH}" | awk '{print $1}')"
+    STAGED_TEST_HASH="$(shasum -a 256 "${PRODUCT_ROOT}/${EXPECTED_BASELINE_FAILURE_PATH}" | awk '{print $1}')"
+    [[ "${BASELINE_TEST_HASH}" != "${STAGED_TEST_HASH}" ]] ||
+      fail 'Expected baseline failure requires a changed staged test at the same path'
+  fi
   MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}" --checks "${SELECTED_CASES[@]}"
 else
   MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_GATE_RECEIPTS="${RECEIPTS}" "${HARNESS}" --full-checks
@@ -157,7 +209,31 @@ while IFS= read -r CASE_PATH; do
   BASELINE_HASH="$(shasum -a 256 "${BASELINE_ROOT}/${CASE_PATH}" | awk '{print $1}')"
   if ! grep -Fxq "${BASELINE_HASH}"$'\t'"${CASE_PATH}" "${RECEIPTS}"; then
     printf 'baseline_shell_test=%s\n' "${CASE_PATH}"
-    MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/${CASE_PATH}"
+    if [[ "${CASE_PATH}" != "${EXPECTED_BASELINE_FAILURE_PATH}" ]]; then
+      MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/${CASE_PATH}"
+      HARNESS_MODE=staged+baseline
+      continue
+    fi
+    BASELINE_STATUS=0
+    if BASELINE_OUTPUT="$(MAILCLI_ROOT="${PRODUCT_ROOT}" "${BASELINE_ROOT}/${CASE_PATH}" 2>&1)"; then
+      BASELINE_STATUS=0
+    else
+      BASELINE_STATUS=$?
+    fi
+    if [[ "${BASELINE_STATUS}" -eq 0 ]]; then
+      fail "Declared baseline failure did not occur: ${CASE_PATH}"
+    fi
+    if [[ "${BASELINE_STATUS}" -ne 1 ]]; then
+      printf '%s\n' "${BASELINE_OUTPUT}" >&2
+      fail "Expected baseline test to exit 1, got ${BASELINE_STATUS}: ${CASE_PATH}"
+    fi
+    BASELINE_LAST_LINE="$(printf '%s\n' "${BASELINE_OUTPUT}" | awk 'NF { line=$0 } END { print line }')"
+    [[ "${BASELINE_LAST_LINE}" == "${EXPECTED_BASELINE_DIAGNOSTIC}" ]] || {
+      printf '%s\n' "${BASELINE_OUTPUT}" >&2
+      fail "Baseline shell test failure did not match the exact expected final diagnostic: ${CASE_PATH}"
+    }
+    printf 'baseline_expected_failure=%s\nbaseline_expected_diagnostic=%s\n' \
+      "${CASE_PATH}" "${BASELINE_LAST_LINE}"
     HARNESS_MODE=staged+baseline
   fi
 done <"${TEST_ROOT}/baseline-cases"
@@ -171,6 +247,7 @@ git -C "${PRODUCT_ROOT}" diff --quiet || fail 'Isolated gate product bytes chang
   fail 'Isolated gate left nonignored product files'
 [[ "$(git -C "${PRODUCT_ROOT}" for-each-ref --format='%(refname) %(objectname)')" == "${PRODUCT_REFS_BEFORE}" ]] ||
   fail 'Isolated gate changed branch, remote-tracking or tag refs'
-printf 'gate_harness=%s\ngate_index_tree=%s\n' "${HARNESS_MODE}" "${INDEX_TREE}"
+printf 'gate_baseline_head=%s\ngate_harness=%s\ngate_index_tree=%s\n' \
+  "${BASELINE_HEAD}" "${HARNESS_MODE}" "${INDEX_TREE}"
 printf 'gate_tier=%s\n' "${GATE_TIER}"
 sed 's/^/shell_test_receipt=/' "${TEST_ROOT}/actual-receipts"

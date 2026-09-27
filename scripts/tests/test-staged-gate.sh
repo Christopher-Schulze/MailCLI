@@ -59,7 +59,10 @@ FIXTURE
 cat >"${REPOSITORY}/scripts/tests/test-invariant.sh" <<'FIXTURE'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$(cat "${MAILCLI_ROOT}/product.txt")" == required ]]
+if [[ "$(cat "${MAILCLI_ROOT}/product.txt")" != required ]]; then
+  printf 'legacy product invariant no longer holds\n'
+  exit 1
+fi
 printf 'invariant-ran\n'
 FIXTURE
 for CASE_PATH in test-private-closure.sh test-task-history-export.sh test-live-fixture.sh; do
@@ -220,8 +223,29 @@ printf 'broken\n' >"${REPOSITORY}/product.txt"
 stage_all
 run_gate 1 baseline_shell_test=scripts/tests/test-invariant.sh
 reset_fixture
+printf 'staged\n' >"${REPOSITORY}/product.txt"
+cat >"${REPOSITORY}/scripts/tests/test-invariant.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$(cat "${MAILCLI_ROOT}/product.txt")" == staged ]]
+printf 'staged invariant passed\n'
+FIXTURE
+stage_all
+run_gate 1 baseline_shell_test=scripts/tests/test-invariant.sh 491 --checks scripts/tests/test-invariant.sh
+run_gate 0 baseline_expected_failure=scripts/tests/test-invariant.sh 491 --checks scripts/tests/test-invariant.sh \
+  --expect-baseline-failure scripts/tests/test-invariant.sh 'legacy product invariant no longer holds'
+grep -Fq 'baseline_expected_diagnostic=legacy product invariant no longer holds' "${TEST_ROOT}/output"
+run_gate 1 'Baseline shell test failure did not match the exact expected final diagnostic' 491 \
+  --checks scripts/tests/test-invariant.sh --expect-baseline-failure scripts/tests/test-invariant.sh 'different diagnostic'
+printf '#!/usr/bin/env bash\nexit 23\n' >"${REPOSITORY}/scripts/tests/test-invariant.sh"
+stage_all
+run_gate 23 '' 491 --checks scripts/tests/test-invariant.sh \
+  --expect-baseline-failure scripts/tests/test-invariant.sh 'legacy product invariant no longer holds'
+reset_fixture
 printf '\nprintf "changed invariant\\n"\n' >>"${REPOSITORY}/scripts/tests/test-invariant.sh"
 stage_all
+run_gate 1 'Declared baseline failure did not occur: scripts/tests/test-invariant.sh' 491 \
+  --checks scripts/tests/test-invariant.sh --expect-baseline-failure scripts/tests/test-invariant.sh 'legacy product invariant no longer holds'
 run_gate 0 gate_harness=staged+baseline
 [[ "$(grep -c '^invariant-ran$' "${TEST_ROOT}/output")" == 2 ]]
 reset_fixture
@@ -291,4 +315,4 @@ MAILCLI_WRITE_ROOT="${REPOSITORY}" "${REPOSITORY}/scripts/utils/manage-write-lea
 [[ "${STATUS}" == 23 && ! -e "${REPOSITORY}/.git/mailcli-write-lease/gate_patch_sha256" ]]
 reset_fixture
 MAILCLI_WRITE_ROOT="${REPOSITORY}" "${REPOSITORY}/scripts/utils/manage-write-lease.sh" abort "${TOKEN}" >/dev/null
-printf 'Staged gate passed: isolated index product, actual execution, baseline invariants, narrow retirement, mutation refusal, and failed own-gate proof\n'
+printf 'Staged gate passed: isolated index product, exact baseline failures, baseline invariants, narrow retirement, mutation refusal, and failed own-gate proof\n'

@@ -13,7 +13,7 @@ usage() {
     '  manage-write-lease.sh register-current TOKEN  # TASK 511 bootstrap only' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN [--diff]' \
-    '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH...]' \
+    '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]' \
     '  manage-write-lease.sh push-check' \
     '  manage-write-lease.sh release TOKEN' \
     '  manage-write-lease.sh abort TOKEN'
