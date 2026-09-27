@@ -19,7 +19,7 @@ type searchBudgetTooSmallError struct {
 
 func (e *searchBudgetTooSmallError) Error() string {
 	return fmt.Sprintf(
-		"search candidate requires %d RFC bytes, above --max-bytes %d; retry the same search page with --max-bytes at least %d, retaining --cursor when supplied",
+		"reaching the first excluded search source requires %d RFC bytes, above --max-scan-bytes %d; retry the same search page with --max-scan-bytes at least %d, retaining --cursor when supplied",
 		e.requiredBytes, e.maximumBytes, e.requiredBytes,
 	)
 }
@@ -152,8 +152,12 @@ chunkLoop:
 	coverage.Complete = coverage.Complete && coverage.CandidateMessagesExact &&
 		progressCount == coverage.CandidateMessages
 	if budgetCandidate != nil && progressCount == 0 {
+		requiredBytes, ok := roundSearchBudgetBytes(budgetRequiredBytes)
+		if !ok {
+			return mail.SearchPage{}, operationError("search_budget_too_small", "required search byte budget cannot be represented")
+		}
 		return mail.SearchPage{}, &searchBudgetTooSmallError{
-			requiredBytes: budgetRequiredBytes,
+			requiredBytes: requiredBytes,
 			maximumBytes:  prepared.Query.MaxBytes,
 		}
 	}
@@ -180,6 +184,23 @@ chunkLoop:
 		return page, err
 	}
 	return page, nil
+}
+
+func roundSearchBudgetBytes(value int64) (int64, bool) {
+	const binaryMiB = int64(1 << 20)
+	if value < 0 {
+		return 0, false
+	}
+	remainder := value % binaryMiB
+	if remainder == 0 {
+		return value, true
+	}
+	increment := binaryMiB - remainder
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if value > maxInt64-increment {
+		return 0, false
+	}
+	return value + increment, true
 }
 
 func (s *Store) querySearchRecords(

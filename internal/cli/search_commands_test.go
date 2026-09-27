@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,7 +35,7 @@ type searchBudgetCLIError struct {
 }
 
 func (e *searchBudgetCLIError) Error() string {
-	return "search candidate requires more bytes; restart the same search without --cursor"
+	return "search candidate requires a larger --max-scan-bytes value; retry this page, retaining --cursor when supplied"
 }
 
 func (e *searchBudgetCLIError) ErrorCode() string {
@@ -84,11 +85,12 @@ func TestSearchCommandsJSON(t *testing.T) {
 }
 
 func TestSearchBudgetTooSmallJSONIncludesRequiredBytesAndRecovery(t *testing.T) {
+	const requiredBytes = 2 << 20
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run(
-		context.Background(), mail.NewService(searchBudgetGateway{requiredBytes: 4096}),
-		[]string{"messages", "search", "--query", "needle", "--json"},
+		context.Background(), mail.NewService(searchBudgetGateway{requiredBytes: requiredBytes}),
+		[]string{"messages", "search", "--query", "needle", "--max-scan-bytes", "1", "--json"},
 		&stdout, &stderr,
 	)
 	var response struct {
@@ -114,15 +116,132 @@ func TestSearchBudgetTooSmallJSONIncludesRequiredBytesAndRecovery(t *testing.T) 
 		t.Fatalf("decode search error: %v; stdout = %q", err, stdout.String())
 	}
 	if code != 1 || stderr.Len() != 0 || response.OK || response.Error == nil ||
-		response.Error.Code != "search_budget_too_small" || response.Error.RequiredBytes != 4096 ||
-		!strings.Contains(response.Error.Message, "without --cursor") ||
+		response.Error.Code != "search_budget_too_small" || response.Error.RequiredBytes != requiredBytes ||
+		!strings.Contains(response.Error.Message, "--max-scan-bytes") ||
 		response.Error.Guidance.Phase != "read" || response.Error.Guidance.EffectCertainty != "none" ||
 		response.Error.Guidance.Retryability != "user_input_required" || response.Error.Guidance.ReplayAllowed ||
 		response.Error.Guidance.Recovery.Action != "correct" || response.Error.Guidance.Recovery.Command != "messages.search" ||
-		len(response.Error.Guidance.Recovery.Args) != 2 ||
-		response.Error.Guidance.Recovery.Args[0] != "--max-bytes" ||
-		response.Error.Guidance.Recovery.Args[1] != "4096" {
+		!reflect.DeepEqual(response.Error.Guidance.Recovery.Args, []string{
+			"--query", "needle", "--limit", "10", "--max-messages", "50000",
+			"--max-scan-bytes", fmt.Sprint(requiredBytes), "--json",
+		}) {
 		t.Fatalf("search error response: code=%d response=%+v stderr=%q", code, response, stderr.String())
+	}
+}
+
+type boundedSearchRecoveryGateway struct {
+	testGateway
+	requiredBytes int64
+	queries       []mail.PreparedQuery
+}
+
+func (g *boundedSearchRecoveryGateway) SearchMessages(_ context.Context, query mail.PreparedQuery) (mail.SearchPage, error) {
+	g.queries = append(g.queries, query)
+	if query.Query.MaxBytes < g.requiredBytes {
+		return mail.SearchPage{}, &searchBudgetCLIError{requiredBytes: g.requiredBytes}
+	}
+	return mail.SearchPage{Coverage: mail.SearchCoverage{CandidateMessagesExact: true, Complete: true}}, nil
+}
+
+func TestSearchBudgetRecoveryArgumentsRetainScopeAndResumeSameCursor(t *testing.T) {
+	query, args := searchRecoveryInput(t)
+	const requiredBytes = 2 << 20
+	gateway := &boundedSearchRecoveryGateway{requiredBytes: requiredBytes}
+	code, firstOutput, firstStderr := runSearchRecovery(gateway, args)
+	response := decodeSearchRecoveryFailure(t, firstOutput)
+	wantArgs := []string{
+		"--query", query.Text, "--sender", query.Sender, "--recipient", query.Recipient,
+		"--subject", query.Subject, "--after", query.After, "--before", query.Before,
+		"--account", query.AccountRef, "--mailbox", query.MailboxRef, "--limit", "7", "--cursor", query.Cursor,
+		"--exact-count", "--max-messages", "99", "--max-scan-bytes", fmt.Sprint(requiredBytes),
+		"--read", "false", "--flagged", "true", "--attachment", "true",
+		"--fields", "sender,snippet", "--json",
+	}
+	if code != 1 || firstStderr != "" || response.RequiredBytes != requiredBytes ||
+		response.Command != "messages.search" || !reflect.DeepEqual(response.Args, wantArgs) {
+		t.Fatalf("first search failure: code=%d recovery=%+v stderr=%q", code, response, firstStderr)
+	}
+	resumedArgs := append([]string{"messages", "search"}, response.Args...)
+	resumedCode, resumedOutput, resumedStderr := runSearchRecovery(gateway, resumedArgs)
+	if resumedCode != 0 || resumedStderr != "" || len(gateway.queries) != 2 || !strings.Contains(resumedOutput, `"ok":true`) {
+		t.Fatalf("recovered search: code=%d calls=%d output=%s stderr=%q", resumedCode, len(gateway.queries), resumedOutput, resumedStderr)
+	}
+	wantQuery := query
+	wantQuery.MaxBytes = requiredBytes
+	if !reflect.DeepEqual(gateway.queries[1].Query, wantQuery) ||
+		gateway.queries[0].Fingerprint != gateway.queries[1].Fingerprint ||
+		!reflect.DeepEqual(gateway.queries[0].Cursor, gateway.queries[1].Cursor) {
+		t.Fatalf("recovery changed search scope: first=%+v resumed=%+v", gateway.queries[0], gateway.queries[1])
+	}
+}
+
+func searchRecoveryInput(t *testing.T) (mail.Query, []string) {
+	t.Helper()
+	read, flagged, attachment := false, true, true
+	query := mail.Query{
+		Text: `invoice "Q" & $literal`, Sender: "sender example", Recipient: "recipient+tag@example.com",
+		Subject: `Quarterly "review"`, After: "2026-09-01", Before: "2026-09-27",
+		Read: &read, Flagged: &flagged, HasAttachment: &attachment, AccountRef: "acct_ref", MailboxRef: "mbx_ref",
+		Limit: 7, MaxMessages: 99, MaxBytes: 1, ExactCount: true,
+	}
+	prepared, err := mail.PrepareQuery(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := mail.EncodeSearchCursorWithRevision(prepared.Fingerprint, "store-uuid", "revision-1", 123, false, 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query.Cursor = cursor
+	return query, []string{
+		"messages", "search", "--query", query.Text, "--sender", query.Sender, "--recipient", query.Recipient,
+		"--subject", query.Subject, "--after", query.After, "--before", query.Before,
+		"--account", query.AccountRef, "--mailbox", query.MailboxRef, "--limit", "7", "--cursor", cursor,
+		"--exact-count", "--max-messages", "99", "--max-scan-bytes", "1", "--read", "false",
+		"--flagged", "true", "--attachment", "true", "--fields", "sender,snippet", "--json",
+	}
+}
+
+func runSearchRecovery(gateway *boundedSearchRecoveryGateway, args []string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(gateway), args, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func decodeSearchRecoveryFailure(t *testing.T, output string) struct {
+	RequiredBytes int64    `json:"required_bytes"`
+	Command       string   `json:"-"`
+	Args          []string `json:"-"`
+} {
+	t.Helper()
+	var response struct {
+		Error struct {
+			RequiredBytes int64 `json:"required_bytes"`
+			Guidance      struct {
+				Recovery struct {
+					Command string   `json:"command"`
+					Args    []string `json:"args"`
+				} `json:"recovery"`
+			} `json:"guidance"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		t.Fatalf("decode search recovery: %v; output=%s", err, output)
+	}
+	return struct {
+		RequiredBytes int64    `json:"required_bytes"`
+		Command       string   `json:"-"`
+		Args          []string `json:"-"`
+	}{RequiredBytes: response.Error.RequiredBytes, Command: response.Error.Guidance.Recovery.Command, Args: response.Error.Guidance.Recovery.Args}
+}
+
+func TestSearchRejectsLegacyByteBudgetFlag(t *testing.T) {
+	gateway := &searchQueryCaptureGateway{}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), mail.NewService(gateway),
+		[]string{"messages", "search", "--query", "needle", "--max-bytes", "10"}, &stdout, &stderr)
+	if code != 2 || gateway.query.Fingerprint != "" || !strings.Contains(stderr.String(), "flag provided but not defined: -max-bytes") {
+		t.Fatalf("legacy search flag: code=%d query=%+v stdout=%q stderr=%q", code, gateway.query, stdout.String(), stderr.String())
 	}
 }
 

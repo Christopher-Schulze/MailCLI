@@ -146,12 +146,16 @@ func TestCapabilityCommandInventory(t *testing.T) {
 		!reflect.DeepEqual(manifest.Limits.IMAPOperationContract, imapclient.OperationContracts()) {
 		t.Fatalf("IMAP concurrency capability = %+v", manifest.Limits)
 	}
-	for _, id := range []string{"messages.filter", "messages.search"} {
-		command := manifest.Commands[slices.Index(got, id)]
-		if !slices.Equal(command.ResultStates, []string{
-			"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small",
-		}) {
-			t.Fatalf("%s result states = %+v", id, command.ResultStates)
+	for _, test := range []struct {
+		id           string
+		resultStates []string
+	}{
+		{id: "messages.filter", resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"}},
+		{id: "messages.search", resultStates: []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"}},
+	} {
+		command := manifest.Commands[slices.Index(got, test.id)]
+		if !slices.Equal(command.ResultStates, test.resultStates) {
+			t.Fatalf("%s result states = %+v, want %+v", test.id, command.ResultStates, test.resultStates)
 		}
 	}
 	send := manifest.Commands[slices.Index(got, "drafts.send")]

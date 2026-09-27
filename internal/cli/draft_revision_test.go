@@ -25,9 +25,9 @@ func TestDraftRevisionRemainsInEveryReviewProjection(t *testing.T) {
 		{"drafts", "inspect", "--view", "plain"},
 		{"drafts", "inspect", "--view", "full"},
 		{"drafts", "inspect", "--fields", "body"},
-		{"drafts", "preview", "--format", "plain"},
-		{"drafts", "preview", "--format", "source"},
-		{"drafts", "preview", "--format", "html"},
+		{"drafts", "preview", "--preview-format", "plain"},
+		{"drafts", "preview", "--preview-format", "source"},
+		{"drafts", "preview", "--preview-format", "html"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := Run(context.Background(), service, append(args, "--ref", draft.Ref, "--json"), &stdout, &stderr)
@@ -44,6 +44,15 @@ func TestDraftRevisionRemainsInEveryReviewProjection(t *testing.T) {
 		if revision == "" || revision != draft.Revision {
 			t.Fatalf("review %v revision=%q, want %q", args, revision, draft.Revision)
 		}
+	}
+}
+
+func TestDraftPreviewRejectsLegacyFormatFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), nil,
+		[]string{"drafts", "preview", "--ref", "draft_ref", "--format", "plain"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -format") {
+		t.Fatalf("legacy preview flag: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

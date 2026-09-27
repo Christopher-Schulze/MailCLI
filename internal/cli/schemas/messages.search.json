@@ -92,14 +92,14 @@
       "description": "maximum messages for body search"
     },
     {
-      "name": "--max-bytes",
+      "name": "--max-scan-bytes",
       "value_type": "bytes",
       "takes_value": true,
       "value_required": true,
       "default": "4294967296",
       "minimum": 1,
       "maximum": 8589934592,
-      "description": "maximum RFC bytes for body search"
+      "description": "maximum RFC bytes scanned for body search"
     },
     {
       "name": "--query",

@@ -636,7 +636,7 @@ func TestSearchSchemaBoundsAreReachableThroughCLI(t *testing.T) {
 	maxBytes := int64(987654)
 	args := []string{
 		"messages", "search", "--query", "needle",
-		"--max-messages", strconv.Itoa(maxMessages), "--max-bytes", strconv.FormatInt(maxBytes, 10), "--json",
+		"--max-messages", strconv.Itoa(maxMessages), "--max-scan-bytes", strconv.FormatInt(maxBytes, 10), "--json",
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -650,9 +650,12 @@ func TestSearchSchemaBoundsAreReachableThroughCLI(t *testing.T) {
 	flags := schemaFlagsByName(searchSchema)
 	if flags["--max-messages"].Default != strconv.Itoa(mail.DefaultSearchMaxMessages) ||
 		*flags["--max-messages"].Minimum != 1 || *flags["--max-messages"].Maximum != int64(mail.MaximumSearchMaxMessages) ||
-		flags["--max-bytes"].Default != strconv.FormatInt(mail.DefaultSearchMaxBytes, 10) ||
-		*flags["--max-bytes"].Minimum != 1 || *flags["--max-bytes"].Maximum != mail.MaximumSearchMaxBytes {
-		t.Fatalf("search schema bounds = %+v/%+v", flags["--max-messages"], flags["--max-bytes"])
+		flags["--max-scan-bytes"].Default != strconv.FormatInt(mail.DefaultSearchMaxBytes, 10) ||
+		*flags["--max-scan-bytes"].Minimum != 1 || *flags["--max-scan-bytes"].Maximum != mail.MaximumSearchMaxBytes {
+		t.Fatalf("search schema bounds = %+v/%+v", flags["--max-messages"], flags["--max-scan-bytes"])
+	}
+	if _, exists := flags["--max-bytes"]; exists {
+		t.Fatal("search schema still exposes the response-size flag for the scan budget")
 	}
 	if !schemaHasConstraint(searchSchema, "ordered") {
 		t.Fatal("search schema omits after/before ordering constraint")

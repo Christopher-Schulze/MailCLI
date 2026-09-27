@@ -200,7 +200,7 @@ func runDraftHandoffWithDispatch(
 func runDraftPreview(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts preview", stderr)
 	ref := flags.String("ref", "", "draft ref")
-	view := flags.String("format", "plain", "preview format: plain, source, or html")
+	view := flags.String("preview-format", "plain", "preview format: plain, source, or html")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {

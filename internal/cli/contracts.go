@@ -154,7 +154,7 @@ var commandContracts = []commandContract{
 	{
 		ID: "messages.filter", effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
-		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"},
+		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
 		mailService:     mailServiceAlwaysRequired,
 		published:       true,
 	},

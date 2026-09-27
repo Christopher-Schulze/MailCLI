@@ -1083,9 +1083,10 @@ func TestBudgetLimitedBodySearchRetriesSameCursorWithLargerBudget(t *testing.T) 
 	if err := os.WriteFile(basePath+".emlx", framed, 0o600); err != nil {
 		t.Fatalf("rewrite oversize fixture source: %v", err)
 	}
-	requiredBytes := int64(len(oversizeSource))
-	if requiredBytes <= maxBytes {
-		t.Fatalf("oversize source = %d bytes, want more than budget %d", requiredBytes, maxBytes)
+	sourceBytes := int64(len(oversizeSource))
+	requiredBytes, ok := roundSearchBudgetBytes(sourceBytes)
+	if !ok || sourceBytes <= maxBytes {
+		t.Fatalf("oversize source = %d bytes, want more than budget %d and a representable rounded budget", sourceBytes, maxBytes)
 	}
 	first, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: maxBytes, MaxMessages: 3,
@@ -1128,7 +1129,7 @@ func TestBudgetLimitedBodySearchRetriesSameCursorWithLargerBudget(t *testing.T) 
 		t.Fatalf("SearchMessages(next) = page %#v, error %v; want terminal budget error requiring %d bytes",
 			nextPage, err, requiredBytes)
 	}
-	if !strings.Contains(err.Error(), "retry the same search page") || !strings.Contains(err.Error(), "retaining --cursor") {
+	if !strings.Contains(err.Error(), "retry the same search page") || !strings.Contains(err.Error(), "--max-scan-bytes") || !strings.Contains(err.Error(), "retaining --cursor") {
 		t.Fatalf("budget error guidance = %q", err)
 	}
 
@@ -1227,9 +1228,13 @@ func TestByteLimitedBodySearchReturnsTerminalErrorForFirstCandidate(t *testing.T
 	if err != nil {
 		t.Fatalf("openMessageSource() error = %v", err)
 	}
-	requiredBytes := source.length
+	sourceBytes := source.length
 	if err := source.Close(); err != nil {
 		t.Fatalf("closeMessageSource() error = %v", err)
+	}
+	requiredBytes, ok := roundSearchBudgetBytes(sourceBytes)
+	if !ok {
+		t.Fatalf("source size %d cannot be rounded", sourceBytes)
 	}
 	first, err := mail.PrepareQuery(mail.Query{
 		MailboxRef: inboxRef, Text: "needle", Limit: 10, MaxBytes: 1,
@@ -1245,8 +1250,34 @@ func TestByteLimitedBodySearchReturnsTerminalErrorForFirstCandidate(t *testing.T
 		t.Fatalf("SearchMessages(first) = page %#v, error %v; want terminal budget error requiring %d bytes",
 			firstPage, err, requiredBytes)
 	}
-	if !strings.Contains(err.Error(), "retry the same search page") || !strings.Contains(err.Error(), "retaining --cursor when supplied") {
+	if !strings.Contains(err.Error(), "retry the same search page") || !strings.Contains(err.Error(), "--max-scan-bytes") || !strings.Contains(err.Error(), "retaining --cursor when supplied") {
 		t.Fatalf("budget error guidance = %q", err)
+	}
+}
+
+func TestRoundSearchBudgetBytes(t *testing.T) {
+	const binaryMiB = int64(1 << 20)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	tests := []struct {
+		name  string
+		input int64
+		want  int64
+		ok    bool
+	}{
+		{name: "zero", input: 0, want: 0, ok: true},
+		{name: "round up", input: 1, want: binaryMiB, ok: true},
+		{name: "exact MiB", input: binaryMiB, want: binaryMiB, ok: true},
+		{name: "next MiB", input: binaryMiB + 1, want: 2 * binaryMiB, ok: true},
+		{name: "overflow", input: maxInt64, ok: false},
+		{name: "negative", input: -1, ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := roundSearchBudgetBytes(test.input)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("roundSearchBudgetBytes(%d) = %d, %t; want %d, %t", test.input, got, ok, test.want, test.ok)
+			}
+		})
 	}
 }
 

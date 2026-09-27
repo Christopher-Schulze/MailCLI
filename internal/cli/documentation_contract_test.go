@@ -395,11 +395,11 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "search default byte budget", expected: mail.DefaultSearchMaxBytes, unit: "bytes",
 		checks: []documentedBoundCheck{
-			boundCheck("docs/documentation.md", "`--max-bytes` defaults to ([0-9]+) GiB", 1<<30),
+			boundCheck("docs/documentation.md", "`--max-scan-bytes` defaults to ([0-9]+) GiB", 1<<30),
 		}},
 	{name: "search maximum byte budget", expected: mail.MaximumSearchMaxBytes, unit: "bytes",
 		checks: []documentedBoundCheck{
-			boundCheck("docs/documentation.md", "`--max-bytes`[^.\n]*capped at ([0-9]+) GiB", 1<<30),
+			boundCheck("docs/documentation.md", "`--max-scan-bytes`[^.\n]*capped at ([0-9]+) GiB", 1<<30),
 		}},
 	{name: "search scan window cap", expected: 64, unit: "candidates",
 		checks: []documentedBoundCheck{

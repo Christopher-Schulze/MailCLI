@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,10 @@ func runMessagesQuery(
 	defer cancel()
 	page, err := service.SearchMessages(operationCtx, query)
 	if err != nil {
+		if command == "messages.search" && errorCode(err) == "search_budget_too_small" {
+			data := responseData{searchRecoveryArgs: buildSearchRecoveryArgs(query, *fields, *jsonOutput, err)}
+			return failCommandWithData(command, *jsonOutput, data, err, stdout, stderr)
+		}
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
@@ -85,12 +90,61 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total")
 	if allowText {
 		flags.IntVar(&query.MaxMessages, "max-messages", mail.DefaultSearchMaxMessages, "maximum messages for body search")
-		flags.Int64Var(&query.MaxBytes, "max-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body search")
+		flags.Int64Var(&query.MaxBytes, "max-scan-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body search")
 	}
 	addOptionalBoolFlag(flags, "read", "read status", &query.Read)
 	addOptionalBoolFlag(flags, "flagged", "flagged status", &query.Flagged)
 	addOptionalBoolFlag(flags, "attachment", "attachment presence", &query.HasAttachment)
 	return flags.Bool("json", false, "emit JSON")
+}
+
+func buildSearchRecoveryArgs(query mail.Query, fields string, jsonOutput bool, err error) []string {
+	var sized interface{ RequiredBytes() int64 }
+	if !errors.As(err, &sized) {
+		return nil
+	}
+	requiredBytes := sized.RequiredBytes()
+	if requiredBytes <= query.MaxBytes || requiredBytes > mail.MaximumSearchMaxBytes {
+		return nil
+	}
+	args := make([]string, 0, 34)
+	args = appendSearchStringArg(args, "--query", query.Text)
+	args = appendSearchStringArg(args, "--sender", query.Sender)
+	args = appendSearchStringArg(args, "--recipient", query.Recipient)
+	args = appendSearchStringArg(args, "--subject", query.Subject)
+	args = appendSearchStringArg(args, "--after", query.After)
+	args = appendSearchStringArg(args, "--before", query.Before)
+	args = appendSearchStringArg(args, "--account", query.AccountRef)
+	args = appendSearchStringArg(args, "--mailbox", query.MailboxRef)
+	args = append(args, "--limit", strconv.Itoa(query.Limit))
+	args = appendSearchStringArg(args, "--cursor", query.Cursor)
+	if query.ExactCount {
+		args = append(args, "--exact-count")
+	}
+	args = append(args, "--max-messages", strconv.Itoa(query.MaxMessages))
+	args = append(args, "--max-scan-bytes", strconv.FormatInt(requiredBytes, 10))
+	args = appendSearchBoolArg(args, "--read", query.Read)
+	args = appendSearchBoolArg(args, "--flagged", query.Flagged)
+	args = appendSearchBoolArg(args, "--attachment", query.HasAttachment)
+	args = appendSearchStringArg(args, "--fields", fields)
+	if jsonOutput {
+		args = append(args, "--json")
+	}
+	return args
+}
+
+func appendSearchStringArg(args []string, name, value string) []string {
+	if value == "" {
+		return args
+	}
+	return append(args, name, value)
+}
+
+func appendSearchBoolArg(args []string, name string, value *bool) []string {
+	if value == nil {
+		return args
+	}
+	return append(args, name, strconv.FormatBool(*value))
 }
 
 func writeSearchResults(stdout io.Writer, page mail.SearchPage) {

@@ -123,8 +123,14 @@ func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 		notWant []string
 	}{
 		{
-			args: []string{"messages", "search", "help"},
-			want: []string{"Options:", "--mailbox <ref>", "--attachment <true|false>", "--max-bytes <bytes>", "(default: 4 GiB)", "-h, --help"},
+			args:    []string{"messages", "search", "help"},
+			want:    []string{"Options:", "--mailbox <ref>", "--attachment <true|false>", "--max-scan-bytes <bytes>", "(default: 4 GiB)", "-h, --help"},
+			notWant: []string{"--max-bytes"},
+		},
+		{
+			args:    []string{"drafts", "preview", "help"},
+			want:    []string{"--preview-format"},
+			notWant: []string{"--format"},
 		},
 		{
 			args:    []string{"messages", "copy", "help"},

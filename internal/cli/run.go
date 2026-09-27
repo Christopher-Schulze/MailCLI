@@ -80,6 +80,7 @@ type responseData struct {
 	serialization            *serializedProjection        `json:"-"`
 	draftMutationCompleted   bool                         `json:"-"`
 	draftRef                 string                       `json:"-"`
+	searchRecoveryArgs       []string                     `json:"-"`
 }
 
 func rawResponsePage(value any) *json.RawMessage {
@@ -191,6 +192,10 @@ func newErrorData(command string, data responseData, err error) *errorData {
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if command == "messages.search" && errorCode(err) == "search_budget_too_small" && len(data.searchRecoveryArgs) > 0 {
+		guidance.Recovery.Command = command
+		guidance.Recovery.Args = data.searchRecoveryArgs
+	}
 	if command == "drafts.send" {
 		var operation *mail.OperationError
 		if errors.As(err, &operation) && operation.DraftRef != "" && operation.UnclaimedSpool != nil {

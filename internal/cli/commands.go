@@ -644,7 +644,7 @@ func polishedFlagValue(name string, inferred string, description string) (string
 		return "path", description
 	case "limit", "max-messages":
 		return "number", description
-	case "max-bytes":
+	case "max-scan-bytes":
 		return "bytes", description
 	case "path":
 		return "segment", description
@@ -662,7 +662,7 @@ func visibleFlagDefault(option *flag.Flag) string {
 	case "-":
 		return "standard input"
 	}
-	if option.Name == "max-bytes" && option.DefValue == "4294967296" {
+	if option.Name == "max-scan-bytes" && option.DefValue == "4294967296" {
 		return "4 GiB"
 	}
 	if option.Name == "max-bytes" && option.DefValue == "1048576" {

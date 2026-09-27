@@ -11,7 +11,7 @@
       "description": "draft ref"
     },
     {
-      "name": "--format",
+      "name": "--preview-format",
       "value_type": "enum",
       "takes_value": true,
       "value_required": true,

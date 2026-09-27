@@ -303,9 +303,7 @@ func TestGuidanceForSearchBudgetTooSmallRequiresCorrectedRestart(t *testing.T) {
 		got := GuidanceForError(command, &searchBudgetGuidanceError{requiredBytes: 4096})
 		if got.Phase != OperationPhaseRead || got.EffectCertainty != EffectNone ||
 			got.Retryability != RetryUserInputRequired || got.ReplayAllowed ||
-			got.Recovery.Action != RecoveryCorrect || got.Recovery.Command != command ||
-			len(got.Recovery.Args) != 2 || got.Recovery.Args[0] != "--max-bytes" ||
-			got.Recovery.Args[1] != "4096" {
+			got.Recovery.Action != RecoveryCorrect || got.Recovery.Command != "" || len(got.Recovery.Args) != 0 {
 			t.Fatalf("GuidanceForError(%q) = %+v", command, got)
 		}
 	}
