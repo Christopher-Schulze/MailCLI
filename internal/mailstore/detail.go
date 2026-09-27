@@ -53,31 +53,48 @@ func (s *Store) GetMessage(ctx context.Context, ref string) (result mail.Message
 }
 
 func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, resultErr error) {
+	source, err := s.openRawSource(ctx, ref)
+	if err != nil {
+		return "", err
+	}
 	var output strings.Builder
-	if err := s.WriteRawSource(ctx, ref, &output); err != nil {
+	output.Grow(int(source.length))
+	if err := writeRawMessageSource(&output, source); err != nil {
 		return "", err
 	}
 	return output.String(), nil
 }
 
-func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer) (resultErr error) {
+func (s *Store) openRawSource(ctx context.Context, ref string) (*emlxSource, error) {
 	_, source, err := s.openMessageSource(ctx, ref)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer joinCloseError(&resultErr, source, "raw message source")
 	if source.partial {
-		return operationError(
+		err = operationError(
 			"raw_source_partial",
 			"the local EMLX source is partial; exact raw source requires a complete message source",
 		)
+	} else if source.length < 0 || source.length > mail.MaximumRawSourceBytes {
+		err = operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
 	}
-	if source.length < 0 || source.length > mail.MaximumRawSourceBytes {
-		return operationError("raw_source_too_large", "raw RFC message source exceeds 64 MiB")
+	if err != nil {
+		joinCloseError(&err, source, "raw message source")
+		return nil, err
 	}
-	if builder, ok := writer.(*strings.Builder); ok {
-		builder.Grow(int(source.length))
+	return source, nil
+}
+
+func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
+	source, err := s.openRawSource(ctx, ref)
+	if err != nil {
+		return err
 	}
+	return writeRawMessageSource(writer, source)
+}
+
+func writeRawMessageSource(writer io.Writer, source *emlxSource) (resultErr error) {
+	defer joinCloseError(&resultErr, source, "raw message source")
 	if _, err := io.CopyN(writer, source.Reader(), source.length); err != nil {
 		return fmt.Errorf("stream RFC message source: %w", err)
 	}
