@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -269,9 +270,16 @@ func runDraftList(ctx context.Context, service *mail.Service, args []string, std
 	if err := validateOutputByteLimit(output.maxBytes); err != nil {
 		return failCommand("drafts.list", *jsonOutput, err, stdout, stderr)
 	}
+	maxBytesProvided := false
+	cursorProvided := false
 	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "fields" {
+		switch option.Name {
+		case "fields":
 			output.fieldsProvided = true
+		case "cursor":
+			cursorProvided = true
+		case "max-bytes":
+			maxBytesProvided = true
 		}
 	})
 	if output.fieldsProvided {
@@ -299,22 +307,26 @@ func runDraftList(ctx context.Context, service *mail.Service, args []string, std
 		})
 	}
 	if *jsonOutput {
-		retryCommand := "mailcli drafts list --limit 50"
-		if *cursor != "" {
-			retryCommand += " --cursor " + *cursor
+		recovery := mail.RecoveryGuidance{Action: mail.RecoveryCorrect}
+		if *limit > 1 {
+			recovery.Command = "drafts.list"
+			recovery.Args = []string{"--limit", strconv.Itoa(*limit / 2)}
+			if cursorProvided {
+				recovery.Args = append(recovery.Args, "--cursor", *cursor)
+			}
+			if output.fieldsProvided {
+				recovery.Args = append(recovery.Args, "--fields", *fieldsValue)
+			}
+			if maxBytesProvided {
+				recovery.Args = append(recovery.Args, "--max-bytes", strconv.FormatInt(*maxBytes, 10))
+			}
+			recovery.Args = append(recovery.Args, "--json")
+		} else {
+			recovery.Instruction = "The minimum page size is already selected; review optional fields or choose an explicit --max-bytes budget based on data.required_bytes and data.limit_bytes."
 		}
-		if output.fieldsProvided {
-			retryCommand += " --fields '" + *fieldsValue + "'"
+		data := responseData{
+			Drafts: &entries, Page: rawResponsePage(page.Pagination), draftListRecovery: &recovery,
 		}
-		retryCommand += fmt.Sprintf(" --max-bytes %d --json", maximumJSONOutputBytes)
-		output.recoveryRoute = fmt.Sprintf("retry with '%s'", retryCommand)
-		if len(entries) > 0 {
-			output.recoveryRoute += fmt.Sprintf(
-				" or inspect/export draft %s with 'mailcli drafts inspect --ref %s --view full --export /absolute/new/path --json'",
-				entries[0].Ref, entries[0].Ref,
-			)
-		}
-		data := responseData{Drafts: &entries, Page: rawResponsePage(page.Pagination)}
 		if data.StoreProfile == nil && invocationStoreProfile != nil {
 			data.StoreProfile = invocationStoreProfile
 		}

@@ -254,6 +254,9 @@ func (e *outputTooLargeError) Error() string {
 	if e.completedDraftRef != "" {
 		return fmt.Sprintf("%s; draft mutation already completed; inspect with 'mailcli drafts inspect --ref %s --view full --json' instead of repeating the mutation", message, e.completedDraftRef)
 	}
+	if e.target == string(projectionTargetDraftList) {
+		return message
+	}
 	if e.recoveryRoute != "" {
 		return message + "; " + e.recoveryRoute
 	}
@@ -1137,7 +1140,7 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 		// too large. Keep the identity and recovery evidence that fits without
 		// replaying the omitted body or headers.
 		if options.target == projectionTargetDraftList && errors.As(err, &oversized) {
-			fallback := responseData{Page: data.Page}
+			fallback := responseData{Page: data.Page, draftListRecovery: data.draftListRecovery}
 			payload, marshalErr = marshalEnvelope(envelope{
 				SchemaVersion: schemaVersion, OK: false, Command: command, Data: fallback,
 				Error: newErrorData(command, fallback, err),

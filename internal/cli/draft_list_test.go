@@ -265,49 +265,92 @@ func TestDraftListBudgetPreservesDefaultPayloadAndExactBoundary(t *testing.T) {
 		t.Fatalf("exact output boundary rejected: code=%d, output=%s", code, stdout.String())
 	}
 	boundaryArgs[len(boundaryArgs)-1] = strconv.Itoa(len(boundary) - 1)
+	limitBelowBoundary := boundaryArgs[len(boundaryArgs)-1]
 	stdout.Reset()
-	if code := Run(context.Background(), service, boundaryArgs, &stdout, &stderr); code != 1 || json.Unmarshal(stdout.Bytes(), &response) != nil || response.OK || response.Error == nil || response.Error.Code != "output_too_large" || !strings.Contains(response.Error.Message, draft.Ref) || !strings.Contains(response.Error.Message, "--export /absolute/new/path") {
-		t.Fatalf("one-byte-over response lacks recovery: code=%d, stdout=%s", code, stdout.String())
+	if code := Run(context.Background(), service, boundaryArgs, &stdout, &stderr); code != 1 || json.Unmarshal(stdout.Bytes(), &response) != nil || response.OK || response.Error == nil || response.Error.Code != "output_too_large" {
+		t.Fatalf("one-byte-over response lacks structured recovery: code=%d, stdout=%s", code, stdout.String())
+	}
+	if response.Error.Guidance == nil || response.Error.Guidance.Recovery.Action != mail.RecoveryCorrect ||
+		response.Error.Guidance.Recovery.Command != "drafts.list" ||
+		!slices.Equal(response.Error.Guidance.Recovery.Args, []string{"--limit", "25", "--max-bytes", limitBelowBoundary, "--json"}) {
+		t.Fatalf("one-byte-over recovery = %+v", response.Error.Guidance)
 	}
 	assertOutputSizeEvidence(t, response, int64(len(boundary)), int64(len(boundary)-1), string(outputSizeExact))
 }
 
-func TestDraftListTwoHundredLongSummariesReturnRecoverableJSON(t *testing.T) {
+func TestDraftListOverflowRecoveryPreservesArguments(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
-	for index := range mail.MaximumDraftListLimit {
+	for index := range 80 {
 		_, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{
 			To:      []mail.Recipient{{Address: "recipient" + strconv.Itoa(index) + "@example.com"}},
-			Subject: strings.Repeat("s", 6000), Body: "",
+			Subject: strings.Repeat("s", 32000), Body: "",
 		}})
 		if err != nil {
 			t.Fatalf("create long summary %d: %v", index, err)
 		}
 	}
+	firstPage, err := service.ListDrafts(context.Background(), mail.ListDraftsRequest{Limit: 40})
+	if err != nil || firstPage.Pagination.NextCursor == "" {
+		t.Fatalf("first page did not provide a continuation cursor: page=%+v error=%v", firstPage.Pagination, err)
+	}
 	var stdout, stderr bytes.Buffer
-	code := Run(context.Background(), service, []string{"drafts", "list", "--limit", "200", "--json"}, &stdout, &stderr)
+	const maxBytes = "1100000"
+	args := []string{
+		"drafts", "list", "--limit", "40", "--cursor", firstPage.Pagination.NextCursor,
+		"--fields", "age_days", "--max-bytes", maxBytes, "--json",
+	}
+	code := Run(context.Background(), service, args, &stdout, &stderr)
 	var response envelope
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.OK || response.Error == nil || response.Error.Code != "output_too_large" ||
-		response.Data.Drafts != nil || response.Data.Page == nil || stdout.Len() >= int(defaultJSONOutputBytes) || stderr.Len() != 0 {
-		t.Fatalf("oversized list was not reported with retained refs/page: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
+		response.Data.Drafts != nil || response.Data.Page == nil || stderr.Len() != 0 {
+		t.Fatalf("oversized page was not reported with retained pagination: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
 	}
 	var pagination mail.DraftPagination
-	if err := json.Unmarshal(*response.Data.Page, &pagination); err != nil || pagination.Limit != mail.MaximumDraftListLimit || pagination.Revision == "" {
+	if err := json.Unmarshal(*response.Data.Page, &pagination); err != nil || pagination.Limit != 40 || pagination.Revision == "" {
 		t.Fatalf("oversized list lost pagination evidence: %v %+v", err, pagination)
 	}
-	firstPage, err := service.ListDrafts(context.Background(), mail.ListDraftsRequest{Limit: 1})
-	if err != nil || len(firstPage.Drafts) != 1 || !strings.Contains(response.Error.Message, "drafts inspect --ref "+firstPage.Drafts[0].Ref) || !strings.Contains(response.Error.Message, "--export /absolute/new/path") {
-		t.Fatalf("oversized list has no concrete inspect/export route: %s", response.Error.Message)
+	if response.Error.Guidance == nil {
+		t.Fatalf("oversized page omitted structured guidance: %+v", response.Error)
 	}
+	wantArgs := []string{
+		"--limit", "20", "--cursor", firstPage.Pagination.NextCursor,
+		"--fields", "age_days", "--max-bytes", maxBytes, "--json",
+	}
+	recovery := response.Error.Guidance.Recovery
+	if recovery.Action != mail.RecoveryCorrect || recovery.Command != "drafts.list" || !slices.Equal(recovery.Args, wantArgs) || recovery.Instruction != "" {
+		t.Fatalf("recovery = %+v, want smaller page preserving caller options %v", recovery, wantArgs)
+	}
+	for _, forbidden := range []string{"67108864", "64 MiB", "--export", "inspect/export", "retry with"} {
+		if strings.Contains(response.Error.Message, forbidden) {
+			t.Fatalf("overflow message contains obsolete advice %q: %q", forbidden, response.Error.Message)
+		}
+	}
+	if strings.Contains(response.Error.Message, "\n") || strings.Contains(response.Error.Message, ";") {
+		t.Fatalf("overflow message is not one sentence: %q", response.Error.Message)
+	}
+	if response.Data.RequiredBytes == nil {
+		t.Fatalf("overflow response omitted required_bytes: %+v", response.Data)
+	}
+	assertOutputSizeEvidence(t, response, *response.Data.RequiredBytes, int64(1100000), string(outputSizeExact))
 }
 
-func TestDraftListOversizedEmptyPageHasRetryRoute(t *testing.T) {
+func TestDraftListLimitOneOverflowHasNoIdenticalRetry(t *testing.T) {
 	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
 	var stdout, stderr bytes.Buffer
-	code := Run(context.Background(), service, []string{"drafts", "list", "--max-bytes", "1", "--json"}, &stdout, &stderr)
+	code := Run(context.Background(), service, []string{"drafts", "list", "--limit", "1", "--max-bytes", "1", "--json"}, &stdout, &stderr)
 	var response envelope
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.OK || response.Error == nil ||
-		response.Error.Code != "output_too_large" || !strings.Contains(response.Error.Message, "retry with 'mailcli drafts list --limit 50 --max-bytes 67108864 --json'") ||
+		response.Error.Code != "output_too_large" || response.Error.Guidance == nil ||
 		response.Data.Page == nil || stderr.Len() != 0 {
-		t.Fatalf("oversized empty list had no concrete retry route: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
+		t.Fatalf("oversized minimum page was not reported: code=%d decode=%v output=%s stderr=%s", code, err, stdout.String(), stderr.String())
 	}
+	recovery := response.Error.Guidance.Recovery
+	if recovery.Action != mail.RecoveryCorrect || recovery.Command != "" || len(recovery.Args) != 0 ||
+		!strings.Contains(recovery.Instruction, "minimum page size") || !strings.Contains(recovery.Instruction, "data.required_bytes") {
+		t.Fatalf("minimum-page recovery = %+v, want correction without a retry command", recovery)
+	}
+	if response.Data.RequiredBytes == nil {
+		t.Fatalf("minimum-page overflow omitted required_bytes: %+v", response.Data)
+	}
+	assertOutputSizeEvidence(t, response, *response.Data.RequiredBytes, 1, string(outputSizeExact))
 }
