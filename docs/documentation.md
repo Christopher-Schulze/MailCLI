@@ -100,7 +100,7 @@ Before a COPY or MOVE command is written, validation, cancellation or deadline f
 
 APPEND consumes at most 100 untagged responses before continuation, with a cumulative 64 KiB wire-byte budget including CRLF and the terminal continuation or rejection. Exceeding either bound returns `imap_resource_limit_exceeded` without reading message data. Tagged NO/BAD preserves server diagnostics. Local command-line validation writes no bytes and preserves the session's dirty state; interrupted I/O still discards the session.
 
-Mutation identity resolution loads the referenced active account directly with the same bounded Sent-history evidence and degradation rules as account listing. If the account ID is absent from active account ordering, resolution falls back to the complete catalog to preserve inactive-account binding and account-reference error categories. Bindings and credentials reload for every item, while unrelated accounts' Sent-history queries are skipped; account listing continues to build the complete catalog.
+Mutation identity resolution loads the referenced active account directly with the same bounded Sent-history evidence and degradation rules as account listing. If the account ID is absent from active account ordering, resolution falls back to the complete catalog to preserve inactive-account binding and account-reference error categories. Within one CLI invocation, all mutation items share one lazy binding snapshot; mailbox rows are selected with the normalized account-root SQL predicate and cached only in that invocation context. Credentials are still reloaded for each resolution attempt. Unrelated accounts' Sent-history queries are skipped; account listing continues to build the complete catalog.
 
 ## Platform and freshness boundaries
 
