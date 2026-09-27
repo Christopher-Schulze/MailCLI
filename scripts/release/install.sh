@@ -660,7 +660,7 @@ if [[ ! -f "${SOURCE_BINARY}" || -L "${SOURCE_BINARY}" || ! -x "${SOURCE_BINARY}
   exit 1
 fi
 SOURCE_BINARY_DIGEST="$(file_digest "${SOURCE_BINARY}")"
-if ! SOURCE_VERSION_OUTPUT="$("${SOURCE_BINARY}" version)" ||
+if ! SOURCE_VERSION_OUTPUT="$(MAILCLI_OUTPUT=human "${SOURCE_BINARY}" version)" ||
   [[ ! "${SOURCE_VERSION_OUTPUT}" =~ ^mailcli\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Release binary version output is invalid\n' >&2
   exit 1
@@ -843,7 +843,7 @@ manifest_write skill_installed
   exit 1
 }
 diff -qr "${SOURCE_SKILL}" "${SKILL_DESTINATION}" >/dev/null
-[[ "$("${BINARY_DESTINATION}" version)" == "${SOURCE_VERSION_OUTPUT}" ]]
+[[ "$(MAILCLI_OUTPUT=human "${BINARY_DESTINATION}" version)" == "${SOURCE_VERSION_OUTPUT}" ]]
 
 manifest_write verified
 manifest_write committed

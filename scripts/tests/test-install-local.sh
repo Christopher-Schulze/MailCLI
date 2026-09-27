@@ -55,6 +55,7 @@ install_local() (
   local skill_destination="$2"
   cd "${SOURCE_ROOT}"
   HOME="${TEST_HOME}" GOMODCACHE="${GOMODCACHE_ROOT}" GOCACHE="${GOCACHE_ROOT}" \
+    MAILCLI_OUTPUT=json \
     MAILCLI_SKILL_DESTINATION="${skill_destination}" \
     MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}" \
     "${SOURCE_ROOT}/scripts/build/install-local.sh" "${binary_destination}" >/dev/null
@@ -70,7 +71,7 @@ verify_install() {
     MAILCLI_TEST_SKILL_DIRECTORY="${skill_destination}" \
       go test ./internal/cli -run '^TestSkillDocumentationSelfContained$' -count=1
   )
-  [[ "$(${binary_destination} version)" == "$("${BUILD_OUTPUT}" version)" ]]
+  [[ "$(MAILCLI_OUTPUT=human "${binary_destination}" version)" == "$(MAILCLI_OUTPUT=human "${BUILD_OUTPUT}" version)" ]]
   [[ ! -e "${binary_destination}.mailcli-backup" ]]
   [[ ! -e "${skill_destination}.mailcli-backup" ]]
 }

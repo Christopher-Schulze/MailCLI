@@ -137,7 +137,7 @@ func TestRunWithFactoriesClosesNoServiceTransport(t *testing.T) {
 					return closeErr
 				},
 			}
-			_, stderr, code := runWithArgsAndStderrUsing(t, append([]string{"mailcli"}, test.args...), func() int {
+			_, stderr, code := runWithArgsAndStderrUsing(t, append(append([]string{"mailcli"}, test.args...), "--human"), func() int {
 				return runWithFactories(nil, func() *invocationTransport {
 					factoryCalls.Add(1)
 					return transport
@@ -162,7 +162,8 @@ func TestRunWithFactoriesClosesNoServiceTransport(t *testing.T) {
 func TestRunWithFactoriesFinalizesNoServiceJSONAfterCleanupFailure(t *testing.T) {
 	closeErr := errors.New("transport close failed")
 	transport := &invocationTransport{closeResource: func() error { return closeErr }}
-	stdout, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "version", "--json"}, func() int {
+	t.Setenv("MAILCLI_OUTPUT", "")
+	stdout, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "version"}, func() int {
 		return runWithFactories(nil, func() *invocationTransport { return transport })
 	})
 	if code != 1 || stderr != "" {
@@ -203,7 +204,8 @@ func TestRunWithConfigFactoryReportsJSONInitializationFailure(t *testing.T) {
 	configErr := errors.New("configuration unavailable")
 	var configCalls atomic.Int32
 	var transportCalls atomic.Int32
-	stdout, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "accounts", "list", "--json"}, func() int {
+	t.Setenv("MAILCLI_OUTPUT", "")
+	stdout, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "accounts", "list"}, func() int {
 		return runWithConfigFactory(nil, func() *invocationTransport {
 			transportCalls.Add(1)
 			return &invocationTransport{}
@@ -287,7 +289,7 @@ func TestRunWithFactoriesClosesTransportAfterStoreInitializationFailure(t *testi
 			return closeErr
 		},
 	}
-	_, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "accounts", "list"}, func() int {
+	_, stderr, code := runWithArgsAndStderrUsing(t, []string{"mailcli", "accounts", "list", "--human"}, func() int {
 		return runWithFactories(nil, func() *invocationTransport {
 			factoryCalls.Add(1)
 			return transport

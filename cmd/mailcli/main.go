@@ -25,9 +25,6 @@ import (
 )
 
 func main() {
-	if cli.RequiresMainThread(os.Args[1:]) {
-		runtime.LockOSThread()
-	}
 	os.Exit(run())
 }
 
@@ -53,8 +50,21 @@ func runWithConfigFactory(
 	newTransport func() *invocationTransport,
 	newConfig func() (mailstore.Config, error),
 ) int {
-	args := os.Args[1:]
-	jsonOutput := cli.JSONOutputRequested(args)
+	args, jsonOutput, err := cli.ResolveOutputMode(os.Args[1:], os.Stdout, os.Getenv("MAILCLI_OUTPUT"))
+	if err != nil {
+		if jsonOutput {
+			if cli.WriteFailureEnvelope(os.Stdout, cli.AttemptedCommand(args), "invalid_argument", err.Error()) != 0 {
+				return 1
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return 2
+	}
+	if cli.RequiresMainThread(args) {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
 	ctx := context.Background()
 	stopSignals := func() {}
 	if cli.RequiresSignalContext(args) {

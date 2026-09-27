@@ -163,7 +163,7 @@ if [[ -f "${CHECKOUT_BINARY}" ]]; then
     report checkout_binary_mode executable "${CHECKOUT_BINARY}"
   fi
   CHECKOUT_VERSION=""
-  if CHECKOUT_VERSION="$("${CHECKOUT_BINARY}" version 2>/dev/null)"; then
+  if CHECKOUT_VERSION="$(MAILCLI_OUTPUT=human "${CHECKOUT_BINARY}" version 2>/dev/null)"; then
     if [[ "${CHECKOUT_VERSION}" == "mailcli ${SOURCE_VERSION}" ]]; then
       report checkout_binary_version match "${CHECKOUT_VERSION}"
     else
@@ -182,7 +182,7 @@ if [[ -f "${BINARY_DESTINATION}" ]]; then
     report installed_binary_mode executable "${BINARY_DESTINATION}"
   fi
   INSTALLED_VERSION=""
-  if INSTALLED_VERSION="$("${BINARY_DESTINATION}" version 2>/dev/null)"; then
+  if INSTALLED_VERSION="$(MAILCLI_OUTPUT=human "${BINARY_DESTINATION}" version 2>/dev/null)"; then
     if [[ "${INSTALLED_VERSION}" == "mailcli ${SOURCE_VERSION}" ]]; then
       report installed_binary_version match "${INSTALLED_VERSION}"
     else

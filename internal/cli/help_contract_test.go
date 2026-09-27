@@ -158,7 +158,7 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 	if !strings.Contains(stdout.String(), "send: ") {
 		t.Fatalf("help omits the send command: %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Output: human by default; --json for JSON.") {
+	if !strings.Contains(stdout.String(), "Output: --json/--human > MAILCLI_OUTPUT=json|human > pipe:JSON, TTY:human.") {
 		t.Fatalf("help omits the output rule: %s", stdout.String())
 	}
 	manual, err := os.ReadFile("../../docs/documentation.md")

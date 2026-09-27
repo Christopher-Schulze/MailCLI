@@ -66,7 +66,7 @@ if "${MAILCLI_ROOT}/scripts/release/build-release.sh" >/dev/null 2>&1; then
   exit 1
 fi
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
-TEST_VERSION="$("${BUILD_OUTPUT}" version)"
+TEST_VERSION="$(MAILCLI_OUTPUT=human "${BUILD_OUTPUT}" version)"
 TEST_VERSION="${TEST_VERSION#mailcli }"
 if [[ ! "${TEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Built binary reports a malformed version: %s\n' "${TEST_VERSION}" >&2
@@ -515,7 +515,7 @@ diff -qr "${PACKAGE_ROOT}/skills/mailcli" "${INSTALLED_SKILL}" >/dev/null
   MAILCLI_TEST_SKILL_DIRECTORY="${INSTALLED_SKILL}" \
     go test ./internal/cli -run '^TestSkillDocumentationSelfContained$' -count=1
 )
-[[ "$("${INSTALLED_BINARY}" version)" == "mailcli ${TEST_VERSION}" ]]
+[[ "$(MAILCLI_OUTPUT=human "${INSTALLED_BINARY}" version)" == "mailcli ${TEST_VERSION}" ]]
 CAPABILITIES_JSON="$("${INSTALLED_BINARY}" capabilities --json)"
 if ! grep -Fq '"raw_mime_send":true' <<<"${CAPABILITIES_JSON}"; then
   printf 'Release binary does not advertise raw_mime_send=true\n' >&2

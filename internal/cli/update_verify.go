@@ -93,7 +93,14 @@ func verifyInstalledBinary(ctx context.Context, binaryPath string, expectedVersi
 }
 
 func verifyBinaryVersion(ctx context.Context, binaryPath string, expectedVersion string) error {
-	output, err := exec.CommandContext(ctx, binaryPath, "version").CombinedOutput()
+	command := exec.CommandContext(ctx, binaryPath, "version")
+	for _, entry := range command.Environ() {
+		if !strings.HasPrefix(entry, "MAILCLI_OUTPUT=") {
+			command.Env = append(command.Env, entry)
+		}
+	}
+	command.Env = append(command.Env, "MAILCLI_OUTPUT=human")
+	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("run installed binary: %w: %s", err, strings.TrimSpace(string(output)))
 	}

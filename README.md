@@ -183,6 +183,8 @@ mailcli version --json
 
 The release installer copies the verified binary to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`. It stages and verifies both before any live rename, records a durable transaction manifest, commits each target with identity-checked rollback, and deterministically recovers interrupted installs before accepting a new one. It rejects unsafe parent or destination symlinks and unresolved backup paths, and never removes macOS security attributes. Start a new agent session after installation so the skill is discovered.
 
+When upgrading through an older binary or installer that assumes plain version output, invoke `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human /absolute/path/install.sh`. Old binaries ignore this setting; new binaries use it for inherited version probes. Current installers and updaters select that format explicitly.
+
 After the first installation, update both components with:
 
 ```bash
@@ -234,6 +236,8 @@ mailcli doctor --live --json
 Mail must already be running. The live probe never launches Mail or creates, saves, or sends a message. It verifies the exact process identity and performs one read-only Apple Events version query. Mail 16 retains some hidden outgoing backends even after `close saving no`, so a healthcheck must never manufacture a compose object.
 
 ## Usage
+
+Output follows explicit `--json`/`--human`, then `MAILCLI_OUTPUT=json|human`, then stdout: pipes/files receive JSON and terminals receive human text. Conflicting modes or invalid environment values fail with exit 2 before initialization. Boolean `=false` selects the opposite mode. Help remains text; use capabilities for machine discovery.
 
 ### Discover accounts and mailboxes
 

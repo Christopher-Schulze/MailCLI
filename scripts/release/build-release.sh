@@ -368,7 +368,7 @@ if [[ "${STAGING_READY}" -eq 0 ]]; then
   preflight_final_assets 0 || exit 1
   "${MAILCLI_ROOT}/scripts/build/build.sh"
   BINARY="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
-  if [[ "$("${BINARY}" version)" != "mailcli ${VERSION}" ]]; then
+  if [[ "$(MAILCLI_OUTPUT=human "${BINARY}" version)" != "mailcli ${VERSION}" ]]; then
     printf 'Binary version does not match requested release %s\n' "${VERSION}" >&2
     exit 1
   fi

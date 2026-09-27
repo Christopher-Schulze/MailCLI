@@ -9,7 +9,7 @@ import (
 )
 
 func TestRunVersionWithoutMailStore(t *testing.T) {
-	output, code := runWithArgs(t, []string{"mailcli", "version"})
+	output, code := runWithArgs(t, []string{"mailcli", "version", "--human"})
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
@@ -29,7 +29,7 @@ func TestRunHelpWithoutMailStore(t *testing.T) {
 }
 
 func TestRunUnknownCommandWithoutMailStore(t *testing.T) {
-	_, stderr, code := runWithArgsAndStderr(t, []string{"mailcli", "not-a-command"})
+	_, stderr, code := runWithArgsAndStderr(t, []string{"mailcli", "not-a-command", "--human"})
 	if code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
 	}
@@ -46,7 +46,7 @@ func TestRunStoreCommandReportsMissingStore(t *testing.T) {
 	}
 	_, stderr, code := runWithArgsAndStderrUsing(
 		t,
-		[]string{"mailcli", "accounts", "list"},
+		[]string{"mailcli", "accounts", "list", "--human"},
 		func() int { return runWithFallbackFactory(nil) },
 	)
 	if code == 0 {

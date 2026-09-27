@@ -115,7 +115,7 @@ chmod 0700 "${CACHE_ROOT}"
 
 BINARY_HASH="$(shasum -a 256 "${BINARY}" | awk '{print $1}')"
 [[ "${BINARY_HASH}" =~ ^[[:xdigit:]]{64}$ ]] || fail "Could not fingerprint the MailCLI binary"
-VERSION_OUTPUT="$("${BINARY}" version 2>/dev/null || true)"
+VERSION_OUTPUT="$(MAILCLI_OUTPUT=human "${BINARY}" version 2>/dev/null || true)"
 [[ "${VERSION_OUTPUT}" =~ ^mailcli\ [0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   fail "MailCLI binary version output is invalid"
 

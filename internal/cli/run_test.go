@@ -441,20 +441,21 @@ func TestVersionJSON(t *testing.T) {
 
 func TestNormalizeGlobalJSONSupportsAnyPositionWithoutStealingValues(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want []string
+		name      string
+		args      []string
+		want      []string
+		requested bool
 	}{
-		{name: "before command", args: []string{"--json", "version"}, want: []string{"version", "--json"}},
-		{name: "between command and subcommand", args: []string{"messages", "--json", "list"}, want: []string{"messages", "list", "--json"}},
+		{name: "before command", args: []string{"--json", "version"}, want: []string{"version", "--json"}, requested: true},
+		{name: "between command and subcommand", args: []string{"messages", "--json", "list"}, want: []string{"messages", "list", "--json"}, requested: true},
 		{name: "after option value", args: []string{"messages", "search", "--query", "--json"}, want: []string{"messages", "search", "--query", "--json"}},
-		{name: "repeated global flag", args: []string{"--json", "version", "--json"}, want: []string{"version", "--json"}},
+		{name: "repeated global flag", args: []string{"--json", "version", "--json"}, want: []string{"version", "--json"}, requested: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, requested := NormalizeGlobalJSON(test.args)
-			if !requested || !slices.Equal(got, test.want) {
-				t.Fatalf("NormalizeGlobalJSON(%q) = %q, %t, want %q, true", test.args, got, requested, test.want)
+			if requested != test.requested || !slices.Equal(got, test.want) {
+				t.Fatalf("NormalizeGlobalJSON(%q) = %q, %t, want %q, %t", test.args, got, requested, test.want, test.requested)
 			}
 		})
 	}

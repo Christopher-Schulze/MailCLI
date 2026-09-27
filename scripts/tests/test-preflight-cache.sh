@@ -29,6 +29,7 @@ increment() {
 
 case "${1:-}" in
   version)
+    [[ "${MAILCLI_OUTPUT:-}" == human ]] || { printf 'version probe must request human output\n' >&2; exit 2; }
     printf 'mailcli 9.9.9\n'
     ;;
   capabilities)

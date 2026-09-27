@@ -136,7 +136,7 @@ var commandContracts = []commandContract{
 		published:       true,
 	},
 	{
-		ID: "batch", handler: runBatch, helpDescription: "Execute bounded explicit reads, attachment saves, and marks",
+		ID: "batch", handler: runBatch, helpDescription: "Execute bounded read/mutation batches",
 		limitRefs:   []string{"batch_operations", "default_batch_concurrency", "maximum_batch_concurrency", "maximum_batch_items", "maximum_batch_input_bytes", "output_projection.message_fields", "output_projection.message_views"},
 		effectClass: "batch", confirmation: "operation-dependent",
 		storeDependency: "mail-store",
@@ -503,7 +503,7 @@ var commandContracts = []commandContract{
 		published:    true,
 	},
 	{
-		ID: "sync", handler: runSync, helpDescription: "Synchronize with Mail.app or check server status over IMAP (--check)",
+		ID: "sync", handler: runSync, helpDescription: "Sync Mail.app; --check observes IMAP",
 		limitRefs:   []string{"imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "mail-write", confirmation: "none",
 		storeDependency: "mail-store",

@@ -750,7 +750,7 @@ func runMessageCopy(ctx context.Context, service *mail.Service, args []string, s
 
 // NormalizeGlobalJSON moves a global --json flag to the command tail.
 func NormalizeGlobalJSON(args []string) ([]string, bool) {
-	if normalized, requested, handled := normalizeReferenceGlobalJSON(args); handled {
+	if normalized, requested, handled := normalizeCommandGlobalJSON(args); handled {
 		return normalized, requested
 	}
 	requested := false
@@ -777,13 +777,13 @@ func NormalizeGlobalJSON(args []string) ([]string, bool) {
 	return normalized, true
 }
 
-func normalizeReferenceGlobalJSON(args []string) ([]string, bool, bool) {
+func normalizeCommandGlobalJSON(args []string) ([]string, bool, bool) {
 	contract, commandEnd, found := referenceCommandForArgs(args)
 	if !found {
 		return nil, false, false
 	}
-	flagArity, ok := referenceGlobalJSONFlagArity(contract)
-	if !ok {
+	flagArity, _ := referenceGlobalJSONFlagArity(contract)
+	if flagArity == nil {
 		return nil, false, false
 	}
 	beforeDelimiter, afterDelimiter, requested := separateReferenceGlobalJSON(args, commandEnd, flagArity)
@@ -1079,7 +1079,7 @@ Commands:
 	}
 	writeLine(writer, "help: Show this command overview")
 	writeRaw(writer, `
-Output: human by default; --json for JSON.
+Output: --json/--human > MAILCLI_OUTPUT=json|human > pipe:JSON, TTY:human.
 Details: mailcli <command> --help
 Manual: docs/documentation.md#composition and #scope
 `)
