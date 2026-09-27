@@ -162,6 +162,9 @@ func projectionSchemaMetadata(t *testing.T, id string, source json.RawMessage) [
 	if err := json.Unmarshal(source, &schema); err != nil {
 		t.Fatal(err)
 	}
+	// Output is derived from actual serializer types and has its own strict
+	// fixture coverage; this test still compares all canonical input metadata.
+	delete(schema, "output")
 	if _, projected := projectionTargetForCommand(id); projected {
 		schema["flags"] = projectionFieldMetadata(t, schema["flags"], "--fields")
 	}

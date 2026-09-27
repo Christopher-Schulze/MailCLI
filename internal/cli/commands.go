@@ -309,6 +309,7 @@ func runMessages(
 
 func runMessagesList(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages list", stderr)
+	enrichment := addMessageEnrichmentFlags(flags, true)
 	mailboxRef := flags.String("mailbox", "", "mailbox ref, role, or exact path; omit for unified inbox")
 	accountRef := flags.String("account", "", "scope to an account ref")
 	cursor := flags.String("cursor", "", "pagination cursor")
@@ -320,6 +321,9 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 		return code
 	}
 	if err := validatePageLimit(*limit); err != nil {
+		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateMessageEnrichment(*enrichment); err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	if err := validateOutputByteLimit(*maxBytes); err != nil {
@@ -336,6 +340,9 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 		MailboxRef: *mailboxRef, AccountRef: *accountRef, Cursor: *cursor, Limit: *limit,
 	})
 	if err != nil {
+		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
+	}
+	if err := enrichMessagePage(operationCtx, service, page.Messages, *enrichment); err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput && projection != nil {
@@ -401,6 +408,7 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 
 func runMessagesGet(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("messages get", stderr)
+	enrichment := addMessageEnrichmentFlags(flags, false)
 	ref := flags.String("ref", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetMessage, defaultMessageOutputView, true)
@@ -409,6 +417,9 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	}
 	output, err := outputFlags.options(projectionTargetMessage)
 	if err != nil {
+		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateMessageEnrichment(*enrichment); err != nil {
 		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
 	}
 	if *ref == "" {
@@ -426,6 +437,16 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 		intent = messageReadIntentForProjection(output)
 	}
 	message, err := service.GetMessageWithIntent(operationCtx, *ref, intent)
+	if err != nil {
+		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr, output)
+	}
+	enrichment.Threading = true
+	if message.Headers != "" {
+		mail.ApplyThreadingHeaders(&message.Summary, message.Headers)
+		enrichment.Threading = false
+	}
+	enrichment.Excerpt = output.includes("excerpt") || output.includes("excerpt_complete") || output.includes("excerpt_source")
+	message.Summary, err = service.EnrichMessage(operationCtx, message.Summary, *enrichment)
 	if err != nil {
 		return failMessageRead("messages.get", *jsonOutput, message, err, stdout, stderr, output)
 	}

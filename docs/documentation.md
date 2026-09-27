@@ -73,7 +73,8 @@ flags, field registries and incompatible combinations.
 
 ### Discovery and maintenance
 
-- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--limits`.
+- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--outputs`, `--limits`.
+  `--outputs` adds every selected command's `schema.output` tree plus shared `$defs`.
   Example: `mailcli capabilities --for messages.get --json`.
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.
@@ -116,8 +117,24 @@ flags, field registries and incompatible combinations.
 - `messages.search`: search metadata and bounded local bodies; main flags
   `--query`, `--max-messages`, `--max-scan-bytes`, `--exact-count`, `--cursor`.
   Example: `mailcli messages search --query invoice --json`. Output: `page`.
+- Reply metadata on list, filter and search pages is opt-in and read-only.
+  `--with-threading` fills `summary.in_reply_to[]`, `summary.references[]`
+  (bracketed msg-ids in header order), `summary.from{name,address}` and
+  `summary.threading_complete` from the bounded header block (local or IMAP
+  `BODY.PEEK[HEADER]`). `--with-excerpt` fills `summary.excerpt`,
+  `summary.excerpt_complete` and `summary.excerpt_source`
+  (`local`, `imap-partial`, `unavailable`); `--excerpt-length` defaults to 240
+  runes (1 to 1000).
+- Excerpts prefer text/plain over HTML text, drop `>` quote lines and a
+  signature after an exact `-- ` line, collapse whitespace and cut at a rune
+  boundary. Each reads at most 256 KiB of RFC source (local prefix, or an IMAP
+  `BODY.PEEK[]<0.262144>` partial fetch only when the local source is partial).
+  Larger or missing sources report `excerpt_complete:false`. Unrequested keys
+  are empty; empty or false means unknown, not absence.
 - `messages.get`: retrieve normalized detail; main flags `--ref`, `--view`,
-  `--fields`, `--export`, `--max-bytes`.
+  `--fields`, `--export`, `--max-bytes`, `--excerpt-length`. Its summary
+  always carries the threading fields; `--fields excerpt` and
+  `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.
   Output: `message`, conditional `content_export`.
 - `messages.raw`: retrieve exact RFC 5322 content; main flags `--ref`,
@@ -241,6 +258,11 @@ and recovery evidence before assuming success.
 5. Send: set up credentials locally, create and fully review a draft, retain
    `data.draft.revision`, then send with `--expected-revision` and `--confirm`.
    Reconcile uncertain outcomes instead of submitting again.
+6. Replies: search `--after DATE --with-threading --with-excerpt`, follow
+   `data.page.next_cursor`, and match each stored sent Message-ID against both
+   `summary.in_reply_to[]` and `summary.references[]`. Treat the domain of
+   `summary.from.address` only as a candidate and `threading_complete:false`
+   as unknown. All steps are read-only.
 
 The packaged skill's linked guides provide the same workflows for agent hosts.
 See [Composition](#composition) for review, claims, rich text and handoff rules.
@@ -1147,7 +1169,7 @@ filter/search keep the complete coverage object. Use `--fields all` alone to ret
 ### Setup and usage
 
 Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas. Execute that argv with the retained binary before using uninspected parameters, or request `--for IDS --schemas --json` to inline complete canonical schemas. Effects, confirmation, dependencies, result states, referenced limits and shared policies remain directly available.
-Unscoped discovery retains all inline schemas; `--schemas` requires `--for`.
+Unscoped discovery retains all inline schemas; `--schemas` requires `--for`. Output trees are opt-in through `--outputs`, with or without `--for`: each command's `schema.output` describes its `data` payload with `$ref` pointers into `data.capabilities.$defs`, projection variants and success requirements; `$defs.error` and `$defs.envelope` describe the shared envelope.
 
 The companion skill uses a compact `skills/mailcli/SKILL.md` entrypoint and seven portable operational guides under `skills/mailcli/references/`. Read the guide for the current action and request `capabilities --for COMMAND_ID --json` for one command or `capabilities --for ID,ID,... --json` for a known multi-command workflow; use family discovery only when the exact command set is
 unknown and retain inspected contracts for the same binary identity. Follow each command's credential, network, store, and Mail.app dependencies; local draft work and direct sending do not trigger unrelated store diagnostics. Default detail views retain completeness and replay evidence; explicit field projections return selected values and any required evidence fields. Header-only

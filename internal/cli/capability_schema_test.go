@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,38 @@ func TestCapabilityScopedWireBudgets(t *testing.T) {
 			}
 			t.Logf("bytes=%d maximum=%d", len(output), test.maximum)
 		})
+	}
+}
+
+func TestCapabilityOutputSchemasAreOptIn(t *testing.T) {
+	hasOutput := func(t *testing.T, response envelope) (int, bool) {
+		t.Helper()
+		withOutput := 0
+		for _, command := range response.Data.Capabilities.Commands {
+			var schema map[string]json.RawMessage
+			if len(command.Schema) > 0 {
+				if err := json.Unmarshal(command.Schema, &schema); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, ok := schema["output"]; ok {
+				withOutput++
+			}
+		}
+		return withOutput, response.Data.Capabilities.OutputDefinitions != nil
+	}
+	for _, args := range [][]string{{"--json"}, {"--for", "messages.search", "--schemas", "--json"}} {
+		code, output, response := captureCapabilitiesJSON(t, args...)
+		if count, defs := hasOutput(t, response); code != 0 || count != 0 || defs || strings.Contains(string(output), `"$defs"`) {
+			t.Fatalf("args=%v published outputs without --outputs: code=%d outputs=%d defs=%t", args, code, count, defs)
+		}
+	}
+	for _, args := range [][]string{{"--outputs", "--json"}, {"--for", "messages.search", "--outputs", "--json"}} {
+		code, _, response := captureCapabilitiesJSON(t, args...)
+		count, defs := hasOutput(t, response)
+		if code != 0 || count != len(response.Data.Capabilities.Commands) || count == 0 || !defs {
+			t.Fatalf("args=%v code=%d outputs=%d commands=%d defs=%t", args, code, count, len(response.Data.Capabilities.Commands), defs)
+		}
 	}
 }
 

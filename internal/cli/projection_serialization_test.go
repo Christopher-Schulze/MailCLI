@@ -269,6 +269,13 @@ func TestProjectionSerializedKeysMatchEveryRegistry(t *testing.T) {
 				} else if !slices.Contains(want, selected) {
 					want = append(want, selected)
 				}
+				if target == projectionTargetMessage && selected != "all" && (selected == "excerpt" || selected == "excerpt_complete" || selected == "excerpt_source") {
+					for _, peer := range []string{"excerpt", "excerpt_complete", "excerpt_source"} {
+						if !slices.Contains(want, peer) {
+							want = append(want, peer)
+						}
+					}
+				}
 				// A healthy draft summary never invents a corrupt-state diagnostic.
 				if target == projectionTargetDraftList {
 					want = slices.DeleteFunc(want, func(field string) bool { return field == "state_error" })
@@ -296,7 +303,7 @@ func TestDefaultProjectionKeysPreserveTargetPolicies(t *testing.T) {
 			registry := projectionRegistry(target)
 			want := append(slices.Clone(registry.core), registry.optional...)
 			want = slices.DeleteFunc(want, func(field string) bool {
-				return target == projectionTargetMessage && (field == "content" || field == "headers") ||
+				return target == projectionTargetMessage && (field == "content" || field == "headers" || field == "header_fields" || field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source") ||
 					target == projectionTargetDraft && (field == "body_source" || field == "body_html") ||
 					target == projectionTargetDraftList && field == "state_error"
 			})

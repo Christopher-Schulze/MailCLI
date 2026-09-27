@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -982,7 +983,7 @@ func TestMarkMessageReportsDuplicateMessageIDMatches(t *testing.T) {
 	if transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID {
 		t.Fatalf("MarkMessage() error = %v, want %s", err, transport.CodeIMAPAmbiguousMessageID)
 	}
-	if result != (mail.MessageSummary{}) {
+	if !reflect.DeepEqual(result, mail.MessageSummary{}) {
 		t.Fatalf("MarkMessage() result = %+v, want empty result", result)
 	}
 	if fakeImap.lastCommand != "" {

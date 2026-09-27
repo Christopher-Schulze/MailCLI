@@ -820,7 +820,7 @@ func TestBodySearchChunkedCandidatesMatchMonolithic(t *testing.T) {
 		t.Fatalf("chunked = %d messages, monolithic = %d", len(chunkedPage.Messages), len(baselinePage.Messages))
 	}
 	for index := range chunkedPage.Messages {
-		if chunkedPage.Messages[index] != baselinePage.Messages[index] {
+		if !reflect.DeepEqual(chunkedPage.Messages[index], baselinePage.Messages[index]) {
 			t.Fatalf("message %d differs: chunked %#v monolithic %#v",
 				index, chunkedPage.Messages[index], baselinePage.Messages[index])
 		}
@@ -967,7 +967,7 @@ func TestBodySearchChunkHandlesNullDateCandidates(t *testing.T) {
 		t.Fatalf("chunked = %d messages, monolithic = %d", len(chunkedPage.Messages), len(baselinePage.Messages))
 	}
 	for index := range chunkedPage.Messages {
-		if chunkedPage.Messages[index] != baselinePage.Messages[index] {
+		if !reflect.DeepEqual(chunkedPage.Messages[index], baselinePage.Messages[index]) {
 			t.Fatalf("message %d differs: chunked %#v monolithic %#v",
 				index, chunkedPage.Messages[index], baselinePage.Messages[index])
 		}

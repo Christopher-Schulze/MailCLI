@@ -28,3 +28,38 @@ func referenceCapabilitySchemas(commands []commandCapability) error {
 	}
 	return nil
 }
+
+// attachOutputSchemas publishes output trees only for an explicit --outputs
+// request, keeping ordinary discovery byte-identical and compact.
+func attachOutputSchemas(commands []commandCapability) error {
+	for i := range commands {
+		command := &commands[i]
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(command.Schema, &fields); err != nil {
+			return invalidEmbeddedCommandSchema("schemas/"+command.ID+".json", err)
+		}
+		output, err := marshalCLIJSON(outputSchemaForCommand(command.ID))
+		if err != nil {
+			return err
+		}
+		fields["output"] = output
+		schema, err := marshalCLIJSON(fields)
+		if err != nil {
+			return err
+		}
+		command.Schema = schema
+	}
+	return nil
+}
+
+func schemasIncludeOutput(commands []commandCapability) bool {
+	for _, command := range commands {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(command.Schema, &fields) == nil {
+			if _, ok := fields["output"]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}

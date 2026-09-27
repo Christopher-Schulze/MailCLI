@@ -1,12 +1,10 @@
 # Installation, setup, and diagnostics
 
---for IDS --schemas inlines schema_ref.resolve contracts.
+--for IDS --schemas inlines schema_ref contracts; --outputs adds schema.output/$defs.
 
 Before extraction/install, trusted OpenSSL 3 verifies README-pinned Ed25519 over exact SHA256SUMS and archive digest; both required.
 
-1. Checkout: `scripts/build/install-local.sh [BINARY_DESTINATION]`, default ~/.local/bin/mailcli, MAILCLI_SKILL_DESTINATION override; binary/skill transaction, restart agent. Optional `scripts/utils/mailcli-preflight.sh capabilities --binary PATH [--for IDS]`: ok JSON/0600 cache keyed by binary SHA-256/schema/selection, no expansion; --refresh/invalidate. Otherwise cache scoped contracts.
-
-2. Read-only drift: `scripts/tests/report-skill-drift.sh --repository PATH --installed PATH`; match=current, missing/mismatch/unstable=reconcile, never install.
+Checkout: `scripts/build/install-local.sh [BINARY_DESTINATION]`, default ~/.local/bin/mailcli, MAILCLI_SKILL_DESTINATION override; binary/skill transaction, restart agent. Cache scoped contracts.
 
 Obey conditional dependencies; empty=none. Store: doctor --json; refresh after store/permission/schema/account/read failure. Healthy checkout cache <=300 s. Never cache `doctor --live`; run before Apple Events/read fallback with Mail running/Automation permission. Store reads: Full Disk Access/no Automation; direct send: no Mail/Full Disk Access.
 
@@ -26,6 +24,6 @@ Legacy text: `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human /abs
 
 Failed install: inspect update_result path/latest_version/updated/failed_phase; complete only with verified installed-version, otherwise unknown. Read version --json, no rerun/assumed rollback.
 
-Persistent lock ~/Library/Application Support/MailCLI/update.lock: Direct wait <=30 s; updater deadline/child ownership. Self-update ignores MAILCLI_INSTALL_PACKAGE_ROOT, source honors it. Never unlink/steal/age-expire; retain refused recovery/artifacts, cancel whole process group.
+Persistent lock ~/Library/Application Support/MailCLI/update.lock: Direct wait <=30 s; updater deadline/child ownership. Never unlink/steal/age-expire; retain refused recovery/artifacts, cancel whole process group.
 
 IMAP reads shared; APPEND/mutations exclusive.

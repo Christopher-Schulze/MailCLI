@@ -87,6 +87,10 @@ type messageProjection struct {
 	CC              *[]mail.Recipient         `json:"cc,omitempty"`
 	BCC             *[]mail.Recipient         `json:"bcc,omitempty"`
 	Headers         *string                   `json:"headers,omitempty"`
+	HeaderFields    *[]mail.HeaderField       `json:"header_fields,omitempty"`
+	Excerpt         *string                   `json:"excerpt,omitempty"`
+	ExcerptComplete *bool                     `json:"excerpt_complete,omitempty"`
+	ExcerptSource   *mail.ExcerptSource       `json:"excerpt_source,omitempty"`
 	Content         *string                   `json:"content,omitempty"`
 	ContentSource   *string                   `json:"content_source,omitempty"`
 	ContentComplete *bool                     `json:"content_complete,omitempty"`
@@ -191,23 +195,30 @@ type searchPageMessageProjection struct {
 }
 
 type messagePageItemProjection struct {
-	Ref             string                       `json:"ref"`
-	MailboxRef      string                       `json:"mailbox_ref"`
-	Account         string                       `json:"account,omitempty"`
-	MessageID       *string                      `json:"message_id,omitempty"`
-	Subject         *string                      `json:"subject,omitempty"`
-	Sender          *string                      `json:"sender,omitempty"`
-	DateReceived    *string                      `json:"date_received,omitempty"`
-	DateSent        *string                      `json:"date_sent,omitempty"`
-	Read            *bool                        `json:"read,omitempty"`
-	Flagged         *bool                        `json:"flagged,omitempty"`
-	Junk            *bool                        `json:"junk,omitempty"`
-	Deleted         *bool                        `json:"deleted,omitempty"`
-	Size            *int64                       `json:"size,omitempty"`
-	AttachmentCount *int                         `json:"attachment_count,omitempty"`
-	ConversationID  *int64                       `json:"conversation_id,omitempty"`
-	ServerTruth     *mail.ServerMutationEvidence `json:"server_truth,omitempty"`
-	StalenessNote   *string                      `json:"staleness_note,omitempty"`
+	Ref               string                       `json:"ref"`
+	MailboxRef        string                       `json:"mailbox_ref"`
+	Account           string                       `json:"account,omitempty"`
+	MessageID         *string                      `json:"message_id,omitempty"`
+	Subject           *string                      `json:"subject,omitempty"`
+	Sender            *string                      `json:"sender,omitempty"`
+	DateReceived      *string                      `json:"date_received,omitempty"`
+	DateSent          *string                      `json:"date_sent,omitempty"`
+	Read              *bool                        `json:"read,omitempty"`
+	Flagged           *bool                        `json:"flagged,omitempty"`
+	Junk              *bool                        `json:"junk,omitempty"`
+	Deleted           *bool                        `json:"deleted,omitempty"`
+	Size              *int64                       `json:"size,omitempty"`
+	AttachmentCount   *int                         `json:"attachment_count,omitempty"`
+	ConversationID    *int64                       `json:"conversation_id,omitempty"`
+	ServerTruth       *mail.ServerMutationEvidence `json:"server_truth,omitempty"`
+	StalenessNote     *string                      `json:"staleness_note,omitempty"`
+	InReplyTo         []string                     `json:"in_reply_to"`
+	References        []string                     `json:"references"`
+	From              mail.Recipient               `json:"from"`
+	ThreadingComplete bool                         `json:"threading_complete"`
+	Excerpt           string                       `json:"excerpt"`
+	ExcerptComplete   bool                         `json:"excerpt_complete"`
+	ExcerptSource     mail.ExcerptSource           `json:"excerpt_source"`
 }
 
 type outputSizeMeasurement string
@@ -621,7 +632,7 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 	switch target {
 	case projectionTargetMessage:
 		return projectionFieldRegistry{core: []string{"summary", "content_source", "content_complete", "missing_parts", "hydration"},
-			optional: []string{"reply_to", "to", "cc", "bcc", "headers", "content", "attachments"}}
+			optional: []string{"reply_to", "to", "cc", "bcc", "headers", "content", "attachments", "header_fields", "excerpt", "excerpt_complete", "excerpt_source"}}
 	case projectionTargetDraft:
 		return projectionFieldRegistry{core: []string{"ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt"},
 			optional: []string{"source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "body", "body_source", "body_html", "content_diagnostics", "attachments"}}
@@ -633,10 +644,10 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 		return projectionFieldRegistry{core: []string{"ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error"},
 			optional: []string{"age_days", "created_at", "updated_at"}}
 	case projectionTargetListPage:
-		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "account"},
+		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "account", "in_reply_to", "references", "from", "threading_complete", "excerpt", "excerpt_complete", "excerpt_source"},
 			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "staleness_note", "subject"}}
 	case projectionTargetSearchPage:
-		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref"},
+		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "in_reply_to", "references", "from", "threading_complete", "excerpt", "excerpt_complete", "excerpt_source"},
 			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "snippet", "staleness_note", "subject"}}
 	default:
 		return projectionFieldRegistry{}
@@ -703,6 +714,18 @@ func projectSearchPage(page mail.SearchPage, fields map[string]struct{}) *json.R
 
 func projectMessageSummary(message mail.MessageSummary, fields map[string]struct{}) messagePageItemProjection {
 	projected := messagePageItemProjection{Ref: message.Ref, MailboxRef: message.MailboxRef, Account: message.Account}
+	projected.InReplyTo, projected.References = message.InReplyTo, message.References
+	if projected.InReplyTo == nil {
+		projected.InReplyTo = []string{}
+	}
+	if projected.References == nil {
+		projected.References = []string{}
+	}
+	projected.From, projected.ThreadingComplete = message.From, message.ThreadingComplete
+	projected.Excerpt, projected.ExcerptComplete, projected.ExcerptSource = message.Excerpt, message.ExcerptComplete, message.ExcerptSource
+	if projected.ExcerptSource == "" {
+		projected.ExcerptSource = mail.ExcerptSourceUnavailable
+	}
 	if _, include := fields["message_id"]; include {
 		projected.MessageID = &message.MessageID
 	}
@@ -760,7 +783,7 @@ func messageReadIntentForProjection(options outputOptions) mail.MessageReadInten
 			return mail.MessageReadIntentAttachments
 		}
 	}
-	for _, field := range []string{"summary", "reply_to", "to", "cc", "bcc", "headers"} {
+	for _, field := range []string{"summary", "reply_to", "to", "cc", "bcc", "headers", "header_fields", "excerpt", "excerpt_complete", "excerpt_source"} {
 		if options.includes(field) {
 			return mail.MessageReadIntentHeaders
 		}
@@ -792,6 +815,13 @@ func messageStateProjectionField(field string) bool {
 //go:noinline
 func (o outputOptions) includes(field string) bool {
 	if o.fieldsProvided {
+		if o.target == projectionTargetMessage && (field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source") {
+			for _, peer := range []string{"excerpt", "excerpt_complete", "excerpt_source"} {
+				if _, selected := o.fields[peer]; selected {
+					return true
+				}
+			}
+		}
 		if _, all := o.fields["all"]; all {
 			return true
 		}
@@ -802,9 +832,9 @@ func (o outputOptions) includes(field string) bool {
 	case outputViewFull:
 		return true
 	case outputViewPlain:
-		return field != "headers" && field != "body_source" && field != "body_html"
+		return field != "headers" && field != "body_source" && field != "body_html" && !newMessageMetadataField(field)
 	case outputViewMetadata:
-		return field != "headers" && field != "content" && field != "body" && field != "body_source" && field != "body_html"
+		return field != "headers" && field != "content" && field != "body" && field != "body_source" && field != "body_html" && !newMessageMetadataField(field)
 	default:
 		return false
 	}
@@ -859,6 +889,19 @@ func messageProjectionFor(message mail.Message, options outputOptions, retainCon
 	}
 	if options.includes("headers") {
 		projection.Headers = &message.Headers
+	}
+	if options.includes("header_fields") {
+		fields, _ := mail.ParseHeaderFields(message.Headers)
+		projection.HeaderFields = &fields
+	}
+	if options.includes("excerpt") || options.includes("excerpt_complete") || options.includes("excerpt_source") {
+		projection.Excerpt = &message.Summary.Excerpt
+		projection.ExcerptComplete = &message.Summary.ExcerptComplete
+		source := message.Summary.ExcerptSource
+		if source == "" {
+			source = mail.ExcerptSourceUnavailable
+		}
+		projection.ExcerptSource = &source
 	}
 	if (options.includes("content") || retainContent) && options.exportPath == "" {
 		projection.Content = &message.Content

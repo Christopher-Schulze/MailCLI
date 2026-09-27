@@ -30,7 +30,7 @@ func (c *Client) FetchMessageHeaders(
 	expectedUIDValidity uint32,
 	maxBytes int64,
 ) ([]byte, error) {
-	source, err := c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false, true)
+	source, err := c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false, "BODY.PEEK[HEADER]")
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +38,16 @@ func (c *Client) FetchMessageHeaders(
 }
 
 func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64, spool bool) (*fetchSource, error) {
-	return c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, spool, false)
+	return c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, spool, "BODY.PEEK[]")
+}
+
+func (c *Client) FetchMessagePrefix(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
+	section := fmt.Sprintf("BODY.PEEK[]<0.%d>", maxBytes)
+	source, err := c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false, section)
+	if err != nil {
+		return nil, err
+	}
+	return source.data, nil
 }
 
 func (c *Client) fetchMessageSection(
@@ -49,7 +58,7 @@ func (c *Client) fetchMessageSection(
 	expectedUIDValidity uint32,
 	maxBytes int64,
 	spool bool,
-	headerOnly bool,
+	bodySection string,
 ) (*fetchSource, error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
@@ -72,10 +81,6 @@ func (c *Client) fetchMessageSection(
 	}
 
 	tag := ps.sess.nextTag()
-	bodySection := "BODY.PEEK[]"
-	if headerOnly {
-		bodySection = "BODY.PEEK[HEADER]"
-	}
 	cmd := fmt.Sprintf("%s UID FETCH %d (%s)", tag, uid, bodySection)
 	if err := c.setTransferDeadline(ctx, ps.sess, maxBytes); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
@@ -84,7 +89,11 @@ func (c *Client) fetchMessageSection(
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchSource(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool)
+	expectedSection := ""
+	if strings.HasPrefix(bodySection, "BODY.PEEK[]<0.") {
+		expectedSection = "BODY[]<0>"
+	}
+	payload, err := c.readFetchSourceSection(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool, expectedSection)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +119,10 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 }
 
 func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool) (result *fetchSource, resultErr error) {
+	return c.readFetchSourceSection(ctx, sess, tag, requestedUID, expectedUIDValidity, maxBytes, spool, "")
+}
+
+func (c *Client) readFetchSourceSection(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool, expectedSection string) (result *fetchSource, resultErr error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
@@ -248,6 +261,10 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 				Message: "IMAP FETCH returned duplicate BODY values for the requested UID",
 			}
 		}
+		if expectedSection != "" && !strings.EqualFold(strings.Replace(parsed.bodySection, "BODY.PEEK[", "BODY[", 1), expectedSection) {
+			sess.dirty = true
+			return nil, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP partial FETCH returned an unexpected BODY section or offset"}
+		}
 		found = true
 		if parsed.bodyLiteral {
 			if parsed.bodyIndex >= 0 {
@@ -279,6 +296,7 @@ type fetchResponse struct {
 	bodyPresent  bool
 	bodyLiteral  bool
 	bodyIndex    int
+	bodySection  string
 }
 
 type fetchValueKind uint8
@@ -371,6 +389,7 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 				return fetchResponse{}, fmt.Errorf("FETCH BODY value is not an nstring")
 			}
 			response.bodyPresent = true
+			response.bodySection = strings.ToUpper(key)
 			switch value.kind {
 			case fetchValueLiteral:
 				response.body = value.literal

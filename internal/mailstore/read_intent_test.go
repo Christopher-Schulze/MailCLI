@@ -203,7 +203,12 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 	if err := json.Unmarshal(metadata.Data.Message, &visible); err != nil {
 		t.Fatalf("unmarshal metadata message: %v", err)
 	}
-	if !reflect.DeepEqual(visible.Summary, baseline.Summary) ||
+	// TASK 559 adds reply metadata to every summary: messages get derives it
+	// from the same bounded header block, and excerpts stay unrequested.
+	wantSummary := baseline.Summary
+	mail.ApplyThreadingHeaders(&wantSummary, baseline.Headers)
+	wantSummary.ExcerptSource = mail.ExcerptSourceUnavailable
+	if !reflect.DeepEqual(visible.Summary, wantSummary) ||
 		visible.ReplyTo != baseline.ReplyTo || !reflect.DeepEqual(visible.To, baseline.To) ||
 		!reflect.DeepEqual(visible.CC, baseline.CC) || !reflect.DeepEqual(visible.BCC, baseline.BCC) ||
 		visible.ContentSource != baseline.ContentSource ||

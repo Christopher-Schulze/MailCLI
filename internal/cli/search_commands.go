@@ -43,6 +43,7 @@ func runMessagesQuery(
 ) int {
 	flags := newFlagSet(strings.ReplaceAll(command, ".", " "), stderr)
 	query := mail.Query{}
+	enrichment := addMessageEnrichmentFlags(flags, true)
 	jsonOutput := defineSearchFlags(flags, &query, allowText)
 	fields := flags.String("fields", "", "comma-separated page fields; use all for the complete page")
 	maxOutputBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
@@ -50,6 +51,9 @@ func runMessagesQuery(
 		return code
 	}
 	if err := validatePageLimit(query.Limit); err != nil {
+		return failCommand(command, *jsonOutput, err, stdout, stderr)
+	}
+	if err := validateMessageEnrichment(*enrichment); err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	if err := validateOutputByteLimit(*maxOutputBytes); err != nil {
@@ -69,6 +73,13 @@ func runMessagesQuery(
 			return failCommandWithData(command, *jsonOutput, data, err, stdout, stderr)
 		}
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
+	}
+	for index := range page.Messages {
+		summary, enrichErr := service.EnrichMessage(operationCtx, page.Messages[index].Summary, *enrichment)
+		if enrichErr != nil {
+			return failCommand(command, *jsonOutput, enrichErr, stdout, stderr)
+		}
+		page.Messages[index].Summary = summary
 	}
 	if *jsonOutput {
 		pageData := searchResponsePage(&page)

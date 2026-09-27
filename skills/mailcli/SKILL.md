@@ -5,15 +5,13 @@ description: Read/search, draft/reply/forward/send, save attachments, organize a
 
 # MailCLI
 
-Use only MailCLI. Keep private content out of logs; never ask the user to paste account passwords or tokens. Credentials: Keychain via `mailcli send setup`.
+Use only MailCLI. Keep private content out of logs; never ask for passwords/tokens; Keychain via `mailcli send setup`.
 
-Keep `command -v mailcli`'s executable. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. Cache by binary SHA-256; invalidate on replacement/contract change/failure.
+Keep `command -v mailcli`'s executable. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. Cache per binary SHA-256; invalidate on replacement/change/failure.
 
 Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; reuse refs/cursors/revisions exactly, refresh refs after mutation/sync. Never replay successful/uncertain writes.
 
 ## Choose the command
-
-Read the linked guide first.
 
 | Intent | IDs | Guide |
 | --- | --- | --- |
@@ -28,9 +26,9 @@ Read the linked guide first.
 
 ## Choose the execution boundary
 
-Never bypass MailCLI via private files, SQLite or UI/scripts. No owned index/refresh command. Follow guide boundaries.
+Never bypass MailCLI (private files, SQLite, UI/scripts); no owned index/refresh command. Follow guide boundaries.
 
-## Five workflows
+## Workflows
 
 Quote operands: REF=list `data.page.messages[].ref`, search/filter `.summary.ref`; DRAFT=`data.draft.ref`/draft list; FILE=UTF-8 body file; QUERY=requested text; REV=`data.draft_preview.revision`; NEXT=`data.page.next_cursor`.
 
@@ -41,10 +39,11 @@ Quote operands: REF=list `data.page.messages[].ref`, search/filter `.summary.ref
 | Search | `mailcli messages search --query QUERY`: matches/coverage. Same query/filters, `--cursor NEXT` until absent; inspect coverage. |
 | Reply | `mailcli messages reply REF --body-file FILE` → `mailcli drafts preview DRAFT`: local reply/review. Authorized `--from ADDRESS` if needed. |
 | Send | `mailcli drafts preview DRAFT` → `mailcli drafts send DRAFT --confirm --expected-revision REV`: authorized full review then submit. Pending/unknown: reconcile. |
+| Replies | `mailcli messages search --after DATE --with-threading --with-excerpt` + NEXT: match sent Message-ID in `in_reply_to[]`/`references[]`; domain=candidate only; `threading_complete=false`=unknown. |
 
-List/filter follow NEXT until absent. Require complete content, never truncated review. Inspect completed drafts, never recreate.
+List/filter: follow NEXT until absent. Review complete content only; inspect, never recreate, completed drafts.
 
-Send/destructive actions need authorization/confirmation; reuse only for unchanged scope/content. Summaries are not review. Save/export to absolute new paths; verify size/hash.
+Send/destructive: authorization/confirmation, reused only for unchanged scope/content. Save/export to absolute new paths; verify size/hash.
 
 ## Error contract
 
@@ -52,8 +51,8 @@ Follow `next.do` with emitted command/args; never invent replay. [Recovery](refe
 
 | `next.do` | Action |
 | --- | --- |
-| `retry` | Retry the original invocation after `wait_seconds`, if present. |
+| `retry` | Retry after `wait_seconds`, if present. |
 | `fix_input` | Correct the named input first. |
-| `check_state` | Observe retained evidence; never repeat the original write. |
-| `ask_user` | Request the required environment or permission repair. |
+| `check_state` | Observe evidence; never repeat the write. |
+| `ask_user` | Ask for environment/permission repair. |
 | `stop` | Stop; cancellation never authorizes restart. |

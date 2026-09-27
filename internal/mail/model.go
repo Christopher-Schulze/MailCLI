@@ -639,9 +639,16 @@ type MessageSummary struct {
 	AttachmentCount int    `json:"attachment_count"`
 	// ConversationID is Mail's opaque store-local conversation-grouping key.
 	// It is not RFC threading and has no cross-store stability.
-	ConversationID int64                   `json:"conversation_id,omitempty"`
-	ServerTruth    *ServerMutationEvidence `json:"server_truth,omitempty"`
-	StalenessNote  string                  `json:"staleness_note,omitempty"`
+	ConversationID    int64                   `json:"conversation_id,omitempty"`
+	ServerTruth       *ServerMutationEvidence `json:"server_truth,omitempty"`
+	StalenessNote     string                  `json:"staleness_note,omitempty"`
+	InReplyTo         []string                `json:"in_reply_to"`
+	References        []string                `json:"references"`
+	From              Recipient               `json:"from"`
+	ThreadingComplete bool                    `json:"threading_complete"`
+	Excerpt           string                  `json:"excerpt"`
+	ExcerptComplete   bool                    `json:"excerpt_complete"`
+	ExcerptSource     ExcerptSource           `json:"excerpt_source"`
 }
 type MarkMessageRequest struct {
 	Ref                string

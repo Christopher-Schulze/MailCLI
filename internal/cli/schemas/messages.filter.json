@@ -3,6 +3,30 @@
   "version": 1,
   "flags": [
     {
+      "name": "--with-threading",
+      "value_type": "boolean",
+      "takes_value": false,
+      "default": "false",
+      "description": "read bounded RFC headers; empty values without this flag; threading_complete reports availability"
+    },
+    {
+      "name": "--with-excerpt",
+      "value_type": "boolean",
+      "takes_value": false,
+      "default": "false",
+      "description": "read up to 256 KiB RFC source per message; excerpt_source and excerpt_complete disclose bounded work"
+    },
+    {
+      "name": "--excerpt-length",
+      "value_type": "integer",
+      "takes_value": true,
+      "value_required": true,
+      "default": "240",
+      "minimum": 1,
+      "maximum": 1000,
+      "description": "maximum excerpt runes; effective only when excerpt is requested"
+    },
+    {
       "name": "--account",
       "value_type": "ref",
       "takes_value": true,

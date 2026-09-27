@@ -55,14 +55,15 @@ type commandDependency struct {
 }
 
 type capabilityManifest struct {
-	SchemaVersion   int                 `json:"schema_version"`
-	Name            string              `json:"name"`
-	Version         string              `json:"version"`
-	Commands        []commandCapability `json:"commands"`
-	Scope           string              `json:"scope,omitempty"`
-	Limits          capabilityLimits    `json:"limits"`
-	SyncCheckPolicy syncCheckPolicy     `json:"sync_check_policy"`
-	DraftSavePolicy draftSavePolicy     `json:"draft_save_policy"`
+	SchemaVersion     int                   `json:"schema_version"`
+	Name              string                `json:"name"`
+	Version           string                `json:"version"`
+	Commands          []commandCapability   `json:"commands"`
+	Scope             string                `json:"scope,omitempty"`
+	Limits            capabilityLimits      `json:"limits"`
+	SyncCheckPolicy   syncCheckPolicy       `json:"sync_check_policy"`
+	DraftSavePolicy   draftSavePolicy       `json:"draft_save_policy"`
+	OutputDefinitions map[string]outputNode `json:"$defs,omitempty"`
 }
 
 type syncCheckPolicy struct {
@@ -336,6 +337,7 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(&selectors, "for", "command IDs, comma lists, or family.* wildcards to describe")
 	limitsOnly := flags.Bool("limits", false, "print the full limit set without command contracts")
 	includeSchemas := flags.Bool("schemas", false, "include complete parameter schemas with --for")
+	includeOutputs := flags.Bool("outputs", false, "include schema.output trees and shared $defs; implies inline schemas")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -362,12 +364,12 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		if len(selected) == 1 {
 			manifest.Scope = selected[0]
 		}
-		if !*includeSchemas {
+		if !*includeSchemas && !*includeOutputs {
 			if err := referenceCapabilitySchemas(manifest.Commands); err != nil {
 				return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 			}
 		}
-		return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
+		return writeCapabilitiesWithOutputs(stdout, stderr, *jsonOutput, manifest, *includeOutputs)
 	}
 	manifest, err := capabilities()
 	if err != nil {
@@ -376,11 +378,23 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	if *limitsOnly {
 		manifest.Commands = []commandCapability{}
 	}
-	return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
+	return writeCapabilitiesWithOutputs(stdout, stderr, *jsonOutput, manifest, *includeOutputs)
+}
+
+func writeCapabilitiesWithOutputs(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest, outputs bool) int {
+	if outputs {
+		if err := attachOutputSchemas(manifest.Commands); err != nil {
+			return failCommand("capabilities", jsonOutput, err, stdout, stderr)
+		}
+	}
+	return writeCapabilities(stdout, stderr, jsonOutput, manifest)
 }
 
 func writeCapabilities(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest) int {
 	if jsonOutput {
+		if err := publishOutputDefinitions(&manifest); err != nil {
+			return failCommand("capabilities", true, err, stdout, stderr)
+		}
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,
 			OK:            true,
