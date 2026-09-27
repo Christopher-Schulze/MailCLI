@@ -27,7 +27,7 @@ var (
 		return file.Close()
 	}
 	attachmentPublicationHook     = func(string, string) error { return nil }
-	attachmentPublicationReadHook = func(int64) {}
+	attachmentPublicationHashHook = func(int64) {}
 )
 
 type attachmentPublication struct {
@@ -301,8 +301,8 @@ func (p *attachmentPublication) captureTemporary(evidence *AttachmentEvidence) e
 				closeErr,
 			)
 		}
-		if identity.Size() != normalized.Size {
-			return attachmentChangedError("temporary attachment size differs from verified evidence")
+		if identity.Size() != normalized.Size || !identity.ModTime().Equal(normalized.Identity.ModTime()) {
+			return attachmentChangedError("temporary attachment differs from verified evidence")
 		}
 		p.temporaryEvidence = &normalized
 	}
@@ -335,7 +335,8 @@ func (p *attachmentPublication) verifyTemporary() error {
 	if p.temporaryEvidence != nil &&
 		(identity.Size() != p.temporaryEvidence.Size ||
 			p.temporaryEvidence.Identity == nil ||
-			!os.SameFile(p.temporaryEvidence.Identity, identity)) {
+			!os.SameFile(p.temporaryEvidence.Identity, identity) ||
+			!identity.ModTime().Equal(p.temporaryEvidence.Identity.ModTime())) {
 		return attachmentChangedError("temporary attachment differs from verified evidence")
 	}
 	return nil
@@ -366,7 +367,7 @@ func (p *attachmentPublication) publish() error {
 	if err := p.restrictPublished(); err != nil {
 		return err
 	}
-	return p.verifyPublishedAndTemporary()
+	return p.verifyTemporary()
 }
 
 func (p *attachmentPublication) openPublished() error {
@@ -399,7 +400,7 @@ func (p *attachmentPublication) openPublished() error {
 }
 
 func (p *attachmentPublication) restrictPublished() error {
-	if err := p.verifyPublished(); err != nil {
+	if err := p.verifyPublished(false); err != nil {
 		p.disownOutputOnChange(err)
 		return err
 	}
@@ -412,7 +413,7 @@ func (p *attachmentPublication) restrictPublished() error {
 	if err := attachmentPublicationHook("after-chmod", p.outputPath); err != nil {
 		return err
 	}
-	if err := p.verifyPublishedMode(); err != nil {
+	if err := p.verifyPublished(true); err != nil {
 		p.disownOutputOnChange(err)
 		return err
 	}
@@ -451,7 +452,7 @@ func (p *attachmentPublication) createPublishedCopy() error {
 	p.output = file
 	p.outputIdentity = identity
 	p.outputOwned = true
-	if err := p.verifyPublished(); err != nil {
+	if err := p.verifyPublished(false); err != nil {
 		p.disownOutputOnChange(err)
 		return err
 	}
@@ -462,8 +463,8 @@ func (p *attachmentPublication) copyTemporaryBytes() error {
 	if _, err := p.temporary.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind temporary attachment: %w", err)
 	}
-	sourceHash := sha256.New()
-	written, err := io.Copy(p.output, io.TeeReader(p.temporary, sourceHash))
+	copyHash := sha256.New()
+	written, err := io.Copy(p.output, io.TeeReader(p.temporary, copyHash))
 	if err != nil {
 		return fmt.Errorf("copy attachment across filesystems: %w", err)
 	}
@@ -476,24 +477,18 @@ func (p *attachmentPublication) copyTemporaryBytes() error {
 	if err := p.verifyTemporary(); err != nil {
 		return err
 	}
-	if _, err := p.output.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind published attachment copy: %w", err)
-	}
-	outputHash := sha256.New()
-	copied, err := io.Copy(outputHash, p.output)
-	if err != nil {
-		return fmt.Errorf("verify published attachment copy: %w", err)
-	}
-	sourceDigest := hex.EncodeToString(sourceHash.Sum(nil))
+	copyDigest := hex.EncodeToString(copyHash.Sum(nil))
+	attachmentPublicationHashHook(written)
 	if p.temporaryEvidence != nil &&
-		(written != p.temporaryEvidence.Size || sourceDigest != p.temporaryEvidence.SHA256) {
+		(written != p.temporaryEvidence.Size || copyDigest != p.temporaryEvidence.SHA256) {
 		return attachmentChangedError("temporary attachment bytes differ from verified evidence")
 	}
-	outputDigest := hex.EncodeToString(outputHash.Sum(nil))
-	if copied != written || sourceDigest != outputDigest {
-		return attachmentChangedError("attachment bytes changed while copying")
+	identity, err := p.output.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect published attachment after copying: %w", err)
 	}
-	p.adoptPublishedEvidenceWithDigest(written, sourceDigest)
+	p.outputIdentity = identity
+	p.adoptPublishedEvidenceWithDigest(written, copyDigest)
 	return nil
 }
 
@@ -510,20 +505,12 @@ func (p *attachmentPublication) adoptPublishedEvidenceWithDigest(size int64, dig
 	}
 }
 
-func (p *attachmentPublication) verifyPublishedAndTemporary() error {
-	if err := p.verifyPublished(); err != nil {
-		p.disownOutputOnChange(err)
-		return err
-	}
-	if err := p.verifyTemporary(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (p *attachmentPublication) verifyPublished() error {
+func (p *attachmentPublication) verifyPublished(requirePrivateMode bool) error {
 	if p.output == nil || p.outputIdentity == nil {
 		return attachmentChangedError("published attachment ownership is unavailable")
+	}
+	if err := attachmentPublicationHook("verify-published", p.outputPath); err != nil {
+		return err
 	}
 	if err := p.verifyParent(); err != nil {
 		return err
@@ -547,31 +534,17 @@ func (p *attachmentPublication) verifyPublished() error {
 	if p.publishedEvidence != nil &&
 		(identity.Size() != p.publishedEvidence.Size ||
 			p.publishedEvidence.Identity == nil ||
-			!os.SameFile(p.publishedEvidence.Identity, identity)) {
+			!os.SameFile(p.publishedEvidence.Identity, identity) ||
+			!identity.ModTime().Equal(p.publishedEvidence.Identity.ModTime())) {
 		return attachmentChangedError("published attachment differs from verified evidence")
 	}
-	return nil
-}
-
-func (p *attachmentPublication) verifyPublishedMode() error {
-	if err := p.verifyPublished(); err != nil {
-		return err
-	}
-	identity, err := p.output.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect saved attachment permissions: %w", err)
-	}
-	if identity.Mode().Perm() != 0o600 {
+	if requirePrivateMode && identity.Mode().Perm() != 0o600 {
 		return fmt.Errorf("saved attachment permissions are not private")
 	}
 	return nil
 }
 
 func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, error) {
-	if err := p.verifyPublishedMode(); err != nil {
-		p.disownOutputOnChange(err)
-		return SavedAttachment{}, err
-	}
 	if err := attachmentPublicationHook("before-inspect", p.outputPath); err != nil {
 		return SavedAttachment{}, err
 	}
@@ -582,7 +555,7 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 	if err := attachmentPublicationHook("after-inspect", p.outputPath); err != nil {
 		return SavedAttachment{}, err
 	}
-	if err := p.verifyPublishedMode(); err != nil {
+	if err := p.verifyPublished(true); err != nil {
 		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
 	}
@@ -590,7 +563,7 @@ func (p *attachmentPublication) inspect(attachmentID string) (SavedAttachment, e
 }
 
 func (p *attachmentPublication) verifiedSaved(attachmentID string) (SavedAttachment, error) {
-	if err := p.verifyPublishedMode(); err != nil {
+	if err := p.verifyPublished(true); err != nil {
 		p.disownOutputOnChange(err)
 		return SavedAttachment{}, err
 	}
@@ -603,15 +576,12 @@ func (p *attachmentPublication) verifiedSaved(attachmentID string) (SavedAttachm
 		if err != nil {
 			return SavedAttachment{}, fmt.Errorf("hash saved attachment: %w", err)
 		}
-		attachmentPublicationReadHook(size)
+		attachmentPublicationHashHook(size)
 		p.adoptPublishedEvidenceWithDigest(size, hex.EncodeToString(hash.Sum(nil)))
-	} else if err := p.verifyPublished(); err != nil {
-		p.disownOutputOnChange(err)
-		return SavedAttachment{}, err
-	}
-	if err := p.verifyPublishedMode(); err != nil {
-		p.disownOutputOnChange(err)
-		return SavedAttachment{}, err
+		if err := p.verifyPublished(true); err != nil {
+			p.disownOutputOnChange(err)
+			return SavedAttachment{}, err
+		}
 	}
 	if p.publishedEvidence == nil {
 		return SavedAttachment{}, attachmentChangedError("published attachment evidence is unavailable")
@@ -657,7 +627,7 @@ func (p *attachmentPublication) cleanup() error {
 		}
 		var outputErr error
 		if p.retainOutput {
-			outputErr = p.verifyPublishedMode()
+			outputErr = p.verifyPublished(true)
 		} else {
 			outputErr = p.removeOwned(p.outputName, p.outputIdentity, "published attachment")
 		}

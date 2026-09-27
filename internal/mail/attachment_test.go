@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type attachmentGateway struct {
@@ -278,6 +279,17 @@ func TestSaveAttachmentUsesVerifiedCopyWhenLinkCrossesFilesystem(t *testing.T) {
 	previous := attachmentLink
 	attachmentLink = func(*os.Root, string, string) error { return syscall.EXDEV }
 	t.Cleanup(func() { attachmentLink = previous })
+	var hashedBytes int64
+	previousHash := attachmentPublicationHashHook
+	attachmentPublicationHashHook = func(bytes int64) { hashedBytes += bytes }
+	t.Cleanup(func() { attachmentPublicationHashHook = previousHash })
+	var verificationCount int
+	setAttachmentPublicationHook(t, func(stage string, _ string) error {
+		if stage == "verify-published" {
+			verificationCount++
+		}
+		return nil
+	})
 
 	output := filepath.Join(t.TempDir(), "report.pdf")
 	content := []byte("copied attachment")
@@ -292,14 +304,27 @@ func TestSaveAttachmentUsesVerifiedCopyWhenLinkCrossesFilesystem(t *testing.T) {
 	if saved.Size != int64(len(content)) {
 		t.Fatalf("saved.Size = %d, want %d", saved.Size, len(content))
 	}
+	if hashedBytes != int64(len(content)) {
+		t.Fatalf("publication hash bytes = %d, want one copy-pass hash of %d bytes", hashedBytes, len(content))
+	}
+	if verificationCount != 7 {
+		t.Fatalf("verifyPublished calls = %d, want 7 across copy, chmod, inspection, and cleanup boundaries", verificationCount)
+	}
 	assertAttachmentFile(t, output, content, 0o600)
 }
 
-func TestSaveAttachmentReusesGatewayEvidenceWithoutInspectionRead(t *testing.T) {
-	var readBytes int64
-	previous := attachmentPublicationReadHook
-	attachmentPublicationReadHook = func(bytes int64) { readBytes += bytes }
-	t.Cleanup(func() { attachmentPublicationReadHook = previous })
+func TestSaveAttachmentReusesGatewayEvidenceWithoutRehash(t *testing.T) {
+	var hashedBytes int64
+	previousHash := attachmentPublicationHashHook
+	attachmentPublicationHashHook = func(bytes int64) { hashedBytes += bytes }
+	t.Cleanup(func() { attachmentPublicationHashHook = previousHash })
+	var verificationCount int
+	setAttachmentPublicationHook(t, func(stage string, _ string) error {
+		if stage == "verify-published" {
+			verificationCount++
+		}
+		return nil
+	})
 
 	content := []byte("verified without a second publication read")
 	output := filepath.Join(t.TempDir(), "report.pdf")
@@ -310,16 +335,26 @@ func TestSaveAttachmentReusesGatewayEvidenceWithoutInspectionRead(t *testing.T) 
 	); err != nil {
 		t.Fatalf("SaveAttachment() error = %v", err)
 	}
-	if readBytes != 0 {
-		t.Fatalf("publication inspection read %d bytes, want zero", readBytes)
+	if hashedBytes != 0 {
+		t.Fatalf("publication rehashed %d bytes, want the gateway evidence reused without a content read", hashedBytes)
+	}
+	if verificationCount != 6 {
+		t.Fatalf("verifyPublished calls = %d, want 6 across unchanged identity boundaries", verificationCount)
 	}
 }
 
 func TestSaveAttachmentKeepsLegacyGatewayInspectionFallback(t *testing.T) {
-	var readBytes int64
-	previous := attachmentPublicationReadHook
-	attachmentPublicationReadHook = func(bytes int64) { readBytes += bytes }
-	t.Cleanup(func() { attachmentPublicationReadHook = previous })
+	var hashedBytes int64
+	previousHash := attachmentPublicationHashHook
+	attachmentPublicationHashHook = func(bytes int64) { hashedBytes += bytes }
+	t.Cleanup(func() { attachmentPublicationHashHook = previousHash })
+	var verificationCount int
+	setAttachmentPublicationHook(t, func(stage string, _ string) error {
+		if stage == "verify-published" {
+			verificationCount++
+		}
+		return nil
+	})
 
 	content := []byte("legacy gateway attachment")
 	output := filepath.Join(t.TempDir(), "report.pdf")
@@ -331,8 +366,11 @@ func TestSaveAttachmentKeepsLegacyGatewayInspectionFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveAttachment() error = %v", err)
 	}
-	if readBytes != int64(len(content)) {
-		t.Fatalf("publication inspection read %d bytes, want %d", readBytes, len(content))
+	if hashedBytes != int64(len(content)) {
+		t.Fatalf("legacy publication hash bytes = %d, want one hash of %d bytes", hashedBytes, len(content))
+	}
+	if verificationCount != 7 {
+		t.Fatalf("verifyPublished calls = %d, want 7 including the legacy content hash boundary", verificationCount)
 	}
 	digest := sha256.Sum256(content)
 	if saved.Size != int64(len(content)) || saved.SHA256 != hex.EncodeToString(digest[:]) {
@@ -380,6 +418,90 @@ func TestSaveAttachmentRejectsEvidenceAfterTemporaryReplacement(t *testing.T) {
 	if !found {
 		t.Fatal("temporary replacement was removed")
 	}
+}
+
+func TestSaveAttachmentRejectsInPlaceTemporaryMutationAfterEvidence(t *testing.T) {
+	directory := t.TempDir()
+	output := filepath.Join(directory, "report.pdf")
+	replacement := []byte("changed!")
+	gateway := &attachmentGateway{content: []byte("original")}
+	gateway.afterEvidence = func(path string) error {
+		before, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, replacement, 0o644); err != nil {
+			return err
+		}
+		changedAt := before.ModTime().Add(time.Second)
+		if err := os.Chtimes(path, changedAt, changedAt); err != nil {
+			return err
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime().Equal(after.ModTime()) {
+			return fmt.Errorf("fixture mutation did not preserve identity and size while changing modification time")
+		}
+		return nil
+	}
+
+	saved, err := NewService(gateway).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	)
+	if errorCode(err) != "attachment_changed" || saved != (SavedAttachment{}) {
+		t.Fatalf("SaveAttachment() = (%+v, %v), want same-inode tampering refusal", saved, err)
+	}
+	entries, readErr := os.ReadDir(directory)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("directory after unpublished tampering = %v, %v; want empty", entries, readErr)
+	}
+}
+
+func TestSaveAttachmentRejectsInPlacePublishedMutationBeforeInspection(t *testing.T) {
+	directory := t.TempDir()
+	output := filepath.Join(directory, "report.pdf")
+	replacement := []byte("tampered")
+	var outputIdentity os.FileInfo
+	setAttachmentPublicationHook(t, func(stage string, path string) error {
+		if stage != "before-inspect" || path != output {
+			return nil
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, replacement, 0o600); err != nil {
+			return err
+		}
+		changedAt := before.ModTime().Add(time.Second)
+		if err := os.Chtimes(path, changedAt, changedAt); err != nil {
+			return err
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime().Equal(after.ModTime()) {
+			return fmt.Errorf("fixture mutation did not preserve identity and size while changing modification time")
+		}
+		outputIdentity = before
+		return nil
+	})
+
+	saved, err := NewService(&attachmentGateway{content: []byte("original")}).SaveAttachment(
+		context.Background(), SaveAttachmentRequest{
+			MessageRef: "msg_ref", AttachmentID: "attachment-id", OutputPath: output,
+		},
+	)
+	if errorCode(err) != "attachment_changed" {
+		t.Fatalf("SaveAttachment() error = %v, want attachment_changed", err)
+	}
+	assertUnknownAttachmentSaveOutcome(t, saved, err)
+	assertAttachmentFile(t, output, replacement, 0o600, outputIdentity)
 }
 
 func TestSaveAttachmentRejectsUnprivatePublishedFile(t *testing.T) {
