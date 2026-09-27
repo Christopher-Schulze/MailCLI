@@ -136,7 +136,9 @@ func TestCIRunnerDocumentationMatchesWorkflow(t *testing.T) {
 	}
 }
 
-func TestPublicDocumentationOmitsPrivateTaskArchivePaths(t *testing.T) {
+func TestPublicDocumentationOmitsOwnerLocalTaskWorkflow(t *testing.T) {
+	// Only user-facing docs are checked. Scripts and tests may need local task paths
+	// as inputs when exercising task-history and CI tooling.
 	paths := []string{"README.md", "docs/documentation.md", "skills/mailcli/SKILL.md"}
 	references, err := filepath.Glob(filepath.Join(repositoryRoot(t), "skills/mailcli/references/*.md"))
 	if err != nil {
@@ -149,9 +151,24 @@ func TestPublicDocumentationOmitsPrivateTaskArchivePaths(t *testing.T) {
 		}
 		paths = append(paths, relative)
 	}
+	ownerLocalMarkers := []string{
+		strings.Join([]string{"docs", "tasks.md"}, "/"),
+		strings.Join([]string{"docs", "tasks", ""}, "/"),
+		strings.Join([]string{"docs", "tasks", "done", ""}, "/"),
+		"AGENTS" + ".local.md",
+		strings.Join([]string{"manage", "write", "lease"}, "-") + ".sh",
+		"private-proof",
+		strings.Join([]string{"report", "task", "ci"}, "-") + ".sh",
+		strings.Join([]string{"export", "task", "history"}, "-") + ".sh",
+		"ci_record",
+		"ci_run_window",
+	}
 	for _, path := range paths {
-		if strings.Contains(readRepositoryFile(t, path), "docs/tasks/done/") {
-			t.Errorf("%s links a private, untracked task archive path", path)
+		content := readRepositoryFile(t, path)
+		for _, marker := range ownerLocalMarkers {
+			if strings.Contains(content, marker) {
+				t.Errorf("%s exposes owner-local task workflow marker %q", path, marker)
+			}
 		}
 	}
 }
@@ -371,7 +388,7 @@ var documentedBounds = []documentedBound{
 			boundCheck("README.md", `page sizes from 1 through (\d+)`, 1),
 			boundCheck("docs/documentation.md", `page sizes from 1 through (\d+)`, 1),
 			boundCheck("docs/documentation.md", `limits pages to (\d+) messages`, 1),
-			boundCheck("docs/documentation.md", `accepts 1 through (\d+) like list pages`, 1),
+			boundCheck("docs/documentation.md", "`--limit` accepts 1 through (\\d+)", 1),
 			boundCheck("skills/mailcli/references/reading.md", `bounded to (\d+)`, 1),
 		}},
 	{name: "draft list page limit", expected: mail.MaximumDraftListLimit, unit: "drafts",
