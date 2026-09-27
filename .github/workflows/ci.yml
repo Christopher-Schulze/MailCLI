@@ -22,6 +22,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: restore pinned Go toolchain
+        run: |
+          if [[ "${GOTOOLCHAIN:-}" == local ]]; then unset GOTOOLCHAIN; fi
+          source scripts/utils/check-go-toolchain.sh
+          check_go_toolchain "$PWD"
+          printf 'GOTOOLCHAIN=%s\n' "$GOTOOLCHAIN" >> "$GITHUB_ENV"
       - name: verify macOS arm64 runner
         run: |
           printf 'os=%s\n' "$(uname -s)"
