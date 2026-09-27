@@ -127,14 +127,18 @@ exec 9<>"${TEST_HOME}/Library/Application Support/MailCLI/update.lock"
     install_local "${BINARY_DESTINATION}" "${SKILL_DESTINATION}"
 ) &
 LOCAL_INSTALL_PROCESS=$!
-WAIT_DEADLINE=$((SECONDS + 30))
+# Native compilation precedes installer entry; its duration is not the
+# installer's 30-second lock-acquisition contract. The owning CI job bounds
+# the complete build, while child exit still fails this entry witness.
+INSTALLER_WAIT_STARTED=${SECONDS}
 while [[ ! -f "${TEST_ROOT}/installer-entered" ]]; do
-  if ((SECONDS >= WAIT_DEADLINE)) || ! kill -0 "${LOCAL_INSTALL_PROCESS}" 2>/dev/null; then
+  if ! kill -0 "${LOCAL_INSTALL_PROCESS}" 2>/dev/null; then
     printf 'Local installer did not reach the shared installation boundary\n' >&2
     exit 1
   fi
   sleep 0.05
 done
+printf 'source_installer_entry_seconds=%s\n' "$((SECONDS - INSTALLER_WAIT_STARTED))"
 sleep 0.2
 kill -0 "${LOCAL_INSTALL_PROCESS}"
 [[ "$(<"${BINARY_DESTINATION}")" == 'old binary' ]]
