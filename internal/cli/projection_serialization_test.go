@@ -342,6 +342,10 @@ func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map
 	message.Summary.MailboxRef, message.Summary.DateReceived, message.Summary.DateSent = "mailbox", "received", "sent"
 	message.Summary.ConversationID, message.Summary.StalenessNote = 7, "retained metadata"
 	message.Summary.ServerTruth = &mail.ServerMutationEvidence{Command: "STORE", UID: 3, UIDValidity: 5}
+	if target == projectionTargetListPage {
+		// Unified inbox rows include their resolved account identity.
+		message.Summary.Account = "account"
+	}
 	if target == projectionTargetListPage || target == projectionTargetSearchPage {
 		return serializedPageRegistryFixture(t, target, message.Summary, fields)
 	}
@@ -355,6 +359,27 @@ func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map
 	}
 	delete(result, "projection")
 	return result
+}
+
+func TestMessageListProjectionPreservesAvailableAccountIdentity(t *testing.T) {
+	for _, account := range []string{"", "account"} {
+		for _, selector := range []string{"subject", "all"} {
+			t.Run(account+"/"+selector, func(t *testing.T) {
+				fields, err := parseProjectionFields(projectionTargetListPage, selector)
+				if err != nil {
+					t.Fatal(err)
+				}
+				actual := serializedPageRegistryFixture(t, projectionTargetListPage, mail.MessageSummary{
+					Ref: "message", MailboxRef: "mailbox", Account: account, Subject: "subject",
+				}, fields)
+				value, present := actual["account"]
+				if present != (account != "") || present && string(value) != `"account"` ||
+					string(actual["ref"]) != `"message"` || string(actual["mailbox_ref"]) != `"mailbox"` {
+					t.Fatalf("account=%q selector=%s projection=%v", account, selector, actual)
+				}
+			})
+		}
+	}
 }
 
 func registryFixtureOptions(target projectionTarget, fields map[string]struct{}) outputOptions {

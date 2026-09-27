@@ -26,6 +26,6 @@ Legacy text: `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human /abs
 
 Failed install: inspect update_result path/latest_version/updated/failed_phase; complete only with verified installed-version, otherwise unknown. Read version --json, no rerun/assumed rollback.
 
-Persistent lock ~/Library/Application Support/MailCLI/update.lock: direct wait <=30 s; updater deadline/child ownership. Self-update ignores MAILCLI_INSTALL_PACKAGE_ROOT, source honors it. Never unlink/steal/age-expire; retain refused recovery/artifacts, cancel whole process group.
+Persistent lock ~/Library/Application Support/MailCLI/update.lock: Direct wait <=30 s; updater deadline/child ownership. Self-update ignores MAILCLI_INSTALL_PACKAGE_ROOT, source honors it. Never unlink/steal/age-expire; retain refused recovery/artifacts, cancel whole process group.
 
 IMAP reads shared; APPEND/mutations exclusive.
