@@ -59,8 +59,12 @@ func (e *hydrationError) Unwrap() []error {
 }
 
 func (e *hydrationError) ErrorCode() string {
-	if code := nestedErrorCode(e.remote); code != "" {
-		return code
+	if e.remote != nil {
+		if code := nestedErrorCode(e.remote); code != "" {
+			return code
+		}
+		// An untyped remote failure must not inherit a local-source correction code.
+		return "hydration_failed"
 	}
 	if code := nestedErrorCode(e.local); code != "" {
 		return code

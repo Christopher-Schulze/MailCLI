@@ -74,6 +74,45 @@ func TestMessagesGetJSONRetainsPartialMessageOnHydrationFailure(t *testing.T) {
 	}
 }
 
+func TestMessagesGetUntypedHydrationFailureKeepsUnknownOrigin(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	message := failedHydrationMessage()
+	message.Hydration.Remote = &mail.HydrationCause{Code: "hydration_failed", Message: "IMAP hydration failed"}
+	message.Hydration.Remediation = "resolve the IMAP failure, then retry `mailcli messages get --ref REF`"
+	service := mail.NewService(hydrationMessageGateway{
+		message: message,
+		err:     &testCodedError{code: "hydration_failed", message: "remote spool failure secret-token"},
+	})
+	code := Run(context.Background(), service, []string{"messages", "get", "--ref", "msg_ref", "--json"}, &stdout, &stderr)
+	if code != 1 || stderr.Len() != 0 {
+		t.Fatalf("Run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; output = %q", err, stdout.String())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "hydration_failed" || response.Data.Message == nil {
+		t.Fatalf("response = %+v", response)
+	}
+	if response.Error.Guidance == nil || response.Error.Guidance.Phase != mail.OperationPhaseHydration ||
+		response.Error.Guidance.EffectCertainty != mail.EffectNone ||
+		response.Error.Guidance.Retryability != mail.RetryObserveRequired || response.Error.Guidance.ReplayAllowed ||
+		response.Error.Guidance.Recovery.Action != mail.RecoveryInspect {
+		t.Fatalf("unknown hydration guidance = %+v", response.Error.Guidance)
+	}
+	message = *response.Data.Message
+	if message.Summary.Ref != "msg_ref" || message.Content != "available text" || message.ContentComplete ||
+		message.Hydration == nil || message.Hydration.AttemptedSource != "imap" ||
+		message.Hydration.Local == nil || message.Hydration.Local.Code != "raw_source_partial" ||
+		message.Hydration.Remote == nil || message.Hydration.Remote.Code != "hydration_failed" {
+		t.Fatalf("unknown-origin partial message = %+v", message)
+	}
+	if strings.Contains(stdout.String(), "secret-token") || strings.Contains(stdout.String(), "remote spool failure") {
+		t.Fatalf("serialized failure leaked raw remote details: %s", stdout.String())
+	}
+}
+
 func TestMessagesGetHumanRetainsPartialMessageOnHydrationFailure(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
