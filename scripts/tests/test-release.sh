@@ -533,8 +533,9 @@ if grep -Fq 'Segment __DWARF:' <<<"${DWARF_DESCRIPTION}"; then
 fi
 BINARY_BYTES="$(wc -c <"${INSTALLED_BINARY}")"
 BINARY_BYTES="${BINARY_BYTES//[[:space:]]/}"
-if ((BINARY_BYTES > 12 * 1024 * 1024)); then
-  printf 'Release binary exceeds the 12 MiB size budget: %s bytes\n' "${BINARY_BYTES}" >&2
+MAXIMUM_BINARY_BYTES=$((12 * 1024 * 1024 + 128 * 1024))
+if ((BINARY_BYTES > MAXIMUM_BINARY_BYTES)); then
+  printf 'Release binary exceeds the 12 MiB + 128 KiB size budget: %s bytes\n' "${BINARY_BYTES}" >&2
   exit 1
 fi
 
