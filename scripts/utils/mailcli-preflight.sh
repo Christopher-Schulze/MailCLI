@@ -15,7 +15,7 @@ REFRESH="${MAILCLI_PREFLIGHT_REFRESH:-0}"
 usage() {
   printf '%s\n' \
     'Usage:' \
-    '  mailcli-preflight.sh capabilities [--commands ID,ID,...] [--binary PATH] [--cache-dir DIR] [--refresh]' \
+    '  mailcli-preflight.sh capabilities [--for ID,ID,...] [--binary PATH] [--cache-dir DIR] [--refresh]' \
     '  mailcli-preflight.sh doctor [--binary PATH] [--cache-dir DIR] [--refresh]' \
     '  mailcli-preflight.sh invalidate [--binary PATH] [--cache-dir DIR]'
 }
@@ -41,8 +41,9 @@ while [[ "$#" -gt 0 ]]; do
       CACHE_ROOT="$2"
       shift
       ;;
-    --commands)
-      [[ "$#" -ge 2 ]] || fail "--commands requires a comma-separated command set"
+    --for)
+      [[ "${COMMANDS_SET}" == "0" ]] || fail "--for must be supplied once"
+      [[ "$#" -ge 2 ]] || fail "--for requires a comma-separated command set"
       COMMANDS="$2"
       COMMANDS_SET=1
       shift
@@ -67,21 +68,21 @@ normalize_commands() {
   local other
   local -a values=()
   [[ -n "${COMMANDS}" && "${COMMANDS}" != ,* && "${COMMANDS}" != *, && "${COMMANDS}" != *,,* ]] ||
-    fail "--commands requires non-empty command IDs without duplicates"
+    fail "--for requires non-empty command IDs without duplicates"
   IFS=, read -r -a values <<<"${COMMANDS}"
-  (( ${#values[@]} > 0 )) || fail "--commands requires at least one command ID"
+  (( ${#values[@]} > 0 )) || fail "--for requires at least one command ID"
   for ((index = 0; index < ${#values[@]}; index++)); do
     value="${values[index]}"
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
     [[ -n "${value}" && "${value}" != *$'\n'* && "${value}" != *$'\t'* ]] ||
-      fail "--commands contains an empty or invalid command ID"
+      fail "--for contains an empty or invalid command ID"
     values[index]="${value}"
   done
   for ((index = 0; index < ${#values[@]}; index++)); do
     for ((other = 0; other < index; other++)); do
       [[ "${values[index]}" != "${values[other]}" ]] ||
-        fail "--commands repeats command ID: ${values[index]}"
+        fail "--for repeats command ID: ${values[index]}"
     done
   done
   NORMALIZED_COMMANDS="$(printf '%s\n' "${values[@]}" | LC_ALL=C sort | paste -sd, -)"
@@ -92,7 +93,7 @@ normalize_commands() {
   exit 2
 }
 if [[ "${COMMANDS_SET}" == "1" ]]; then
-  [[ "${COMMAND}" == "capabilities" ]] || fail "--commands is only valid with capabilities"
+  [[ "${COMMAND}" == "capabilities" ]] || fail "--for is only valid with capabilities"
   normalize_commands
 fi
 [[ "${CACHE_ROOT}" == /* && "${CACHE_ROOT}" != "/" ]] ||
@@ -190,7 +191,7 @@ trap cleanup EXIT
 
 set +e
 if [[ "${COMMANDS_SET}" == "1" ]]; then
-  "${BINARY}" capabilities --commands "${NORMALIZED_COMMANDS}" --json >"${TEMPORARY}"
+  "${BINARY}" capabilities --for "${NORMALIZED_COMMANDS}" --json >"${TEMPORARY}"
 else
   "${BINARY}" "${COMMAND}" --json >"${TEMPORARY}"
 fi

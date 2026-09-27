@@ -19,6 +19,7 @@ type commandContract struct {
 	storeDependency    string
 	dependencies       []commandDependency
 	resultStates       []string
+	limitRefs          []string
 	mailService        mailServiceRequirement
 	published          bool
 	requiresSignal     bool
@@ -84,6 +85,7 @@ func commandCapabilityFor(contract commandContract) (commandCapability, error) {
 		StoreDependency: contract.storeDependency,
 		Dependencies:    capabilityDependencyList(contract.dependencies),
 		ResultStates:    slices.Clone(contract.resultStates),
+		LimitRefs:       commandLimitReferences(contract),
 	}, nil
 }
 
@@ -135,6 +137,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "batch", handler: runBatch, helpDescription: "Execute bounded explicit reads, attachment saves, and marks",
+		limitRefs:   []string{"batch_operations", "default_batch_concurrency", "maximum_batch_concurrency", "maximum_batch_items", "maximum_batch_input_bytes", "output_projection.message_fields", "output_projection.message_views"},
 		effectClass: "batch", confirmation: "operation-dependent",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -147,6 +150,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "accounts.list", handler: runAccountsList, helpDescription: "List configured accounts and sender identities",
+		limitRefs:   []string{"sender_identity_scan_limit", "maximum_sender_identity_scan_limit", "sender_identity_coverage_states", "direct_ops_support_reasons", "supported_providers"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies:    []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
@@ -156,6 +160,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "mailboxes.list", handler: runMailboxesList, helpDescription: "List and resolve exact mailbox paths",
+		limitRefs:       []string{"maximum_imap_list_response_bytes", "maximum_imap_list_response_lines", "maximum_imap_list_mailboxes"},
 		emptyFamilyHelp: true,
 		effectClass:     "read", confirmation: "none",
 		storeDependency: "mail-store",
@@ -165,6 +170,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "mailboxes.resolve", handler: runMailboxResolve,
+		limitRefs:   []string{"maximum_imap_list_response_bytes", "maximum_imap_list_response_lines", "maximum_imap_list_mailboxes"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"resolved"},
@@ -173,6 +179,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.list", handler: runMessagesList, helpDescription: "List, search, read, reply, forward, and organize messages",
+		limitRefs:   []string{"maximum_page_size"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies:    []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
@@ -182,6 +189,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.filter", handler: runMessagesFilter,
+		limitRefs:   []string{"maximum_page_size", "search_pagination_consistency", "search_cursor_detects_index_drift", "search_candidate_count_default", "search_exact_count_bounded"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
@@ -190,6 +198,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.search", handler: runMessagesSearch,
+		limitRefs:   []string{"maximum_page_size", "search_pagination_consistency", "search_cursor_detects_index_drift", "search_candidate_count_default", "search_exact_count_bounded"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"},
@@ -198,6 +207,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.get", handler: runMessagesGet,
+		limitRefs:   []string{"maximum_raw_source_bytes", "raw_mime_read", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -210,6 +220,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.raw", handler: runMessagesRaw,
+		limitRefs:   []string{"maximum_raw_source_bytes", "raw_mime_read"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -234,6 +245,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.thread", handler: runMessageThread,
+		limitRefs:   []string{"maximum_page_size"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"complete", "partial"},
@@ -242,6 +254,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "attachments.list", handler: runAttachmentsList, helpDescription: "List and save received attachments",
+		limitRefs:   []string{"maximum_raw_source_bytes"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -254,6 +267,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "attachments.save", handler: runAttachmentsSaveCommand,
+		limitRefs:   []string{"maximum_raw_source_bytes", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "filesystem-write", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -266,6 +280,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.create", handler: runDraftCreateContext, helpDescription: "Create, preview, edit, hand off, and prune drafts",
+		limitRefs:   []string{"maximum_draft_input_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "draft-store",
 		resultStates:    []string{"created"},
@@ -275,6 +290,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.list", handler: runDraftList,
+		limitRefs:   []string{"maximum_page_size"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "draft-store",
 		resultStates:    []string{"complete"},
@@ -291,6 +307,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.preview", handler: runDraftPreviewCommand,
+		limitRefs:   []string{"maximum_draft_body_bytes"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "draft-store",
 		resultStates:    []string{"complete"},
@@ -299,6 +316,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.edit", handler: runDraftEdit,
+		limitRefs:   []string{"maximum_draft_input_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		audience:    commandAudienceHuman,
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "draft-store",
@@ -310,6 +328,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.handoff", handler: runDraftHandoff,
+		limitRefs:   []string{"visible_compose_handoff", "visible_attachment_handoff", "maximum_compose_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "visible-compose", confirmation: "none",
 		storeDependency:    "draft-store",
 		dependencies:       []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetSystemComposeService, Condition: dependencyConditionAlways}},
@@ -321,6 +340,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.update", handler: runDraftUpdate,
+		limitRefs:   []string{"maximum_draft_input_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "draft-store",
 		resultStates:    []string{"updated", "up_to_date"},
@@ -330,6 +350,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.open", handler: runMailDraftOpen,
+		limitRefs:   []string{"maximum_raw_source_bytes", "raw_mime_read", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -342,6 +363,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.adopt", handler: runDraftAdopt,
+		limitRefs:   []string{"maximum_raw_source_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "draft-store+mail-store",
 		dependencies: []commandDependency{
@@ -357,6 +379,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.send", handler: runDraftSend,
+		limitRefs:   []string{"send_transport", "raw_mime_send", "supported_providers", "unsupported_provider_code", "provider_support_description", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "smtp-send", confirmation: "required-flag",
 		storeDependency: "draft-store",
 		dependencies: []commandDependency{
@@ -371,6 +394,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "send.setup", handler: runSendSetupCommand, helpDescription: "Store or remove app-specific SMTP send credentials",
+		limitRefs:   []string{"supported_providers", "unsupported_provider_code", "provider_support_description"},
 		effectClass: "keychain-write", confirmation: "none",
 		storeDependency: "none",
 		dependencies:    []commandDependency{{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways}},
@@ -380,6 +404,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "drafts.reconcile", handler: runDraftReconcile,
+		limitRefs:   []string{"imap_connections_per_account", "maximum_imap_connections_per_account", "maximum_compose_body_bytes"},
 		effectClass: "local-write+imap-write", confirmation: "none",
 		storeDependency: "draft-store+mail-store-if-baseline",
 		dependencies: []commandDependency{
@@ -409,6 +434,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.reply", handler: runMessageReply,
+		limitRefs:   []string{"maximum_draft_input_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"created"},
@@ -417,6 +443,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.forward", handler: runMessageForward,
+		limitRefs:   []string{"maximum_draft_input_bytes", "maximum_draft_subject_bytes", "maximum_draft_body_bytes", "maximum_draft_recipients", "maximum_draft_attachments", "maximum_draft_attachment_bytes"},
 		effectClass: "local-write", confirmation: "none",
 		storeDependency: "mail-store",
 		resultStates:    []string{"created"},
@@ -425,6 +452,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.mark", handler: runMessageMark,
+		limitRefs:   []string{"mutation_transport", "supported_providers", "unsupported_provider_code", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "imap-write", confirmation: "draft-flag",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -437,6 +465,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.move", handler: runMessageMove,
+		limitRefs:   []string{"mutation_transport", "supported_providers", "unsupported_provider_code", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "imap-write", confirmation: "draft-flag",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -449,6 +478,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.copy", handler: runMessageCopy,
+		limitRefs:   []string{"mutation_transport", "supported_providers", "unsupported_provider_code", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "imap-write", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -461,6 +491,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "messages.delete", handler: runMessageDelete,
+		limitRefs:   []string{"mutation_transport", "supported_providers", "unsupported_provider_code", "imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "imap-write", confirmation: "required-and-draft-flags",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{
@@ -473,6 +504,7 @@ var commandContracts = []commandContract{
 	},
 	{
 		ID: "sync", handler: runSync, helpDescription: "Synchronize with Mail.app or check server status over IMAP (--check)",
+		limitRefs:   []string{"imap_connections_per_account", "maximum_imap_connections_per_account"},
 		effectClass: "mail-write", confirmation: "none",
 		storeDependency: "mail-store",
 		dependencies: []commandDependency{

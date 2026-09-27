@@ -3,32 +3,17 @@
   "version": 1,
   "flags": [
     {
-      "name": "--command",
-      "value_type": "command_id",
+      "name": "--for",
+      "value_type": "command_selector",
       "takes_value": true,
       "value_required": true,
-      "description": "exact command ID to describe"
+      "description": "command IDs, comma lists, or family.* wildcards to describe"
     },
     {
-      "name": "--commands",
-      "value_type": "command_id_list",
-      "takes_value": true,
-      "value_required": true,
-      "description": "comma-separated command IDs to describe"
-    },
-    {
-      "name": "--family",
-      "value_type": "command_family",
-      "takes_value": true,
-      "value_required": true,
-      "description": "command family to describe"
-    },
-    {
-      "name": "--scope",
-      "value_type": "command_id_or_family",
-      "takes_value": true,
-      "value_required": true,
-      "description": "exact command ID or command family to describe"
+      "name": "--limits",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "print the full limit set without command contracts"
     },
     {
       "name": "--json",
@@ -42,21 +27,10 @@
     {
       "kind": "mutually_exclusive",
       "flags": [
-        "--command",
-        "--family",
-        "--scope"
+        "--for",
+        "--limits"
       ],
-      "description": "at most one capability selector may be supplied"
-    },
-    {
-      "kind": "mutually_exclusive",
-      "flags": [
-        "--commands",
-        "--command",
-        "--family",
-        "--scope"
-      ],
-      "description": "--commands cannot be combined with --command, --family, or --scope"
+      "description": "supply --for once; --for and --limits are mutually exclusive"
     }
   ]
 }

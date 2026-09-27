@@ -33,7 +33,7 @@ case "${1:-}" in
     ;;
   capabilities)
     increment capabilities
-    if [[ "${2:-}" == "--commands" ]]; then
+    if [[ "${2:-}" == "--for" ]]; then
       printf '{"schema_version":1,"ok":true,"command":"capabilities","data":{"selection":"%s","capabilities":{"schema_version":1}},"error":null}\n' "${3:-}"
     else
       printf '%s\n' '{"schema_version":1,"ok":true,"command":"capabilities","data":{"capabilities":{"schema_version":1}},"error":null}'
@@ -84,7 +84,19 @@ expect_count capabilities 1
 preflight capabilities | grep -Fq '"command":"capabilities"'
 expect_count capabilities 1
 
-preflight capabilities --commands 'messages.search,messages.get' | grep -Fq '"selection":"messages.get,messages.search"'
+for selector in --command --commands --family --scope; do
+  if preflight capabilities "${selector}" messages.get >/dev/null 2>&1; then
+    printf 'removed selector unexpectedly succeeded: %s\n' "${selector}" >&2
+    exit 1
+  fi
+done
+if preflight capabilities --for messages.get --for messages.search >/dev/null 2>&1; then
+  printf 'repeated --for unexpectedly succeeded\n' >&2
+  exit 1
+fi
+expect_count capabilities 1
+
+preflight capabilities --for 'messages.search,messages.get' | grep -Fq '"selection":"messages.get,messages.search"'
 expect_count capabilities 2
 FAKE_BINARY_HASH="$(shasum -a 256 "${FAKE_BINARY}" | awk '{print $1}')"
 SELECTED_COMMANDS_HASH="$(printf '%s' 'messages.get,messages.search' | shasum -a 256 | awk '{print $1}')"
@@ -92,9 +104,9 @@ SELECTED_COMMANDS_HASH="$(printf '%s' 'messages.get,messages.search' | shasum -a
   printf 'selected cache key omitted binary, schema, or normalized selector identity\n' >&2
   exit 1
 }
-preflight capabilities --commands 'messages.get,messages.search' | grep -Fq '"selection":"messages.get,messages.search"'
+preflight capabilities --for 'messages.get,messages.search' | grep -Fq '"selection":"messages.get,messages.search"'
 expect_count capabilities 2
-preflight capabilities --commands 'messages.get,messages.thread' | grep -Fq '"selection":"messages.get,messages.thread"'
+preflight capabilities --for 'messages.get,messages.thread' | grep -Fq '"selection":"messages.get,messages.thread"'
 expect_count capabilities 3
 
 preflight doctor | grep -Fq '"command":"doctor"'
@@ -113,14 +125,14 @@ expect_count doctor 3
 printf '\n# binary identity changed\n' >>"${FAKE_BINARY}"
 preflight capabilities >/dev/null
 expect_count capabilities 4
-preflight capabilities --commands 'messages.search,messages.get' |
+preflight capabilities --for 'messages.search,messages.get' |
   grep -Fq '"selection":"messages.get,messages.search"'
 expect_count capabilities 5
 
 preflight invalidate
 preflight capabilities >/dev/null
 expect_count capabilities 6
-preflight capabilities --commands 'messages.search,messages.get' |
+preflight capabilities --for 'messages.search,messages.get' |
   grep -Fq '"selection":"messages.get,messages.search"'
 expect_count capabilities 7
 printf 'Preflight cache passed: selector isolation and normalization, binary/schema/selector cache identity, binary-change invalidation, bounded doctor reuse, refresh, and failure invalidation\n'

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 
@@ -88,9 +87,11 @@ type commandCapability struct {
 	StoreDependency string              `json:"store_dependency"`
 	Dependencies    []commandDependency `json:"dependencies"`
 	ResultStates    []string            `json:"result_states"`
+	LimitRefs       []string            `json:"limit_refs"`
 }
 
 type capabilityLimits struct {
+	selectedRefs                     []string
 	Platform                         string                         `json:"platform"`
 	Architecture                     string                         `json:"architecture"`
 	OwnsMailIndex                    bool                           `json:"owns_mail_index"`
@@ -321,36 +322,29 @@ func capabilitiesForCommands(selected []string) (capabilityManifest, error) {
 		}
 	}
 	manifest.Commands = commands
+	manifest.Limits.selectedRefs = []string{}
+	for _, command := range commands {
+		manifest.Limits.selectedRefs = append(manifest.Limits.selectedRefs, command.LimitRefs...)
+	}
 	return manifest, nil
 }
 
 func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("capabilities", stderr)
-	command := flags.String("command", "", "exact command ID to describe")
-	commands := flags.String("commands", "", "comma-separated command IDs to describe")
-	family := flags.String("family", "", "command family to describe")
-	scope := flags.String("scope", "", "exact command ID or command family to describe")
+	var selectors repeatableStringFlag
+	flags.Var(&selectors, "for", "command IDs, comma lists, or family.* wildcards to describe")
+	limitsOnly := flags.Bool("limits", false, "print the full limit set without command contracts")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
-	commandsSelected := false
-	legacySelectorSelected := false
-	flags.Visit(func(selected *flag.Flag) {
-		switch selected.Name {
-		case "commands":
-			commandsSelected = true
-		case "command", "family", "scope":
-			legacySelectorSelected = true
-		}
-	})
-	if commandsSelected {
-		if legacySelectorSelected {
+	if len(selectors) > 0 {
+		if len(selectors) != 1 || *limitsOnly {
 			return failCommand("capabilities", *jsonOutput, &commandError{
-				code: "invalid_argument", message: "--commands cannot be combined with --command, --family, or --scope",
+				code: "invalid_argument", message: "supply --for once; --for and --limits are mutually exclusive",
 			}, stdout, stderr)
 		}
-		selected, err := resolveCapabilityCommands(*commands)
+		selected, err := resolveCapabilityCommands(selectors[0])
 		if err != nil {
 			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 		}
@@ -358,15 +352,17 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		if err != nil {
 			return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 		}
+		if len(selected) == 1 {
+			manifest.Scope = selected[0]
+		}
 		return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 	}
-	selectionCommand, selectionFamily, err := resolveCapabilityScope(*command, *family, *scope)
+	manifest, err := capabilities()
 	if err != nil {
 		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 	}
-	manifest, err := capabilitiesForScope(selectionCommand, selectionFamily)
-	if err != nil {
-		return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
+	if *limitsOnly {
+		manifest.Commands = []commandCapability{}
 	}
 	return writeCapabilities(stdout, stderr, *jsonOutput, manifest)
 }

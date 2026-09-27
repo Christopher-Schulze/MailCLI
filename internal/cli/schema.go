@@ -367,65 +367,23 @@ func containsHTMLEscapedString(source []byte) bool {
 		bytes.Contains(source, []byte(`\u003E`))
 }
 
-func resolveCapabilityScope(command, family, scope string) (string, string, error) {
-	command = strings.TrimSpace(command)
-	family = strings.TrimSpace(family)
-	scope = strings.TrimSpace(scope)
-	selectors := 0
-	if command != "" {
-		selectors++
-	}
-	if family != "" {
-		selectors++
-	}
-	if scope != "" {
-		selectors++
-	}
-	if selectors > 1 {
-		return "", "", &commandError{code: "invalid_argument", message: "--command, --family, and --scope are mutually exclusive"}
-	}
-	if command != "" {
-		if !publishedCommandID(command) {
-			return "", "", unknownCapabilityScope(command)
-		}
-		return command, "", nil
-	}
-	if family != "" {
-		if !publishedCommandFamily(family) {
-			return "", "", unknownCapabilityScope(family)
-		}
-		return "", family, nil
-	}
-	if scope == "" {
-		return "", "", nil
-	}
-	if publishedCommandID(scope) {
-		return scope, "", nil
-	}
-	if publishedCommandFamily(scope) {
-		return "", scope, nil
-	}
-	return "", "", unknownCapabilityScope(scope)
-}
-
 func resolveCapabilityCommands(selector string) ([]string, error) {
 	values := strings.Split(selector, ",")
 	if strings.TrimSpace(selector) == "" {
-		return nil, &commandError{code: "invalid_argument", message: "--commands requires at least one command ID"}
+		return nil, &commandError{code: "invalid_argument", message: "--for requires at least one command ID or family.* wildcard"}
 	}
 	selected := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		id := strings.TrimSpace(value)
-		if id == "" {
-			return nil, &commandError{code: "invalid_argument", message: "--commands cannot contain an empty command ID"}
+		ids, err := capabilitySelectorIDs(strings.TrimSpace(value))
+		if err != nil {
+			return nil, err
 		}
-		if _, exists := selected[id]; exists {
-			return nil, &commandError{code: "invalid_argument", message: fmt.Sprintf("--commands repeats command ID %q", id)}
+		for _, id := range ids {
+			if _, exists := selected[id]; exists {
+				return nil, &commandError{code: "invalid_argument", message: fmt.Sprintf("--for repeats or overlaps command ID %q", id)}
+			}
+			selected[id] = struct{}{}
 		}
-		if !publishedCommandID(id) {
-			return nil, unknownCapabilityScope(id)
-		}
-		selected[id] = struct{}{}
 	}
 	canonical := make([]string, 0, len(selected))
 	for _, contract := range commandContracts {
@@ -448,15 +406,32 @@ func publishedCommandID(id string) bool {
 	return false
 }
 
-func publishedCommandFamily(family string) bool {
+func capabilitySelectorIDs(value string) ([]string, error) {
+	if value == "" {
+		return nil, &commandError{code: "invalid_argument", message: "--for cannot contain an empty selector"}
+	}
+	if !strings.HasSuffix(value, ".*") {
+		if !publishedCommandID(value) {
+			return nil, unknownCapabilityScope(value)
+		}
+		return []string{value}, nil
+	}
+	family := strings.TrimSuffix(value, ".*")
+	if family == "" || strings.Contains(family, "*") {
+		return nil, unknownCapabilityScope(value)
+	}
+	ids := []string{}
 	for _, contract := range commandContracts {
-		if commandIsPublished(contract) && (contract.ID == family || strings.HasPrefix(contract.ID, family+".")) {
-			return true
+		if commandIsPublished(contract) && strings.HasPrefix(contract.ID, family+".") {
+			ids = append(ids, contract.ID)
 		}
 	}
-	return false
+	if len(ids) == 0 {
+		return nil, unknownCapabilityScope(value)
+	}
+	return ids, nil
 }
 
 func unknownCapabilityScope(value string) error {
-	return &commandError{code: "invalid_argument", message: fmt.Sprintf("unknown capability scope %q", value)}
+	return &commandError{code: "invalid_argument", message: fmt.Sprintf("unknown capability selector %q", value)}
 }
