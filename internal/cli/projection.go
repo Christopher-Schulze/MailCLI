@@ -1244,6 +1244,7 @@ func dataForProjection(data responseData, options outputOptions, failed bool) re
 }
 
 func marshalEnvelope(value envelope) ([]byte, error) {
+	value.Next = envelopeNextAction(value)
 	if value.Error != nil && value.Error.outputSize != nil {
 		requiredBytes := value.Error.outputSize.requiredBytes
 		limitBytes := value.Error.outputSize.limitBytes

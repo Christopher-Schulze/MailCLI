@@ -22,10 +22,10 @@ Read only the guide needed for the current action. When a workflow changes actio
 | --- | --- | --- |
 | Find accounts or mailboxes | `accounts.list`, `mailboxes.list`, `mailboxes.resolve` | [Reading](references/reading.md) |
 | Find or read messages; save received files | `messages.list`, `messages.filter`, `messages.search`, `messages.get`, `messages.raw`, `messages.thread`, `attachments.list`, `attachments.save` | [Reading](references/reading.md) |
-| Create, reply, forward, inspect, or manage a draft | `drafts.create`, `drafts.list`, `drafts.inspect`, `drafts.preview`, `drafts.update`, `drafts.open`, `drafts.adopt`, `drafts.discard`, `drafts.prune`, `messages.reply`, `messages.forward` | [Drafts](references/drafts.md) |
+| Create, reply, forward, inspect, or manage a draft; edit is human-only | `drafts.create`, `drafts.list`, `drafts.inspect`, `drafts.preview`, `drafts.edit`, `drafts.update`, `drafts.open`, `drafts.adopt`, `drafts.discard`, `drafts.prune`, `messages.reply`, `messages.forward` | [Drafts](references/drafts.md) |
 | Send reviewed content or reconcile a send | `drafts.send`, `drafts.reconcile` | [Sending](references/sending.md) |
 | Verify flags, mark, move, copy, delete, or synchronize | `messages.state`, `messages.mark`, `messages.move`, `messages.copy`, `messages.delete`, `sync` | [Mutations](references/mutations.md) |
-| Open a visible new compose or resolve a native claim | `drafts.handoff`, `drafts.handoff-reconcile`, `drafts.reconcile` | [Native handoff](references/native-handoff.md) |
+| Open a visible new compose or resolve a native claim | `drafts.handoff`, `drafts.handoff-reconcile` | [Native handoff](references/native-handoff.md) |
 | Check version, install, diagnose, or configure a sender | `version`, `update`, `doctor`, `send.setup` | [Setup](references/setup.md) |
 | Batch, project, export, or recover an error | `batch` or the affected command | [Output and recovery](references/output-and-recovery.md) |
 
@@ -55,14 +55,12 @@ Require explicit user authorization for sending or destructive changes and pass 
 
 ## Error contract
 
-Every JSON call returns one envelope:
+Follow `next.do` on failures and pending results; use emitted command/args, never invent replay. Details: [recovery](references/output-and-recovery.md).
 
-```json
-{"schema_version":1,"ok":true,"command":"accounts.list","data":{},"error":null}
-```
-
-Check `ok`, `error.code`, `error.message`, and `error.guidance`: `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `recovery`. Only `safe` with replay allowed permits an immediate retry. `observe_required` requires observation first; `replay_allowed:false` forbids replay; `user_input_required` requires correcting the named input/environment; `terminal` means stop. For `messages get` `not_found`, get a fresh valid ref; never replay the same ref. Follow the emitted recovery command and retain its operation ID. Never invent a retry from prose.
-
-For tagged IMAP `NO`/`BAD`, inspect `error.imap_rejection` (`command`, `status`, `response_code`, `text`) together with guidance. Only `NO [UNAVAILABLE]` permits retry for reads; `BAD` is never automatically retryable. `NO [NONEXISTENT]` and APPEND `NO [OVERQUOTA]` require correcting the mailbox or quota. After SMTP acceptance, use `drafts.reconcile` for every mirror rejection and never replay `drafts.send`.
-
-Exit 0 normally indicates success, 1 operation failure, and 2 usage failure. A partial JSON batch returns exit 1 with `ok:false` and `batch_partial`; inspect its envelope and items. Only `sync --check --require-complete` may return exit 3 with `ok:true` for valid incomplete coverage. Read the output guide for teardown failures and retained partial evidence.
+| `next.do` | Action |
+| --- | --- |
+| `retry` | Retry the original invocation after `wait_seconds`, if present. |
+| `fix_input` | Correct the named input first. |
+| `check_state` | Observe retained evidence; never repeat the original write. |
+| `ask_user` | Request the required environment or permission repair. |
+| `stop` | Stop; cancellation never authorizes restart. |

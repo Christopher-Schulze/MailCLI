@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"slices"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type envelope struct {
 	Command       string       `json:"command"`
 	Data          responseData `json:"data"`
 	Error         *errorData   `json:"error"`
+	Next          *nextAction  `json:"next,omitempty"`
 }
 
 // responseData is the flat per-command payload union. The field set is
@@ -116,6 +118,8 @@ type errorData struct {
 	DraftEditor           *draftEditorEvidence            `json:"draft_editor,omitempty"`
 	UnclaimedSpool        *mail.UnclaimedSpoolObservation `json:"unclaimed_spool,omitempty"`
 	outputSize            *outputSizeEvidence             `json:"-"`
+	environmentRepair     bool                            `json:"-"`
+	callerCanceled        bool                            `json:"-"`
 }
 
 type unknownSubcommandData struct {
@@ -193,7 +197,7 @@ func newErrorData(command string, data responseData, err error) *errorData {
 		Code: code, Message: publicFailureMessage(err), Guidance: &guidance, IMAPRejection: imapRejection,
 		RequiredBytes: requiredBytes, DraftRevisionConflict: conflict, DraftEditor: editorEvidence,
 		Limit: limit, ObservedAtLeast: observedAtLeast, UnclaimedSpool: unclaimedSpool,
-		outputSize: outputSize,
+		outputSize: outputSize, environmentRepair: errors.Is(err, fs.ErrPermission) || transport.IsConfigurationFailure(err), callerCanceled: errors.Is(err, context.Canceled),
 	}
 }
 
