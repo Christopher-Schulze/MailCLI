@@ -1611,13 +1611,56 @@ func TestSendDraftPreservesClaimedRecoverySpool(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}
+	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
+	claimPath := filepath.Join(root, draft.Ref+".send-claim")
+	if err := os.Chmod(spoolPath, 0o640); err != nil {
+		t.Fatalf("Chmod(spool before direct recovery) error = %v", err)
+	}
+	spoolBefore, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile(spool before direct recovery) error = %v", err)
+	}
+	claimBefore, err := os.ReadFile(claimPath)
+	if err != nil {
+		t.Fatalf("ReadFile(claim before direct recovery) error = %v", err)
+	}
+	spoolInfoBefore, err := os.Lstat(spoolPath)
+	if err != nil {
+		t.Fatalf("Lstat(spool before direct recovery) error = %v", err)
+	}
+	claimInfoBefore, err := os.Lstat(claimPath)
+	if err != nil {
+		t.Fatalf("Lstat(claim before direct recovery) error = %v", err)
+	}
+	if !spoolInfoBefore.Mode().IsRegular() || spoolInfoBefore.Mode().Perm() != 0o640 ||
+		!claimInfoBefore.Mode().IsRegular() || claimInfoBefore.Mode().Perm() != 0o600 {
+		t.Fatalf("claimed spool/claim modes = %v/%v, want regular mode-0640 spool and mode-0600 claim", spoolInfoBefore.Mode(), claimInfoBefore.Mode())
+	}
+	if err := recoverUnclaimedAcceptedMessageSpool(root, draft.Ref, lease.storage); errorCode(err) != "send_retry_blocked" ||
+		submitter.calls != 0 || mirror.calls != 0 {
+		t.Fatalf("recoverUnclaimedAcceptedMessageSpool() error = %v, submitter/mirror = %d/%d; want send_retry_blocked without transport", err, submitter.calls, mirror.calls)
+	}
+	spoolAfter, err := os.ReadFile(spoolPath)
+	if err != nil || !bytes.Equal(spoolBefore, spoolAfter) {
+		t.Fatalf("claimed spool changed during direct recovery: read error = %v", err)
+	}
+	claimAfter, err := os.ReadFile(claimPath)
+	if err != nil || !bytes.Equal(claimBefore, claimAfter) {
+		t.Fatalf("send claim changed during direct recovery: read error = %v", err)
+	}
+	spoolInfoAfter, err := os.Lstat(spoolPath)
+	if err != nil || !os.SameFile(spoolInfoBefore, spoolInfoAfter) || spoolInfoAfter.Mode() != spoolInfoBefore.Mode() {
+		t.Fatalf("claimed spool identity/mode changed during direct recovery: before = %v, after = %v, error = %v", spoolInfoBefore, spoolInfoAfter, err)
+	}
+	claimInfoAfter, err := os.Lstat(claimPath)
+	if err != nil || !os.SameFile(claimInfoBefore, claimInfoAfter) || claimInfoAfter.Mode() != claimInfoBefore.Mode() {
+		t.Fatalf("send claim identity/mode changed during direct recovery: before = %v, after = %v, error = %v", claimInfoBefore, claimInfoAfter, err)
+	}
+	if err := os.Chmod(spoolPath, 0o600); err != nil {
+		t.Fatalf("Chmod(spool before SendDraft retry) error = %v", err)
+	}
 	if err := lease.release(); err != nil {
 		t.Fatalf("release draft lease before retry: %v", err)
-	}
-	spoolPath := filepath.Join(root, draft.Ref+".send-spool")
-	before, err := os.ReadFile(spoolPath)
-	if err != nil {
-		t.Fatalf("ReadFile(spool before retry) error = %v", err)
 	}
 
 	result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
@@ -1625,7 +1668,7 @@ func TestSendDraftPreservesClaimedRecoverySpool(t *testing.T) {
 		t.Fatalf("SendDraft() = %+v, error = %v, submitter/mirror = %d/%d", result, err, submitter.calls, mirror.calls)
 	}
 	after, err := os.ReadFile(spoolPath)
-	if err != nil || !bytes.Equal(before, after) {
+	if err != nil || !bytes.Equal(spoolBefore, after) {
 		t.Fatalf("claimed spool changed during blocked retry: read error = %v", err)
 	}
 	claim, err := readSendAttempt(root, draft.Ref)
