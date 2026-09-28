@@ -152,6 +152,13 @@ diff -u "${TEST_ROOT}/inventory" "${TEST_ROOT}/registered" ||
 
 retired_case() {
   local CASE_PATH="$1"
+  # TASK 568 retires the unused worktree reservations and per-task CI report.
+  case ",${TASK_IDS},:${CASE_PATH}" in
+    *,568,*:scripts/tests/test-worktree-coordination.sh | *,568,*:scripts/tests/test-task-ci-report.sh)
+      [[ ! -e "${PRODUCT_ROOT}/${CASE_PATH}" ]]
+      return
+      ;;
+  esac
   case ",${TASK_IDS}," in *,509,*) ;; *) return 1 ;; esac
   case "${CASE_PATH}" in
     scripts/tests/test-private-closure.sh | scripts/tests/test-task-history-export.sh) ;;
