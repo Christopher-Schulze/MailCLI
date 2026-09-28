@@ -316,6 +316,56 @@ func TestExcerptSourceCapAndThreadingRead(t *testing.T) {
 	}
 }
 
+func TestEnrichMessagesStopsExcerptsAtTheByteBudgetButKeepsThreading(t *testing.T) {
+	store, ref, _ := newLargeReadIntentFixture(t, 512<<10)
+	metrics := &readMetrics{}
+	store.readMetrics = metrics
+	client := &Client{store: store}
+	refs := slices.Repeat([]string{ref}, 10)
+	request := mail.MessageEnrichmentRequest{
+		Threading: true, Excerpt: true, ExcerptLength: 40, ExcerptSourceBudget: 2 * mail.MaximumExcerptSourceBytes,
+	}
+	summaries, err := client.EnrichMessages(context.Background(), refs, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, summary := range summaries {
+		if !summary.ThreadingComplete {
+			t.Fatalf("row %d lost its threading data: %+v", index, summary)
+		}
+		excerpted := summary.ExcerptSource == mail.ExcerptSourceLocal && summary.EnrichmentError == ""
+		skipped := summary.ExcerptSource != mail.ExcerptSourceLocal && summary.Excerpt == "" &&
+			summary.EnrichmentError == mail.EnrichmentBudgetExhausted
+		if (index < enrichmentConcurrency && !excerpted) || (index >= enrichmentConcurrency && !skipped) {
+			t.Fatalf("row %d = %+v; the first chunk is read, later rows stop at the budget", index, summary)
+		}
+	}
+	limit := int64(enrichmentConcurrency)*mail.MaximumExcerptSourceBytes + int64(len(refs))*maximumHeaderBytes
+	if metrics.sourceBytes.Load() > limit {
+		t.Fatalf("read %d source bytes, want at most %d", metrics.sourceBytes.Load(), limit)
+	}
+}
+
+func TestExcerptSourceChargeCountsRealBytes(t *testing.T) {
+	local := excerptInput{data: make([]byte, 1000), source: mail.ExcerptSourceLocal}
+	cached := excerptInput{cached: true, excerpt: "cached", source: mail.ExcerptSourceIMAPPartial}
+	for _, test := range []struct {
+		name        string
+		input       excerptInput
+		needsRemote bool
+		want        int64
+	}{
+		{"local source counts its bytes", local, false, 1000},
+		{"cache hit costs nothing", cached, false, 0},
+		{"planned IMAP fetch counts its bound", excerptInput{}, true, mail.IMAPExcerptTextBytes},
+		{"unavailable source costs nothing", excerptInput{source: mail.ExcerptSourceUnavailable}, false, 0},
+	} {
+		if got := excerptSourceCharge(test.input, test.needsRemote); got != test.want {
+			t.Errorf("%s: charge = %d, want %d", test.name, got, test.want)
+		}
+	}
+}
+
 func TestExcerptUsesCompleteLargeLocalSourceWithoutIMAP(t *testing.T) {
 	store, ref, _ := newLargeReadIntentFixture(t, 512<<10)
 	data, complete, localPartial, err := store.readExcerptSource(context.Background(), ref)

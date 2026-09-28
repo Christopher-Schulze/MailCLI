@@ -32,30 +32,19 @@ func newMessageMetadataField(field string) bool {
 	return field == "header_fields" || field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source"
 }
 
-const (
-	// enrichmentPageSourceBytes caps the excerpt source bytes one page may read.
-	enrichmentPageSourceBytes = int64(8 << 20)
-	enrichmentBudgetExhausted = "enrichment_page_budget_exhausted"
-)
+// enrichmentPageSourceBytes caps the excerpt source bytes one page may read.
+const enrichmentPageSourceBytes = int64(8 << 20)
 
 // enrichSummaries fills requested reply metadata in place, in row order, as
-// one page request. Rows past the page's excerpt byte budget are not read and
-// name the budget in enrichment_error.
+// one page request. The store charges the excerpt budget with the bytes it
+// reads; rows past it keep their reply metadata and name the budget in
+// enrichment_error.
 func enrichSummaries(ctx context.Context, service *mail.Service, summaries []*mail.MessageSummary, request mail.MessageEnrichmentRequest) error {
 	if !request.Threading && !request.Excerpt {
 		return nil
 	}
-	selected := make([]*mail.MessageSummary, 0, len(summaries))
-	var reserved int64
-	for _, summary := range summaries {
-		if request.Excerpt {
-			reserved += min(max(summary.Size, 1), mail.MaximumExcerptSourceBytes)
-			if reserved > enrichmentPageSourceBytes {
-				summary.EnrichmentError = enrichmentBudgetExhausted
-				continue
-			}
-		}
-		selected = append(selected, summary)
+	if request.Excerpt {
+		request.ExcerptSourceBudget = enrichmentPageSourceBytes
 	}
-	return service.EnrichMessages(ctx, selected, request)
+	return service.EnrichMessages(ctx, summaries, request)
 }

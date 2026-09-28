@@ -154,7 +154,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Unrequested keys are empty; empty or false means unknown, not absence.
 - A malformed `In-Reply-To` or `References` value keeps every valid msg-id but sets `threading_complete:false`.
   When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.
-  A page reads local sources for at most four messages at a time, keeps row order and reads no more than 8 MiB of excerpt source in total; later rows get `enrichment_error:"enrichment_page_budget_exhausted"` and can be fetched on a smaller page.
+  A page enriches at most four messages at a time in row order and charges its 8 MiB excerpt budget with the bytes actually read (local source bytes, the 64 KiB bound of a planned IMAP prefix fetch, nothing for a cache hit), so a page reads up to 8 MiB plus one chunk; once the budget is used up, later rows keep their reply metadata and get `enrichment_error:"enrichment_page_budget_exhausted"` for the excerpt and can be fetched on a smaller page.
 - `messages.get`: read projected metadata, recipients, body and attachment metadata; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`, `--excerpt-length`.
   Its summary carries the threading fields (`get` always reads the header block); `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in, and `--view full` returns `headers` but not `header_fields`.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.

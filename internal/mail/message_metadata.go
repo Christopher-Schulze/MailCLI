@@ -37,7 +37,15 @@ type MessageEnrichmentRequest struct {
 	Threading     bool
 	Excerpt       bool
 	ExcerptLength int
+	// ExcerptSourceBudget bounds the excerpt source bytes one page may read;
+	// zero means unlimited. Rows past the budget keep their reply metadata and
+	// report EnrichmentBudgetExhausted for the excerpt.
+	ExcerptSourceBudget int64
 }
+
+// EnrichmentBudgetExhausted is the enrichment_error of a row whose excerpt was
+// skipped because the page used its excerpt source budget.
+const EnrichmentBudgetExhausted = "enrichment_page_budget_exhausted"
 
 // MessageEnrichmentGateway enriches a page of refs at once, returning one
 // summary per ref in order, and never falls back to an unrestricted body read.

@@ -115,13 +115,15 @@ func TestRealStoreMessageExcerptAndOrderedHeaders(t *testing.T) {
 
 type enrichmentProbeGateway struct {
 	testGateway
-	calls    int
-	lastRefs []string
+	calls       int
+	lastRefs    []string
+	lastRequest mail.MessageEnrichmentRequest
 }
 
 func (g *enrichmentProbeGateway) EnrichMessages(_ context.Context, refs []string, request mail.MessageEnrichmentRequest) ([]mail.MessageSummary, error) {
 	g.calls++
 	g.lastRefs = append([]string(nil), refs...)
+	g.lastRequest = request
 	summaries := make([]mail.MessageSummary, len(refs))
 	for index, ref := range refs {
 		summaries[index] = mail.MessageSummary{MessageID: "<" + ref + "@example.com>", ThreadingComplete: request.Threading}
@@ -157,23 +159,34 @@ func TestEnrichSummariesKeepsOrderInOnePageRequest(t *testing.T) {
 	}
 }
 
-func TestEnrichSummariesStopsAtThePageSourceBudget(t *testing.T) {
-	rows := enrichmentProbeRows(40, mail.MaximumExcerptSourceBytes)
-	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: mail.DefaultExcerptLength}
-	gateway := &enrichmentProbeGateway{}
-	if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, request); err != nil {
-		t.Fatal(err)
-	}
-	withinBudget := int(enrichmentPageSourceBytes / mail.MaximumExcerptSourceBytes)
-	if len(gateway.lastRefs) != withinBudget {
-		t.Fatalf("gateway read %d refs, want the %d within budget", len(gateway.lastRefs), withinBudget)
-	}
-	for index, row := range rows {
-		enriched := row.ExcerptSource == mail.ExcerptSourceLocal && row.EnrichmentError == ""
-		skipped := row.ExcerptSource == "" && row.EnrichmentError == enrichmentBudgetExhausted
-		if (index < withinBudget && !enriched) || (index >= withinBudget && !skipped) {
-			t.Fatalf("row %d of %d-row budget = %+v", index, withinBudget, row)
-		}
+func TestEnrichSummariesPassesThePageSourceBudgetAndEveryRow(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		request    mail.MessageEnrichmentRequest
+		wantBudget int64
+	}{
+		{"excerpt", mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: mail.DefaultExcerptLength}, enrichmentPageSourceBytes},
+		{"threading and excerpt", mail.MessageEnrichmentRequest{Threading: true, Excerpt: true, ExcerptLength: mail.DefaultExcerptLength}, enrichmentPageSourceBytes},
+		{"threading only", mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: mail.DefaultExcerptLength}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows := enrichmentProbeRows(40, mail.MaximumExcerptSourceBytes)
+			gateway := &enrichmentProbeGateway{}
+			if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, test.request); err != nil {
+				t.Fatal(err)
+			}
+			if gateway.calls != 1 || len(gateway.lastRefs) != len(rows) {
+				t.Fatalf("gateway calls = %d with %d refs, want one call with all %d rows", gateway.calls, len(gateway.lastRefs), len(rows))
+			}
+			if gateway.lastRequest.ExcerptSourceBudget != test.wantBudget {
+				t.Fatalf("budget = %d, want %d", gateway.lastRequest.ExcerptSourceBudget, test.wantBudget)
+			}
+			for index, row := range rows {
+				if row.EnrichmentError != "" || (test.request.Threading && !row.ThreadingComplete) {
+					t.Fatalf("row %d = %+v", index, row)
+				}
+			}
+		})
 	}
 }
 

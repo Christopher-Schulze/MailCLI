@@ -52,39 +52,83 @@ type remoteExcerptMailbox struct {
 func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail.MessageEnrichmentRequest) ([]mail.MessageSummary, error) {
 	summaries := make([]mail.MessageSummary, len(refs))
 	inputs := make([]excerptInput, len(refs))
+	skipped := make([]bool, len(refs))
+	needsRemoteRow := make([]bool, len(refs))
 	var remote []remoteExcerpt
 	var remoteMu sync.Mutex
-	var rows errgroup.Group
-	rows.SetLimit(enrichmentConcurrency)
-	for index, ref := range refs {
-		rows.Go(func() error {
-			if request.Threading {
-				c.enrichThreading(ctx, ref, &summaries[index])
-			}
-			if request.Excerpt {
+	// Rows run in chunks of the concurrency limit so that the excerpt budget is
+	// charged with the bytes actually read: once a chunk used it up, later rows
+	// keep their threading data and only skip the excerpt.
+	remaining := request.ExcerptSourceBudget
+	limited := request.Excerpt && remaining > 0
+	for start := 0; start < len(refs); start += enrichmentConcurrency {
+		end := min(start+enrichmentConcurrency, len(refs))
+		exhausted := limited && remaining <= 0
+		var rows errgroup.Group
+		rows.SetLimit(enrichmentConcurrency)
+		for index := start; index < end; index++ {
+			ref := refs[index]
+			rows.Go(func() error {
+				if request.Threading {
+					c.enrichThreading(ctx, ref, &summaries[index])
+				}
+				if !request.Excerpt {
+					return nil
+				}
+				if exhausted {
+					skipped[index] = true
+					if summaries[index].EnrichmentError == "" {
+						summaries[index].EnrichmentError = mail.EnrichmentBudgetExhausted
+					}
+					return nil
+				}
 				input, target, needsRemote := c.localExcerpt(ctx, ref)
 				inputs[index] = input
 				if needsRemote {
+					needsRemoteRow[index] = true
 					remoteMu.Lock()
 					remote = append(remote, remoteExcerpt{index: index, target: target})
 					remoteMu.Unlock()
 				}
+				return nil
+			})
+		}
+		if err := rows.Wait(); err != nil {
+			return nil, err
+		}
+		if limited {
+			for index := start; index < end; index++ {
+				if !skipped[index] {
+					remaining -= excerptSourceCharge(inputs[index], needsRemoteRow[index])
+				}
 			}
-			return nil
-		})
-	}
-	if err := rows.Wait(); err != nil {
-		return nil, err
+		}
 	}
 	if request.Excerpt {
 		if err := c.fetchRemoteExcerpts(ctx, remote, inputs); err != nil {
 			return nil, err
 		}
 		for index := range summaries {
-			c.applyExcerpt(ctx, &summaries[index], inputs[index], request.ExcerptLength)
+			if !skipped[index] {
+				c.applyExcerpt(ctx, &summaries[index], inputs[index], request.ExcerptLength)
+			}
 		}
 	}
 	return summaries, ctx.Err()
+}
+
+// excerptSourceCharge is what one row takes from the page's excerpt source
+// budget: the local source bytes it read, the bound of a planned IMAP prefix
+// fetch, and nothing for a cache hit or an unavailable source.
+func excerptSourceCharge(input excerptInput, needsRemote bool) int64 {
+	switch {
+	case needsRemote:
+		return mail.IMAPExcerptTextBytes
+	case input.cached:
+		return 0
+	default:
+		return int64(len(input.data))
+	}
 }
 
 // noteEnrichmentFailure reports the first local or remote failure per row
