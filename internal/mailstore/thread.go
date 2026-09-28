@@ -39,6 +39,9 @@ func (c *Client) MessageThread(
 	request mail.MessageThreadRequest,
 ) (mail.MessageThread, error) {
 	if c.store == nil {
+		if err := c.unavailableMessageRefError(request.Ref); err != nil {
+			return mail.MessageThread{}, err
+		}
 		return mail.MessageThread{}, c.readUnavailableError()
 	}
 	return c.store.MessageThread(ctx, request)

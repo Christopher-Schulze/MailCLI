@@ -422,6 +422,8 @@ Retained submission, mutation, APPEND or partial-effect evidence always takes pr
 
 References and cursors:
 `invalid_reference` means a malformed opaque ref; obtain a current ref from the matching listing and never edit tokens.
+Message reads decode the ref before reporting an unavailable store, so a malformed ref returns `invalid_reference` with exit `2` and `fix_input`, not a Full Disk Access request.
+`next.why` names the concrete fix: `fix_input` and default `stop` quote `error.message`, selected terminal codes name their outcome (for example `message_already_trashed`: nothing to do), and `check_state` with a recovery command names that command.
 `ambiguous_reference` means an account or mailbox path did not resolve uniquely; refresh the listing first.
 `stale_cursor` means a Mail.app page boundary changed; restart that listing without the cursor.
 `account_reference_version_unsupported` needs a compatible MailCLI build; `account_reference_corrupt` and mixed `account_reference_invalid` are terminal catalog-integrity failures.

@@ -42,7 +42,10 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 	case canceled:
 		next.Do, next.Why = "stop", "The caller canceled the operation; do not restart it automatically."
 	case guidance.Retryability == mail.RetryTerminal:
-		next.Do, next.Why = "stop", "This failure is terminal; inspect the detailed guidance before further action."
+		next.Do, next.Why = "stop", boundedWhy("Stop: ", failure.Message)
+		if why, found := terminalWhy[failure.Code]; found {
+			next.Why = why
+		}
 	case failure.environmentRepair || environmentFailure(failure.Code) || (previous != nil && previous.Do == "ask_user"):
 		next.Do, next.Why = "ask_user", genericEnvironmentRepairWhy
 		if why, found := environmentRepairWhy[failure.Code]; found {
@@ -55,10 +58,32 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 			next.WaitSeconds = 1
 		}
 	case guidance.Retryability == mail.RetryUserInputRequired:
-		next.Do, next.Why = "fix_input", "Correct the input described by the detailed guidance before resubmitting."
+		next.Do, next.Why = "fix_input", boundedWhy("Fix the input: ", failure.Message)
 	}
 	attachNextRecovery(next, guidance.Recovery)
+	if next.Do == "check_state" && next.Command != "" {
+		next.Why = boundedWhy("Run "+strings.Join(append([]string{"mailcli", strings.ReplaceAll(next.Command, ".", " ")}, next.Args...), " ")+
+			" and decide from its result; ", "do not replay.")
+	}
 	return next
+}
+
+// terminalWhy names the outcome for terminal codes whose message alone would
+// not tell an agent that there is nothing left to do.
+var terminalWhy = map[string]string{
+	"message_already_trashed":        "The message is already in Trash; nothing to do.",
+	"compose_automation_unsupported": "Scripted Mail compose is unavailable; use drafts create and drafts send, or drafts handoff.",
+	"update_unsupported_platform":    "Self-update supports only macOS on Apple silicon; stop.",
+	"unsupported_platform":           "This platform cannot provide the required safe file access; stop.",
+}
+
+// boundedWhy keeps next.why to one line of at most 120 runes.
+func boundedWhy(prefix, detail string) string {
+	why := []rune(prefix + strings.Join(strings.Fields(detail), " "))
+	if len(why) > 120 {
+		why = append(why[:119], '…')
+	}
+	return string(why)
 }
 
 const genericEnvironmentRepairWhy = "Repair the environment or permissions using the detailed guidance before continuing."

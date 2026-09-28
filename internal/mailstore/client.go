@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -258,6 +259,9 @@ func (c *Client) OpenDraft(ctx context.Context, ref string) (mail.Message, error
 }
 
 func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (mail.Message, error) {
+	if err := c.unavailableMessageRefError(ref); err != nil {
+		return mail.Message{}, err
+	}
 	var local mail.Message
 	hasLocal := false
 	var localErr error
@@ -360,6 +364,9 @@ func messageFromRawReader(ctx context.Context, base mail.Message, summary mail.M
 }
 
 func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
+	if err := c.unavailableMessageRefError(ref); err != nil {
+		return "", err
+	}
 	var localErr error
 	if c.store != nil {
 		localCtx, cancelLocal := localReadOrResolveContext(ctx)
@@ -393,6 +400,9 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 }
 
 func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
+	if err := c.unavailableMessageRefError(ref); err != nil {
+		return err
+	}
 	var localErr error
 	if c.store != nil {
 		localCtx, cancelLocal := localReadOrResolveContext(ctx)
@@ -440,6 +450,9 @@ func (c *Client) SaveAttachmentToWithEvidence(
 	attachmentID string,
 	outputPath string,
 ) (mail.AttachmentEvidence, error) {
+	if err := c.unavailableMessageRefError(messageRef); err != nil {
+		return mail.AttachmentEvidence{}, err
+	}
 	var localErr error
 	if c.store != nil {
 		localCtx, cancelLocal := localReadOrResolveContext(ctx)
@@ -734,6 +747,9 @@ func (c *Client) Sync(ctx context.Context, accountRef string) error {
 // message's current membership is revalidated as part of the source open.
 func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.ThreadSource, error) {
 	if c.store == nil {
+		if err := c.unavailableMessageRefError(ref); err != nil {
+			return mail.ThreadSource{}, err
+		}
 		return mail.ThreadSource{}, c.readUnavailableError()
 	}
 	_, source, err := c.store.openMessageSource(ctx, ref)
@@ -772,6 +788,19 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 		MessageID:  messageID,
 		References: headers.References,
 	}, nil
+}
+
+// unavailableMessageRefError reports a malformed message ref as caller input
+// before the unavailable store is reported, so an agent fixes the ref instead
+// of asking the user for Full Disk Access.
+func (c *Client) unavailableMessageRefError(ref string) error {
+	if c.store != nil {
+		return nil
+	}
+	if _, err := mailref.DecodeMessage(ref); err != nil {
+		return &mail.ValidationError{Code: "invalid_reference", Message: "invalid message ref; use a current ref from a listing"}
+	}
+	return nil
 }
 
 func (c *Client) readUnavailableError() error {

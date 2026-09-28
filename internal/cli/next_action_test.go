@@ -74,6 +74,29 @@ func TestNextActionMapping(t *testing.T) {
 	}
 }
 
+func TestNextActionWhyNamesTheConcreteFix(t *testing.T) {
+	long := strings.Repeat("value ", 60)
+	for _, test := range []struct {
+		name, command, code, message, want string
+	}{
+		{"input names the message", "messages.get", "invalid_argument", "missing required --ref or REF", "Fix the input: missing required --ref or REF"},
+		{"terminal outcome", "messages.delete", "message_already_trashed", "already in trash", "The message is already in Trash; nothing to do."},
+		{"terminal default names the message", "update", "update_signature_invalid", "SHA256SUMS signature is invalid", "Stop: SHA256SUMS signature is invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failure := newErrorData(test.command, responseData{}, &mail.OperationError{Code: test.code, Message: test.message})
+			if next := failureNextAction(failure, nil); next.Why != test.want {
+				t.Fatalf("why = %q, want %q", next.Why, test.want)
+			}
+		})
+	}
+	failure := newErrorData("messages.get", responseData{}, &mail.OperationError{Code: "invalid_argument", Message: long})
+	why := failureNextAction(failure, nil).Why
+	if utf8.RuneCountInString(why) != 120 || !strings.HasSuffix(why, "…") || !strings.HasPrefix(why, "Fix the input: value") {
+		t.Fatalf("long why = %q (%d runes)", why, utf8.RuneCountInString(why))
+	}
+}
+
 func TestNextActionGuidanceTruthTable(t *testing.T) {
 	for _, rule := range []struct {
 		retryability mail.Retryability

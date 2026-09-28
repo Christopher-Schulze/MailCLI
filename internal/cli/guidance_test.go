@@ -644,7 +644,17 @@ func TestUnavailableMailStoreMessageGetEmitsUserRecovery(t *testing.T) {
 	})
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := Run(ctx, mail.NewService(client), []string{"messages", "get", "--ref", "missing", "--json"}, &stdout, &stderr)
+	// A malformed ref is caller input even while the store is unavailable.
+	if code := Run(ctx, mail.NewService(client), []string{"messages", "get", "--ref", "missing", "--json"}, &stdout, &stderr); code != 2 ||
+		!strings.Contains(stdout.String(), `"code":"invalid_reference"`) || !strings.Contains(stdout.String(), `"do":"fix_input"`) {
+		t.Fatalf("malformed ref with unavailable store: code=%d stdout=%s", code, stdout.String())
+	}
+	stdout.Reset()
+	validRef, err := mailref.EncodeMessage(mailref.Message{AccountID: "account", MailboxPath: []string{"INBOX"}, LibraryID: "1", ExpectedMessageID: "<m@example.com>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := Run(ctx, mail.NewService(client), []string{"messages", "get", "--ref", validRef, "--json"}, &stdout, &stderr)
 	if code != 1 || stderr.Len() != 0 {
 		t.Fatalf("Run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}

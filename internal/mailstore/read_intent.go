@@ -152,6 +152,9 @@ func (c *Client) GetMessageWithIntent(
 		return c.readMessage(ctx, ref, false)
 	}
 	if c.store == nil {
+		if err := c.unavailableMessageRefError(ref); err != nil {
+			return mail.Message{}, err
+		}
 		return mail.Message{}, c.readUnavailableError()
 	}
 	switch intent {

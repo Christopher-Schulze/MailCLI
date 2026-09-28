@@ -18,6 +18,9 @@ const messageStateStalenessNote = "server flags are read over IMAP now; local in
 // stored, marked, or expunged.
 func (c *Client) MessageState(ctx context.Context, messageRef string) (mail.MessageState, error) {
 	if c.store == nil {
+		if err := c.unavailableMessageRefError(messageRef); err != nil {
+			return mail.MessageState{}, err
+		}
 		return mail.MessageState{}, c.readUnavailableError()
 	}
 	target, err := c.resolveImapTarget(ctx, messageRef)
