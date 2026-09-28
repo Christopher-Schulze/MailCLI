@@ -60,6 +60,7 @@ type capabilityManifest struct {
 	SchemaVersion     int                   `json:"schema_version"`
 	Name              string                `json:"name"`
 	Version           string                `json:"version"`
+	ContractSHA256    string                `json:"contract_sha256"`
 	Commands          []commandCapability   `json:"commands"`
 	Scope             string                `json:"scope,omitempty"`
 	Limits            capabilityLimits      `json:"limits"`
@@ -390,6 +391,11 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func writeCapabilitiesWithOutputs(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest, outputs bool) int {
+	digest, err := contractDigest()
+	if err != nil {
+		return failCommand("capabilities", jsonOutput, err, stdout, stderr)
+	}
+	manifest.ContractSHA256 = digest
 	if outputs {
 		if err := attachOutputSchemas(manifest.Commands); err != nil {
 			return failCommand("capabilities", jsonOutput, err, stdout, stderr)

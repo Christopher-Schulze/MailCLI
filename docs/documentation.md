@@ -610,6 +610,8 @@ The CLI is optimized for both humans and agents:
   flags fail normal invalid input. Scoped output retains audience, effects, conditional dependencies, confirmations and result states, `sync_check_policy` only with `sync` and `draft_save_policy` only with `drafts.*` commands, while its `limits` contains exactly the keys declared by the selected commands' `limit_refs`.
   Complete parameter schemas are available through `schema_ref.resolve` or `--for IDS --schemas`; no-selector discovery retains all inline schemas and limits.
   Only a single-command selection returns `data.capabilities.scope`.
+  Every capabilities view carries the same `data.capabilities.contract_sha256`: SHA-256 over MailCLI's canonical JSON of the complete contract
+  (all commands with parameter and output schemas, shared `$defs`, error catalog and limits; version and digest cleared). Cache per digest; reread on change.
 - Capability discovery, local draft create/list/inspect/preview/edit/update/discard/prune, sending, credential setup, direct transport-claim reconciliation, and missing or unknown command/subcommand routes bypass Mail-store configuration, SQLite, `plutil`, and Mail.app initialization. Reply and forward creation read the source message's header block from the Mail store (they require it,
   like reads) but write only local draft files. Visible handoff reads only the local draft and invokes AppKit. `drafts open` uses the local store with targeted IMAP hydration and no Mail Automation; `drafts adopt` uses the same read path and writes only local draft files. Legacy baseline reconciliation uses the Mail store, while direct claims do not.
 
