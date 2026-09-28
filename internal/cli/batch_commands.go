@@ -222,6 +222,9 @@ func prepareBatchReadProjection(request *mail.BatchRequest, maxBytes int64) erro
 				request.Items[index].View = request.Defaults.View
 				request.Items[index].Fields = request.Defaults.Fields
 			}
+			if request.Items[index].Links == nil {
+				request.Items[index].Links = request.Defaults.Links
+			}
 		}
 		request.Defaults = nil
 	}

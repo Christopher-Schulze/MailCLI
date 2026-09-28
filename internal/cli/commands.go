@@ -415,12 +415,16 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	enrichment := addMessageEnrichmentFlags(flags, false)
 	ref := flags.String("ref", "", "message ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
+	links := flags.String("links", string(mail.LinkModeFull), "URLs in the plain body: full, host (long URLs become <host>) or none")
 	outputFlags := addOutputFlags(flags, projectionTargetMessage, defaultMessageOutputView, true)
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
 	output, err := outputFlags.options(projectionTargetMessage)
 	if err != nil {
+		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
+	}
+	if output.links, err = mail.ParseLinkMode(*links); err != nil {
 		return failCommand("messages.get", *jsonOutput, err, stdout, stderr)
 	}
 	if err := validateMessageEnrichment(*enrichment); err != nil {
@@ -470,6 +474,7 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 		writeFormat(stdout, "%s\t%d\t%s\n", exported.Path, exported.Size, exported.SHA256)
 		return 0
 	}
+	message.Content = mail.ShortenLinks(message.Content, output.links)
 	if err := writeMessage(stdout, message); err != nil {
 		return 1
 	}

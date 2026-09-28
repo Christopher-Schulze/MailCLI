@@ -58,6 +58,7 @@ type BatchRequest struct {
 type BatchReadDefaults struct {
 	View   *string   `json:"view,omitempty"`
 	Fields *[]string `json:"fields,omitempty"`
+	Links  *string   `json:"links,omitempty"`
 }
 
 // BatchReadAdmission carries content retention and an explicit output-budget
@@ -88,6 +89,7 @@ type BatchItem struct {
 	AllowDraftMutation bool              `json:"allow_draft_mutation,omitempty"`
 	View               *string           `json:"view,omitempty"`
 	Fields             *[]string         `json:"fields,omitempty"`
+	Links              *string           `json:"links,omitempty"`
 	ReadIntent         MessageReadIntent `json:"-"`
 	RetainReadContent  bool              `json:"-"`
 	RetainReadHeaders  bool              `json:"-"`
@@ -303,7 +305,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			if item.AttachmentID == "" || item.OutputPath == "" {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q requires attachment_id and output_path", item.ID))
 			}
-			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.Mailbox != "" || item.AllowDraftMutation || item.View != nil || item.Fields != nil {
+			if item.Read != nil || item.Flagged != nil || item.Junk != nil || item.Mailbox != "" || item.AllowDraftMutation || item.View != nil || item.Fields != nil || item.Links != nil {
 				return 0, validationError(fmt.Sprintf("batch attachment item %q contains unsupported fields", item.ID))
 			}
 			if err := validateAttachmentRequest(SaveAttachmentRequest{
@@ -317,7 +319,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			}
 			destinations[strings.ToLower(path)] = item.ID
 		case BatchOperationMark:
-			if item.AttachmentID != "" || item.OutputPath != "" || item.Mailbox != "" || item.View != nil || item.Fields != nil ||
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Mailbox != "" || item.View != nil || item.Fields != nil || item.Links != nil ||
 				(item.Read == nil && item.Flagged == nil && item.Junk == nil) {
 				return 0, validationError(fmt.Sprintf("batch mark item %q requires state fields only", item.ID))
 			}
@@ -325,7 +327,7 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 			if item.Mailbox == "" {
 				return 0, validationError(fmt.Sprintf("batch move item %q requires mailbox", item.ID))
 			}
-			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil || item.View != nil || item.Fields != nil {
+			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil || item.View != nil || item.Fields != nil || item.Links != nil {
 				return 0, validationError(fmt.Sprintf("batch move item %q contains unsupported fields", item.ID))
 			}
 		case BatchOperationCopy:
@@ -333,12 +335,12 @@ func validateBatchRequest(request BatchRequest) (int, error) {
 				return 0, validationError(fmt.Sprintf("batch copy item %q requires mailbox", item.ID))
 			}
 			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
-				item.AllowDraftMutation || item.View != nil || item.Fields != nil {
+				item.AllowDraftMutation || item.View != nil || item.Fields != nil || item.Links != nil {
 				return 0, validationError(fmt.Sprintf("batch copy item %q contains unsupported fields", item.ID))
 			}
 		case BatchOperationDelete:
 			if item.AttachmentID != "" || item.OutputPath != "" || item.Read != nil || item.Flagged != nil || item.Junk != nil ||
-				item.Mailbox != "" || item.View != nil || item.Fields != nil {
+				item.Mailbox != "" || item.View != nil || item.Fields != nil || item.Links != nil {
 				return 0, validationError(fmt.Sprintf("batch delete item %q contains unsupported fields", item.ID))
 			}
 		}

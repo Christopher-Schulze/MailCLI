@@ -52,7 +52,7 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 		}
 	case inputJSONBatchDefaults:
 		return []inputJSONField{
-			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true},
+			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true}, {"links", inputJSONString, true},
 		}
 	case inputJSONBatchItem:
 		return []inputJSONField{
@@ -61,7 +61,7 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 			{"read", inputJSONBoolean, false}, {"flagged", inputJSONBoolean, false},
 			{"junk", inputJSONBoolean, false}, {"mailbox", inputJSONString, false},
 			{"allow_draft_mutation", inputJSONBoolean, false},
-			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true},
+			{"view", inputJSONString, true}, {"fields", inputJSONStringList, true}, {"links", inputJSONString, true},
 		}
 	default:
 		return nil

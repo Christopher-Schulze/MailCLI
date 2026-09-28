@@ -317,6 +317,7 @@ This presentation policy never modifies stored mail, JSON values, normalized exp
 
 `messages get` defaults to the `metadata` view, which returns `summary` (with `attachment_count`), `to`, `cc`, `bcc` and `reply_to` from the header block only.
 Attachments and content state (`attachments`, `content_source`, `content_complete`, `missing_parts`, `hydration`) come with `--view plain`, `--view full` or `--fields`.
+`--links full|host|none` (batch read items and `defaults` accept `links` too) reduces the URLs in the returned `content`: `host` replaces every URL of 40 or more characters by `<host>`, `none` removes all URLs together with the ` (url)` suffix of a link label, and both collapse runs of blank lines; the default `full` and every `--export` keep the complete body.
 `drafts inspect` defaults to its `metadata` view, which keeps identity and operation-state evidence while omitting bodies.
 `drafts create`, `drafts update`, `drafts edit`, `messages reply` and `messages forward` default to the canonical plain draft body; `--view plain` omits draft source and HTML variants, and `--view full` includes every stored representation.
 `attachments list` defaults to attachment metadata; `messages raw` has only its `full` view.

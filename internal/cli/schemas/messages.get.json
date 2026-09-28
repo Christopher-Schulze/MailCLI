@@ -40,6 +40,19 @@
       "description": "output view"
     },
     {
+      "name": "--links",
+      "value_type": "enum",
+      "takes_value": true,
+      "value_required": true,
+      "default": "full",
+      "values": [
+        "full",
+        "host",
+        "none"
+      ],
+      "description": "URLs in the plain body: full, host (long URLs become <host>) or none; exports stay complete"
+    },
+    {
       "name": "--fields",
       "value_type": "field_list",
       "takes_value": true,

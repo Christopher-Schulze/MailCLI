@@ -63,7 +63,9 @@ type outputOptions struct {
 	allowExport                bool
 	draftMutationCompleted     bool
 	omitUnselectedMessageState bool
-	recoveryRoute              string
+	// links reduces the URLs of the plain body; empty means full.
+	links         mail.LinkMode
+	recoveryRoute string
 }
 
 type projectionInfo struct {
@@ -515,6 +517,13 @@ func pageProjectionOptions(
 func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (outputOptions, error) {
 	source := projectionInputSource{kind: projectionInputBatchItem, itemIndex: index, itemID: item.ID}
 	options := outputOptions{target: projectionTargetMessage, view: defaultMessageOutputView, maxBytes: maxBytes}
+	if item.Links != nil {
+		mode, err := mail.ParseLinkMode(*item.Links)
+		if err != nil {
+			return outputOptions{}, projectionValidationError(source, "links", err.Error())
+		}
+		options.links = mode
+	}
 	if item.View != nil {
 		options.view = strings.ToLower(strings.TrimSpace(*item.View))
 	}
@@ -543,6 +552,11 @@ func validateBatchReadDefaults(defaults *mail.BatchReadDefaults) error {
 	source := projectionInputSource{kind: projectionInputBatchDefaults}
 	if defaults.View != nil && defaults.Fields != nil {
 		return projectionValidationError(source, "fields", "cannot be combined with view")
+	}
+	if defaults.Links != nil {
+		if _, err := mail.ParseLinkMode(*defaults.Links); err != nil {
+			return projectionValidationError(source, "links", err.Error())
+		}
 	}
 	if defaults.View != nil {
 		view := strings.ToLower(strings.TrimSpace(*defaults.View))
@@ -951,7 +965,8 @@ func messageProjectionFor(message mail.Message, options outputOptions, retainCon
 		projection.ExcerptSource = &source
 	}
 	if (options.includes("content") || retainContent) && options.exportPath == "" {
-		projection.Content = &message.Content
+		content := mail.ShortenLinks(message.Content, options.links)
+		projection.Content = &content
 	}
 	if options.includes("attachments") {
 		projection.Attachments = &message.Attachments

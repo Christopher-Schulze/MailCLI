@@ -122,6 +122,61 @@ func TestBatchCommandJSONProjectsReadItemsIndependently(t *testing.T) {
 	}
 }
 
+func TestBatchReadLinksFollowDefaultsAndItemOverrides(t *testing.T) {
+	run := func(payload string) (int, string) {
+		path := filepath.Join(t.TempDir(), "batch.json")
+		if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		message := trackedLinkMessage()
+		gateway := &intentProjectionGateway{projectionGateway: &projectionGateway{message: message}}
+		code, output, _ := runIntentProjectionCommand(t, gateway, "batch", "--input", path, "--json")
+		return code, output
+	}
+	code, output := run(`{"operation":"read","defaults":{"view":"plain","links":"host"},"items":[` +
+		`{"id":"inherited","ref":"a"},{"id":"full","ref":"b","links":"full"},{"id":"none","ref":"c","links":"none"}]}`)
+	if code != 0 {
+		t.Fatalf("batch code = %d, output = %s", code, output)
+	}
+	var response struct {
+		Data struct {
+			Batch struct {
+				Items []struct {
+					ID      string `json:"id"`
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"items"`
+			} `json:"batch_result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"inherited": "Upload\n<click.example.com>\n\nBye",
+		"full":      trackedLinkMessage().Content,
+		"none":      "Upload\n\nBye",
+	}
+	if len(response.Data.Batch.Items) != len(want) {
+		t.Fatalf("batch items = %d, want %d: %s", len(response.Data.Batch.Items), len(want), output)
+	}
+	for _, item := range response.Data.Batch.Items {
+		if item.Message.Content != want[item.ID] {
+			t.Errorf("item %s content = %q, want %q", item.ID, item.Message.Content, want[item.ID])
+		}
+	}
+	for name, payload := range map[string]string{
+		"invalid item mode":    `{"operation":"read","items":[{"id":"a","ref":"a","links":"short"}]}`,
+		"invalid default mode": `{"operation":"read","defaults":{"links":"short"},"items":[{"id":"a","ref":"a"}]}`,
+		"links on a mutation":  `{"operation":"mark","items":[{"id":"a","ref":"a","read":true,"links":"host"}]}`,
+	} {
+		if code, output := run(payload); code != 2 || !strings.Contains(output, `"ok":false`) {
+			t.Errorf("%s: code = %d, output = %s", name, code, output)
+		}
+	}
+}
+
 func TestBatchReadDefaultsFollowPrecedence(t *testing.T) {
 	for _, test := range []struct {
 		name    string

@@ -112,6 +112,16 @@
           "attachments"
         ],
         "description": "default message fields, mutually exclusive with view"
+      },
+      {
+        "name": "links",
+        "value_type": "enum",
+        "values": [
+          "full",
+          "host",
+          "none"
+        ],
+        "description": "default URL handling in plain bodies, inherited by items without links"
       }
     ],
     "item_fields": [
@@ -190,6 +200,16 @@
           "attachments"
         ],
         "description": "message fields, overrides request defaults and is mutually exclusive with view"
+      },
+      {
+        "name": "links",
+        "value_type": "enum",
+        "values": [
+          "full",
+          "host",
+          "none"
+        ],
+        "description": "URL handling in the plain body of a read item: full, host or none; overrides request defaults"
       }
     ],
     "constraints": [
@@ -267,9 +287,10 @@
           "mailbox",
           "allow_draft_mutation",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
-        "description": "read items allow id and ref plus an optional view or fields projection"
+        "description": "read items allow id and ref plus an optional view or fields projection and a links mode"
       },
       {
         "kind": "conditional",
@@ -283,7 +304,8 @@
           "mailbox",
           "allow_draft_mutation",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
         "description": "attachment_save items require attachment_id and output_path and reject mark, transfer, draft, and projection fields"
       },
@@ -306,7 +328,8 @@
           "junk",
           "mailbox",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
         "description": "mark items require at least one of read, flagged, or junk and reject attachment, transfer, and projection fields"
       },
@@ -321,7 +344,8 @@
           "flagged",
           "junk",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
         "description": "move items require mailbox and reject attachment, mark, and projection fields"
       },
@@ -337,7 +361,8 @@
           "junk",
           "allow_draft_mutation",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
         "description": "copy items require mailbox and reject all other optional fields"
       },
@@ -352,7 +377,8 @@
           "junk",
           "mailbox",
           "view",
-          "fields"
+          "fields",
+          "links"
         ],
         "description": "delete items reject unsupported fields, including projections"
       },

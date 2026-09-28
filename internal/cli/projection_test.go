@@ -96,6 +96,58 @@ func TestMessageProjectionViewsSelectOnlyRequestedContent(t *testing.T) {
 	}
 }
 
+func trackedLinkMessage() mail.Message {
+	message := projectionMessage()
+	message.Content = "Upload\nhttps://click.example.com/f/a/upYx533wyWJ-C15_1C36yg~~/AAAmIhA~/6m7yqwKk6656jrzYqqLXL1faPlsHRF6\n\n\n\nBye"
+	return message
+}
+
+func TestMessageGetLinksModesReduceOnlyTheReturnedContent(t *testing.T) {
+	contentOf := func(t *testing.T, output string) string {
+		t.Helper()
+		var response struct {
+			Data struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Data.Message.Content
+	}
+	for _, test := range []struct{ links, want string }{
+		{"", trackedLinkMessage().Content},
+		{"full", trackedLinkMessage().Content},
+		{"host", "Upload\n<click.example.com>\n\nBye"},
+		{"none", "Upload\n\nBye"},
+	} {
+		args := []string{"messages", "get", "--ref", "msg_ref", "--view", "plain", "--json"}
+		if test.links != "" {
+			args = append(args, "--links", test.links)
+		}
+		code, output, stderr := runProjectionCommand(t, &projectionGateway{message: trackedLinkMessage()}, args...)
+		if got := contentOf(t, output); code != 0 || stderr != "" || got != test.want {
+			t.Fatalf("--links %q: code=%d stderr=%q content=%q, want %q", test.links, code, stderr, got, test.want)
+		}
+	}
+	// An export always carries the complete content.
+	exportPath := filepath.Join(t.TempDir(), "body.txt")
+	code, output, stderr := runProjectionCommand(t, &projectionGateway{message: trackedLinkMessage()},
+		"messages", "get", "--ref", "msg_ref", "--view", "plain", "--links", "none", "--export", exportPath, "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("export: code=%d stderr=%q output=%s", code, stderr, output)
+	}
+	assertExportFile(t, exportPath, []byte(trackedLinkMessage().Content), output)
+	// An invalid mode fails before any retrieval.
+	gateway := &projectionGateway{message: trackedLinkMessage()}
+	code, output, stderr = runProjectionCommand(t, gateway, "messages", "get", "--ref", "msg_ref", "--links", "short", "--json")
+	if code != 2 || stderr != "" || gateway.getCalls != 0 || !strings.Contains(output, `"code":"invalid_argument"`) {
+		t.Fatalf("invalid mode: code=%d calls=%d stderr=%q output=%s", code, gateway.getCalls, stderr, output)
+	}
+}
+
 func TestFullViewOmitsHeaderFieldsUnlessSelected(t *testing.T) {
 	code, full, stderr := runProjectionCommand(t, &projectionGateway{message: projectionMessage()},
 		"messages", "get", "--ref", "msg_ref", "--view", "full", "--json")
