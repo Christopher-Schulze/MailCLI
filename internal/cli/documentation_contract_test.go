@@ -225,16 +225,8 @@ func TestPublicDocumentationOmitsOwnerLocalTaskWorkflow(t *testing.T) {
 }
 
 func TestPublicGoCommentsOmitPrivateTaskPaths(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "git", "ls-files", "-z", "--", "*.go")
-	command.Dir = repositoryRoot(t)
-	paths, err := command.Output()
-	if err != nil {
-		t.Fatalf("inventory tracked Go sources: %v", err)
-	}
 	count := 0
-	for _, path := range strings.Split(string(paths), "\x00") {
+	for _, path := range publicGoSourcePaths(t, repositoryRoot(t)) {
 		if path == "" {
 			continue
 		}
@@ -247,6 +239,45 @@ func TestPublicGoCommentsOmitPrivateTaskPaths(t *testing.T) {
 		t.Fatal("tracked Go comment inventory is empty")
 	}
 	t.Logf("checked comments in %d tracked Go sources, including tests", count)
+}
+
+// publicGoSourcePaths lists tracked Go files in a Git checkout and falls back
+// to a module walk for plain source trees (for example `git archive` output).
+func publicGoSourcePaths(t *testing.T, root string) []string {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, "git", "ls-files", "-z", "--", "*.go")
+		command.Dir = root
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("inventory tracked Go sources: %v", err)
+		}
+		return strings.Split(string(output), "\x00")
+	}
+	skipped := map[string]bool{".git": true, "bin": true, "dist": true, "graphify-out": true, filepath.Join("docs", "tasks"): true}
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && skipped[relative] {
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() && strings.HasSuffix(relative, ".go") {
+			paths = append(paths, filepath.ToSlash(relative))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("inventory Go sources: %v", err)
+	}
+	return paths
 }
 
 func validatePublicGoComments(filename, source string) error {
