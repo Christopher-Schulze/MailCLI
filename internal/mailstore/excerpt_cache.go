@@ -30,7 +30,12 @@ type excerptCache struct {
 	dir string
 }
 
+// excerptCacheVersion marks entries written by this layout; entries without it
+// or with another value are ignored and overwritten.
+const excerptCacheVersion = 1
+
 type cachedExcerpt struct {
+	Version  int    `json:"v"`
 	Excerpt  string `json:"excerpt"`
 	Complete bool   `json:"complete"`
 }
@@ -51,11 +56,31 @@ func (s *Store) excerptCacheKey(ctx context.Context, ref string) (string, error)
 	if record.RemoteID <= 0 {
 		return "", errors.New("message has no server UID")
 	}
-	identity := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%d",
-		s.storeUUID, resolved.Reference.AccountID, strings.Join(resolved.Reference.MailboxPath, "/"),
-		record.RowID, record.StoreGlobalID, record.RemoteID)
-	sum := sha256.Sum256([]byte(identity))
-	return hex.EncodeToString(sum[:]), nil
+	return excerptCacheIdentity{
+		storeUUID: s.storeUUID, accountID: resolved.Reference.AccountID, mailboxPath: resolved.Reference.MailboxPath,
+		rowID: record.RowID, storeGlobalID: record.StoreGlobalID, remoteID: record.RemoteID,
+		uidValidity: resolved.Reference.ExpectedIMAPUIDValidity,
+	}.key(), nil
+}
+
+// excerptCacheIdentity is everything a cache key is derived from. The server
+// UIDVALIDITY (0 while unknown) separates two generations of one mailbox.
+type excerptCacheIdentity struct {
+	storeUUID     string
+	accountID     string
+	mailboxPath   []string
+	rowID         int64
+	storeGlobalID int64
+	remoteID      int64
+	uidValidity   uint32
+}
+
+func (identity excerptCacheIdentity) key() string {
+	text := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%d",
+		identity.storeUUID, identity.accountID, strings.Join(identity.mailboxPath, "/"),
+		identity.rowID, identity.storeGlobalID, identity.remoteID, identity.uidValidity)
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func (cache excerptCache) path(key string) string {
@@ -79,6 +104,9 @@ func (cache excerptCache) load(key string) (cachedExcerpt, bool) {
 	if err := json.NewDecoder(io.LimitReader(file, maximumExcerptCacheEntryBytes)).Decode(&entry); err != nil {
 		return cachedExcerpt{}, false
 	}
+	if entry.Version != excerptCacheVersion {
+		return cachedExcerpt{}, false
+	}
 	return entry, true
 }
 
@@ -91,6 +119,7 @@ func (cache excerptCache) store(key string, entry cachedExcerpt) error {
 	if err := os.MkdirAll(cache.dir, 0o700); err != nil {
 		return err
 	}
+	entry.Version = excerptCacheVersion
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -112,7 +141,7 @@ func (cache excerptCache) store(key string, entry cachedExcerpt) error {
 
 func (cache excerptCache) pruneDaily() error {
 	marker := filepath.Join(cache.dir, excerptCachePruneMarker)
-	if info, err := os.Stat(marker); err == nil && time.Since(info.ModTime()) < 24*time.Hour {
+	if info, err := os.Lstat(marker); err == nil && info.Mode().IsRegular() && time.Since(info.ModTime()) < 24*time.Hour {
 		return nil
 	}
 	entries, err := os.ReadDir(cache.dir)
@@ -129,8 +158,24 @@ func (cache excerptCache) pruneDaily() error {
 			errs = append(errs, os.Remove(filepath.Join(cache.dir, entry.Name())))
 		}
 	}
-	errs = append(errs, os.WriteFile(marker, nil, 0o600))
+	errs = append(errs, replaceFile(cache.dir, marker))
 	return errors.Join(errs...)
+}
+
+// replaceFile publishes an empty regular file at path through a temporary file
+// and a rename, so an existing symlink at path is replaced and never followed.
+func replaceFile(directory string, path string) error {
+	temporary, err := os.CreateTemp(directory, ".marker.*")
+	if err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return errors.Join(err, os.Remove(temporary.Name()))
+	}
+	if err := os.Rename(temporary.Name(), path); err != nil {
+		return errors.Join(err, os.Remove(temporary.Name()))
+	}
+	return nil
 }
 
 // cutExcerpt shortens a cached maximum-length excerpt to length runes; it

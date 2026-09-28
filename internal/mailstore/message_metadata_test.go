@@ -7,6 +7,7 @@ import (
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -267,6 +268,63 @@ func TestExcerptCacheIgnoresExpiredAndOversizedEntries(t *testing.T) {
 	}
 	if _, hit := (excerptCache{}).load("fresh"); hit {
 		t.Fatal("a disabled cache served an entry")
+	}
+}
+
+func TestExcerptCacheRejectsForeignAndUnversionedEntries(t *testing.T) {
+	cache := excerptCache{dir: t.TempDir()}
+	for name, content := range map[string]string{
+		"empty object":  `{}`,
+		"unversioned":   `{"excerpt":"legacy text","complete":true}`,
+		"other version": `{"v":2,"excerpt":"future text","complete":true}`,
+	} {
+		if err := os.WriteFile(cache.path(name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if entry, hit := cache.load(name); hit {
+			t.Errorf("%s was served as %+v", name, entry)
+		}
+	}
+	if err := cache.store("legacy", cachedExcerpt{Excerpt: "new", Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if entry, hit := cache.load("legacy"); !hit || entry.Excerpt != "new" || !entry.Complete {
+		t.Fatalf("stored entry = %+v hit=%t", entry, hit)
+	}
+}
+
+func TestExcerptCachePruneMarkerNeverFollowsASymlink(t *testing.T) {
+	cache := excerptCache{dir: t.TempDir()}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("victim content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(cache.dir, excerptCachePruneMarker)); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.store("key", cachedExcerpt{Excerpt: "text", Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := os.ReadFile(victim); err != nil || string(content) != "victim content" {
+		t.Fatalf("victim = %q, %v; the marker write followed the symlink", content, err)
+	}
+	info, err := os.Lstat(filepath.Join(cache.dir, excerptCachePruneMarker))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("marker = %v, %v; want a regular file", info, err)
+	}
+}
+
+func TestExcerptCacheKeyBindsTheServerMailboxGeneration(t *testing.T) {
+	base := excerptCacheIdentity{
+		storeUUID: "store", accountID: "account", mailboxPath: []string{"INBOX"}, rowID: 7, storeGlobalID: 70, remoteID: 5, uidValidity: 111,
+	}
+	same, other := base, base
+	other.uidValidity = 222
+	unknown := base
+	unknown.uidValidity = 0
+	if base.key() != same.key() || base.key() == other.key() || base.key() == unknown.key() {
+		t.Fatalf("keys equal: same=%t other=%t unknown=%t; want true, false, false",
+			same.key() == base.key(), other.key() == base.key(), unknown.key() == base.key())
 	}
 }
 
