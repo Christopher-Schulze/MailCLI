@@ -471,7 +471,7 @@ func scanCandidate(
 		if match {
 			// Build original-case text only for the snippet to preserve
 			// readable case in search results.
-			snippet = snippetForSearchText(&representations, firstTerm)
+			snippet = snippetForMatch(&representations, document.Content, firstTerm)
 		}
 	}
 	return candidateScan{

@@ -79,6 +79,9 @@ type PreparedQuery struct {
 	Fingerprint   string
 	Cursor        *SearchCursor
 	IndexRevision string
+	// MailboxScope lists the mailboxes a role or path selector resolved to in
+	// several accounts; it is set by the store, never by callers.
+	MailboxScope []Mailbox
 }
 
 type SearchCursor struct {

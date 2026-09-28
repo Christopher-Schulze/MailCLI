@@ -1,7 +1,7 @@
 # Reading, search, and attachments
 
 - Local index reads work with Mail closed; never prove current server absence/delivery or poll new mail. [Sync](mutations.md) distinguishes observing counts from requesting Mail sync.
-- `messages list`: newest-first unified inbox; --account narrows. Rows retain account/mailbox refs under fields. --mailbox: ref, case-insensitive inbox/sent/drafts/trash/junk/archive, or exact slash path. Ambiguous: choose returned ref/account. Supported store required, no global Apple Events scan. All mail: page each mailbox.
+- `messages list`: newest-first unified inbox; --account narrows. --mailbox: ref, case-insensitive inbox/sent/drafts/trash/junk/archive, or exact slash path; filter and search take the same values, and a role there covers every account unless --account is given (list needs --account or a ref when several accounts match). Ambiguous: choose returned ref/account. Supported store required, no global Apple Events scan. All mail: page each mailbox.
 - Degraded/stale/ambiguous account coverage blocks transport. Check complete/identity_coverage/direct_ops_supported/reason; unsupported provider needs [setup](setup.md) with explicit hosts.
 - Lists/filter/search default 20, limit 1..200; JSON 1 MiB, --max-bytes <=64 MiB. Follow page.next_cursor until absent; overflow has no rows/new cursor.
 - Cursors bind store/query; catalogs bind command/scope/ordered refs. Invalid: restart. Refresh refs after copy/move/delete/sync; thread has the same page bounds.

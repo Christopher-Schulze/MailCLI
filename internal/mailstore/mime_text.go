@@ -122,6 +122,10 @@ func collapseSearchText(value string) string {
 			continue
 		}
 		character, size := utf8.DecodeRuneInString(value[i:])
+		if isInvisibleFormatRune(character) {
+			i += size
+			continue
+		}
 		if unicode.IsSpace(character) {
 			pendingSpace = output.Len() > 0
 		} else {

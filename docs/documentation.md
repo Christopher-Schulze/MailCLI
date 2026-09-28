@@ -536,6 +536,7 @@ One SQL statement selects physical and label membership, deduplicates rows and o
 Each item carries its account ref as `account` and its resolved `mailbox_ref`, also under projections.
 `--account REF` narrows the inbox or mailbox selection.
 `--mailbox` accepts an opaque ref, a case-insensitive role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`) or an exact slash-separated path; roles use proven Sent/Drafts cache attributes and localized role names, never guessed attribute bits, and ambiguity returns `ambiguous_mailbox` with candidate refs.
+`messages filter` and `messages search` accept the same selectors; without `--account` a role or path covers the matching mailbox of every account (`filter --mailbox inbox --read false` is the unread inbox of all accounts), with `--account` it covers that account, and two matches inside one account stay ambiguous.
 Inbox cursors bind the store UUID, account scope, resolved inbox set and date/row boundary.
 Unified inbox and role/path selection require the supported local store and never trigger a global Apple Events scan; an explicit ref keeps the legacy fallback.
 

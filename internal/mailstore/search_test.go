@@ -1426,6 +1426,93 @@ func TestBuildSearchTextIsDeterministicAndCollapsed(t *testing.T) {
 	}
 }
 
+func TestSearchTextDropsInvisibleFormatCharacters(t *testing.T) {
+	t.Parallel()
+	soft, zeroWidth, joiner, wordJoiner, bom, grapheme := string(rune(0x00AD)), string(rune(0x200B)), string(rune(0x200C))+string(rune(0x200D)), string(rune(0x2060)), string(rune(0xFEFF)), string(rune(0x034F))
+	invisible := "in" + soft + "voice " + zeroWidth + "pre" + joiner + "header" + wordJoiner + " " + bom + "end" + grapheme
+	item := messageRecord{SummaryText: invisible}
+	document := mimeDocument{Content: "body in" + soft + "voice text"}
+	got := buildSearchText(item, document)
+	if strings.ContainsAny(got, soft+zeroWidth+joiner+wordJoiner+bom+grapheme) {
+		t.Fatalf("buildSearchText() kept invisible characters: %q", got)
+	}
+	if want := "invoice preheader end body invoice text"; got != want {
+		t.Fatalf("buildSearchText() = %q, want %q", got, want)
+	}
+	if got := collapseSearchText("a" + soft + "b " + zeroWidth + "c"); got != "ab c" {
+		t.Fatalf("collapseSearchText() = %q, want %q", got, "ab c")
+	}
+	representations := buildSearchTextRepresentations(item, document)
+	if matched, _ := containsAllFoldedSearchTerms(representations.folded, []string{"invoice"}); !matched {
+		t.Fatal("a word split by a soft hyphen must match its plain spelling")
+	}
+}
+
+func TestSnippetPrefersBodyContextOverHeaderText(t *testing.T) {
+	t.Parallel()
+	item := messageRecord{Subject: "Receipt", SenderName: "Billing", SenderAddress: "invoice+statements@example.com"}
+	document := mimeDocument{Content: "Thanks for your order. The invoice number is 42 and it is paid."}
+	representations := buildSearchTextRepresentations(item, document)
+	got := snippetForMatch(&representations, document.Content, "invoice")
+	if !strings.Contains(got, "invoice number is 42") || strings.Contains(got, "Billing") {
+		t.Fatalf("snippet = %q, want body context", got)
+	}
+	headerOnly := snippetForMatch(&representations, "unrelated body", "statements")
+	if !strings.Contains(headerOnly, "statements@example.com") {
+		t.Fatalf("header-only hit snippet = %q, want the header text", headerOnly)
+	}
+}
+
+func TestSearchAndFilterAcceptMailboxRolesLikeList(t *testing.T) {
+	t.Parallel()
+	fixture := createSearchFixtureData(t, 0, true)
+	store, err := Open(context.Background(), Config{MailRoot: fixture.mailRoot, ActiveAccountURLs: fixture.activeAccountURLs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestResource(t, store, "role selector fixture store")
+	byRef, err := store.SearchMessages(context.Background(), mustPrepareQuery(t, mail.Query{MailboxRef: fixture.inboxRef, Limit: 10}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selector := range []string{"inbox", "INBOX"} {
+		byRole, err := store.SearchMessages(context.Background(), mustPrepareQuery(t,
+			mail.Query{MailboxRef: selector, AccountRef: fixture.accountRef, Limit: 10}))
+		if err != nil {
+			t.Fatalf("selector %q: %v", selector, err)
+		}
+		if len(byRole.Messages) == 0 || len(byRole.Messages) != len(byRef.Messages) {
+			t.Fatalf("selector %q returned %d rows, ref returned %d", selector, len(byRole.Messages), len(byRef.Messages))
+		}
+		// Without --account the role covers the inbox of every account.
+		acrossAccounts, err := store.SearchMessages(context.Background(), mustPrepareQuery(t, mail.Query{MailboxRef: selector, Limit: 10}))
+		if err != nil {
+			t.Fatalf("selector %q across accounts: %v", selector, err)
+		}
+		unified, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(acrossAccounts.Messages) != len(unified.Messages) || len(acrossAccounts.Messages) < len(byRole.Messages) {
+			t.Fatalf("selector %q across accounts returned %d rows, the unified inbox has %d, one account has %d",
+				selector, len(acrossAccounts.Messages), len(unified.Messages), len(byRole.Messages))
+		}
+	}
+	if _, err := store.SearchMessages(context.Background(), mustPrepareQuery(t, mail.Query{MailboxRef: "No/Such/Folder", Limit: 10})); err == nil ||
+		!strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unknown selector error = %v, want not_found", err)
+	}
+}
+
+func mustPrepareQuery(t *testing.T, query mail.Query) mail.PreparedQuery {
+	t.Helper()
+	prepared, err := mail.PrepareQuery(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
 func TestNormalizedSearchTermsDeduplicates(t *testing.T) {
 	t.Parallel()
 	got := normalizedSearchTerms(" Alpha beta ALPHA beta gamma ")

@@ -100,10 +100,10 @@
     },
     {
       "name": "--mailbox",
-      "value_type": "ref",
+      "value_type": "mailbox_selector",
       "takes_value": true,
       "value_required": true,
-      "description": "mailbox reference"
+      "description": "mailbox ref, role, or exact path; a role covers every account unless --account is given"
     },
     {
       "name": "--max-bytes",

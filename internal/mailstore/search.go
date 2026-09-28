@@ -52,6 +52,20 @@ func (s *Store) SearchMessages(ctx context.Context, prepared mail.PreparedQuery)
 	if prepared.Cursor != nil && prepared.Cursor.StoreUUID != s.storeUUID {
 		return mail.SearchPage{}, &mail.ValidationError{Code: "invalid_cursor", Message: "search cursor belongs to a different Mail store"}
 	}
+	if selector := prepared.Query.MailboxRef; selector != "" && !strings.HasPrefix(selector, "mbx_") {
+		// A role or exact path resolves like `messages list --mailbox`; without
+		// --account it covers the matching mailbox of every account.
+		selected, err := s.selectedSearchMailboxes(ctx, selector, prepared.Query.AccountRef)
+		if err != nil {
+			return mail.SearchPage{}, err
+		}
+		if len(selected) == 1 {
+			prepared.Query.MailboxRef = selected[0].Ref
+		} else {
+			prepared.Query.MailboxRef = ""
+			prepared.MailboxScope = selected
+		}
+	}
 	indexRevision, err := s.searchIndexRevision(ctx)
 	if err != nil {
 		return mail.SearchPage{}, err
@@ -130,7 +144,27 @@ func (s *Store) prepareSearchPlan(
 	`
 	arguments := make([]any, 0, 16)
 	where := []string{"m.deleted = 0"}
-	if mailbox != nil {
+	scopeRowIDs, err := s.scopeMailboxRowIDs(ctx, prepared.MailboxScope)
+	if err != nil {
+		return searchPlan{}, false, err
+	}
+	if len(prepared.MailboxScope) > 0 && len(scopeRowIDs) == 0 {
+		return searchPlan{}, true, nil
+	}
+	if len(scopeRowIDs) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(scopeRowIDs)), ",")
+		cte = `WITH membership(id) AS (
+			SELECT ROWID FROM messages WHERE mailbox IN (` + placeholders + `)
+			UNION
+			SELECT message_id FROM labels WHERE mailbox_id IN (` + placeholders + `)
+		) `
+		from = strings.Replace(from, "FROM messages m", "FROM membership membership JOIN messages m ON m.ROWID = membership.id", 1)
+		for range 2 {
+			for _, rowID := range scopeRowIDs {
+				arguments = append(arguments, rowID)
+			}
+		}
+	} else if mailbox != nil {
 		cte = `WITH membership(id) AS (
 			SELECT ROWID FROM messages WHERE mailbox = ?
 			UNION
@@ -151,6 +185,29 @@ func (s *Store) prepareSearchPlan(
 		prefixSQL: cte, fromWhereSQL: from + " WHERE " + strings.Join(where, " AND "),
 		arguments: arguments, mailbox: mailbox,
 	}, false, nil
+}
+
+// scopeMailboxRowIDs maps the mailboxes of a multi-account selector to their
+// Envelope Index rows; a mailbox with no local rows contributes nothing.
+func (s *Store) scopeMailboxRowIDs(ctx context.Context, scope []mail.Mailbox) ([]int64, error) {
+	if len(scope) == 0 {
+		return nil, nil
+	}
+	records, err := s.mailboxRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rowIDs := make([]int64, 0, len(scope))
+	for _, candidate := range scope {
+		mailbox, err := mailref.DecodeMailbox(candidate.Ref)
+		if err != nil {
+			return nil, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
+		}
+		if record, found := findMailboxRecord(records, mailbox.AccountID, mailbox.Path); found {
+			rowIDs = append(rowIDs, record.RowID)
+		}
+	}
+	return rowIDs, nil
 }
 
 func (s *Store) resolveSearchScope(

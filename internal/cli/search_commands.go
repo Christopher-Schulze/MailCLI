@@ -103,7 +103,7 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.StringVar(&query.After, "after", "", "received at or after RFC3339 or YYYY-MM-DD")
 	flags.StringVar(&query.Before, "before", "", "received before RFC3339 or YYYY-MM-DD")
 	flags.StringVar(&query.AccountRef, "account", "", "account ref")
-	flags.StringVar(&query.MailboxRef, "mailbox", "", "mailbox ref")
+	flags.StringVar(&query.MailboxRef, "mailbox", "", "mailbox ref, role, or exact path; a role covers every account unless --account is given")
 	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size (1-200)")
 	flags.StringVar(&query.Cursor, "cursor", "", "pagination cursor")
 	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total")

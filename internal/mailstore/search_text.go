@@ -138,6 +138,21 @@ func containsAllFoldedSearchTerms(folded string, terms []string) (bool, string) 
 	return len(terms) > 0, first
 }
 
+// snippetForMatch cuts the snippet around the first hit in the message body
+// when the body contains the term; a hit that exists only in the header text
+// (subject, sender, summary, recipients, attachment names) uses that text.
+func snippetForMatch(representations *searchTextRepresentations, content string, term string) string {
+	if term != "" && content != "" {
+		var builder collapsedSearchTextBuilder
+		builder.Add(content)
+		body := newSearchTextRepresentations(builder.String())
+		if strings.Contains(body.folded, foldSearchText(term)) {
+			return snippetForSearchText(&body, term)
+		}
+	}
+	return snippetForSearchText(representations, term)
+}
+
 func snippetFor(value string, term string) string {
 	value = collapseSearchText(value)
 	representations := newSearchTextRepresentations(value)
@@ -271,11 +286,26 @@ func (b *collapsedSearchTextBuilder) Add(value string) {
 	b.add(norm.NFC.String(value))
 }
 
+// isInvisibleFormatRune reports the zero-width and hyphenation characters that
+// marketing mail pads its preview text with. They carry no meaning, split words
+// and fill snippets, so search text drops them.
+func isInvisibleFormatRune(r rune) bool {
+	switch r {
+	case 0x00AD, 0x034F, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF:
+		return true
+	default:
+		return false
+	}
+}
+
 func (b *collapsedSearchTextBuilder) add(value string) {
 	if value != "" && b.output.Len() > 0 {
 		b.pendingSpace = true
 	}
 	for _, r := range value {
+		if isInvisibleFormatRune(r) {
+			continue
+		}
 		if unicode.IsSpace(r) {
 			b.pendingSpace = b.output.Len() > 0
 			continue

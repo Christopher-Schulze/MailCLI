@@ -13,6 +13,38 @@ import (
 )
 
 func (s *Store) selectedListMailboxes(ctx context.Context, request mail.ListMessagesRequest) ([]mail.Mailbox, error) {
+	selected, err := s.matchedListMailboxes(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if request.MailboxRef != "" && len(selected) != 1 {
+		return nil, listMailboxSelectionError(selected)
+	}
+	return selected, nil
+}
+
+// selectedSearchMailboxes resolves a role or exact path for search and filter:
+// every account contributes its own matching mailbox, so `inbox` covers the
+// inbox of each account. Two matches inside one account stay ambiguous.
+func (s *Store) selectedSearchMailboxes(ctx context.Context, selector string, accountRef string) ([]mail.Mailbox, error) {
+	selected, err := s.matchedListMailboxes(ctx, mail.ListMessagesRequest{MailboxRef: selector, AccountRef: accountRef})
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, mailbox := range selected {
+		if seen[mailbox.AccountRef] {
+			return nil, listMailboxSelectionError(selected)
+		}
+		seen[mailbox.AccountRef] = true
+	}
+	if len(selected) == 0 {
+		return nil, listMailboxSelectionError(selected)
+	}
+	return selected, nil
+}
+
+func (s *Store) matchedListMailboxes(ctx context.Context, request mail.ListMessagesRequest) ([]mail.Mailbox, error) {
 	mailboxes, err := s.ListMailboxes(ctx, mail.ListMailboxesRequest{AccountRef: request.AccountRef})
 	if err != nil {
 		return nil, err
@@ -37,9 +69,6 @@ func (s *Store) selectedListMailboxes(ctx context.Context, request mail.ListMess
 			return nil, err
 		}
 		selected = append(selected, matches...)
-	}
-	if request.MailboxRef != "" && len(selected) != 1 {
-		return nil, listMailboxSelectionError(selected)
 	}
 	return selected, nil
 }
