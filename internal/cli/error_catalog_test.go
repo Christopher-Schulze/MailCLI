@@ -6,12 +6,15 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"mailcli/internal/mail"
 )
 
 var errorCodeLiteral = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)+$`)
@@ -190,5 +193,126 @@ func TestErrorCatalogIsPublishedWithOutputs(t *testing.T) {
 		if !slices.Equal(entry.Commands, []string{"sync"}) {
 			t.Fatalf("scoped entry %s lists %v", entry.Code, entry.Commands)
 		}
+	}
+}
+
+func catalogGroup(t *testing.T, code, command string) errorCatalogGuidance {
+	t.Helper()
+	for _, entry := range errorCatalog() {
+		if entry.Code != code {
+			continue
+		}
+		for _, group := range entry.Guidance {
+			if slices.Contains(group.Commands, command) {
+				return group
+			}
+		}
+	}
+	t.Fatalf("catalog has no group for %s on %s", code, command)
+	return errorCatalogGuidance{}
+}
+
+func TestErrorCatalogNamesRecoveryCommands(t *testing.T) {
+	inspect := &errorCatalogRecovery{Action: "inspect", Command: "drafts.inspect", Args: []string{"--ref", "REF", "--json"}}
+	inspectFull := &errorCatalogRecovery{Action: "inspect", Command: "drafts.inspect", Args: []string{"--ref", "REF", "--view", "full", "--json"}}
+	version := &errorCatalogRecovery{Action: "observe", Command: "version", Args: []string{"--json"}}
+	accounts := &errorCatalogRecovery{Action: "observe", Command: "accounts.list", Args: []string{"--json"}}
+	tests := []struct {
+		code, command string
+		want          *errorCatalogRecovery
+	}{
+		{"draft_revision_conflict", "drafts.update", inspectFull},
+		{"draft_revision_conflict", "drafts.send", inspectFull},
+		{"draft_revision_unavailable", "drafts.send", inspect},
+		{"draft_busy", "drafts.update", inspect},
+		{"draft_busy", "drafts.send", inspect},
+		{"draft_busy", "drafts.create", nil},
+		{"draft_busy", "drafts.list", nil},
+		{"smtp_source_invalid", "drafts.send", inspect},
+		{"update_install_failed", "update", version},
+		{"operation_failed", "update", version},
+		{"operation_timeout", "update", version},
+		{"finalization_failed", "update", version},
+		{"operation_failed", "send.setup", accounts},
+		{"operation_timeout", "send.setup", accounts},
+		{"finalization_failed", "send.setup", accounts},
+		{"operation_failed", "messages.get", nil},
+	}
+	for _, test := range tests {
+		got := catalogGroup(t, test.code, test.command)
+		if !reflect.DeepEqual(got.Recovery, test.want) {
+			t.Errorf("%s on %s recovery = %+v, want %+v", test.code, test.command, got.Recovery, test.want)
+		}
+		if got.Next != "check_state" || got.EffectCertainty != mail.EffectNone {
+			t.Errorf("%s on %s next=%s effect=%s; a recovery command must keep check_state without a proven effect", test.code, test.command, got.Next, got.EffectCertainty)
+		}
+	}
+}
+
+func TestErrorCatalogRecoveryMatchesRuntime(t *testing.T) {
+	const ref = "draft_runtime"
+	fill := func(recovery *errorCatalogRecovery) []string {
+		args := slices.Clone(recovery.Args)
+		for index, arg := range args {
+			if arg == "REF" {
+				args[index] = ref
+			}
+		}
+		return args
+	}
+	failures := map[string]error{
+		"draft_busy":              &mail.OperationError{Code: "draft_busy", Message: "busy", DraftRef: ref},
+		"draft_revision_conflict": &mail.DraftRevisionConflict{Ref: ref, ExpectedRevision: "a", CurrentRevision: "b"},
+	}
+	for code, failure := range failures {
+		group := catalogGroup(t, code, "drafts.update")
+		runtime := newErrorData("drafts.update", responseData{}, failure).Guidance.Recovery
+		if runtime.Command != group.Recovery.Command || !slices.Equal(runtime.Args, fill(group.Recovery)) {
+			t.Errorf("%s runtime recovery %s %v differs from the catalog template %s %v", code, runtime.Command, runtime.Args, group.Recovery.Command, fill(group.Recovery))
+		}
+	}
+	update := newErrorData("update", responseData{UpdateResult: &updateResult{FailedPhase: updatePhaseInstaller}}, updateFailure("update_install_failed", "install release: failed")).Guidance.Recovery
+	group := catalogGroup(t, "update_install_failed", "update")
+	if update.Command != group.Recovery.Command || !slices.Equal(update.Args, group.Recovery.Args) {
+		t.Errorf("update_install_failed runtime recovery %s %v differs from the catalog template %s %v", update.Command, update.Args, group.Recovery.Command, group.Recovery.Args)
+	}
+}
+
+func TestErrorCatalogReclassifiedCodes(t *testing.T) {
+	tests := []struct {
+		code, command, next string
+	}{
+		{"account_binding_changed", "send.setup", "ask_user"},
+		{"bridge_cleanup_failed", "doctor", "ask_user"},
+		{"mail_access_gate_failed", "accounts.list", "ask_user"},
+		{"mail_automation_unavailable", "messages.list", "ask_user"},
+		{"special_use_mailbox_unresolved", "accounts.list", "ask_user"},
+		{"imap_quota_exceeded", "messages.get", "fix_input"},
+		{"imap_command_rejected", "messages.get", "stop"},
+	}
+	for _, test := range tests {
+		group := catalogGroup(t, test.code, test.command)
+		if group.Next != test.next || group.EffectCertainty != mail.EffectNone {
+			t.Errorf("%s on %s next=%s effect=%s, want next=%s with no effect", test.code, test.command, group.Next, group.EffectCertainty, test.next)
+		}
+	}
+}
+
+func TestErrorCatalogLeavesOnlyNamedResidueWithoutRecovery(t *testing.T) {
+	allowed := []string{"draft_busy", "hydration_failed", "operation_failed", "store_profile_unverified"}
+	groups := 0
+	for _, entry := range errorCatalog() {
+		for _, group := range entry.Guidance {
+			if group.EffectCertainty != mail.EffectNone || group.Next != "check_state" || group.Recovery != nil {
+				continue
+			}
+			groups++
+			if !slices.Contains(allowed, entry.Code) {
+				t.Errorf("%s on %v is a no-effect check_state group without a recovery command", entry.Code, group.Commands)
+			}
+		}
+	}
+	if groups > 4 {
+		t.Errorf("%d no-effect check_state groups without a recovery command; the budget is 4", groups)
 	}
 }

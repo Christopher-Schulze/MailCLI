@@ -176,6 +176,10 @@ func GuidanceForError(command string, err error) OperationGuidance {
 		switch code {
 		case "mail_busy", "mail_automation_timeout", "mail_process_changed":
 			return guidanceForRead()
+		case transport.CodeIMAPQuotaExceeded:
+			return guidanceForReadCorrection("Free space in the mailbox or choose one with sufficient quota, then retry the read.")
+		case transport.CodeIMAPCommandRejected:
+			return guidanceForTerminalRead()
 		case "invalid_request":
 			// The bridge uses this for malformed internal request envelopes too,
 			// so a supported read cannot safely treat it as caller input.

@@ -409,7 +409,8 @@ Inspect `ok`, `error.code`, `error.guidance`, retained `data` and every batch it
 Follow `next`: a completed, partial or unknown effect requires checking state and never permits blind replay; only explicitly transient no-effect failures permit unchanged replay.
 Codes surface verbatim in `error.code`; follow their specific remediation rather than retrying with different flags.
 Typed store and transport codes such as `mail_store_unavailable`, `unsupported_mail_store_schema`, `unsafe_message_source`, `local_only_mailbox` and `message_already_trashed` name their condition precisely.
-The error catalog lists every code with its meaning and guidance.
+The error catalog lists every code with its meaning and guidance; a group's `recovery` names the observation command the runtime always has for it (`REF` marks the draft reference it fills in), and `mail_access_gate_failed`, `mail_automation_unavailable`, `bridge_cleanup_failed`, `account_binding_changed` and `special_use_mailbox_unresolved` report `ask_user` because only the user can repair them.
+Codes that stay `check_state` without a command are generic or evidence-only: `operation_failed`, `store_profile_unverified`, an untyped `hydration_failed` whose origin stays unknown, and `draft_busy` on commands without a draft reference.
 
 Generic codes: `unknown_command` (unrecognized command), `invalid_argument` (wrong flag or operand, exit `2`), `invalid_input` (malformed structured input, exit `2`), `missing_required` (omitted required flag, exit `2`), `confirmation_required` (the action needs `--confirm` after explicit user authorization) and `operation_failed` (runtime failure in store, IMAP, SMTP or Mail.app, exit `1`).
 `draft_operation_canceled` means a draft command's context was canceled before completion, distinct from a confirmed transport or Mail.app failure.
