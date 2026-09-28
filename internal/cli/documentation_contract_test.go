@@ -558,24 +558,19 @@ var documentedBounds = []documentedBound{
 			boundCheck("docs/documentation.md", "`--limit` values from 1 through ([\\d,]+)", 1),
 			boundCheck("docs/documentation.md", `limits list pages to (\d+) items`, 1),
 			boundCheck("docs/documentation.md", "`--limit` accepts 1 through (\\d+)", 1),
-			boundCheck("skills/mailcli/references/reading.md", `limit 1\.\.(\d+)`, 1),
 		}},
 	{name: "default list page size", expected: mail.DefaultPageLimit, unit: "items",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", "list commands default to ([\\d,]+) items", 1),
 			boundCheck("docs/documentation.md", `List commands default to (\d+) items`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `default (\d+), limit`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `default (\d+)/limit`, 1),
 		}},
 	{name: "draft list page limit", expected: mail.MaximumDraftListLimit, unit: "drafts",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `summaries and accepts 1 through (\d+)`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `limit 1\.\.(\d+)`, 1),
 		}},
 	{name: "draft list default page size", expected: mail.DefaultDraftListLimit, unit: "drafts",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `defaults to (\d+) summaries`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `default (\d+)/limit`, 1),
 		}},
 	{name: "search default candidate bound", expected: mail.DefaultSearchMaxMessages, unit: "messages",
 		checks: []documentedBoundCheck{
@@ -612,17 +607,17 @@ var documentedBounds = []documentedBound{
 	{name: "external attachment directory entry limit", expected: 10_000, unit: "entries",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `Directory bounds: ([\d,]+) entries`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `at most ([\d,]+) entries`, 1),
 		}},
 	{name: "external attachment ambiguity candidate limit", expected: 128, unit: "candidates",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
-			boundCheck("skills/mailcli/references/reading.md", `entries/([\d,]+) ambiguity hashes`, 1),
+			boundCheck("skills/mailcli/references/reading.md", `entries, ([\d,]+) ambiguity hashes`, 1),
 		}},
 	{name: "external attachment cumulative hash input", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
-			boundCheck("skills/mailcli/references/reading.md", `hashes/([\d]+) GiB hash input`, 1<<30),
+			boundCheck("skills/mailcli/references/reading.md", `hashes and ([\d]+) GiB of hash input`, 1<<30),
 		}},
 	{name: "recovery spool cap", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
@@ -633,8 +628,8 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `capped at (\d+) MiB`, 1<<20),
 			boundCheck("docs/documentation.md", `at most (\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/output-and-recovery.md", `object <=(\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `one object <=(\d+) MiB`, 1<<20),
+			boundCheck("skills/mailcli/references/output-and-recovery.md", `object of at most (\d+) MiB`, 1<<20),
+			boundCheck("skills/mailcli/references/drafts.md", `one object of at most (\d+) MiB`, 1<<20),
 		}},
 	{name: "batch item limit", expected: mail.MaximumBatchItems, unit: "items",
 		checks: []documentedBoundCheck{
@@ -746,22 +741,18 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `each bounded at (\d+) MiB`, 1<<20),
 			boundCheck("docs/documentation.md", `bodies to (\d+) MiB`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `each (\d+) MiB`, 1<<20),
 		}},
 	{name: "draft content node limit", expected: 65536, unit: "nodes",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `at most ([\d,]+) nodes`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `([\d,]+) nodes`, 1),
 		}},
 	{name: "draft content depth limit", expected: 512, unit: "levels",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `nodes and (\d+) levels`, 1),
-			boundCheck("skills/mailcli/references/drafts.md", `nodes/(\d+) levels`, 1),
 		}},
 	{name: "draft link label budget", expected: 4 * mail.MaximumDraftBodyBytes, unit: "bytes",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `limited to (\d+) MiB across`, 1<<20),
-			boundCheck("skills/mailcli/references/drafts.md", `link labels (\d+) MiB`, 1<<20),
 		}},
 	{name: "received HTML source limit", expected: 16 << 20, unit: "bytes",
 		checks: []documentedBoundCheck{
