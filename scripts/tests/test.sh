@@ -61,7 +61,7 @@ fi
 unset MAILCLI_BINARY_DESTINATION MAILCLI_SKILL_DESTINATION
 
 MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
-MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-2}"
+MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-4}"
 
 # Gate builds must not rewrite the ignored production binary: installer and
 # release tests compile into private output so the lease's ignored-asset
@@ -183,31 +183,47 @@ if [[ "${1:-}" == --core-source ]]; then
   declare -f validate_product_contract run_go_checks run_core_checks
   exit 0
 fi
-if [[ "${1:-}" != --core-only ]]; then
+if [[ "${1:-}" == --core-only ]]; then
+  run_core_checks
+  exit 0
+fi
+
+# Shell regressions run in one ordered lane beside the Go checks; the lane's
+# output is printed once it finishes.
+run_shell_lane() {
+  set -euo pipefail
   run_shell_test scripts/tests/test-preflight-cache.sh
   run_shell_test scripts/tests/test-bootstrap.sh
   run_shell_test scripts/tests/test-benchmark-summary.sh
   run_shell_test scripts/tests/test-install-local.sh
   run_shell_test scripts/tests/test-skill-drift.sh
-fi
+  run_shell_test scripts/tests/test-write-coordination.sh
+  run_shell_test scripts/tests/test-commit-authority.sh
+  run_shell_test scripts/tests/test-release-authority.sh
+  run_shell_test scripts/tests/test-staged-gate.sh
+  run_shell_test scripts/tests/test-verification-policy.sh
+  run_shell_test scripts/tests/test-fast-gate.sh
+  local REFS_BEFORE REFS_AFTER
+  REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/remotes refs/tags)"
+  run_shell_test scripts/tests/test-release.sh
+  REFS_AFTER="$(git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/remotes refs/tags)"
+  if [[ "${REFS_AFTER}" != "${REFS_BEFORE}" ]]; then
+    printf 'Local release verification changed branch, remote-tracking, or tag refs\n' >&2
+    exit 1
+  fi
+  printf 'Local release verification preserved branch, remote-tracking, and tag refs\n'
+}
+SHELL_LANE_LOG="${MAILCLI_GATE_BUILD_ROOT}/shell-lane.log"
+set -m
+run_shell_lane >"${SHELL_LANE_LOG}" 2>&1 &
+SHELL_LANE_PID=$!
+set +m
+trap 'kill -TERM -- "-${SHELL_LANE_PID}" 2>/dev/null || true; wait "${SHELL_LANE_PID}" 2>/dev/null || true; rm -rf -- "${MAILCLI_GATE_BUILD_ROOT}"' EXIT
 run_core_checks
-[[ "${1:-}" != --core-only ]] || exit 0
-run_shell_test scripts/tests/test-write-coordination.sh
-run_shell_test scripts/tests/test-commit-authority.sh
-run_shell_test scripts/tests/test-release-authority.sh
-run_shell_test scripts/tests/test-staged-gate.sh
-run_shell_test scripts/tests/test-verification-policy.sh
-run_shell_test scripts/tests/test-fast-gate.sh
-RELEASE_REFS_BEFORE="$(git for-each-ref --format='%(refname) %(objectname)' \
-  refs/heads refs/remotes refs/tags)"
-run_shell_test scripts/tests/test-release.sh
-RELEASE_REFS_AFTER="$(git for-each-ref --format='%(refname) %(objectname)' \
-  refs/heads refs/remotes refs/tags)"
-if [[ "${RELEASE_REFS_AFTER}" != "${RELEASE_REFS_BEFORE}" ]]; then
-  printf 'Local release verification changed branch, remote-tracking, or tag refs\n' >&2
-  exit 1
-fi
-printf 'Local release verification preserved branch, remote-tracking, and tag refs\n'
+SHELL_LANE_STATUS=0
+wait "${SHELL_LANE_PID}" || SHELL_LANE_STATUS=$?
+cat "${SHELL_LANE_LOG}"
+[[ "${SHELL_LANE_STATUS}" == 0 ]] || exit "${SHELL_LANE_STATUS}"
 
 # Opt-in live gates. Each stage prints an explicit skip line when its flag is
 # unset so the default suite stays free of live prompts and live coverage is

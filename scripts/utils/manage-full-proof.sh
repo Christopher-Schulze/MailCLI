@@ -56,7 +56,7 @@ full_identity() {
       [[ -x "${TOOL_PATH}" ]] || { printf 'Full proof requires %s\n' "${TOOL}" >&2; return 1; }
       shasum -a 256 "${TOOL_PATH}" | awk '{print $1}' || return 1
     done
-    printf 'cpus=%s\npackages=%s\n' "${MAILCLI_TEST_CPUS:-4}" "${MAILCLI_TEST_PACKAGES:-2}"
+    printf 'cpus=%s\npackages=%s\n' "${MAILCLI_TEST_CPUS:-4}" "${MAILCLI_TEST_PACKAGES:-4}"
   } | shasum -a 256 | awk '{print $1}'
 }
 

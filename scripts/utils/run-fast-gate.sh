@@ -12,7 +12,7 @@ MODE="$4"
 LINT_RECEIPT="${5:-}"
 TASK_IDS="${6:-}"
 MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
-MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-2}"
+MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-4}"
 for VALUE in "${MAILCLI_TEST_CPUS}" "${MAILCLI_TEST_PACKAGES}"; do
   [[ "${VALUE}" =~ ^[1-9][0-9]*$ ]] || { printf 'Verification concurrency must be a positive integer\n' >&2; exit 2; }
 done
@@ -97,7 +97,7 @@ if [[ "${MODE}" == --fast ]]; then
   if [[ "${#PACKAGES[@]}" -gt 0 ]]; then
     printf 'selected_package=%s\n' "${PACKAGES[@]}"
     MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \
-      go test -mod=readonly -vet=off -count=1 -p "${MAILCLI_TEST_PACKAGES:-2}" "${PACKAGES[@]}"
+      go test -mod=readonly -vet=off -count=1 -p "${MAILCLI_TEST_PACKAGES:-4}" "${PACKAGES[@]}"
   fi
   if [[ "${CLI_SELECTED}" == false && "$(jq -r '.Documentation' "${TEST_ROOT}/plan")" == true ]]; then
     MAILCLI_ROOT="${PRODUCT_ROOT}" MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \

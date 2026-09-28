@@ -220,6 +220,20 @@ func TestInstallerSharedDescriptorRemainsLockedAfterChildExit(t *testing.T) {
 
 func TestInstallerDirectLockWaitIsBounded(t *testing.T) {
 	fixture := newInstallerFixture(t)
+	// The documented 30-second bound is pinned by the documentation contract;
+	// this test proves the bounded-wait mechanism with a 2-second copy.
+	installerPath := filepath.Join(fixture.packageRoot, "install.sh")
+	installer, err := os.ReadFile(installerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortened := strings.Replace(string(installer), "/usr/bin/lockf -s -t 30 9", "/usr/bin/lockf -s -t 2 9", 1)
+	if shortened == string(installer) {
+		t.Fatal("installer lock wait command not found")
+	}
+	if err := os.WriteFile(installerPath, []byte(shortened), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	lock, err := acquireUpdateLock(context.Background(), fixture.environment.homeDirectory)
 	if err != nil {
 		t.Fatal(err)
@@ -232,8 +246,8 @@ func TestInstallerDirectLockWaitIsBounded(t *testing.T) {
 	start := time.Now()
 	contender := startInstallerTestProcess(t, fixture)
 	finishInstallerTestProcess(t, contender, false)
-	if elapsed := time.Since(start); elapsed < 29*time.Second || elapsed > 35*time.Second ||
-		!strings.Contains(contender.output.String(), "wait exceeded 30 seconds") {
+	if elapsed := time.Since(start); elapsed < 2*time.Second || elapsed > 8*time.Second ||
+		!strings.Contains(contender.output.String(), "Another MailCLI installation holds the lock; wait exceeded") {
 		t.Fatalf("lock wait = %s: %s", elapsed, contender.output.String())
 	}
 	if _, err := os.Stat(fixture.stateRoot); !errors.Is(err, os.ErrNotExist) {
@@ -300,6 +314,7 @@ func TestInstallerRecoversKilledOwnerAndPreservesReplacements(t *testing.T) {
 	for _, phase := range []string{"binary", "skill"} {
 		for _, replacement := range []string{"none", "destination", "backup"} {
 			t.Run(phase+"/"+replacement, func(t *testing.T) {
+				t.Parallel()
 				fixture := newInstallerFixture(t)
 				destination := fixture.environment.executablePath
 				if phase == "skill" {
