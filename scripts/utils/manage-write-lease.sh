@@ -238,7 +238,7 @@ ignored_asset_snapshot() {
   git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard -z |
     while IFS= read -r -d '' RELATIVE_PATH; do
       case "${RELATIVE_PATH}" in
-        docs/tasks.md | docs/tasks | docs/tasks/*) continue ;;
+        docs/tasks.md | docs/tasks | docs/tasks/* | graphify-out/*) continue ;;
       esac
       require_snapshot_path "${RELATIVE_PATH}"
       FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
@@ -251,7 +251,7 @@ ignored_asset_snapshot() {
   git -C "${MAILCLI_ROOT}" ls-files --others --ignored --exclude-standard --directory -z |
     while IFS= read -r -d '' RELATIVE_PATH; do
       RELATIVE_PATH="${RELATIVE_PATH%/}"
-      case "${RELATIVE_PATH}" in docs/tasks | docs/tasks/*) continue ;; esac
+      case "${RELATIVE_PATH}" in docs/tasks | docs/tasks/* | graphify-out | graphify-out/*) continue ;; esac
       [[ -d "${MAILCLI_ROOT}/${RELATIVE_PATH}" &&
         ! -L "${MAILCLI_ROOT}/${RELATIVE_PATH}" ]] || continue
       find "${MAILCLI_ROOT}/${RELATIVE_PATH}" -type d -print0 |
@@ -279,6 +279,7 @@ verify_ignored_asset_scope() {
   if OUT_OF_SCOPE="$(diff -u \
     <(awk -F '\t' 'NR == FNR { allowed[$0] = 1; next }
       $1 == "docs/tasks.md" || $1 == "docs/tasks" || index($1, "docs/tasks/") == 1 { next }
+      $1 == "graphify-out" || index($1, "graphify-out/") == 1 { next }
       !($1 in allowed)' \
       "$(lease_file allowed_paths)" "${BASELINE}") \
     <(printf '%s' "${CURRENT}" |

@@ -97,7 +97,9 @@ git -C "${TEST_REPOSITORY}" checkout -q --detach "${INITIAL_COMMIT}"
 mkdir -p "${TEST_REPOSITORY}/docs/tasks"
 printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
-printf '/docs/tasks.md\n/docs/tasks/\n/ignored/\n' >"${TEST_REPOSITORY}/.git/info/exclude"
+printf '/docs/tasks.md\n/docs/tasks/\n/graphify-out/\n/ignored/\n' >"${TEST_REPOSITORY}/.git/info/exclude"
+mkdir -p "${TEST_REPOSITORY}/graphify-out"
+printf 'graph baseline\n' >"${TEST_REPOSITORY}/graphify-out/graph.json"
 mkdir -p "${TEST_REPOSITORY}/ignored/nested" "${TEST_REPOSITORY}/ignored/empty"
 printf 'first\n' >"${TEST_REPOSITORY}/ignored/one.txt"
 printf 'nested\n' >"${TEST_REPOSITORY}/ignored/nested/keep.txt"
@@ -177,6 +179,10 @@ done
 # Private planning changes do not invalidate tracked-product authority.
 printf 'private board update\n' >>"${TEST_REPOSITORY}/docs/tasks.md"
 printf 'private detail update\n' >>"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
+# Regenerating the ignored Graphify cache does not invalidate the lease either.
+printf 'graph refresh\n' >>"${TEST_REPOSITORY}/graphify-out/graph.json"
+mkdir -p "${TEST_REPOSITORY}/graphify-out/cache"
+printf 'cache\n' >"${TEST_REPOSITORY}/graphify-out/cache/entry.json"
 
 # The canonical worktree spelling sees the lease that was acquired through the
 # differently spelled alias path.
