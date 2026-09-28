@@ -7,7 +7,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/emersion/go-message"
 	messageMail "github.com/emersion/go-message/mail"
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
@@ -144,6 +143,3 @@ func preferredExcerptText(plain, html string) string {
 	}
 	return mail.HTMLToPlainText([]byte(html))
 }
-
-// Keep charset registration supplied by the existing go-message import path.
-var _ = message.IsUnknownCharset

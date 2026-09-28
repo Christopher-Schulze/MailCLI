@@ -17,6 +17,7 @@ func TestExcerptMIMEFixtures(t *testing.T) {
 		{"html only", "Content-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <b>world</b></p>", "Hello world", true},
 		{"plain preferred", "Content-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>HTML</p>\r\n--x\r\nContent-Type: text/plain\r\n\r\nPlain\r\n--x--\r\n", "Plain", true},
 		{"invalid MIME", "no header boundary", "", false},
+		{"iso-8859-1", "Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nGr=FC=DFe aus M=FCnchen\r\n", "Grüße aus München", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			text, complete := excerptText(context.Background(), []byte(test.source))

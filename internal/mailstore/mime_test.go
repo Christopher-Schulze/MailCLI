@@ -48,6 +48,31 @@ func TestParseMIMEDocument(t *testing.T) {
 	}
 }
 
+func TestParseMIMEDocumentDecodesLegacyCharsets(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct{ name, source, want string }{
+		{"iso-8859-1 quoted-printable", "Content-Type: text/plain; charset=iso-8859-1\r\n" +
+			"Content-Transfer-Encoding: quoted-printable\r\n\r\nGr=FC=DFe aus M=FCnchen\r\n", "Grüße aus München"},
+		{"windows-1252 html", "Content-Type: text/html; charset=windows-1252\r\n" +
+			"Content-Transfer-Encoding: quoted-printable\r\n\r\n<p>Preis 5 =80</p>\r\n", "Preis 5 €"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document, err := parseMIMEDocument(strings.NewReader(test.source), false, false, false)
+			if err != nil || !document.Complete || len(document.MissingParts) != 0 || document.Content != test.want {
+				t.Fatalf("document = %#v, err = %v", document, err)
+			}
+			searched, err := parseMIMEDocument(strings.NewReader(test.source), false, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			folded := foldSearchText(buildSearchText(messageRecord{}, searched))
+			if matched, _ := containsAllFoldedSearchTerms(folded, normalizedSearchTerms(test.want)); !matched {
+				t.Fatalf("body search text %q does not match %q", folded, test.want)
+			}
+		})
+	}
+}
+
 func TestParseMIMEDocumentCanSkipAttachmentHashing(t *testing.T) {
 	t.Parallel()
 	source := []byte("Content-Type: multipart/mixed; boundary=b\r\n\r\n" +

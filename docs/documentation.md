@@ -525,6 +525,7 @@ Unified inbox and role/path selection require the supported local store and neve
 Message detail distinguishes normalized plain content, raw source, headers, attachment metadata, `content_source`, `content_complete` and `missing_parts`.
 Large bodies, raw MIME and attachment bytes are never included in list responses.
 MIME parsing selects one representation from each `multipart/alternative`, keeps mixed-part order, and marks malformed recipient or decoding data incomplete.
+Text in legacy charsets (ISO-8859-x, Windows-125x, Shift_JIS, GB18030, EUC-KR, Big5 and the other encodings known to `golang.org/x/text`) is decoded to UTF-8 for reads, excerpts and body search; an unknown charset keeps its raw bytes and adds `mime-decoding` to `missing_parts`.
 Attachment transfer-decoding errors and declared `X-Apple-Content-Length` shortfalls mark the message incomplete and list the MIME part path in `missing_parts`; recovered bytes and healthy attachment size and hash evidence remain available.
 
 Parsing uses one aggregate budget per message: 32 MiB of decoded text, 4,096 visited entities, 64 nesting levels, 8 MiB of retained part and header metadata, and 128 MiB of source bytes.
