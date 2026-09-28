@@ -4,6 +4,8 @@ Review local create/update before authorized send/destruction.
 
 --ref or positional REF; all supplied refs must match, options may surround. Open/adopt: store refs; otherwise local. Scripts/recovery: --ref.
 
+Reply/forward set from to the source account's address when that is unique; else from is empty. Draft views carry from and send_blockers (from_missing, recipients_missing): resolve every blocker (--from ADDRESS on update) before send; blockers are not part of the revision.
+
 - JSON 1 MiB, --max-bytes <=64 MiB. List fields: age_days/created_at/updated_at or all alone; core refs/review/account/format/claims/page stay. Preview never truncates: `drafts inspect --ref REF --view full --export /absolute/new/path --json` for overflow.
 
 - Rich bounds: source/Markdown/HTML/plain each 4 MiB, tree 65536 nodes/512 levels, link labels 16 MiB. Review persisted loss diagnostics/sanitization; rejected/canceled render is not saved.

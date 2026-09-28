@@ -5,9 +5,83 @@ import (
 	"fmt"
 	stdmail "net/mail"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"mailcli/internal/mailref"
 )
+
+func TestInferDerivedSenderUsesTheAccountThatHoldsTheSourceMessage(t *testing.T) {
+	t.Parallel()
+	accountRef := func(id string) string {
+		ref, err := mailref.EncodeAccount(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	messageRef := func(id string) string {
+		ref, err := mailref.EncodeMessage(mailref.Message{
+			AccountID: id, MailboxPath: []string{"INBOX"}, LibraryID: "1", ExpectedMessageID: "m",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	gateway := &gatewayStub{accounts: []Account{
+		{Ref: accountRef("ACC-GMAIL"), State: "ok", EmailAddresses: []string{"me@gmail.com"},
+			ConfiguredSenderAliases: []string{"alias@example.com"}},
+		{Ref: accountRef("ACC-ICLOUD"), State: "ok", EmailAddresses: []string{"me@icloud.com"}},
+		{Ref: accountRef("ACC-MANY"), State: "ok", EmailAddresses: []string{"a@many.example", "b@many.example"}},
+		{Ref: accountRef("ACC-DEGRADED"), State: "degraded", EmailAddresses: []string{"x@degraded.example"}},
+	}}
+	service := NewService(gateway)
+	for _, test := range []struct {
+		name        string
+		account     string
+		source      ThreadSource
+		wantFrom    string
+		wantAccount string
+	}{
+		{"addressee alias wins", "ACC-GMAIL", ThreadSource{To: []Recipient{{Address: "other@example.com"}, {Address: "Alias@Example.com"}}}, "alias@example.com", accountRef("ACC-GMAIL")},
+		{"cc counts as addressee", "ACC-MANY", ThreadSource{To: []Recipient{{Address: "x@elsewhere.example"}}, CC: []Recipient{{Address: "b@many.example"}}}, "b@many.example", accountRef("ACC-MANY")},
+		{"single address is the fallback", "ACC-ICLOUD", ThreadSource{To: []Recipient{{Address: "list@example.com"}}}, "me@icloud.com", accountRef("ACC-ICLOUD")},
+		{"several addresses without a match stay open", "ACC-MANY", ThreadSource{To: []Recipient{{Address: "list@example.com"}}}, "", ""},
+		{"degraded account stays open", "ACC-DEGRADED", ThreadSource{To: []Recipient{{Address: "x@degraded.example"}}}, "", ""},
+		{"unknown account stays open", "ACC-NONE", ThreadSource{To: []Recipient{{Address: "me@gmail.com"}}}, "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			from, account := service.InferDerivedSender(context.Background(), messageRef(test.account), test.source)
+			if from != test.wantFrom || account != test.wantAccount {
+				t.Fatalf("InferDerivedSender() = %q, %q; want %q, %q", from, account, test.wantFrom, test.wantAccount)
+			}
+		})
+	}
+	if from, account := service.InferDerivedSender(context.Background(), "msg_not-a-ref", ThreadSource{}); from != "" || account != "" {
+		t.Fatalf("invalid ref inferred %q, %q", from, account)
+	}
+}
+
+func TestSendBlockersNameWhatStopsASend(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		draft Draft
+		want  []string
+	}{
+		{"ready", Draft{From: "me@example.com", To: []Recipient{{Address: "you@example.com"}}}, []string{}},
+		{"no sender", Draft{To: []Recipient{{Address: "you@example.com"}}}, []string{"from_missing"}},
+		{"blank sender and no recipients", Draft{From: "  "}, []string{"from_missing", "recipients_missing"}},
+		{"bcc counts as a recipient", Draft{From: "me@example.com", BCC: []Recipient{{Address: "you@example.com"}}}, []string{}},
+	} {
+		got := SendBlockers(test.draft)
+		if got == nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%s: SendBlockers() = %#v, want %#v", test.name, got, test.want)
+		}
+	}
+}
 
 func TestDeriveReplyInputDefaults(t *testing.T) {
 	t.Parallel()

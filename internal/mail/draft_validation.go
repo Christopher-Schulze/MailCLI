@@ -9,6 +9,25 @@ import (
 	"mailcli/internal/mailref"
 )
 
+// Send blocker codes.
+const (
+	SendBlockerFromMissing       = "from_missing"
+	SendBlockerRecipientsMissing = "recipients_missing"
+)
+
+// SendBlockers lists what stops a send of this draft today. It is derived
+// review evidence, never part of the draft revision.
+func SendBlockers(draft Draft) []string {
+	blockers := []string{}
+	if strings.TrimSpace(draft.From) == "" {
+		blockers = append(blockers, SendBlockerFromMissing)
+	}
+	if len(draft.To)+len(draft.CC)+len(draft.BCC) == 0 {
+		blockers = append(blockers, SendBlockerRecipientsMissing)
+	}
+	return blockers
+}
+
 func prepareDraft(request CreateDraftRequest) (Draft, error) {
 	return prepareDraftWithObserver(request, nil)
 }

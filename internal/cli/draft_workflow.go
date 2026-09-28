@@ -21,7 +21,7 @@ type draftPreview struct {
 	Ref                string                   `json:"ref"`
 	Revision           string                   `json:"revision"`
 	AccountRef         string                   `json:"account_ref,omitempty"`
-	From               string                   `json:"from,omitempty"`
+	From               string                   `json:"from"`
 	To                 []mail.Recipient         `json:"to"`
 	CC                 []mail.Recipient         `json:"cc"`
 	BCC                []mail.Recipient         `json:"bcc"`
@@ -31,6 +31,7 @@ type draftPreview struct {
 	Body               string                   `json:"body"`
 	ContentDiagnostics []mail.ContentDiagnostic `json:"content_diagnostics,omitempty"`
 	Attachments        []mail.DraftAttachment   `json:"attachments"`
+	SendBlockers       []string                 `json:"send_blockers"`
 }
 
 type draftHandoffOutcome string
@@ -245,6 +246,7 @@ func makeDraftPreview(draft mail.Draft, view string) (draftPreview, error) {
 		Subject:  draft.Subject, BodyFormat: draft.BodyFormat, View: view, Body: body,
 		ContentDiagnostics: draft.ContentDiagnostics,
 		Attachments:        draft.Attachments,
+		SendBlockers:       mail.SendBlockers(draft),
 	}, nil
 }
 
@@ -254,6 +256,9 @@ func writeHumanDraftPreview(writer io.Writer, preview draftPreview) {
 		writeFormat(writer, "Account: %s\n", preview.AccountRef)
 	}
 	writeFormat(writer, "From: %s\n", preview.From)
+	if len(preview.SendBlockers) > 0 {
+		writeFormat(writer, "Send blockers: %s\n", strings.Join(preview.SendBlockers, ", "))
+	}
 	writeFormat(writer, "To: %s\n", formatRecipients(preview.To))
 	if len(preview.CC) > 0 {
 		writeFormat(writer, "CC: %s\n", formatRecipients(preview.CC))

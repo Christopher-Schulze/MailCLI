@@ -109,6 +109,46 @@ func TestFullViewOmitsHeaderFieldsUnlessSelected(t *testing.T) {
 	}
 }
 
+func TestDraftReviewShowsSenderAndSendBlockers(t *testing.T) {
+	service := mail.NewServiceWithDraftRoot(testGateway{}, t.TempDir())
+	code, output, stderr := runProjectionDraftCreate(service, "--to", "recipient@example.com", "--body", "body", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("create: code=%d stderr=%q output=%s", code, stderr, output)
+	}
+	var created struct {
+		Data struct {
+			Draft struct {
+				Ref          string   `json:"ref"`
+				From         *string  `json:"from"`
+				SendBlockers []string `json:"send_blockers"`
+			} `json:"draft"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(output), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Data.Draft.From == nil || *created.Data.Draft.From != "" ||
+		!slices.Equal(created.Data.Draft.SendBlockers, []string{"from_missing"}) {
+		t.Fatalf("created draft = %+v, want an empty from and the from_missing blocker: %s", created.Data.Draft, output)
+	}
+	var stdout, errOut bytes.Buffer
+	code = Run(context.Background(), service, []string{"drafts", "preview", "--ref", created.Data.Draft.Ref, "--json"}, &stdout, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("preview: code=%d stderr=%q output=%s", code, errOut.String(), stdout.String())
+	}
+	var preview struct {
+		Data struct {
+			Preview map[string]json.RawMessage `json:"draft_preview"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if string(preview.Data.Preview["from"]) != `""` || string(preview.Data.Preview["send_blockers"]) != `["from_missing"]` {
+		t.Fatalf("preview from=%s send_blockers=%s, want an empty from and the blocker", preview.Data.Preview["from"], preview.Data.Preview["send_blockers"])
+	}
+}
+
 func TestDraftProjectionKeepsEmptyListsArrays(t *testing.T) {
 	encoded, err := json.Marshal(draftProjectionFor(mail.Draft{Ref: "draft"},
 		outputOptions{target: projectionTargetDraft, view: outputViewPlain}))

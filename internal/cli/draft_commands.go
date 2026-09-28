@@ -620,6 +620,11 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
+	if derived.From == "" && derived.AccountRef == "" {
+		// The account that holds the source message sends the answer; without a
+		// unique choice the draft stays open and reports from_missing.
+		derived.From, derived.AccountRef = service.InferDerivedSender(ctx, *ref, source)
+	}
 	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{
 		Kind: kind, SourceRef: *ref, ReplyAll: replyAll, Input: derived,
 		SourceMessageID: sourceMessageID, SourceReferences: references,

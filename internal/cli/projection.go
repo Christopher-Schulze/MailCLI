@@ -141,6 +141,7 @@ type draftProjection struct {
 	BodyHTML           *string                          `json:"body_html,omitempty"`
 	ContentDiagnostics *[]mail.ContentDiagnostic        `json:"content_diagnostics,omitempty"`
 	Attachments        *[]mail.DraftAttachment          `json:"attachments,omitempty"`
+	SendBlockers       *[]string                        `json:"send_blockers,omitempty"`
 	AttachmentCount    int                              `json:"attachment_count"`
 	CreatedAt          *time.Time                       `json:"created_at,omitempty"`
 	UpdatedAt          *time.Time                       `json:"updated_at,omitempty"`
@@ -636,7 +637,7 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 			optional: []string{"reply_to", "to", "cc", "bcc", "headers", "content", "attachments", "header_fields", "excerpt", "excerpt_complete", "excerpt_source"}}
 	case projectionTargetDraft:
 		return projectionFieldRegistry{core: []string{"ref", "revision", "kind", "account_ref", "subject", "body_format", "attachment_count", "created_at", "updated_at", "send_attempt", "save_attempt", "handoff_attempt"},
-			optional: []string{"source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "body", "body_source", "body_html", "content_diagnostics", "attachments"}}
+			optional: []string{"source_ref", "reply_all", "source_message_id", "source_references", "from", "to", "cc", "bcc", "body", "body_source", "body_html", "content_diagnostics", "attachments", "send_blockers"}}
 	case projectionTargetAttachment:
 		return projectionFieldRegistry{optional: []string{"id", "name", "mime_type", "size", "size_known", "downloaded"}}
 	case projectionTargetRaw:
@@ -1021,6 +1022,9 @@ func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjectio
 			projection.Attachments = &attachments
 		case "attachment_count":
 			projection.AttachmentCount = len(draft.Attachments)
+		case "send_blockers":
+			blockers := mail.SendBlockers(draft)
+			projection.SendBlockers = &blockers
 		case "created_at":
 			projection.CreatedAt = &draft.CreatedAt
 		case "updated_at":

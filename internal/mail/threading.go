@@ -5,6 +5,8 @@ import (
 	"fmt"
 	stdmail "net/mail"
 	"strings"
+
+	"mailcli/internal/mailref"
 )
 
 // ThreadSource carries the reply/forward derivation inputs read from the
@@ -44,6 +46,63 @@ func (s *Service) ThreadSource(ctx context.Context, ref string) (ThreadSource, e
 		}
 	}
 	return provider.MessageThreadSource(ctx, ref)
+}
+
+// InferDerivedSender chooses the sender of a reply or forward draft from the
+// account that holds the source message: the address of that account found in
+// the source's To or CC, otherwise its only address. It returns empty values
+// when the choice is not unique or the account is unusable, so the draft stays
+// unsendable until the caller names a sender.
+func (s *Service) InferDerivedSender(ctx context.Context, messageRef string, source ThreadSource) (string, string) {
+	message, err := mailref.DecodeMessage(messageRef)
+	if err != nil {
+		return "", ""
+	}
+	accounts, err := s.ListAccounts(ctx)
+	if err != nil {
+		return "", ""
+	}
+	for _, account := range accounts {
+		decoded, err := mailref.DecodeAccount(account.Ref)
+		if err != nil || !strings.EqualFold(decoded.AccountID, message.AccountID) {
+			continue
+		}
+		if account.State == "disabled" || account.State == "degraded" {
+			return "", ""
+		}
+		if from := derivedSenderAddress(account, source); from != "" {
+			return from, account.Ref
+		}
+		return "", ""
+	}
+	return "", ""
+}
+
+func derivedSenderAddress(account Account, source ThreadSource) string {
+	var addresses []string
+	seen := map[string]bool{}
+	for _, group := range [][]string{account.EmailAddresses, account.ConfiguredSenderAliases, account.DiscoveredSenderIdentities} {
+		for _, candidate := range group {
+			key := strings.ToLower(strings.TrimSpace(candidate))
+			if key != "" && !seen[key] {
+				seen[key] = true
+				addresses = append(addresses, strings.TrimSpace(candidate))
+			}
+		}
+	}
+	for _, group := range [][]Recipient{source.To, source.CC} {
+		for _, recipient := range group {
+			for _, address := range addresses {
+				if strings.EqualFold(strings.TrimSpace(recipient.Address), address) {
+					return address
+				}
+			}
+		}
+	}
+	if len(addresses) == 1 {
+		return addresses[0]
+	}
+	return ""
 }
 
 // DeriveReplyInput merges source-derived defaults with the caller input.

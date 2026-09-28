@@ -754,6 +754,8 @@ The subject becomes `Re: <subject>` or `Fwd: <subject>` with stacked prefixes co
 Every valid Reply-To address becomes a reply target in header order, and From is used only when Reply-To is absent; a malformed or partially parsed Reply-To fails with `invalid_message_source`.
 Reply-all moves the other To and CC recipients into CC, excluding reply targets and any final To address.
 Explicit input fields win over derived values, including an intentionally empty `subject`, `to` or `cc`; native recipient flags accept an empty value for that case.
+Without `--from` and `--account`, the sender is the account that holds the source message: its address found in the source To or CC, otherwise its only address; a degraded account or an ambiguous choice leaves `from` empty.
+`drafts create`, `inspect`, `preview` and the reply and forward responses carry `from` (empty when unset) and `send_blockers` (`from_missing`, `recipients_missing`); the blockers are review evidence and never part of the revision.
 Final recipient roles are deduplicated by normalized address before validation.
 The draft stores a canonical source Message-ID and thread chain: valid entries in first-seen order without duplicates, the direct parent once at the end, capped at the newest 20 entries.
 Sending emits that `In-Reply-To` and `References` chain; malformed entries and control characters are rejected.
