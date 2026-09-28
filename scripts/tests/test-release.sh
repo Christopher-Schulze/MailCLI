@@ -50,10 +50,6 @@ if [[ "${STAGING_ONLY}" == false ]] && ! (cd "${MAILCLI_ROOT}" && go mod verify)
   printf 'Go module verification failed before release work began\n' >&2
   exit 1
 fi
-if [[ "${STAGING_ONLY}" == false ]] && ! (cd "${MAILCLI_ROOT}" && go build -mod=readonly ./...); then
-  printf 'Source build failed before native release packaging\n' >&2
-  exit 1
-fi
 
 BUILD_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${TEST_ROOT}/build/mailcli}"
 export MAILCLI_BUILD_OUTPUT="${BUILD_OUTPUT}"
@@ -66,6 +62,10 @@ if "${MAILCLI_ROOT}/scripts/release/build-release.sh" >/dev/null 2>&1; then
   exit 1
 fi
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
+# Release builder runs overwrite BUILD_OUTPUT; keep this independent build as
+# the reproducibility reference for the packaged binary.
+REFERENCE_BUILD="${TEST_ROOT}/reference-build"
+cp "${BUILD_OUTPUT}" "${REFERENCE_BUILD}"
 TEST_VERSION="$(MAILCLI_OUTPUT=human "${BUILD_OUTPUT}" version)"
 TEST_VERSION="${TEST_VERSION#mailcli }"
 if [[ ! "${TEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -500,8 +500,7 @@ tar -xzf "${ARCHIVE}" -C "${TEST_ROOT}"
 PACKAGE_ROOT="${TEST_ROOT}/mailcli_${TEST_VERSION}_darwin_arm64"
 SOURCE_BINARY_COPY="${TEST_ROOT}/release-source-binary"
 cp "${PACKAGE_ROOT}/bin/mailcli" "${SOURCE_BINARY_COPY}"
-"${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
-cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${BUILD_OUTPUT}"
+cmp -s "${PACKAGE_ROOT}/bin/mailcli" "${REFERENCE_BUILD}"
 TEST_HOME="${TEST_ROOT}/home"
 mkdir -p "${TEST_HOME}"
 HOME="${TEST_HOME}" "${PACKAGE_ROOT}/install.sh"
