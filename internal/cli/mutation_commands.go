@@ -137,7 +137,7 @@ func runMessageDelete(
 ) int {
 	flags := newFlagSet("messages delete", stderr)
 	ref := flags.String("ref", "", "message ref")
-	confirm := flags.Bool("confirm", false, "confirm Mail.app deletion behavior")
+	confirm := flags.Bool("confirm", false, "confirm the deletion")
 	allowDraft := flags.Bool("allow-draft", false, "allow deleting a source message that is a draft")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {

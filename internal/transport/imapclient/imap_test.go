@@ -653,6 +653,13 @@ func TestAppendToSentTimeout(t *testing.T) {
 	}
 }
 
+func TestDoCommandResponseRejectsACommandWithoutATag(t *testing.T) {
+	_, _, err := (&Client{}).doCommandResponse(context.Background(), &session{}, "NOTAGSEPARATOR")
+	if transport.ErrorCode(err) != transport.CodeIMAPInvalidValue {
+		t.Fatalf("doCommandResponse() error = %v, want %s", err, transport.CodeIMAPInvalidValue)
+	}
+}
+
 func TestQuoteIMAP(t *testing.T) {
 	cases := []struct {
 		in, want string

@@ -1,15 +1,14 @@
-// Package imapclient implements a minimal IMAP4rev1 client for mirroring a
-// sent message into the account's Sent mailbox.
+// Package imapclient implements the IMAP4rev1 client that MailCLI uses for
+// direct mailbox reads, mutations and the Sent copy of a sent message.
 //
-// Implemented subset:
-//   - Implicit TLS connection over port 993.
-//   - Initial greeting and capability negotiation for mailbox encoding.
-//   - LOGIN with quoted credentials.
-//   - LIST "" "*" for mailbox discovery.
-//   - SELECT to make a mailbox active for SEARCH and UID SEARCH.
-//   - SEARCH HEADER Message-ID "<id>" plus exact UID FETCH verification.
-//   - APPEND <mailbox> (\Seen) {length} with a synchronizing literal.
-//   - LOGOUT.
+// It provides a per-account pooled session (implicit TLS on the configured
+// port, LOGIN with quoted credentials, optional UTF8=ACCEPT) and these
+// operations: mailbox LIST and STATUS, SELECT, UID SEARCH and message identity
+// resolution by Message-ID, UID FETCH of flags, headers, excerpt prefixes and
+// complete sources (always BODY.PEEK), UID STORE, COPY, MOVE (with a verified
+// COPY plus flag plus UID EXPUNGE fallback), delete to Trash, APPEND of a sent
+// message and a cross-process per-account mutation lock. STARTTLS and
+// AUTHENTICATE are not implemented.
 //
 // Response parsing is intentionally bounded: untagged "* ..." lines,
 // continuation "+ ..." lines, and a final tagged "tag OK|NO|BAD ..." line.

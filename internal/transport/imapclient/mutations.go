@@ -78,7 +78,14 @@ func validateMessageUID(uid uint32) error {
 }
 
 func (c *Client) doCommandResponse(ctx context.Context, sess *session, cmd string) (string, string, error) {
-	tag := cmd[:strings.Index(cmd, " ")]
+	separator := strings.IndexByte(cmd, ' ')
+	if separator <= 0 {
+		return "", "", &transport.TransportError{
+			Code:    transport.CodeIMAPInvalidValue,
+			Message: "IMAP command has no tag separator",
+		}
+	}
+	tag := cmd[:separator]
 	if err := c.setDeadline(ctx, sess); err != nil {
 		return "", "", wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP command deadline")
 	}

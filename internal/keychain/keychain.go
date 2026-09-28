@@ -61,7 +61,6 @@ type store interface {
 
 // keychain implements transport.CredentialStore.
 type keychain struct {
-	service string
 	backend store
 }
 
@@ -109,16 +108,10 @@ func validateIdentifier(value string) error {
 
 // New returns a transport.CredentialStore backed by the platform keychain.
 func New() transport.CredentialStore {
-	return &keychain{
-		service: serviceName,
-		backend: newOSStore(),
-	}
+	return &keychain{backend: newOSStore()}
 }
 
 // newForTest returns a CredentialStore using the provided backend.
 func newForTest(backend store) transport.CredentialStore {
-	return &keychain{
-		service: serviceName,
-		backend: backend,
-	}
+	return &keychain{backend: backend}
 }
