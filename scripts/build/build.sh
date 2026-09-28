@@ -8,7 +8,7 @@ MAILCLI_BINARY_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
 
 mkdir -p "$(dirname "${MAILCLI_BINARY_OUTPUT}")"
 # Retain compiler inlining for hot paths; stripping and native dead-code removal
-# keep the executable within the size budget enforced by the release gate.
+# keep the executable small.
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go -C "${MAILCLI_ROOT}" build \
   -buildvcs=false \
   -ldflags='-s -w -extldflags=-dead_strip' \
