@@ -644,9 +644,24 @@ func TestCapabilitiesSelectedCommandsPreserveFullContract(t *testing.T) {
 			t.Fatalf("selected command %s differs from full contract: %+v vs %+v", command.ID, command, fullCommands[command.ID])
 		}
 	}
-	if !reflect.DeepEqual(selected.SyncCheckPolicy, full.SyncCheckPolicy) ||
-		!reflect.DeepEqual(selected.DraftSavePolicy, full.DraftSavePolicy) {
-		t.Fatal("selected manifest dropped or changed shared policies")
+	if selected.SyncCheckPolicy != nil || selected.DraftSavePolicy != nil || bytes.Contains(output, []byte("_policy")) {
+		t.Fatalf("messages selection carries unrelated policies: sync=%+v draft=%+v", selected.SyncCheckPolicy, selected.DraftSavePolicy)
+	}
+	for _, scope := range []struct {
+		selector   string
+		sync, save bool
+	}{
+		{selector: "sync", sync: true},
+		{selector: "drafts.reconcile", save: true},
+		{selector: "messages.list,sync,drafts.create", sync: true, save: true},
+	} {
+		_, _, scoped := captureCapabilitiesJSON(t, "--for", scope.selector, "--json")
+		policies := scoped.Data.Capabilities
+		if (policies.SyncCheckPolicy != nil) != scope.sync || (policies.DraftSavePolicy != nil) != scope.save ||
+			scope.sync && !reflect.DeepEqual(policies.SyncCheckPolicy, full.SyncCheckPolicy) ||
+			scope.save && !reflect.DeepEqual(policies.DraftSavePolicy, full.DraftSavePolicy) {
+			t.Fatalf("--for %s policies: sync=%+v draft=%+v", scope.selector, policies.SyncCheckPolicy, policies.DraftSavePolicy)
+		}
 	}
 	if bytes.Count(output, []byte(`"limits":`)) != 1 {
 		t.Fatalf("selected response should serialize limits exactly once; bytes=%d", len(output))

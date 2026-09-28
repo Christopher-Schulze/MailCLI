@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
@@ -61,8 +63,8 @@ type capabilityManifest struct {
 	Commands          []commandCapability   `json:"commands"`
 	Scope             string                `json:"scope,omitempty"`
 	Limits            capabilityLimits      `json:"limits"`
-	SyncCheckPolicy   syncCheckPolicy       `json:"sync_check_policy"`
-	DraftSavePolicy   draftSavePolicy       `json:"draft_save_policy"`
+	SyncCheckPolicy   *syncCheckPolicy      `json:"sync_check_policy,omitempty"`
+	DraftSavePolicy   *draftSavePolicy      `json:"draft_save_policy,omitempty"`
 	OutputDefinitions map[string]outputNode `json:"$defs,omitempty"`
 }
 
@@ -288,13 +290,13 @@ func capabilitiesForScope(command, family string) (capabilityManifest, error) {
 				string(mail.DirectOpsReasonUnsupportedProvider),
 			},
 		},
-		SyncCheckPolicy: syncCheckPolicy{
+		SyncCheckPolicy: &syncCheckPolicy{
 			IncompleteIsSuccessfulResult:      true,
 			DefaultIncompleteExitCode:         0,
 			RequireCompleteFlag:               "--require-complete",
 			RequireCompleteIncompleteExitCode: syncCheckIncompleteExitCode,
 		},
-		DraftSavePolicy: draftSavePolicy{
+		DraftSavePolicy: &draftSavePolicy{
 			NewNativeSave:       "rejected_before_mail_contact",
 			LegacyClaimHandling: "reconcile_only",
 			SafeRecoveryCommand: "mailcli drafts reconcile --ref <DRAFT_REF> --json",
@@ -324,6 +326,12 @@ func capabilitiesForCommands(selected []string) (capabilityManifest, error) {
 		}
 	}
 	manifest.Commands = commands
+	if _, ok := selectedSet["sync"]; !ok {
+		manifest.SyncCheckPolicy = nil
+	}
+	if !slices.ContainsFunc(selected, func(id string) bool { return strings.HasPrefix(id, "drafts.") }) {
+		manifest.DraftSavePolicy = nil
+	}
 	manifest.Limits.selectedRefs = []string{}
 	for _, command := range commands {
 		manifest.Limits.selectedRefs = append(manifest.Limits.selectedRefs, command.LimitRefs...)
