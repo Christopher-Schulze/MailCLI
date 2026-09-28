@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -26,6 +27,7 @@ type Client struct {
 	storeOpenDuration time.Duration
 	mailboxCacheMu    sync.Mutex
 	mailboxCache      map[string]mailboxCacheEntry
+	mailboxLoads      singleflight.Group
 	mutationMu        sync.Mutex
 	copyAttempts      map[string]transport.MutationEvidence
 }

@@ -148,6 +148,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
 - Excerpts prefer text/plain over HTML text, drop `>` quote lines and a signature after an exact `-- ` line, collapse whitespace and cut at a rune boundary.
   Each reads 256 KiB of local RFC source or less; only when the local source is partial or missing does it fetch over IMAP the `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` header fields plus a 64 KiB `BODY.PEEK[TEXT]` prefix, never the full body. Larger sources report `excerpt_complete:false`.
   A page selects each account mailbox once and fetches all of its IMAP excerpts with one `UID FETCH`; a message the server does not return gets `enrichment_error:"imap_message_not_found"`.
+  Excerpts use the server UID from the local Mail store without a server search; when the local mailbox has no UIDVALIDITY, the fetched `Message-ID` must equal the local one, otherwise the row keeps its local result with `enrichment_error:"imap_message_uid_mismatch"`. The account's mailbox list is loaded once per page.
   Unrequested keys are empty; empty or false means unknown, not absence.
 - A malformed `In-Reply-To` or `References` value keeps every valid msg-id but sets `threading_complete:false`.
   When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.

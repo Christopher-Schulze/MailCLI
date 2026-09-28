@@ -13,25 +13,41 @@ import (
 	"mailcli/internal/transport"
 )
 
+type imapTargetOptions struct {
+	rejectTrash     bool
+	rejectDuplicate bool
+	forMutation     bool
+	// localUIDWithoutValidity accepts the local server UID of a mailbox whose
+	// local UIDVALIDITY is unknown instead of searching the server by
+	// Message-ID. The target then has uidvalidity 0 and a local Message-ID,
+	// and the caller must match the fetched Message-ID before using the data.
+	localUIDWithoutValidity bool
+}
+
 func (c *Client) resolveImapTarget(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true, false)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectDuplicate: true})
+}
+
+// resolveImapTargetForExcerpt is the read-only resolution for excerpt fetches;
+// see imapTargetOptions.localUIDWithoutValidity.
+func (c *Client) resolveImapTargetForExcerpt(ctx context.Context, messageRef string) (imapTarget, error) {
+	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectDuplicate: true, localUIDWithoutValidity: true})
 }
 
 func (c *Client) resolveImapTargetForMutation(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, false, true, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectDuplicate: true, forMutation: true})
 }
 
 func (c *Client) resolveImapTargetForDelete(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, true, true, true)
+	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectTrash: true, rejectDuplicate: true, forMutation: true})
 }
 
 func (c *Client) resolveImapTargetWithOptions(
 	ctx context.Context,
 	messageRef string,
-	rejectTrash bool,
-	rejectDuplicate bool,
-	forMutation bool,
+	options imapTargetOptions,
 ) (imapTarget, error) {
+	rejectTrash, rejectDuplicate, forMutation := options.rejectTrash, options.rejectDuplicate, options.forMutation
 	var target imapTarget
 	if c.store == nil {
 		return target, c.safeWriteUnavailableError()
@@ -56,13 +72,19 @@ func (c *Client) resolveImapTargetWithOptions(
 			localIdentityErr = directErr
 		} else if usable {
 			target.uid, target.uidvalidity, target.duplicateMatches = uid, uidval, 1
+		} else if options.localUIDWithoutValidity {
+			target.uid, target.duplicateMatches = uid, 1
 		}
 	}
-	if target.messageID == "" && target.uid == 0 {
+	if target.messageID == "" && (target.uid == 0 || target.uidvalidity == 0) {
 		target.messageID, localIdentityErr = c.readLocalMessageID(ctx, messageRef)
 		if localIdentityErr != nil && !safeTargetedFallback(localIdentityErr) {
 			return target, fmt.Errorf("resolve IMAP message identity: %w", localIdentityErr)
 		}
+	}
+	if target.uidvalidity == 0 && target.messageID == "" {
+		// An unverified local UID is only usable with a Message-ID to match.
+		target.uid, target.duplicateMatches = 0, 0
 	}
 	if resolved.PhysicalLocation.Scheme != "imap" || resolved.Reference.AccountID == "local" {
 		return target, &transport.TransportError{
@@ -202,7 +224,7 @@ func (c *Client) resolveImapTargetWithOptions(
 			}
 		}
 	}
-	if target.uid == 0 || target.uidvalidity == 0 {
+	if target.uid == 0 || (target.uidvalidity == 0 && !options.localUIDWithoutValidity) {
 		return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
 			Code:    transport.CodeIMAPMessageUIDUnknown,
 			Message: "no independently verified IMAP UID and UIDVALIDITY are available; refresh the local Mail catalog or provide a fresh Message-ID-backed reference",
@@ -529,20 +551,25 @@ func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperat
 	}
 	c.mailboxCacheMu.Unlock()
 
-	boxes, err := op.ListMailboxes(ctx, cfg)
-	if err != nil {
-		return boxes, err
-	}
-	c.mailboxCacheMu.Lock()
-	if c.mailboxCache == nil {
-		c.mailboxCache = make(map[string]mailboxCacheEntry)
-	}
-	c.mailboxCache[key] = mailboxCacheEntry{
-		boxes:     cloneMailboxInfos(boxes),
-		expiresAt: time.Now().Add(mailboxCacheTTL),
-	}
-	c.mailboxCacheMu.Unlock()
-	return boxes, nil
+	// Concurrent rows of one page share a single LIST per account.
+	loaded, err, _ := c.mailboxLoads.Do(key, func() (any, error) {
+		boxes, err := op.ListMailboxes(ctx, cfg)
+		if err != nil {
+			return boxes, err
+		}
+		c.mailboxCacheMu.Lock()
+		if c.mailboxCache == nil {
+			c.mailboxCache = make(map[string]mailboxCacheEntry)
+		}
+		c.mailboxCache[key] = mailboxCacheEntry{
+			boxes:     cloneMailboxInfos(boxes),
+			expiresAt: time.Now().Add(mailboxCacheTTL),
+		}
+		c.mailboxCacheMu.Unlock()
+		return boxes, nil
+	})
+	boxes, _ := loaded.([]transport.MailboxInfo)
+	return cloneMailboxInfos(boxes), err
 }
 
 func mailboxCacheKey(cfg transport.ImapConfig, email string) string {

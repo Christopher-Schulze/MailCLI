@@ -182,7 +182,9 @@ type MessageHeaderFetcher interface {
 // with a single UID FETCH: the top-level MIME header fields and at most
 // maxTextBytes of the body text per message. Implementations must not fall
 // back to a full-body fetch. UIDs the server does not return are absent from
-// the result.
+// the result. The fetched header fields include Message-ID; an
+// expectedUIDValidity of 0 skips the UIDVALIDITY check, and the caller must
+// then verify each Message-ID.
 type MessageExcerptFetcher interface {
 	FetchMessageExcerpts(ctx context.Context, cfg ImapConfig, mailbox string, expectedUIDValidity uint32, uids []uint32, maxTextBytes int64) (map[uint32]MessageExcerptSource, error)
 }

@@ -131,7 +131,7 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 	if _, supported := c.send.ImapClient().(transport.MessageExcerptFetcher); !supported {
 		return fallback, imapTarget{}, false
 	}
-	target, targetErr := c.resolveImapTarget(ctx, ref)
+	target, targetErr := c.resolveImapTargetForExcerpt(ctx, ref)
 	if targetErr != nil {
 		fallback.err = targetErr
 		return fallback, imapTarget{}, false
@@ -177,6 +177,8 @@ func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt
 					inputs[row.index].err = err
 				case !found:
 					inputs[row.index].err = &transport.TransportError{Code: transport.CodeIMAPMessageNotFound, Message: "message not returned by the IMAP excerpt FETCH"}
+				case row.target.uidvalidity == 0 && !excerptMatchesMessageID(source.Source, row.target.messageID):
+					inputs[row.index].err = &transport.TransportError{Code: transport.CodeIMAPMessageUIDMismatch, Message: "IMAP excerpt Message-ID differs from the local message"}
 				default:
 					inputs[row.index] = excerptInput{data: source.Source, complete: source.Complete, source: mail.ExcerptSourceIMAPPartial}
 				}
@@ -185,6 +187,12 @@ func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt
 		})
 	}
 	return mailboxes.Wait()
+}
+
+// excerptMatchesMessageID verifies a row fetched by an unverified local UID.
+func excerptMatchesMessageID(source []byte, messageID string) bool {
+	fetched, err := messageIDFromSource(bytes.NewReader(source))
+	return err == nil && messageID != "" && fetched == messageID
 }
 
 func applyExcerpt(ctx context.Context, summary *mail.MessageSummary, input excerptInput, length int) {

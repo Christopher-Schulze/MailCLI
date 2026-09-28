@@ -52,18 +52,21 @@ type excerptBatchOperator struct {
 	fetchUIDs     [][]uint32
 	fetchMailbox  []string
 	fetchLimit    int64
+	fetchValidity []uint32
 }
 
 func (operator *excerptBatchOperator) ResolveMessageIdentity(
 	_ context.Context, _ transport.ImapConfig, _ string, hint transport.MessageIdentityHint,
 ) (transport.MessageIdentity, error) {
+	operator.calls++
 	uid := operator.uidsBySubject[hint.Subject]
 	return transport.MessageIdentity{UID: uid, UIDValidity: 12345, MessageID: fmt.Sprintf("<%d@example.com>", uid)}, nil
 }
 
 func (operator *excerptBatchOperator) FetchMessageExcerpts(
-	_ context.Context, _ transport.ImapConfig, mailbox string, _ uint32, uids []uint32, maxTextBytes int64,
+	_ context.Context, _ transport.ImapConfig, mailbox string, expectedUIDValidity uint32, uids []uint32, maxTextBytes int64,
 ) (map[uint32]transport.MessageExcerptSource, error) {
+	operator.fetchValidity = append(operator.fetchValidity, expectedUIDValidity)
 	operator.fetchUIDs = append(operator.fetchUIDs, append([]uint32(nil), uids...))
 	operator.fetchMailbox = append(operator.fetchMailbox, mailbox)
 	operator.fetchLimit = maxTextBytes
@@ -146,6 +149,58 @@ func TestEnrichMessagesFetchesIMAPExcerptsOncePerMailbox(t *testing.T) {
 	}
 	if missing.ExcerptSource != mail.ExcerptSourceUnavailable || missing.Excerpt != "" || missing.EnrichmentError != transport.CodeIMAPMessageNotFound {
 		t.Fatalf("row the server did not return = %+v", missing)
+	}
+}
+
+// TestEnrichMessagesUsesLocalUIDsWithoutServerSearch covers mailboxes whose
+// local Info.plist has no UIDVALIDITY: the local UID is fetched directly, the
+// Message-ID is verified instead of searched, and LIST runs once per account.
+func TestEnrichMessagesUsesLocalUIDsWithoutServerSearch(t *testing.T) {
+	operator := &excerptBatchOperator{sources: map[uint32]string{
+		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nVerified text",
+		203: "Message-ID: <other@example.com>\r\nContent-Type: text/plain\r\n\r\nWrong message",
+	}}
+	client, refs := newExcerptBatchFixture(t, operator)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET remote_id = ROWID + 100 WHERE ROWID IN (102, 103)`)
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rowID := range []int64{102, 103} {
+		base, err := client.store.messageBasePath(location, rowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers := []byte(fmt.Sprintf("Message-ID: <local-%d@example.com>\r\nSubject: partial\r\n\r\n", rowID))
+		framed := append([]byte(fmt.Sprintf("%-10d\n", len(headers))), headers...)
+		if err := os.WriteFile(base+".partial.emlx", append(framed, validPlistTrailer()...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs[0], refs[2] = messageRefWithSubject(t, page.Messages, "Status Update"), messageRefWithSubject(t, page.Messages, "Noise")
+	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operator.searchCalls != 0 || operator.calls != 0 || operator.listCalls != 1 {
+		t.Fatalf("server searches=%d resolver calls=%d LIST calls=%d, want 0, 0, 1", operator.searchCalls, operator.calls, operator.listCalls)
+	}
+	if len(operator.fetchUIDs) != 1 || !slices.Equal(operator.fetchUIDs[0], []uint32{202, 203}) || operator.fetchValidity[0] != 0 {
+		t.Fatalf("fetches=%v validity=%v, want one unverified fetch of 202,203", operator.fetchUIDs, operator.fetchValidity)
+	}
+	if summaries[0].ExcerptSource != mail.ExcerptSourceIMAPPartial || summaries[0].Excerpt != "Verified text" || summaries[0].EnrichmentError != "" {
+		t.Fatalf("verified row = %+v", summaries[0])
+	}
+	if summaries[2].ExcerptSource != mail.ExcerptSourceLocal || strings.Contains(summaries[2].Excerpt, "Wrong") || summaries[2].EnrichmentError != transport.CodeIMAPMessageUIDMismatch {
+		t.Fatalf("mismatched row = %+v", summaries[2])
 	}
 }
 

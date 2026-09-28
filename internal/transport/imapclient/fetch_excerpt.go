@@ -9,13 +9,14 @@ import (
 	"mailcli/internal/transport"
 )
 
-// excerptHeaderFields are the only top-level headers an excerpt parse needs to
-// decode the body text.
-const excerptHeaderFields = "BODY.PEEK[HEADER.FIELDS (MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING)]"
+// excerptHeaderFields are the top-level headers an excerpt parse needs to
+// decode the body text, plus Message-ID for identity checks.
+const excerptHeaderFields = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING)]"
 
 // FetchMessageExcerpts selects the mailbox once and fetches, for every UID in
 // one UID FETCH, the MIME header fields and a body-text prefix of at most
-// maxTextBytes. Each literal is bounded by maxTextBytes.
+// maxTextBytes. Each literal is bounded by maxTextBytes. An expectedUIDValidity
+// of 0 skips the UIDVALIDITY check; the caller then verifies each Message-ID.
 func (c *Client) FetchMessageExcerpts(
 	ctx context.Context,
 	cfg transport.ImapConfig,
@@ -51,8 +52,10 @@ func (c *Client) FetchMessageExcerpts(
 	if err != nil {
 		return nil, err
 	}
-	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
-		return nil, err
+	if expectedUIDValidity != 0 {
+		if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
+			return nil, err
+		}
 	}
 	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s UID FETCH %s (UID %s BODY.PEEK[TEXT]<0.%d>)", tag, strings.Join(set, ","), excerptHeaderFields, maxTextBytes)
