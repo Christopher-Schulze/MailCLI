@@ -72,11 +72,11 @@ An unsupported store version or schema fails closed instead of guessing. See [pl
 
 ## Install
 
-The `v1.4.0` release archive installs the CLI and its agent skill. The script needs a trusted OpenSSL 3 with Ed25519 (for example Homebrew `openssl@3` as `OPENSSL_BIN`; macOS `/usr/bin/openssl` is LibreSSL and cannot verify). It authenticates the signed `SHA256SUMS` before downloading the archive and checks its digest before extraction.
+The `v1.5.0` release archive installs the CLI and its agent skill. The script needs a trusted OpenSSL 3 with Ed25519 (for example Homebrew `openssl@3` as `OPENSSL_BIN`; macOS `/usr/bin/openssl` is LibreSSL and cannot verify). It authenticates the signed `SHA256SUMS` before downloading the archive and checks its digest before extraction.
 
 ```bash
 set -euo pipefail
-VERSION=1.4.0
+VERSION=1.5.0
 if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   printf 'Release version must use MAJOR.MINOR.PATCH: %s\n' "${VERSION}" >&2
   exit 1
