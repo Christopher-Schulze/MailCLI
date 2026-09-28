@@ -64,6 +64,9 @@ func TestNextActionMapping(t *testing.T) {
 			if decoded.Next.Do != test.want || decoded.Next.Command != test.recovery || decoded.Next.WaitSeconds != test.wait {
 				t.Fatalf("next = %+v, want %s / %s / %d; guidance = %+v", decoded.Next, test.want, test.recovery, test.wait, decoded.Error.Guidance)
 			}
+			if decoded.Next.Do == "ask_user" && test.code != "" && decoded.Next.Why != environmentRepairWhy[test.code] {
+				t.Fatalf("next.why = %q, want the specific %s sentence", decoded.Next.Why, test.code)
+			}
 			if decoded.Error.Guidance == nil || decoded.Error.Code != value.Error.Code {
 				t.Fatalf("lost detailed error evidence: %s", payload)
 			}
@@ -166,10 +169,20 @@ func TestNextActionEverySourceErrorCode(t *testing.T) {
 				if environmentFailure(code) && guidance.EffectCertainty == mail.EffectNone && guidance.Retryability == mail.RetryUserInputRequired && next.Do != "ask_user" {
 					t.Fatalf("environment classified as input: %+v", next)
 				}
+				if next.Do == "ask_user" && next.Why == genericEnvironmentRepairWhy {
+					t.Fatalf("%s asks the user without a specific next.why; add it to environmentRepairWhy", code)
+				}
 			})
 		}
 	}
 	t.Logf("tested %d source-declared error codes across five command contexts", len(codes))
+	for code, why := range environmentRepairWhy {
+		failure := newErrorData("messages.get", responseData{}, &mail.OperationError{Code: code, Message: "environment error"})
+		next := envelopeNextAction(envelope{SchemaVersion: schemaVersion, Command: "messages.get", Error: failure})
+		if next.Do != "ask_user" || next.Why != why || utf8.RuneCountInString(why) > 120 {
+			t.Errorf("environment repair %s: next = %+v, want ask_user with %q", code, next, why)
+		}
+	}
 }
 
 // Discover declarations from production code rather than maintaining a stale

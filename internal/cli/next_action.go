@@ -44,7 +44,10 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 	case guidance.Retryability == mail.RetryTerminal:
 		next.Do, next.Why = "stop", "This failure is terminal; inspect the detailed guidance before further action."
 	case failure.environmentRepair || environmentFailure(failure.Code) || (previous != nil && previous.Do == "ask_user"):
-		next.Do, next.Why = "ask_user", "Repair the environment or permissions using the detailed guidance before continuing."
+		next.Do, next.Why = "ask_user", genericEnvironmentRepairWhy
+		if why, found := environmentRepairWhy[failure.Code]; found {
+			next.Why = why
+		}
 	case guidance.Retryability == mail.RetryObserveRequired:
 	case guidance.Retryability == mail.RetrySafe && guidance.ReplayAllowed:
 		next.Do, next.Why = "retry", "The evidence permits retrying the original invocation."
@@ -58,15 +61,48 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 	return next
 }
 
+const genericEnvironmentRepairWhy = "Repair the environment or permissions using the detailed guidance before continuing."
+
+const fullDiskAccessWhy = "Ask the user to grant Full Disk Access to the calling app, or open Mail.app once, then retry."
+
+// environmentRepairWhy is the single list of environment failures and the
+// concrete user action each one needs; keep every sentence at most 120 runes.
+var environmentRepairWhy = map[string]string{
+	"initialization_failed":              "MailCLI could not start; fix the path or permission named in error.message, then retry.",
+	"environment_unhealthy":              "Run `mailcli doctor --json`, fix each failing check it reports, then retry.",
+	"imap_mutation_lock_unavailable":     "Create or permit the IMAP mutation lock directory named in error.message, then retry.",
+	"mail_not_running":                   "Open Mail.app and let it finish loading, then retry the same command.",
+	"mail_automation_denied":             "Ask the user to allow Mail control in System Settings > Privacy & Security > Automation, then retry.",
+	"mail_recovery_required":             "Ask the user to quit and reopen Mail.app, then retry; inspect prior writes before replaying them.",
+	"mail_access_gate_corrupt":           "Quit Mail.app and retry while it is stopped; never delete or replace mail-access.lock.",
+	"smtp_auth_failed":                   "SMTP rejected the stored password; ask the user to renew it with `mailcli send setup`, then retry.",
+	"imap_auth_failed":                   "IMAP rejected the stored password; ask the user to renew it with `mailcli send setup`, then retry.",
+	"smtp_tls_failed":                    "The SMTP TLS handshake failed; check the bound host, port and certificate, then retry.",
+	"smtp_credentials_missing":           "No app-specific password is stored; ask the user to run `mailcli send setup`, then retry.",
+	"imap_credentials_missing":           "No app-specific password is stored; ask the user to run `mailcli send setup`, then retry.",
+	"smtp_utf8_unsupported":              "The SMTP server lacks SMTPUTF8; use ASCII addresses and headers or another account.",
+	"transport_unsupported_provider":     "Direct transport supports Gmail and iCloud; bind explicit SMTP/IMAP hosts or use drafts handoff.",
+	"editor_unavailable":                 "No editor is available; pass --editor or set VISUAL or EDITOR, then retry.",
+	"editor_terminal_unavailable":        "The editor needs an interactive terminal; run this command from a TTY.",
+	"account_disabled":                   "Ask the user to enable this account in Mail.app, then retry.",
+	"account_degraded":                   "Read the degraded reason in `mailcli accounts list --json`, fix the account in Mail.app, then retry.",
+	"account_identity_missing":           "Ask the user to configure the sender identity with `mailcli send setup`, then retry.",
+	"account_binding_invalid":            "Correct the account binding with `mailcli send setup`; never replace it with guessed values.",
+	"account_binding_host_invalid":       "Correct the bound SMTP/IMAP host and port with `mailcli send setup`, then retry.",
+	"account_binding_provider_mismatch":  "Bind the sender alias and credential account to the same provider, then retry.",
+	"account_binding_provider_invalid":   "Bind this account to a supported provider or explicit hosts with `mailcli send setup`, then retry.",
+	"account_binding_unavailable":        "Fix access to the MailCLI account-binding file or its directory, then retry; keep its contents.",
+	"mail_store_unavailable":             fullDiskAccessWhy,
+	"mail_store_preferences_unavailable": fullDiskAccessWhy,
+	"safe_mailbox_listing_unavailable":   fullDiskAccessWhy,
+	"safe_search_unavailable":            fullDiskAccessWhy,
+	"safe_message_listing_unavailable":   fullDiskAccessWhy,
+	"mail_store_preferences_invalid":     "Ask the user to open Mail.app and restore a valid account configuration, then retry.",
+}
+
 func environmentFailure(code string) bool {
-	switch code {
-	case "initialization_failed", "environment_unhealthy", "imap_mutation_lock_unavailable", "mail_not_running", "mail_automation_denied", "mail_recovery_required", "mail_access_gate_corrupt",
-		"smtp_auth_failed", "imap_auth_failed", "smtp_tls_failed", "smtp_credentials_missing", "imap_credentials_missing", "smtp_utf8_unsupported", "transport_unsupported_provider",
-		"editor_unavailable", "editor_terminal_unavailable", "account_disabled", "account_degraded", "account_identity_missing", "account_binding_invalid", "account_binding_host_invalid", "account_binding_provider_mismatch", "account_binding_provider_invalid", "account_binding_unavailable",
-		"mail_store_unavailable", "mail_store_preferences_unavailable", "preferences_unavailable", "safe_mailbox_listing_unavailable", "safe_search_unavailable", "safe_message_listing_unavailable", "mail_store_preferences_invalid":
-		return true
-	}
-	return false
+	_, found := environmentRepairWhy[code]
+	return found
 }
 
 func attachNextRecovery(next *nextAction, recovery mail.RecoveryGuidance) {
