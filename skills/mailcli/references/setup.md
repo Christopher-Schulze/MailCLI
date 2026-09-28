@@ -1,6 +1,6 @@
 # Installation, setup, and diagnostics
 
-Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --outputs --json` when it changes. Install or update only through a signed release as the README describes.
+Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --outputs --json` when it changes. Install or update with `mailcli update` or the signed release the user provides.
 
 Obey conditional dependencies; an empty list means none. Run `mailcli doctor --json` before store work and again after a store, permission, schema, account or read failure. Never cache `doctor --live`; run it before Apple Events or a read fallback, with Mail running and Automation permission granted. Store reads need Full Disk Access and no Automation; direct send needs neither Mail nor Full Disk Access.
 
