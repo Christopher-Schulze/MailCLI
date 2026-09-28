@@ -55,10 +55,6 @@ printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
 chmod 755 "${TEST_REPOSITORY}/scripts/tests/test-lease-fixture.sh"
 cp "${MAILCLI_ROOT}/scripts/utils/run-staged-gate.sh" "${TEST_REPOSITORY}/scripts/utils/run-staged-gate.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/tests/test.sh"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'printf "standalone-reporter\\n"' >"${TEST_REPOSITORY}/scripts/tests/report-task-ci.sh"
-chmod 755 "${TEST_REPOSITORY}/scripts/tests/report-task-ci.sh"
 cp "${LEASE_TOOL}" "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 chmod 755 "${TEST_REPOSITORY}/scripts/utils/manage-write-lease.sh"
 
@@ -89,11 +85,22 @@ stage_fixture_path other.txt 100644
 stage_fixture_path scripts/tests/test.sh 100755
 stage_fixture_path scripts/tests/test-lease-fixture.sh 100755
 stage_fixture_path scripts/utils/run-staged-gate.sh 100755
-stage_fixture_path scripts/tests/report-task-ci.sh 100755
 stage_fixture_path scripts/utils/manage-write-lease.sh 100755
 INITIAL_TREE="$(git -C "${TEST_REPOSITORY}" write-tree)"
 INITIAL_COMMIT="$(printf 'initial\n' | git -C "${TEST_REPOSITORY}" commit-tree "${INITIAL_TREE}")"
 git -C "${TEST_REPOSITORY}" checkout -q --detach "${INITIAL_COMMIT}"
+# One writer: a linked worktree of the same repository cannot acquire a lease.
+git -C "${TEST_REPOSITORY}" worktree add -q --detach "${TEST_ROOT}/linked-worktree" "${INITIAL_COMMIT}"
+if LINKED_OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_ROOT}/linked-worktree" \
+  "${LEASE_TOOL}" acquire 174 linked-writer tracked.txt 2>&1)"; then
+  printf 'A linked worktree acquired a write lease\n' >&2
+  exit 1
+fi
+[[ "${LINKED_OUTPUT}" == *'Write leases are acquired only in the primary worktree'* ]] || {
+  printf 'Linked worktree lease failed for the wrong reason: %s\n' "${LINKED_OUTPUT}" >&2
+  exit 1
+}
+git -C "${TEST_REPOSITORY}" worktree remove --force "${TEST_ROOT}/linked-worktree"
 mkdir -p "${TEST_REPOSITORY}/docs/tasks"
 printf 'board baseline\n' >"${TEST_REPOSITORY}/docs/tasks.md"
 printf 'detail baseline\n' >"${TEST_REPOSITORY}/docs/tasks/174-detail.md"
@@ -127,8 +134,6 @@ prove_guard_failable() {
   local MUTANT_ROOT="${TEST_ROOT}/mutation-${MUTATION_NUMBER}"
   mkdir -p "${MUTANT_ROOT}/scripts/utils"
   cp -R "${TEST_REPOSITORY}/.git/mailcli-write-lease" "${MUTANT_ROOT}/saved-lease"
-  [[ ! -d "${TEST_REPOSITORY}/.git/mailcli-write-reservations" ]] ||
-    cp -R "${TEST_REPOSITORY}/.git/mailcli-write-reservations" "${MUTANT_ROOT}/saved-reservations"
   while IFS= read -r LINE || [[ -n "${LINE}" ]]; do
     if [[ "${LINE}" == *"fail \"${SOURCE_MESSAGE}\"" ]]; then
       printf '    :\n'
@@ -151,9 +156,6 @@ prove_guard_failable() {
   # Restore only this fixture's authority state, including absence of new proof.
   rm -rf "${TEST_REPOSITORY}/.git/mailcli-write-lease"
   cp -R "${MUTANT_ROOT}/saved-lease" "${TEST_REPOSITORY}/.git/mailcli-write-lease"
-  rm -rf "${TEST_REPOSITORY}/.git/mailcli-write-reservations"
-  [[ ! -d "${MUTANT_ROOT}/saved-reservations" ]] ||
-    cp -R "${MUTANT_ROOT}/saved-reservations" "${TEST_REPOSITORY}/.git/mailcli-write-reservations"
 }
 
 mkdir "${TEST_ROOT}/entropy-bin"
