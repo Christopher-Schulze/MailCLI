@@ -627,6 +627,7 @@ var documentedBounds = []documentedBound{
 	{name: "recovery spool cap", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
 			boundCheck("README.md", `recovery spool is bounded to (\d+) GiB`, 1<<30),
+			boundCheck("docs/documentation.md", `recovery spool is bounded to (\d+) GiB`, 1<<30),
 		}},
 	{name: "structured input cap", expected: mail.MaximumBatchInputBytes, unit: "bytes",
 		checks: []documentedBoundCheck{

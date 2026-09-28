@@ -140,7 +140,8 @@ flags, field registries and incompatible combinations.
 - `messages.raw`: retrieve exact RFC 5322 content; main flags `--ref`,
   `--export`, `--max-bytes`.
   Example: `mailcli messages raw --ref MESSAGE_REF --json`.
-  Output: `raw_source`, conditional `content_export`.
+  Output: `raw_source`, conditional `content_export`. In human mode a complete
+  local `.emlx` source streams directly to stdout without a second in-memory copy.
 - `messages.state`: observe server flags and compare local cached state;
   main flag `--ref`.
   Example: `mailcli messages state --ref MESSAGE_REF --json`. Output: `state`.
@@ -154,7 +155,9 @@ flags, field registries and incompatible combinations.
 - `attachments.save`: export one decoded received attachment; main flags
   `--ref`, `--attachment`, `--output`.
   Example: `mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/new/file.pdf --json`.
-  Output: `saved_attachment`.
+  Output: `saved_attachment` (`attachment_id`, `path`, `size`, `sha256`).
+  Attachment IDs are deterministic MIME-part paths, also during targeted hydration;
+  saved files hold the decoded part bytes, and `attachments.list` reports media types.
 
 ### Local drafts and review
 
@@ -348,7 +351,7 @@ the timed loop; each measured item resolves through the normal local mutation-ta
 ## Design reference
 
 The following topics preserve the detailed architecture and operational
-contracts. Their anchors remain stable for focused help and existing links.
+contracts. Their anchors remain stable for existing links.
 
 - [Architecture](#architecture)
 - [Account identity bindings](#account-identity-bindings)
@@ -487,7 +490,8 @@ back to full-message IMAP hydration under the same 64 MiB cap. External attachme
 can change reported metadata and saved bytes. Mutations (`messages mark`, `messages move`, `messages copy`, `messages delete`) execute over IMAP directly and return typed server-truth evidence. COPY records a deterministic operation identity before dispatch, preserves the source account, source and destination UIDVALIDITY/UID, and any strict single-UID `COPYUID` mapping. A lost or
 incomplete final response returns `imap_copy_outcome_unknown` with the evidence collected so far; the store observes the exact destination Message-ID before any replay and refuses a replay when the destination is present, duplicated, or has changed UIDVALIDITY. Every exact Message-ID match is verified before hydration or mutation; duplicate matches fail closed with
 `imap_ambiguous_message_id` before any UID becomes a target. A MOVE fallback records `source_flag` only after bounded STORE/FETCH observation proves Deleted for the selected source mailbox, UID and UIDVALIDITY. Tagged OK alone is insufficient. It dispatches UID EXPUNGE only after that proof; unsupported UID EXPUNGE always defers cleanup and counts foreign deleted UIDs without plain
-EXPUNGE. `server_truth.expunge_branch`, `foreign_deleted_count` and `completed_effects` retain the proven phases. A later flag failure returns `imap_move_outcome_unknown` with partial COPY evidence and actual `flags_state`, `actual_flags` and `flags_source` under `data.message_state` or `data.delete_result`; neither COPY nor STORE is automatically replayed. Source flag evidence describes
+EXPUNGE. `server_truth.expunge_branch`, `foreign_deleted_count` and `completed_effects` retain the proven phases (`copy`, `source_flag`, `uid_expunge`, `cleanup_deferred`).
+A later flag failure returns `imap_move_outcome_unknown` with partial COPY evidence and actual `flags_state`, `actual_flags` and `flags_source` under `data.message_state` or `data.delete_result`; neither COPY nor STORE is automatically replayed. Source flag evidence describes
 the observation before expunge, while summary booleans remain local cached values. Account identity resolution is local-store-only. The local-store account catalog derives identities from the newest bounded Sent-history window, defaulting to 2,000 messages and permitting only a configured maximum of 10,000. Each account carries `identity_coverage` with `source`, `state`,
 `observed_messages`, `limit`, and `more_available`; `bounded` means more Sent history exists outside the scan, `not_observed` means no sender was found inside that bound, and `no_valid_sender` means the available history was exhausted without a valid sender. Account listing may return a partial catalog with `data.complete:false`; `data.identity_coverage_complete:false` separately reports
 bounded or unavailable sender history, and each degraded account carries `degraded_reason` and `degraded_remediation`. A global SQL or schema failure returns `account_catalog_incomplete` with `mailcli doctor` remediation instead of invoking Apple Events. Mutation identity resolution preserves malformed or incompatible account references as `account_reference_corrupt`,
@@ -631,7 +635,8 @@ publishes this input contract. Concurrent producers account for requested bodies
 Output overflow stops new reads, cancels and joins owned in-flight reads, retains completed outcomes, and marks never-started items `skipped_budget`; these count as skipped. Mutation batches do not use this cancellation policy.
 Read-batch overflow returns at most the first 10 item IDs and states in input order while retaining the full total and outcome counts; it proves `effect_certainty:none`, sets `retryability:user_input_required` and `replay_allowed:true`, and directs the caller to
 narrow `view`/`fields` or raise `--max-bytes` before replaying the same read batch. Mutation-batch overflow retains effect-aware, non-replayable guidance and completed-effect evidence. Both return one bounded `output_too_large` envelope and never emit partial JSON. `messages get`, `messages raw`, and `drafts inspect` additionally accept `--export /absolute/new/path`. The exporter creates
-a mode-0600 file with exclusive creation, writes complete normalized body or raw RFC 5322 bytes, then verifies path identity, size, and SHA-256. JSON reports only `data.content_export` metadata for an export, an invalid destination fails before retrieval, and incomplete normalized content fails without creating an export. Failed message hydration keeps the safe `data.message.hydration`
+a mode-0600 file with exclusive creation, writes complete normalized body or raw RFC 5322 bytes, then verifies path identity, size, and SHA-256.
+JSON reports only `data.content_export` metadata for an export, a relative, existing or symlinked destination or a non-directory parent fails before retrieval, and incomplete normalized content fails without creating an export. Failed message hydration keeps the safe `data.message.hydration`
 evidence and retains recovered content only when it was not redirected to an export file.
 
 Retained draft handoff attempts appear as required `handoff_attempt` recovery metadata in every detail view, custom field selection, output-size fallback and body-export response. The shared list/detail summary includes the attempt ID, timestamps, outcome, dispatch state, snapshot retention flag, count and byte total, without snapshot names, paths or contents. An absent or successfully
@@ -699,7 +704,8 @@ Machine responses use one envelope:
 }
 ```
 
-The additive schema-1 `next` object appears on every failure and successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization or incomplete synchronization coverage. Completed results omit it; normal pagination is not recovery. Its fields are `do` (one of the five actions below), `why` (one sentence, at most 120 Unicode characters),
+The additive schema-1 `next` object appears on every failure and successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization or incomplete synchronization coverage. Completed results omit it; normal pagination is not recovery.
+Its fields are `do` (one of the five actions below), `why` (one sentence, at most 120 Unicode characters; for `ask_user` it names the concrete user action),
 optional `command` (published command ID), optional `args` (argument strings), and optional `wait_seconds` (positive integer). Commands and arguments come from supported recovery builders; absent arguments mean the caller must retain the original invocation or inspect the detailed evidence, not invent a command.
 
 | Evidence, in precedence order | `next.do` |
@@ -840,8 +846,10 @@ Reply and forward drafts derive from the source message's stored header block (h
 `invalid_message_source` instead of silently falling back. Reply-all promotes the other To/CC recipients into CC while excluding all reply targets and any final To address. Explicit input fields win over every derived value, including an intentionally empty `subject`, `to`, or `cc`; omission still requests derivation. Native recipient flags accept an empty value for that explicit-empty
 case, and JSON uses empty strings or arrays. Final recipient roles are deduplicated by normalized address before validation. The draft stores a canonical source message ID and thread chain: valid angle-bracket Message-ID entries stay in first-seen order with duplicates removed, the direct parent appears exactly once at the end, and the final chain is capped at the newest 20 entries.
 Sending emits that same bounded `In-Reply-To` and `References` chain for replies and forwards when source threading is available; manually persisted drafts without source headers remain unthreaded. Malformed Message-ID entries and control characters in thread headers are rejected. `messages reply` and `messages forward` require a fresh store-bound message reference and the Mail store.
+Sending a forward draft requires at least one explicit recipient. A successful SMTP submission does not guarantee server- or client-side conversation grouping.
 
-Drafts are private JSON files under `~/Library/Application Support/MailCLI/drafts`, not fragile unsaved Mail compose objects. Draft creation and updates both write to a temporary file and atomically rename it into place, so a crashed process never leaves a partial `draft_*.json`. `drafts list` returns summaries (ref, subject, recipients, timestamps, format, attachment count, redacted
+Drafts are private JSON files under `~/Library/Application Support/MailCLI/drafts`, not fragile unsaved Mail compose objects; creating, editing or updating one never sends mail.
+Draft creation and updates both write to a temporary file and atomically rename it into place, so a crashed process never leaves a partial `draft_*.json`. `drafts list` returns summaries (ref, subject, recipients, timestamps, format, attachment count, redacted
 send/save/handoff attempt metadata; never body, HTML, raw MIME, or attachment bytes) without re-rendering bodies, so a draft with corrupt state still appears as a minimal `state_error` entry; `drafts inspect` fails closed on structurally invalid state with the affected file and remediation; mutation commands additionally verify the canonical rendering and fail closed on any mismatch.
 `drafts preview` renders plain, source, or sanitized HTML without fetching remote resources. `drafts edit` writes a mode-0600 temporary JSON file, invokes the selected editor directly without a shell and in a private process group, validates the complete result, and atomically replaces the draft only if its initial revision still matches under the draft lock. Cancellation gracefully
 terminates that group, force-cleans resistant descendants after a bounded grace period, verifies group absence, and leaves the original draft unchanged. `drafts reconcile` and `drafts send` inherit SIGINT/SIGTERM cancellation through their operation contexts, stop new attachment hashing/spooling and transport work, and release their draft leases. A send claim is retained whenever SMTP or
@@ -1004,8 +1012,10 @@ The calling host needs Full Disk Access to read `~/Library/Mail`; this is the on
 Automation permission; they load the IMAP credential from the Keychain, so the first keychain read may show one macOS consent prompt. The IMAP mutations and sync checks still need Full Disk Access for their local account/message identity and comparison data. Sending and direct transport-claim reconciliation need no Mail-store or Automation permission: `send setup`, `drafts send`, and
 direct `drafts reconcile` use the Keychain and direct SMTP/IMAP transports, and the first keychain read may show one macOS consent prompt. Accessibility and Screen Recording are never required. When permission is missing, `doctor` returns the exact System Settings remediation and does not weaken the read-only boundary.
 
-Structured output excludes body content unless the command requests it. Diagnostics avoid subjects, bodies, headers, recipient lists, and attachment bytes unless needed to identify the failed operation. MailCLI persists only review drafts, historical send/save claims, terminal send receipts, and cross-process access/update locks under `~/Library/Application Support/MailCLI`; it persists
-no mail corpus or search index. SMTP credentials live only in the macOS Keychain, never in files. State directories use mode `0700` and files use mode `0600`. `drafts discard --confirm` removes only the named local draft and its claims. `drafts list` reports each draft's age in days and whether any send attempt was ever recorded. `drafts prune` defaults to a dry run that lists never-sent
+Structured output excludes body content unless the command requests it. Diagnostics avoid subjects, bodies, headers, recipient lists, and attachment bytes unless needed to identify the failed operation.
+MailCLI persists only review drafts, historical send/save claims, terminal send receipts, accepted-message recovery spools, and cross-process access/update locks under `~/Library/Application Support/MailCLI`; it persists
+no mail corpus or search index. Each accepted-message recovery spool is bounded to 1 GiB and is removed after durable terminal send evidence; unresolved or corrupt evidence remains for explicit recovery.
+SMTP credentials live only in the macOS Keychain, never in files. State directories use mode `0700` and files use mode `0600`. `drafts discard --confirm` removes only the named local draft and its claims. `drafts list` reports each draft's age in days and whether any send attempt was ever recorded. `drafts prune` defaults to a dry run that lists never-sent
 drafts older than 30 days (`--older-than` overrides the stale-draft threshold), expired terminal send receipts, which use fixed 30-day retention, and draft refs whose claim, spool or handoff snapshot survives without its draft file; it also reports eligible unpublished temporaries for live and orphan refs. With `--confirm` it deletes exactly those drafts with their claims and lock files,
 re-verifying age and claim state under the draft lease before each deletion, removes only receipts with no draft or unresolved claim, and sweeps verified inactive temporaries and orphan send/save claims and spools under the draft lease. Handoff snapshot content and its claim are swept only when a valid matching prepared claim proves dispatch never started; dispatched, ambiguous, changed,
 or non-empty unclaimed handoff evidence is retained and reported as a prune failure. Verified empty private snapshot parents can be removed without a claim. Drafts with a send or save attempt are reconcilable state and are never pruned.
@@ -1157,7 +1167,7 @@ over only the metadata candidates in scope. Two bounded workers stream each auth
 never exceeds 64 candidates. Matching text is collapsed into one pre-sized buffer, repeated query terms are deduplicated, nonmatching attachment filters avoid building search text, and the next cursor reuses the matched store row instead of decoding and scanning result references. A full result page stops loading further candidate chunks; the cursor remains anchored at the last
 classified candidate, and a bounded keyset lookahead is used only when the loaded prefix is fully classified. The default body path runs no candidate-count query: it derives continuation and coverage from streamed rows plus at most one keyset lookahead. `--exact-count` adds one explicit bounded count probe for either metadata or body search after the current cursor. Body probes cover at
 most `max-messages + 1` rows; metadata filters use the normalized default bound because `--max-messages` remains a body-search option. A larger set fails with `search_count_limit_exceeded` before body scanning. `--max-messages` defaults to 50,000 and is capped at 100,000; it bounds body candidate scanning and the exact-count probe for metadata filters. `--max-scan-bytes` defaults to 4
-GiB and is capped at 8 GiB. These limits bound work rather than pretending that arbitrary full-text search is instant.
+GiB and is capped at 8 GiB. These limits bound work rather than pretending that arbitrary full-text search is instant; narrow account, mailbox, sender, date or subject scope for large stores.
 
 Every search page includes `data.page.coverage`: backend, candidate messages, candidate-count exactness, scanned messages and bytes, full sources, partial sources, missing sources, catalog-proven messages (`catalog_proven_messages`, attachment-only candidates decided by the catalog without opening the source), and `complete`. Metadata-only default candidate totals are observed lower
 bounds from the page plus one continuation row; they become exact when that query returns no continuation or when `--exact-count` completes its bounded count. Body `candidate_messages` is the observed lower bound unless `candidate_messages_exact` is true because stream exhaustion or explicit bounded counting proved the total. Body results are complete only when the candidate total is
@@ -1169,7 +1179,7 @@ filter/search keep the complete coverage object. Use `--fields all` alone to ret
 
 ### Setup and usage
 
-Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas. Execute that argv with the retained binary before using uninspected parameters, or request `--for IDS --schemas --json` to inline complete canonical schemas. Effects, confirmation, dependencies, result states, referenced limits and shared policies remain directly available.
+Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas. Execute that argv with the retained binary before using uninspected parameters, or request `--for IDS --schemas --json` to inline complete canonical schemas. Effects, confirmation, dependencies, result states, referenced limits and the policies those commands use remain directly available.
 Unscoped discovery retains all inline schemas; `--schemas` requires `--for`. Output trees are opt-in through `--outputs`, with or without `--for`: each command's `schema.output` describes its `data` payload with `$ref` pointers into `data.capabilities.$defs`, projection variants and success requirements; `$defs.error` and `$defs.envelope` describe the shared envelope.
 
 The companion skill uses a compact `skills/mailcli/SKILL.md` entrypoint and seven portable operational guides under `skills/mailcli/references/`. Read the guide for the current action and request `capabilities --for COMMAND_ID --json` for one command or `capabilities --for ID,ID,... --json` for a known multi-command workflow; use family discovery only when the exact command set is

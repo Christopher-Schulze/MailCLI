@@ -68,7 +68,7 @@ MailCLI runs no daemon, watcher, or index of its own; see the [architecture sect
 | Envelope Index | Store version `4`, minor version `74003` |
 | Go toolchain | Exact Go version declared in `go.mod` for source builds |
 
-An unsupported store version or schema fails closed, so a new macOS or Mail release may need an adapter update. New mail appears after Mail.app updates its local store. Direct sending supports Gmail and iCloud by default; other providers need explicit SMTP and IMAP hosts. See [platform and freshness boundaries](docs/documentation.md#platform-and-freshness-boundaries).
+An unsupported store version or schema fails closed instead of guessing. See [platform and freshness boundaries](docs/documentation.md#platform-and-freshness-boundaries) and [Limitations](#limitations).
 
 ## Install
 
@@ -167,34 +167,79 @@ MailCLI uses the permissions of the terminal or agent host that launches it (**S
 
 ## Usage
 
-Pipes and files receive JSON, terminals receive text; `--json`/`--human` or `MAILCLI_OUTPUT=json|human` override that. Never guess account, mailbox, message, or attachment identifiers; resolve them through the CLI.
+Pipes and files receive JSON, terminals receive text; `--json`/`--human` or `MAILCLI_OUTPUT=json|human` override that. `mailcli help` lists all commands and `mailcli <command> --help` shows their options.
+
+### Discover accounts and mailboxes
+
+Never guess account, mailbox, message, or attachment identifiers; resolve them through the CLI.
 
 ```bash
-# Discover
 mailcli accounts list --json
+mailcli mailboxes list --account ACCOUNT_REF --json
 mailcli mailboxes resolve --account ACCOUNT_REF --path Projects --path 2026 --json
-# List, search, read
+```
+
+### List, filter, and search
+
+```bash
 mailcli messages list --mailbox inbox --account ACCOUNT_REF --json
+mailcli messages filter --mailbox MAILBOX_REF --read false --attachment true --json
 mailcli messages search --query "invoice tracking number" --after 2026-01-01 --json
-mailcli messages get --ref MESSAGE_REF --view plain --json
-mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/new/file.pdf --json
-# Check replies to sent mail
+```
+
+All list commands default to 20 items and accept `--limit` values from 1 through 200; follow `data.page.next_cursor` until it is absent. Body search scans local `.emlx` sources on demand within message and byte limits, and every page reports its coverage; `data.page.coverage.complete` false means the search is not proven complete.
+
+### Check replies to sent mail
+
+```bash
 mailcli messages search --after 2026-09-01 --with-threading --with-excerpt --json
-# Draft, review, send
-mailcli drafts create --to "Ann <ann@example.com>" --subject "Update" --body-file /abs/message.md --format markdown --json
+```
+
+`--with-threading` adds `in_reply_to`, `references` and the parsed sender; `--with-excerpt` adds a short text preview. Match the sent Message-ID against both `in_reply_to` and `references`; empty or false values mean unknown, never proven absence.
+
+### Read messages and attachments
+
+```bash
+mailcli messages get --ref MESSAGE_REF --view plain --json
+mailcli messages raw --ref MESSAGE_REF --export /absolute/new/path/message.eml --json
+mailcli messages thread --ref MESSAGE_REF --json
+mailcli attachments list --ref MESSAGE_REF --json
+mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/new/file.pdf --json
+```
+
+`messages get` defaults to metadata; `--view plain` or `--view full` add the body. `--max-bytes` defaults to 1 MiB (up to 64 MiB); larger JSON fails with `output_too_large` instead of truncating. `--export` writes complete content to a new file with size and SHA-256 proof; exports and attachment saves never overwrite a file.
+
+### Create, review, and send a draft
+
+```bash
+mailcli drafts create --to "Ann <ann@example.com>" --subject "Update" --body-file /absolute/path/message.md --format markdown --json
 mailcli drafts inspect --ref DRAFT_REF --view full --json
 mailcli send setup --from me@example.com
 mailcli drafts send --ref DRAFT_REF --expected-revision REVIEWED_REVISION --confirm --json
-# Reply and organize
-printf '%s' '{"body":"Thanks, I will review this.\n"}' | mailcli messages reply --ref MESSAGE_REF --input - --json
-mailcli messages move --ref MESSAGE_REF --mailbox DESTINATION_MAILBOX_REF --json
-mailcli sync --check --account ACCOUNT_REF --json
 ```
 
-- All list commands default to 20 items and accept `--limit` values from 1 through 200. Follow `data.page.next_cursor` until it is absent; `data.page.coverage.complete` false means a search is not proven complete.
-- `--max-bytes` defaults to 1 MiB (up to 64 MiB); larger JSON fails with `output_too_large` instead of truncating. `--export /absolute/new/path` writes complete content to a new file.
-- A send needs the reviewed draft `revision` plus `--confirm`. If SMTP accepted but the Sent copy is unresolved, `drafts reconcile` finishes it; MailCLI never resends.
-- `--with-threading` and `--with-excerpt` add reply metadata; match the sent Message-ID against `in_reply_to` and `references`.
+Drafts are local review files in plain text, Markdown, or safe HTML; creating or editing one never sends mail. `send setup` stores an app-specific password in the Keychain once. A send needs the reviewed draft `revision` plus `--confirm`. If SMTP accepted but the Sent copy is unresolved, `drafts reconcile` finishes it; MailCLI never resends. `drafts handoff` opens a new draft visibly in Mail.app without sending.
+
+### Reply, forward, and organize
+
+```bash
+printf '%s' '{"body":"Thanks, I will review this.\n"}' | mailcli messages reply --ref MESSAGE_REF --input - --all --json
+printf '%s' '{"to":[{"address":"recipient@example.com"}],"body":"For your review.\n"}' | mailcli messages forward --ref MESSAGE_REF --input - --json
+mailcli messages mark --ref MESSAGE_REF --read true --json
+mailcli messages move --ref MESSAGE_REF --mailbox DESTINATION_MAILBOX_REF --json
+mailcli messages delete --ref MESSAGE_REF --confirm --json
+mailcli sync --check --require-complete --account ACCOUNT_REF --json
+```
+
+Replies and forwards become local review drafts. Mark, move, copy, and delete run over IMAP and return server evidence. Marking, moving, or deleting a draft message needs `--allow-draft`, and deletion always needs `--confirm`. IMAP changes reach the local store after Mail.app's next sync; `sync --check` compares server and local counts.
+
+## Limitations
+
+- macOS on Apple silicon only; a new macOS or Mail release may need an adapter update.
+- Direct sending supports Gmail and iCloud by default; other providers need an account binding with explicit SMTP and IMAP hosts.
+- Scripted Mail compose stays disabled; visible handoff supports new drafts only and needs Mail.app as the default email application.
+- New mail appears after Mail.app updates its local store; there is no remote-only inbox search.
+- Body search is bounded work over local sources, not an instant index; narrow the scope for large stores.
 
 ## JSON contract
 
@@ -218,7 +263,7 @@ test -f "$HOME/.agents/skills/mailcli/SKILL.md" &&
   ln -s "$HOME/.agents/skills/mailcli" "$HOME/.claude/skills/mailcli"
 ```
 
-The link follows `mailcli update` automatically. `scripts/tests/report-skill-drift.sh --repository PATH --installed PATH` compares an installation read-only.
+The link follows `mailcli update` automatically. `scripts/tests/report-skill-drift.sh --repository PATH --installed PATH` compares an installation read-only; for a Claude Code link, compare the canonical target directory.
 
 ## Safety model
 
