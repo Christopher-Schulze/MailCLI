@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ "$#" -ge 4 && "$#" -le 6 && ( "$4" == --fast || "$4" == --lint-only ) ]] || {
-  printf 'Usage: run-fast-gate.sh ROOT BASELINE INDEX_TREE --fast|--lint-only [LINT_RECEIPT] [TASK_IDS]\n' >&2
+[[ "$#" -ge 4 && "$#" -le 5 && ( "$4" == --fast || "$4" == --lint-only ) ]] || {
+  printf 'Usage: run-fast-gate.sh ROOT BASELINE INDEX_TREE --fast|--lint-only [LINT_RECEIPT]\n' >&2
   exit 2
 }
 SOURCE_ROOT="$1"
@@ -10,7 +10,6 @@ BASELINE_HEAD="$2"
 INDEX_TREE="$3"
 MODE="$4"
 LINT_RECEIPT="${5:-}"
-TASK_IDS="${6:-}"
 MAILCLI_TEST_CPUS="${MAILCLI_TEST_CPUS:-4}"
 MAILCLI_TEST_PACKAGES="${MAILCLI_TEST_PACKAGES:-4}"
 for VALUE in "${MAILCLI_TEST_CPUS}" "${MAILCLI_TEST_PACKAGES}"; do
@@ -118,6 +117,6 @@ if [[ "${MODE}" == --fast ]]; then
   while IFS= read -r CHECK; do
     [[ "${CHECK}" == scripts/tests/test-commit-authority.sh ]] || CHECKS+=("${CHECK}")
   done < <(jq -r '.ShellChecks[]' "${TEST_ROOT}/plan")
-  "$(dirname "${BASH_SOURCE[0]}")/run-staged-gate.sh" "${SOURCE_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" "${TASK_IDS}" --checks "${CHECKS[@]}"
+  "$(dirname "${BASH_SOURCE[0]}")/run-staged-gate.sh" "${SOURCE_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --checks "${CHECKS[@]}"
   printf 'gate_tier=fast\nfull_gate=deferred\n'
 fi

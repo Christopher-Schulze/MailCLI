@@ -30,7 +30,7 @@ case "${1:-}" in
   --fast | '')
     INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
     exec "${MAILCLI_ROOT}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
-      "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" "${INDEX_TREE}" 506 --fast ;;
+      "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" "${INDEX_TREE}" --fast ;;
   --checks) [[ "$#" -ge 2 ]] || { printf 'Specify at least one registered check\n' >&2; exit 2; } ;;
   *) printf 'Unknown verification argument: %s\n' "$1" >&2; exit 2 ;;
 esac

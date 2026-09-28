@@ -8,6 +8,7 @@ usage() {
   printf '%s\n' \
     'Usage:' \
     '  manage-write-lease.sh acquire TASK_ID[,TASK_ID...] OWNER PATH [PATH...]' \
+    '  manage-write-lease.sh extend TOKEN PATH [PATH...]' \
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN [--diff]' \
     '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]' \
@@ -41,7 +42,7 @@ lease_file() {
 remove_lease_files() {
   local NAME
   for NAME in task owner_session token acquired_at baseline_head \
-    allowed_paths allowed_fingerprints \
+    allowed_paths allowed_fingerprints allowed_paths.next allowed_fingerprints.next \
     ignored_asset_fingerprints \
     reviewed_digest reviewed_patch_sha256 lint_identity \
     gate_patch_sha256 gate_index_tree \
@@ -331,6 +332,41 @@ acquire_lease() {
   printf 'write_lease_head=%s\n' "$(<"$(lease_file baseline_head)")"
 }
 
+extend_lease() {
+  [[ "$#" -ge 2 ]] || {
+    usage >&2
+    exit 2
+  }
+  local TOKEN="$1"
+  shift
+  require_token "${TOKEN}"
+  local RELATIVE_PATH
+  for RELATIVE_PATH in "$@"; do
+    validate_allowed_path "${RELATIVE_PATH}"
+    ! path_is_allowed "${RELATIVE_PATH}" || fail "Path is already leased: ${RELATIVE_PATH}"
+    [[ -z "$(git -C "${MAILCLI_ROOT}" status --porcelain=v1 --untracked-files=all -- ":(literal)${RELATIVE_PATH}")" ]] ||
+      fail "Path changed before it was leased: ${RELATIVE_PATH}"
+  done
+  umask 077
+  local NEXT_PATHS NEXT_FINGERPRINTS FINGERPRINT
+  NEXT_PATHS="$(lease_file allowed_paths.next)"
+  NEXT_FINGERPRINTS="$(lease_file allowed_fingerprints.next)"
+  { cat "$(lease_file allowed_paths)"; printf '%s\n' "$@"; } | LC_ALL=C sort -u >"${NEXT_PATHS}"
+  while IFS= read -r RELATIVE_PATH; do
+    FINGERPRINT="$(awk -F '\t' -v path="${RELATIVE_PATH}" '$2 == path { print $1 }' "$(lease_file allowed_fingerprints)")"
+    [[ -n "${FINGERPRINT}" ]] || FINGERPRINT="$(fingerprint_path "${RELATIVE_PATH}")" ||
+      fail "Could not fingerprint allowed path"
+    printf '%s\t%s\n' "${FINGERPRINT}" "${RELATIVE_PATH}"
+  done <"${NEXT_PATHS}" >"${NEXT_FINGERPRINTS}"
+  mv "${NEXT_FINGERPRINTS}" "$(lease_file allowed_fingerprints)"
+  mv "${NEXT_PATHS}" "$(lease_file allowed_paths)"
+  # Earlier review and gate evidence covered the smaller scope.
+  rm -f "$(lease_file reviewed_digest)" "$(lease_file reviewed_patch_sha256)" \
+    "$(lease_file gate_patch_sha256)" "$(lease_file gate_index_tree)" "$(lease_file gate_harness)" \
+    "$(lease_file gate_tier)" "$(lease_file gate_shell_receipts)"
+  printf 'write_lease_extended=%s\n' "$@"
+}
+
 status_lease() {
   if [[ ! -d "${LEASE_DIRECTORY}" ]]; then
     printf 'write_lease=inactive\n'
@@ -393,7 +429,7 @@ review_lease() {
   done <"$(lease_file changed_paths)"
   if [[ "${LINT_REQUIRED}" == true ]]; then
     INDEX_TREE="$(git -C "${MAILCLI_ROOT}" write-tree)"
-    "${MAILCLI_ROOT}/scripts/utils/run-fast-gate.sh" "${MAILCLI_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --lint-only "$(lease_file lint_identity)" "$(<"$(lease_file task)")"
+    "${MAILCLI_ROOT}/scripts/utils/run-fast-gate.sh" "${MAILCLI_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --lint-only "$(lease_file lint_identity)"
     [[ "$(git -C "${MAILCLI_ROOT}" rev-parse HEAD)" == "${BASELINE_HEAD}" &&
       "$(git -C "${MAILCLI_ROOT}" write-tree)" == "${INDEX_TREE}" ]] || fail 'Review source changed during lint'
     verify_staged_scope
@@ -488,7 +524,7 @@ gate_lease() {
   git -C "${MAILCLI_ROOT}" archive "${BASELINE_HEAD}" scripts/utils |
     tar -x -C "${HARNESS_DIR}"
   "${HARNESS_DIR}/scripts/utils/run-staged-gate.sh" "${MAILCLI_ROOT}" \
-    "${BASELINE_HEAD}" "${INDEX_TREE}" "$(<"$(lease_file task)")" "${GATE_ARGS[@]}" |
+    "${BASELINE_HEAD}" "${INDEX_TREE}" "${GATE_ARGS[@]}" |
     tee "${HARNESS_DIR}/gate-output" || GATE_STATUS=$?
   GATE_HARNESS_MODE="$(sed -n 's/^gate_harness=//p' "${HARNESS_DIR}/gate-output")"
   trap - INT TERM
@@ -590,6 +626,10 @@ case "${COMMAND}" in
   acquire)
     shift
     acquire_lease "$@"
+    ;;
+  extend)
+    shift
+    extend_lease "$@"
     ;;
   status)
     [[ "$#" -eq 1 ]] || fail "status accepts no additional arguments"

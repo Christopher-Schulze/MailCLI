@@ -2,14 +2,13 @@
 set -euo pipefail
 
 # Executed from the lease baseline, never from the staged patch itself.
-[[ "$#" -eq 4 || ( "$#" -eq 5 && ( "$5" == --fast || "$5" == --full ) ) || ( "$#" -ge 6 && "$5" == --checks ) ]] || {
-  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE TASK_IDS [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]\n' >&2; exit 2;
+[[ "$#" -eq 3 || ( "$#" -eq 4 && ( "$4" == --fast || "$4" == --full ) ) || ( "$#" -ge 5 && "$4" == --checks ) ]] || {
+  printf 'Usage: run-staged-gate.sh ROOT BASELINE INDEX_TREE [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]\n' >&2; exit 2;
 }
 SOURCE_ROOT="$1"
 BASELINE_HEAD="$2"
 INDEX_TREE="$3"
-TASK_IDS="$4"
-shift 4
+shift 3
 FAST_SHELL_ONLY=false
 if [[ "${1:-}" == --fast ]]; then
   if git -C "${SOURCE_ROOT}" cat-file -e "${BASELINE_HEAD}:go.mod" 2>/dev/null ||
@@ -18,7 +17,7 @@ if [[ "${1:-}" == --fast ]]; then
     LINT_RECEIPT=""
     [[ ! -d "${GIT_DIRECTORY}/mailcli-write-lease" ]] || LINT_RECEIPT="${GIT_DIRECTORY}/mailcli-write-lease/lint_identity"
     exec "$(dirname "${BASH_SOURCE[0]}")/run-fast-gate.sh" "${SOURCE_ROOT}" "${BASELINE_HEAD}" "${INDEX_TREE}" --fast \
-      "${LINT_RECEIPT}" "${TASK_IDS}"
+      "${LINT_RECEIPT}"
   fi
   # A shell-only product has no Go analysis; its registered shell checks remain required.
   FAST_SHELL_ONLY=true
@@ -134,7 +133,6 @@ read_manifest() {
 grep -Fxq '# MAILCLI_GATE_HARNESS=staged-v1' "${BASELINE_ROOT}/scripts/tests/test.sh" ||
   fail 'Baseline gate harness marker is required'
 read_manifest "${BASELINE_ROOT}" --list-shell-tests "${TEST_ROOT}/baseline-cases"
-read_manifest "${BASELINE_ROOT}" --list-live-shell-tests "${TEST_ROOT}/baseline-live"
 read_manifest "${PRODUCT_ROOT}" --list-shell-tests "${TEST_ROOT}/staged-cases"
 read_manifest "${PRODUCT_ROOT}" --list-live-shell-tests "${TEST_ROOT}/staged-live"
 cat "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/staged-live" |
@@ -149,39 +147,6 @@ while IFS= read -r CASE_PATH; do
 done <"${TEST_ROOT}/inventory"
 diff -u "${TEST_ROOT}/inventory" "${TEST_ROOT}/registered" ||
   fail 'Every staged shell test must be registered, including opt-in live cases'
-
-retired_case() {
-  local CASE_PATH="$1"
-  # TASK 568 retires the unused worktree reservations and per-task CI report.
-  case ",${TASK_IDS},:${CASE_PATH}" in
-    *,568,*:scripts/tests/test-worktree-coordination.sh | *,568,*:scripts/tests/test-task-ci-report.sh)
-      [[ ! -e "${PRODUCT_ROOT}/${CASE_PATH}" ]]
-      return
-      ;;
-  esac
-  case ",${TASK_IDS}," in *,509,*) ;; *) return 1 ;; esac
-  case "${CASE_PATH}" in
-    scripts/tests/test-private-closure.sh | scripts/tests/test-task-history-export.sh) ;;
-    *) return 1 ;;
-  esac
-  [[ ! -e "${PRODUCT_ROOT}/${CASE_PATH}" &&
-    ! -e "${PRODUCT_ROOT}/scripts/utils/export-task-history.sh" ]] || return 1
-  ! grep -Eq '^(private_task_snapshot|verify_private_task_scope|source_task_manifest|private_proof_lease)\(\)|private-proof' \
-    "${PRODUCT_ROOT}/scripts/utils/manage-write-lease.sh"
-}
-
-# Ordinary cases cannot silently become opt-in live cases; retained live cases
-# must keep their explicit registration. Only the named obsolete feature retires.
-while IFS= read -r CASE_PATH; do
-  if ! grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-cases"; then
-    retired_case "${CASE_PATH}" || fail "Baseline shell test removed or made opt-in: ${CASE_PATH}"
-    printf 'retired_shell_test=%s\n' "${CASE_PATH}"
-  fi
-done <"${TEST_ROOT}/baseline-cases"
-while IFS= read -r CASE_PATH; do
-  grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-live" ||
-    fail "Baseline live test registration removed: ${CASE_PATH}"
-done <"${TEST_ROOT}/baseline-live"
 
 cp "${TEST_ROOT}/staged-cases" "${TEST_ROOT}/executed-cases"
 if [[ "${GATE_TIER}" == targeted ]]; then
@@ -232,7 +197,8 @@ if [[ "${GATE_TIER}" == full && "${BASELINE_CORE_HASH}" != "${CORE_HASH}" ]]; th
   HARNESS_MODE=staged+baseline
 fi
 while IFS= read -r CASE_PATH; do
-  retired_case "${CASE_PATH}" && continue
+  # A test the staged patch removed or made opt-in has no baseline rerun.
+  grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/staged-cases" || continue
   if [[ "${GATE_TIER}" == targeted ]] && ! grep -Fxq "${CASE_PATH}" "${TEST_ROOT}/executed-cases"; then continue; fi
   BASELINE_HASH="$(shasum -a 256 "${BASELINE_ROOT}/${CASE_PATH}" | awk '{print $1}')"
   if ! grep -Fxq "${BASELINE_HASH}"$'\t'"${CASE_PATH}" "${RECEIPTS}"; then

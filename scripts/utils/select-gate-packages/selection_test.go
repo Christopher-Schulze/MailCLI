@@ -99,7 +99,7 @@ func TestDocumentationAndToolingRoutes(t *testing.T) {
 		docs  bool
 		check string
 	}{
-		{path: "README.md", docs: true},
+		{path: "README.md", docs: true, check: "scripts/tests/test-bootstrap.sh"},
 		{path: "docs/documentation.md", docs: true},
 		{path: "skills/mailcli/SKILL.md", docs: true, check: "scripts/tests/test-skill-drift.sh"},
 		{path: ".github/workflows/ci.yml", docs: true, check: "scripts/tests/test-verification-policy.sh"},

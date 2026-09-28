@@ -75,7 +75,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 HEAD="$(git rev-parse HEAD)"
 TREE="$(git write-tree)"
-"${ROOT}/scripts/utils/run-staged-gate.sh" "${ROOT}" "${HEAD}" "${TREE}" '' --full | tee "${TEST_ROOT}/output"
+"${ROOT}/scripts/utils/run-staged-gate.sh" "${ROOT}" "${HEAD}" "${TREE}" --full | tee "${TEST_ROOT}/output"
 grep -qx 'gate_tier=full' "${TEST_ROOT}/output"
 grep -qx 'vulnerability_check=passed' "${TEST_ROOT}/output"
 [[ "$(full_identity)" == "${IDENTITY}" ]] || { printf 'Full verification source/environment changed\n' >&2; exit 1; }

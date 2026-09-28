@@ -197,6 +197,10 @@ func routePath(path string, plan *checkPlan, checks map[string]bool) {
 	if path == "README.md" || strings.HasPrefix(path, "docs/") || strings.HasPrefix(path, "skills/") {
 		plan.Documentation = true
 	}
+	if path == "README.md" {
+		// The bootstrap test pins the README's signed install script.
+		checks["scripts/tests/test-bootstrap.sh"] = true
+	}
 	if strings.HasPrefix(path, "skills/") {
 		checks["scripts/tests/test-skill-drift.sh"] = true
 	}

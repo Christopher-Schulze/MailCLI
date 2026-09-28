@@ -354,7 +354,7 @@ chmod 755 "${TEST_ROOT}/signal-mutant-helper.sh"
 SIGNAL_STATUS=0
 TMPDIR="${TEST_ROOT}/signal-mutant-temporaries" MAILCLI_TEST_GATE_SIGNAL=TERM \
   "${TEST_ROOT}/signal-mutant-helper.sh" "${TEST_REPOSITORY}" "${INITIAL_COMMIT}" \
-  "$(git -C "${TEST_REPOSITORY}" write-tree)" 174 --checks scripts/tests/test-lease-fixture.sh \
+  "$(git -C "${TEST_REPOSITORY}" write-tree)" --checks scripts/tests/test-lease-fixture.sh \
   >"${TEST_ROOT}/signal-mutant-output" 2>&1 || SIGNAL_STATUS=$?
 [[ "${SIGNAL_STATUS}" == 143 && -n "$(find "${TEST_ROOT}/signal-mutant-temporaries" -mindepth 1 -print)" ]] || {
   printf 'Interruption cleanup fixture did not fail after removal of its cleanup trap\n' >&2
@@ -637,5 +637,46 @@ for REVIEW_PATH in "${REVIEW_PATHS[@]}"; do grep -Fxq "  ${REVIEW_PATH}" "${TEST
   "$(sed -n 's/^reviewed_patch_sha256=//p' "${TEST_ROOT}/full-review")" ]]
 git -C "${TEST_REPOSITORY}" read-tree --reset -u "${GROUP_COMMIT}"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" abort "${LARGE_TOKEN}" >/dev/null
+
+# extend adds unchanged tracked paths to an active lease; review then accepts them.
+EXTEND_ACQUIRE="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" acquire 178 extend-owner tracked.txt)"
+EXTEND_TOKEN="$(printf '%s\n' "${EXTEND_ACQUIRE}" | sed -n 's/^write_lease_token=//p')"
+expect_extend_rejection() {
+  local EXPECTED_MESSAGE="$1" EXTEND_OWNER_TOKEN="$2"
+  shift 2
+  local OUTPUT
+  if OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+    "${LEASE_TOOL}" extend "${EXTEND_OWNER_TOKEN}" "$@" 2>&1)"; then
+    printf 'Extend accepted an invalid path set: %s\n' "$*" >&2
+    exit 1
+  fi
+  [[ "${OUTPUT}" == *"${EXPECTED_MESSAGE}"* ]] || {
+    printf 'Extend failed for the wrong reason: %s\n' "${OUTPUT}" >&2
+    exit 1
+  }
+}
+expect_extend_rejection 'Write lease token does not match the active owner' \
+  "$(printf '%064d' 0)" other.txt
+expect_extend_rejection 'Path is already leased: tracked.txt' "${EXTEND_TOKEN}" tracked.txt
+expect_extend_rejection 'Lease paths must name tracked files, not a tracked directory: scripts' "${EXTEND_TOKEN}" scripts
+printf 'changed before lease\n' >>"${TEST_REPOSITORY}/other.txt"
+expect_extend_rejection 'Path changed before it was leased: other.txt' "${EXTEND_TOKEN}" other.txt
+git -C "${TEST_REPOSITORY}" checkout -q -- other.txt
+grep -Fxq other.txt "${LEASE_METADATA}/allowed_paths" && {
+  printf 'Rejected extend changed the lease scope\n' >&2
+  exit 1
+}
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" extend "${EXTEND_TOKEN}" other.txt >"${TEST_ROOT}/extend-output"
+grep -Fxq 'write_lease_extended=other.txt' "${TEST_ROOT}/extend-output"
+grep -Fxq other.txt "${LEASE_METADATA}/allowed_paths"
+printf 'extended change\n' >"${TEST_REPOSITORY}/other.txt"
+stage_fixture_path other.txt 100644
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" review "${EXTEND_TOKEN}" >"${TEST_ROOT}/extend-review"
+grep -Fq other.txt "${TEST_ROOT}/extend-review"
+git -C "${TEST_REPOSITORY}" read-tree --reset -u "${GROUP_COMMIT}"
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" abort "${EXTEND_TOKEN}" >/dev/null
 
 printf 'Write coordination passed: ownership, path and asset scope, failure-preserving gate, tested commit identity, and exact grouped TASK membership\n'
