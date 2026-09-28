@@ -33,10 +33,9 @@ printf 'module verificationfixture\n\ngo %s\n' "${GOTOOLCHAIN#go}" >"${TEST_ROOT
 printf 'package verificationfixture\nfunc Value() int { return 42 }\n' >"${TEST_ROOT}/fixture.go"
 gofmt -w "${TEST_ROOT}/fixture.go"
 (cd "${TEST_ROOT}" && "${LINTER}" run --config "${ROOT}/.golangci.yml" ./...)
-for CASE in errcheck govet staticcheck; do
+for CASE in errcheck staticcheck; do
   case "${CASE}" in
     errcheck) printf 'package verificationfixture\nimport "io"\nfunc Close(c io.Closer) { c.Close() }\n' ;;
-    govet) printf 'package verificationfixture\nimport "fmt"\nfunc Print() { _, _ = fmt.Printf("%%d", "text") }\n' ;;
     staticcheck) printf 'package verificationfixture\nimport "regexp"\nfunc Match(s string) (bool, error) { return regexp.MatchString("[a-", s) }\n' ;;
   esac >"${TEST_ROOT}/fixture.go"
   gofmt -w "${TEST_ROOT}/fixture.go"

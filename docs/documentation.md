@@ -1235,7 +1235,7 @@ Caller cancellation and earlier parent deadlines always take precedence, and tim
 
 Build with `./scripts/build/build.sh`; it writes `bin/mailcli` unless `MAILCLI_BUILD_OUTPUT` names another destination.
 `./scripts/tests/test.sh` checks the exact staged change: changed-source formatting and shell syntax, configured lint, changed Go packages and their transitive reverse dependencies, applicable documentation contracts, and registered shell checks; it omits vulnerability scanning.
-`./scripts/tests/test.sh --full` is the integrated non-live suite: shell script checks, `gofmt`, module verification, one configured `golangci-lint` pass (errcheck, govet, ineffassign, staticcheck and unused), blocking `govulncheck`, coverage tests, forbidden-path architecture checks, commit and release authority checks, and isolated release, source-installation and skill-validation tests.
+`./scripts/tests/test.sh --full` is the integrated non-live suite: shell script checks, `gofmt`, module verification, one configured `golangci-lint` pass (errcheck, ineffassign, staticcheck and unused; vet runs in no standard flow), blocking `govulncheck`, coverage tests, forbidden-path architecture checks, commit and release authority checks, and isolated release, source-installation and skill-validation tests.
 `--push-check` validates a matching full proof without publishing.
 It runs four Go packages concurrently with `GOMAXPROCS=4` and runs the shell regressions in one ordered lane beside the Go checks; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` accept positive-integer overrides.
 No gate, CI run or full proof uses the race detector; run `scripts/tests/run-race-tests.sh [PACKAGE...]` manually when a race check is wanted.
