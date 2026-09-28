@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -14,6 +15,9 @@ const (
 	DefaultExcerptLength      = 240
 	MaximumExcerptLength      = 1000
 	MaximumExcerptSourceBytes = int64(256 * 1024)
+	// IMAPExcerptTextBytes bounds the body-text prefix an IMAP excerpt fetch
+	// reads per message, next to the MIME header fields.
+	IMAPExcerptTextBytes = int64(64 * 1024)
 )
 
 type ExcerptSource string
@@ -35,23 +39,44 @@ type MessageEnrichmentRequest struct {
 	ExcerptLength int
 }
 
-// MessageEnrichmentGateway never falls back to an unrestricted body read.
+// MessageEnrichmentGateway enriches a page of refs at once, returning one
+// summary per ref in order, and never falls back to an unrestricted body read.
 type MessageEnrichmentGateway interface {
-	EnrichMessage(context.Context, string, MessageEnrichmentRequest) (MessageSummary, error)
+	EnrichMessages(context.Context, []string, MessageEnrichmentRequest) ([]MessageSummary, error)
 }
 
 func (s *Service) EnrichMessage(ctx context.Context, summary MessageSummary, request MessageEnrichmentRequest) (MessageSummary, error) {
+	err := s.EnrichMessages(ctx, []*MessageSummary{&summary}, request)
+	return summary, err
+}
+
+// EnrichMessages fills the requested reply metadata of every summary in place.
+func (s *Service) EnrichMessages(ctx context.Context, summaries []*MessageSummary, request MessageEnrichmentRequest) error {
 	if request.ExcerptLength < 1 || request.ExcerptLength > MaximumExcerptLength {
-		return summary, validationError("excerpt length must be between 1 and 1000")
+		return validationError("excerpt length must be between 1 and 1000")
 	}
 	reader, ok := s.gateway.(MessageEnrichmentGateway)
-	if !ok || (!request.Threading && !request.Excerpt) {
-		return summary, nil
+	if !ok || (!request.Threading && !request.Excerpt) || len(summaries) == 0 {
+		return nil
 	}
-	metadata, err := reader.EnrichMessage(ctx, summary.Ref, request)
+	refs := make([]string, len(summaries))
+	for index, summary := range summaries {
+		refs[index] = summary.Ref
+	}
+	enriched, err := reader.EnrichMessages(ctx, refs, request)
 	if err != nil {
-		return summary, err
+		return err
 	}
+	if len(enriched) != len(summaries) {
+		return fmt.Errorf("message enrichment returned %d summaries for %d refs", len(enriched), len(summaries))
+	}
+	for index, summary := range summaries {
+		applyEnrichment(summary, enriched[index], request)
+	}
+	return nil
+}
+
+func applyEnrichment(summary *MessageSummary, metadata MessageSummary, request MessageEnrichmentRequest) {
 	if request.Threading {
 		if summary.MessageID == "" {
 			summary.MessageID = metadata.MessageID
@@ -63,7 +88,6 @@ func (s *Service) EnrichMessage(ctx context.Context, summary MessageSummary, req
 		summary.Excerpt, summary.ExcerptComplete, summary.ExcerptSource = metadata.Excerpt, metadata.ExcerptComplete, metadata.ExcerptSource
 	}
 	summary.EnrichmentError = metadata.EnrichmentError
-	return summary, nil
 }
 
 // MarshalJSON normalizes only new fields; historical values and omission

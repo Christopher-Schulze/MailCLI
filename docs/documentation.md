@@ -146,11 +146,12 @@ All commands share the [Output contract](#output-contract); the selected capabil
   `--with-threading` fills `summary.in_reply_to[]`, `summary.references[]` (bracketed msg-ids in header order), `summary.from{name,address}` and `summary.threading_complete` from the bounded header block (local or IMAP `BODY.PEEK[HEADER]`).
   `--with-excerpt` fills `summary.excerpt`, `summary.excerpt_complete` and `summary.excerpt_source` (`local`, `imap-partial`, `unavailable`); `--excerpt-length` defaults to 240 runes (1 to 1000).
 - Excerpts prefer text/plain over HTML text, drop `>` quote lines and a signature after an exact `-- ` line, collapse whitespace and cut at a rune boundary.
-  Each reads 256 KiB of RFC source or less (a local prefix, or an IMAP `BODY.PEEK[]<0.262144>` partial fetch only when the local source is partial); larger or missing sources report `excerpt_complete:false`.
+  Each reads 256 KiB of local RFC source or less; only when the local source is partial or missing does it fetch over IMAP the `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` header fields plus a 64 KiB `BODY.PEEK[TEXT]` prefix, never the full body. Larger sources report `excerpt_complete:false`.
+  A page selects each account mailbox once and fetches all of its IMAP excerpts with one `UID FETCH`; a message the server does not return gets `enrichment_error:"imap_message_not_found"`.
   Unrequested keys are empty; empty or false means unknown, not absence.
 - A malformed `In-Reply-To` or `References` value keeps every valid msg-id but sets `threading_complete:false`.
   When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.
-  A page enriches at most four messages at a time in row order and reads no more than 8 MiB of excerpt source in total; later rows get `enrichment_error:"enrichment_page_budget_exhausted"` and can be fetched on a smaller page.
+  A page reads local sources for at most four messages at a time, keeps row order and reads no more than 8 MiB of excerpt source in total; later rows get `enrichment_error:"enrichment_page_budget_exhausted"` and can be fetched on a smaller page.
 - `messages.get`: read projected metadata, recipients, body and attachment metadata; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`, `--excerpt-length`.
   Its summary always carries the threading fields; `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.

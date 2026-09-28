@@ -7,9 +7,7 @@ import (
 	"mailcli/internal/mail"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 	"unicode/utf8"
 )
 
@@ -111,20 +109,21 @@ func TestRealStoreMessageExcerptAndOrderedHeaders(t *testing.T) {
 
 type enrichmentProbeGateway struct {
 	testGateway
-	inFlight, peak atomic.Int32
+	calls    int
+	lastRefs []string
 }
 
-func (g *enrichmentProbeGateway) EnrichMessage(_ context.Context, ref string, request mail.MessageEnrichmentRequest) (mail.MessageSummary, error) {
-	current := g.inFlight.Add(1)
-	defer g.inFlight.Add(-1)
-	for peak := g.peak.Load(); current > peak && !g.peak.CompareAndSwap(peak, current); peak = g.peak.Load() {
+func (g *enrichmentProbeGateway) EnrichMessages(_ context.Context, refs []string, request mail.MessageEnrichmentRequest) ([]mail.MessageSummary, error) {
+	g.calls++
+	g.lastRefs = append([]string(nil), refs...)
+	summaries := make([]mail.MessageSummary, len(refs))
+	for index, ref := range refs {
+		summaries[index] = mail.MessageSummary{MessageID: "<" + ref + "@example.com>", ThreadingComplete: request.Threading}
+		if request.Excerpt {
+			summaries[index].Excerpt, summaries[index].ExcerptSource = "text", mail.ExcerptSourceLocal
+		}
 	}
-	time.Sleep(20 * time.Millisecond)
-	summary := mail.MessageSummary{MessageID: "<" + ref + "@example.com>", ThreadingComplete: request.Threading}
-	if request.Excerpt {
-		summary.Excerpt, summary.ExcerptSource = "text", mail.ExcerptSourceLocal
-	}
-	return summary, nil
+	return summaries, nil
 }
 
 func enrichmentProbeRows(count int, size int64) []*mail.MessageSummary {
@@ -135,7 +134,7 @@ func enrichmentProbeRows(count int, size int64) []*mail.MessageSummary {
 	return rows
 }
 
-func TestEnrichSummariesKeepsOrderWithBoundedConcurrency(t *testing.T) {
+func TestEnrichSummariesKeepsOrderInOnePageRequest(t *testing.T) {
 	gateway := &enrichmentProbeGateway{}
 	rows := enrichmentProbeRows(12, 1024)
 	request := mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: mail.DefaultExcerptLength}
@@ -147,18 +146,22 @@ func TestEnrichSummariesKeepsOrderWithBoundedConcurrency(t *testing.T) {
 			t.Fatalf("row %d = %+v", index, row)
 		}
 	}
-	if peak := gateway.peak.Load(); peak > enrichmentConcurrency || peak < 2 {
-		t.Fatalf("peak concurrent enrichments = %d, want 2..%d", peak, enrichmentConcurrency)
+	if gateway.calls != 1 || len(gateway.lastRefs) != len(rows) {
+		t.Fatalf("gateway calls = %d with %d refs, want one call with %d refs", gateway.calls, len(gateway.lastRefs), len(rows))
 	}
 }
 
 func TestEnrichSummariesStopsAtThePageSourceBudget(t *testing.T) {
 	rows := enrichmentProbeRows(40, mail.MaximumExcerptSourceBytes)
 	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: mail.DefaultExcerptLength}
-	if err := enrichSummaries(context.Background(), mail.NewService(&enrichmentProbeGateway{}), rows, request); err != nil {
+	gateway := &enrichmentProbeGateway{}
+	if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, request); err != nil {
 		t.Fatal(err)
 	}
 	withinBudget := int(enrichmentPageSourceBytes / mail.MaximumExcerptSourceBytes)
+	if len(gateway.lastRefs) != withinBudget {
+		t.Fatalf("gateway read %d refs, want the %d within budget", len(gateway.lastRefs), withinBudget)
+	}
 	for index, row := range rows {
 		enriched := row.ExcerptSource == mail.ExcerptSourceLocal && row.EnrichmentError == ""
 		skipped := row.ExcerptSource == "" && row.EnrichmentError == enrichmentBudgetExhausted

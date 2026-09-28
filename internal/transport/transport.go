@@ -178,10 +178,21 @@ type MessageHeaderFetcher interface {
 	FetchMessageHeaders(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error)
 }
 
-// MessagePrefixFetcher reads at most maxBytes RFC source bytes with a partial
-// BODY.PEEK fetch. Implementations must not fall back to a full-body fetch.
-type MessagePrefixFetcher interface {
-	FetchMessagePrefix(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error)
+// MessageExcerptFetcher reads excerpt sources for several UIDs of one mailbox
+// with a single UID FETCH: the top-level MIME header fields and at most
+// maxTextBytes of the body text per message. Implementations must not fall
+// back to a full-body fetch. UIDs the server does not return are absent from
+// the result.
+type MessageExcerptFetcher interface {
+	FetchMessageExcerpts(ctx context.Context, cfg ImapConfig, mailbox string, expectedUIDValidity uint32, uids []uint32, maxTextBytes int64) (map[uint32]MessageExcerptSource, error)
+}
+
+// MessageExcerptSource is a minimal MIME message: the MIME header fields
+// followed by a body-text prefix. Complete reports that the whole body text
+// fit in the prefix.
+type MessageExcerptSource struct {
+	Source   []byte
+	Complete bool
 }
 
 // ImapConcurrencyProvider optionally reports the configured per-account pool

@@ -2,7 +2,12 @@ package mailstore
 
 import (
 	"context"
+	"fmt"
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -29,17 +34,152 @@ func TestExcerptMIMEFixtures(t *testing.T) {
 	}
 }
 
+func enrichOne(client *Client, ref string, request mail.MessageEnrichmentRequest) (mail.MessageSummary, error) {
+	summaries, err := client.EnrichMessages(context.Background(), []string{ref}, request)
+	if err != nil {
+		return mail.MessageSummary{}, err
+	}
+	return summaries[0], nil
+}
+
+// excerptBatchOperator resolves UIDs by subject and serves excerpt sources for
+// the UIDs in sources; every other requested UID is not returned.
+type excerptBatchOperator struct {
+	*metadataResolverStub
+	uidsBySubject map[string]uint32
+	sources       map[uint32]string
+	fetchErr      error
+	fetchUIDs     [][]uint32
+	fetchMailbox  []string
+	fetchLimit    int64
+}
+
+func (operator *excerptBatchOperator) ResolveMessageIdentity(
+	_ context.Context, _ transport.ImapConfig, _ string, hint transport.MessageIdentityHint,
+) (transport.MessageIdentity, error) {
+	uid := operator.uidsBySubject[hint.Subject]
+	return transport.MessageIdentity{UID: uid, UIDValidity: 12345, MessageID: fmt.Sprintf("<%d@example.com>", uid)}, nil
+}
+
+func (operator *excerptBatchOperator) FetchMessageExcerpts(
+	_ context.Context, _ transport.ImapConfig, mailbox string, _ uint32, uids []uint32, maxTextBytes int64,
+) (map[uint32]transport.MessageExcerptSource, error) {
+	operator.fetchUIDs = append(operator.fetchUIDs, append([]uint32(nil), uids...))
+	operator.fetchMailbox = append(operator.fetchMailbox, mailbox)
+	operator.fetchLimit = maxTextBytes
+	if operator.fetchErr != nil {
+		return nil, operator.fetchErr
+	}
+	results := make(map[uint32]transport.MessageExcerptSource)
+	for _, uid := range uids {
+		if source, found := operator.sources[uid]; found {
+			results[uid] = transport.MessageExcerptSource{Source: []byte(source), Complete: true}
+		}
+	}
+	return results, nil
+}
+
+// newExcerptBatchFixture removes the local sources of the two INBOX messages
+// so their excerpts need IMAP, and returns refs for the INBOX rows plus the
+// locally complete archive row.
+func newExcerptBatchFixture(t *testing.T, operator *excerptBatchOperator) (*Client, []string) {
+	t.Helper()
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "excerpt batch fixture store")
+	installImapIdentityFixture(t, store, "metadata@gmail.com")
+	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID IN (102, 103)`)
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rowID := range []int64{102, 103} {
+		base, err := store.messageBasePath(location, rowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(base + ".emlx"); err != nil {
+			t.Fatalf("remove local source %d: %v", rowID, err)
+		}
+	}
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveRef, err := mailref.EncodeMailbox(testAccountID, []string{"All"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: archiveRef, Limit: 1})
+	if err != nil || len(archive.Messages) != 1 {
+		t.Fatalf("archive rows=%d err=%v", len(archive.Messages), err)
+	}
+	operator.metadataResolverStub = &metadataResolverStub{stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "[Gmail]/All"}}}}
+	client := &Client{store: store, send: mail.SendTransport{Imap: operator, Credentials: stubCredentials{"metadata@gmail.com": "secret"}}}
+	refs := []string{
+		messageRefWithSubject(t, page.Messages, "Status Update"),
+		archive.Messages[0].Ref,
+		messageRefWithSubject(t, page.Messages, "Noise"),
+	}
+	return client, refs
+}
+
+func TestEnrichMessagesFetchesIMAPExcerptsOncePerMailbox(t *testing.T) {
+	operator := &excerptBatchOperator{
+		uidsBySubject: map[string]uint32{"Status Update": 202, "Noise": 203},
+		sources:       map[uint32]string{202: "Content-Type: text/plain\r\n\r\nRemote status text"},
+	}
+	client, refs := newExcerptBatchFixture(t, operator)
+	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operator.fetchUIDs) != 1 || !slices.Equal(operator.fetchUIDs[0], []uint32{202, 203}) ||
+		operator.fetchMailbox[0] != "INBOX" || operator.fetchLimit != mail.IMAPExcerptTextBytes {
+		t.Fatalf("fetches=%v mailboxes=%v limit=%d, want one INBOX fetch of 202,203", operator.fetchUIDs, operator.fetchMailbox, operator.fetchLimit)
+	}
+	remote, local, missing := summaries[0], summaries[1], summaries[2]
+	if remote.ExcerptSource != mail.ExcerptSourceIMAPPartial || remote.Excerpt != "Remote status text" || !remote.ExcerptComplete || remote.EnrichmentError != "" {
+		t.Fatalf("remote row = %+v", remote)
+	}
+	if local.ExcerptSource != mail.ExcerptSourceLocal || local.Excerpt == "" || local.EnrichmentError != "" {
+		t.Fatalf("local row = %+v", local)
+	}
+	if missing.ExcerptSource != mail.ExcerptSourceUnavailable || missing.Excerpt != "" || missing.EnrichmentError != transport.CodeIMAPMessageNotFound {
+		t.Fatalf("row the server did not return = %+v", missing)
+	}
+}
+
+func TestEnrichMessagesReportsAFailedExcerptFetchPerRow(t *testing.T) {
+	operator := &excerptBatchOperator{
+		uidsBySubject: map[string]uint32{"Status Update": 202, "Noise": 203},
+		fetchErr:      &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "timeout"},
+	}
+	client, refs := newExcerptBatchFixture(t, operator)
+	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{0, 2} {
+		if summaries[index].ExcerptSource != mail.ExcerptSourceUnavailable || summaries[index].EnrichmentError != transport.CodeIMAPTimeout {
+			t.Fatalf("row %d = %+v", index, summaries[index])
+		}
+	}
+	if summaries[1].ExcerptSource != mail.ExcerptSourceLocal || summaries[1].EnrichmentError != "" {
+		t.Fatalf("local row = %+v", summaries[1])
+	}
+}
+
 func TestExcerptSourceCapAndThreadingRead(t *testing.T) {
 	store, ref, _ := newLargeReadIntentFixture(t, 512<<10)
 	metrics := &readMetrics{}
 	store.readMetrics = metrics
 	client := &Client{store: store}
-	result, err := client.EnrichMessage(context.Background(), ref, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 13})
+	result, err := enrichOne(client, ref, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 13})
 	if err != nil || result.ExcerptSource != mail.ExcerptSourceLocal || result.ExcerptComplete || utf8.RuneCountInString(result.Excerpt) > 13 || metrics.sourceBytes.Load() > mail.MaximumExcerptSourceBytes {
 		t.Fatalf("metadata=%+v bytes=%d err=%v", result, metrics.sourceBytes.Load(), err)
 	}
 	metrics.sourceBytes.Store(0)
-	result, err = client.EnrichMessage(context.Background(), ref, mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: 240})
+	result, err = enrichOne(client, ref, mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: 240})
 	if err != nil || !result.ThreadingComplete || metrics.sourceBytes.Load() > maximumHeaderBytes || result.Excerpt != "" {
 		t.Fatalf("threading=%+v bytes=%d err=%v", result, metrics.sourceBytes.Load(), err)
 	}
@@ -69,7 +209,7 @@ func TestEnrichmentReportsTheFailureInsteadOfHidingIt(t *testing.T) {
 		{Threading: true, ExcerptLength: 240},
 		{Excerpt: true, ExcerptLength: 240},
 	} {
-		result, err := client.EnrichMessage(context.Background(), "msg_not-a-reference", request)
+		result, err := enrichOne(client, "msg_not-a-reference", request)
 		if err != nil || result.EnrichmentError == "" || result.ThreadingComplete || result.Excerpt != "" {
 			t.Fatalf("request=%+v result=%+v err=%v", request, result, err)
 		}

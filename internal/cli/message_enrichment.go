@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 
-	"golang.org/x/sync/errgroup"
 	"mailcli/internal/mail"
 )
 
@@ -12,7 +11,7 @@ func addMessageEnrichmentFlags(flags *flag.FlagSet, page bool) *mail.MessageEnri
 	request := &mail.MessageEnrichmentRequest{ExcerptLength: mail.DefaultExcerptLength}
 	if page {
 		flags.BoolVar(&request.Threading, "with-threading", false, "read bounded RFC headers for reply IDs and structured sender; disclose threading_complete")
-		flags.BoolVar(&request.Excerpt, "with-excerpt", false, "read at most 256 KiB of RFC source per message for an excerpt; disclose source and completeness")
+		flags.BoolVar(&request.Excerpt, "with-excerpt", false, "read at most 256 KiB of local RFC source or a 64 KiB IMAP text prefix per message for an excerpt; disclose source and completeness")
 	}
 	requirement := "requires --fields excerpt"
 	if page {
@@ -36,19 +35,17 @@ func newMessageMetadataField(field string) bool {
 const (
 	// enrichmentPageSourceBytes caps the excerpt source bytes one page may read.
 	enrichmentPageSourceBytes = int64(8 << 20)
-	enrichmentConcurrency     = 4
 	enrichmentBudgetExhausted = "enrichment_page_budget_exhausted"
 )
 
-// enrichSummaries fills requested reply metadata in place, in row order, with
-// bounded concurrency. Rows past the page's excerpt byte budget are not read
-// and name the budget in enrichment_error.
+// enrichSummaries fills requested reply metadata in place, in row order, as
+// one page request. Rows past the page's excerpt byte budget are not read and
+// name the budget in enrichment_error.
 func enrichSummaries(ctx context.Context, service *mail.Service, summaries []*mail.MessageSummary, request mail.MessageEnrichmentRequest) error {
 	if !request.Threading && !request.Excerpt {
 		return nil
 	}
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(enrichmentConcurrency)
+	selected := make([]*mail.MessageSummary, 0, len(summaries))
 	var reserved int64
 	for _, summary := range summaries {
 		if request.Excerpt {
@@ -58,14 +55,7 @@ func enrichSummaries(ctx context.Context, service *mail.Service, summaries []*ma
 				continue
 			}
 		}
-		group.Go(func() error {
-			enriched, err := service.EnrichMessage(groupCtx, *summary, request)
-			if err != nil {
-				return err
-			}
-			*summary = enriched
-			return nil
-		})
+		selected = append(selected, summary)
 	}
-	return group.Wait()
+	return service.EnrichMessages(ctx, selected, request)
 }

@@ -14,7 +14,7 @@
       "value_type": "boolean",
       "takes_value": false,
       "default": "false",
-      "description": "read up to 256 KiB RFC source per message; excerpt_source and excerpt_complete disclose bounded work"
+      "description": "read up to 256 KiB local RFC source or a 64 KiB IMAP text prefix per message; excerpt_source and excerpt_complete disclose bounded work"
     },
     {
       "name": "--excerpt-length",

@@ -60,11 +60,15 @@ func TestLiveReplyMetadataShape(t *testing.T) {
 		t.Fatalf("ListMessages() rows=%d error=%v", len(page.Messages), err)
 	}
 	request := mail.MessageEnrichmentRequest{Threading: true, Excerpt: true, ExcerptLength: 80}
+	refs := make([]string, len(page.Messages))
 	for index, message := range page.Messages {
-		summary, err := client.EnrichMessage(context.Background(), message.Ref, request)
-		if err != nil {
-			t.Fatalf("row %d: EnrichMessage() error = %v", index, err)
-		}
+		refs[index] = message.Ref
+	}
+	summaries, err := client.EnrichMessages(context.Background(), refs, request)
+	if err != nil || len(summaries) != len(refs) {
+		t.Fatalf("EnrichMessages() rows=%d error = %v", len(summaries), err)
+	}
+	for index, summary := range summaries {
 		if summary.ExcerptSource == "" || (summary.ExcerptSource == mail.ExcerptSourceUnavailable && summary.EnrichmentError == "") {
 			t.Fatalf("row %d: source=%q enrichment_error=%q", index, summary.ExcerptSource, summary.EnrichmentError)
 		}

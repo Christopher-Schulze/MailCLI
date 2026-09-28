@@ -41,15 +41,6 @@ func (c *Client) fetchMessage(ctx context.Context, cfg transport.ImapConfig, mai
 	return c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, spool, "BODY.PEEK[]")
 }
 
-func (c *Client) FetchMessagePrefix(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
-	section := fmt.Sprintf("BODY.PEEK[]<0.%d>", maxBytes)
-	source, err := c.fetchMessageSection(ctx, cfg, mailbox, uid, expectedUIDValidity, maxBytes, false, section)
-	if err != nil {
-		return nil, err
-	}
-	return source.data, nil
-}
-
 func (c *Client) fetchMessageSection(
 	ctx context.Context,
 	cfg transport.ImapConfig,
@@ -89,11 +80,7 @@ func (c *Client) fetchMessageSection(
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	expectedSection := ""
-	if strings.HasPrefix(bodySection, "BODY.PEEK[]<0.") {
-		expectedSection = "BODY[]<0>"
-	}
-	payload, err := c.readFetchSourceSection(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool, expectedSection)
+	payload, err := c.readFetchSource(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +97,39 @@ func validateFetchLimit(maxBytes int64) error {
 	}
 }
 
+// fetchResponseLimit bounds one logical FETCH response: its literals plus the
+// protocol text around them.
+func fetchResponseLimit(literalBytes int64) int64 {
+	if literalBytes > int64(^uint64(0)>>1)-maxIMAPResponseLineBytes {
+		return literalBytes
+	}
+	return literalBytes + maxIMAPResponseLineBytes
+}
+
+// fetchReadError maps a failed FETCH response read to its transport error.
+func fetchReadError(ctx context.Context, err error, maxBytes int64) error {
+	var limitErr *literalLimitError
+	if errors.As(err, &limitErr) {
+		return &transport.TransportError{
+			Code: transport.CodeIMAPRawSourceTooLarge,
+			Message: fmt.Sprintf(
+				"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
+				limitErr.size, maxBytes,
+			),
+			Err: err,
+		}
+	}
+	var malformed *malformedResponseError
+	if errors.As(err, &malformed) {
+		return &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP FETCH response malformed", Err: err}
+	}
+	var literalErr *literalReadError
+	if errors.As(err, &literalErr) {
+		return wrapIOError(ctx, literalErr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
+	}
+	return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
+}
+
 func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64) ([]byte, error) {
 	source, err := c.readFetchSource(ctx, sess, tag, requestedUID, 0, maxBytes, false)
 	if err != nil {
@@ -119,17 +139,10 @@ func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string
 }
 
 func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool) (result *fetchSource, resultErr error) {
-	return c.readFetchSourceSection(ctx, sess, tag, requestedUID, expectedUIDValidity, maxBytes, spool, "")
-}
-
-func (c *Client) readFetchSourceSection(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool, expectedSection string) (result *fetchSource, resultErr error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
-	responseLimit := maxBytes
-	if responseLimit <= int64(^uint64(0)>>1)-maxIMAPResponseLineBytes {
-		responseLimit += maxIMAPResponseLineBytes
-	}
+	responseLimit := fetchResponseLimit(maxBytes)
 	var payload *fetchSource
 	var pending []*fetchSource
 	defer func() {
@@ -168,30 +181,7 @@ func (c *Client) readFetchSourceSection(ctx context.Context, sess *session, tag 
 			},
 		)
 		if err != nil {
-			var limitErr *literalLimitError
-			if errors.As(err, &limitErr) {
-				return nil, &transport.TransportError{
-					Code: transport.CodeIMAPRawSourceTooLarge,
-					Message: fmt.Sprintf(
-						"IMAP FETCH announced %d bytes exceeding the %d byte raw-source cap; read the message from the local Mail store instead",
-						limitErr.size, maxBytes,
-					),
-					Err: err,
-				}
-			}
-			var malformed *malformedResponseError
-			if errors.As(err, &malformed) {
-				return nil, &transport.TransportError{
-					Code:    transport.CodeIMAPResponseMalformed,
-					Message: "IMAP FETCH response malformed",
-					Err:     err,
-				}
-			}
-			var literalErr *literalReadError
-			if errors.As(err, &literalErr) {
-				return nil, wrapIOError(ctx, literalErr, transport.CodeIMAPFetchFailed, "IMAP FETCH read literal bytes")
-			}
-			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
+			return nil, fetchReadError(ctx, err, maxBytes)
 		}
 		if err := validateFetchResponseValidity(line, tag, expectedUIDValidity); err != nil {
 			sess.dirty = true
@@ -261,9 +251,9 @@ func (c *Client) readFetchSourceSection(ctx context.Context, sess *session, tag 
 				Message: "IMAP FETCH returned duplicate BODY values for the requested UID",
 			}
 		}
-		if expectedSection != "" && !strings.EqualFold(strings.Replace(parsed.bodySection, "BODY.PEEK[", "BODY[", 1), expectedSection) {
+		if len(parsed.sections) > 1 {
 			sess.dirty = true
-			return nil, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP partial FETCH returned an unexpected BODY section or offset"}
+			return nil, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP FETCH returned more BODY sections than requested"}
 		}
 		found = true
 		if parsed.bodyLiteral {
@@ -296,7 +286,14 @@ type fetchResponse struct {
 	bodyPresent  bool
 	bodyLiteral  bool
 	bodyIndex    int
-	bodySection  string
+	sections     []fetchBodySection
+}
+
+// fetchBodySection is one BODY[...] value of a FETCH response; name is the
+// upper-case section with BODY.PEEK normalized to BODY.
+type fetchBodySection struct {
+	name string
+	data []byte
 }
 
 type fetchValueKind uint8
@@ -382,14 +379,24 @@ func parseFetchResponse(line string, literals [][]byte) (fetchResponse, error) {
 			response.uid = uid
 			response.uidPresent = true
 		case isFetchBodyAttribute(key):
-			if response.bodyPresent {
-				return fetchResponse{}, fmt.Errorf("duplicate FETCH BODY attribute %q", key)
+			name := strings.Replace(strings.ToUpper(key), "BODY.PEEK[", "BODY[", 1)
+			for _, section := range response.sections {
+				if section.name == name {
+					return fetchResponse{}, fmt.Errorf("duplicate FETCH BODY attribute %q", key)
+				}
 			}
 			if value.kind != fetchValueLiteral && value.kind != fetchValueQuoted && value.kind != fetchValueNil {
 				return fetchResponse{}, fmt.Errorf("FETCH BODY value is not an nstring")
 			}
+			section := fetchBodySection{name: name, data: value.literal}
+			if value.kind == fetchValueQuoted {
+				section.data = []byte(value.text)
+			}
+			response.sections = append(response.sections, section)
+			if response.bodyPresent {
+				continue
+			}
 			response.bodyPresent = true
-			response.bodySection = strings.ToUpper(key)
 			switch value.kind {
 			case fetchValueLiteral:
 				response.body = value.literal
