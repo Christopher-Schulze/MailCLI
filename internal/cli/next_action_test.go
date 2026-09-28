@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -71,6 +72,71 @@ func TestNextActionMapping(t *testing.T) {
 				t.Fatalf("next action changed across typed finalization: err=%v first=%s second=%s", err, payload, reencoded)
 			}
 		})
+	}
+}
+
+func TestCheckStateWhyKeepsTheReplayWarning(t *testing.T) {
+	conflict := &mail.DraftRevisionConflict{
+		Ref: "draft_" + strings.Repeat("d", 300), ExpectedRevision: "draft-review-v1:bad", CurrentRevision: "draft-review-v1:good",
+	}
+	failure := newErrorData("drafts.update", responseData{}, conflict)
+	next := failureNextAction(failure, nil)
+	const want = "Do not replay. Inspect the state with next.command and next.args."
+	if next.Do != "check_state" || next.Command != "drafts.inspect" || next.Why != want {
+		t.Fatalf("next = %+v, want check_state drafts.inspect with why %q", next, want)
+	}
+}
+
+func TestConfirmationRequiredAsksTheUser(t *testing.T) {
+	for _, command := range []string{"drafts.send", "messages.delete", "drafts.discard", "batch"} {
+		err := confirmationRequired("the action")
+		failure := newErrorData(command, responseData{}, err)
+		next := failureNextAction(failure, nil)
+		if next.Do != "ask_user" || next.Why != "Ask the user to authorize this action, then rerun with --confirm." {
+			t.Fatalf("%s next = %+v, want ask_user with the authorization sentence", command, next)
+		}
+	}
+}
+
+func TestErrorCodeNamesContextFailures(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("read: %w", context.DeadlineExceeded), "operation_timeout"},
+		{fmt.Errorf("read: %w", context.Canceled), "operation_canceled"},
+		{errors.New("plain"), "operation_failed"},
+		{&commandError{code: "invalid_argument", message: "x", cause: context.DeadlineExceeded}, "invalid_argument"},
+	} {
+		if got := errorCode(test.err); got != test.want {
+			t.Errorf("errorCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
+func TestUnknownFlagNamesTheValidFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), newTestService(), []string{"messages", "list", "--after", "2026-01-01", "--json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit code = %d, stdout %s stderr %s", code, stdout.String(), stderr.String())
+	}
+	var decoded struct {
+		Data  map[string]json.RawMessage `json:"data"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Error.Code != "invalid_argument" ||
+		!strings.HasPrefix(decoded.Error.Message, `unknown flag --after for "messages list"; valid flags: --account, `) ||
+		!strings.Contains(decoded.Error.Message, "--limit") || strings.Contains(decoded.Error.Message, " -after") {
+		t.Fatalf("error = %+v", decoded.Error)
+	}
+	if _, present := decoded.Data["store_profile"]; present {
+		t.Fatalf("validation failure carries store_profile: %s", stdout.String())
 	}
 }
 

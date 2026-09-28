@@ -373,6 +373,7 @@ Commands and arguments come only from supported recovery builders; absent argume
 | Caller cancellation with proven no effect | `stop` |
 | Terminal failure with proven no effect | `stop` |
 | Environment, credentials, account configuration or permission repair with no effect | `ask_user` |
+| `confirmation_required` (the action waits for the user's authorization; exit `1`) | `ask_user` |
 | Observation required, missing guidance or an unclassified failure | `check_state` |
 | Safe and replay allowed, with no effect | `retry` |
 | Input correction required, with no effect | `fix_input` |
@@ -428,7 +429,8 @@ Retained submission, mutation, APPEND or partial-effect evidence always takes pr
 References and cursors:
 `invalid_reference` means a malformed opaque ref; obtain a current ref from the matching listing and never edit tokens.
 Message reads decode the ref before reporting an unavailable store, so a malformed ref returns `invalid_reference` with exit `2` and `fix_input`, not a Full Disk Access request.
-`next.why` names the concrete fix: `fix_input` and default `stop` quote `error.message`, selected terminal codes name their outcome (for example `message_already_trashed`: nothing to do), and `check_state` with a recovery command names that command.
+`next.why` names the concrete fix: `fix_input` and default `stop` quote `error.message`, selected terminal codes name their outcome (for example `message_already_trashed`: nothing to do), and `check_state` with a recovery command says `Do not replay. Inspect the state with next.command and next.args.`
+Unknown flags name the flag as written and list the command's valid flags; canceled and timed-out operations without a more specific code are `operation_canceled` and `operation_timeout`, and validation failures carry no `data.store_profile`.
 `ambiguous_reference` means an account or mailbox path did not resolve uniquely; refresh the listing first.
 `stale_cursor` means a Mail.app page boundary changed; restart that listing without the cursor.
 `account_reference_version_unsupported` needs a compatible MailCLI build; `account_reference_corrupt` and mixed `account_reference_invalid` are terminal catalog-integrity failures.

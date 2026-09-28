@@ -1256,6 +1256,9 @@ func errorCode(err error) string {
 	if errors.As(err, &typed) && typed.ErrorCode() != "" {
 		return typed.ErrorCode()
 	}
+	if code := mail.ContextErrorCode(err); code != "" {
+		return code
+	}
 	return "operation_failed"
 }
 

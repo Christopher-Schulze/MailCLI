@@ -588,13 +588,22 @@ func guidanceErrorCode(err error) string {
 	if code := transport.ErrorCode(err); code != "" {
 		return code
 	}
+	if code := ContextErrorCode(err); code != "" {
+		return code
+	}
+	return "operation_failed"
+}
+
+// ContextErrorCode names a canceled or timed-out operation and returns an
+// empty string for every other error.
+func ContextErrorCode(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "operation_canceled"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "operation_timeout"
 	}
-	return "operation_failed"
+	return ""
 }
 
 func isInputErrorCode(code string) bool {

@@ -28,6 +28,7 @@ Obtain refs from listings, never edit tokens; uniquely resolve ambiguity, restar
 
 Corrupt access gate: quit Mail; retry same operation stopped (verified cleanup returns mail_not_running, no dispatch); reopen/retry. Running Mail/failed lookup preserves corruption. Unsafe gate: inspect owner/type/link count/identity, retain inode. Never delete/replace mail-access.lock or age-expire ownership.
 
+confirmation_required means the user has not authorized the action: ask the user before adding --confirm.
 Follow next.do/emitted recovery; only typed transients allow read retry. Effects/uncertainty/acceptance outrank cleanup/rejection; never invent absent args or replay accepted/uncertain writes.
 
 Resource overflow reports error.limit{name,value}/observed_at_least (byte bound >=value+1); inspect, no unchanged replay.

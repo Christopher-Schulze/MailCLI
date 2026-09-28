@@ -634,7 +634,7 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 		return 0
 	}
 	if err != nil {
-		writeLine(stderr, err)
+		writeLine(stderr, flagParseError(flags, err))
 		writeFlagUsage(flags, stderr)
 		return 2
 	}
@@ -655,6 +655,26 @@ func parseFlags(flags *flag.FlagSet, args []string, stdout io.Writer, stderr io.
 		return 2
 	}
 	return -1
+}
+
+// flagParseError rewrites the flag package's single-dash messages so an agent
+// sees the exact flag it wrote and the flags the command accepts.
+func flagParseError(flags *flag.FlagSet, err error) error {
+	const undefined = "flag provided but not defined: -"
+	const needsValue = "flag needs an argument: -"
+	message := err.Error()
+	switch {
+	case strings.HasPrefix(message, undefined):
+		var valid []string
+		flags.VisitAll(func(option *flag.Flag) { valid = append(valid, "--"+option.Name) })
+		valid = append(valid, "--help")
+		return fmt.Errorf("unknown flag --%s for %q; valid flags: %s",
+			strings.TrimLeft(strings.TrimPrefix(message, undefined), "-"), flags.Name(), strings.Join(valid, ", "))
+	case strings.HasPrefix(message, needsValue):
+		return fmt.Errorf("flag --%s for %q needs a value", strings.TrimLeft(strings.TrimPrefix(message, needsValue), "-"), flags.Name())
+	default:
+		return err
+	}
 }
 
 type referenceArgumentState struct {

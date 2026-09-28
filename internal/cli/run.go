@@ -1000,7 +1000,9 @@ func parseBooleanFlags(args []string, allowed ...string) (map[string]bool, error
 }
 
 func writeJSON(writer io.Writer, value envelope) int {
-	if value.Data.StoreProfile == nil && invocationStoreProfile != nil {
+	validationFailure := value.Error != nil && value.Error.Guidance != nil &&
+		value.Error.Guidance.Phase == mail.OperationPhaseValidation
+	if value.Data.StoreProfile == nil && invocationStoreProfile != nil && !validationFailure {
 		value.Data.StoreProfile = invocationStoreProfile
 	}
 	payload, err := marshalEnvelope(value)

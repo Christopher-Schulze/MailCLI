@@ -51,7 +51,7 @@ func TestDraftPreviewRejectsLegacyFormatFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), nil,
 		[]string{"drafts", "preview", "--ref", "draft_ref", "--format", "plain"}, &stdout, &stderr)
-	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -format") {
+	if code != 2 || !strings.Contains(stderr.String(), `unknown flag --format for "drafts preview"`) {
 		t.Fatalf("legacy preview flag: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

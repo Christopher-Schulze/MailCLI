@@ -553,7 +553,7 @@ func EncodeCompactTokenPayload(prefix string, value *CompactPayload, version byt
 func DecodeTokenPayload(prefix string, value string) ([]byte, error) {
 	kind := strings.TrimSuffix(prefix, "_")
 	if len(value) < len(prefix) || value[:len(prefix)] != prefix {
-		return nil, fmt.Errorf("invalid %s token prefix", kind)
+		return nil, fmt.Errorf("invalid %s token prefix: copy refs and cursors unchanged from MailCLI output", kind)
 	}
 	encoded := value[len(prefix):]
 	maxEncoded := ((MaxCompactPayloadBytes + 2) / 3) * 4

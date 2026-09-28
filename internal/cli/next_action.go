@@ -51,6 +51,8 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 		if why, found := environmentRepairWhy[failure.Code]; found {
 			next.Why = why
 		}
+	case failure.Code == confirmationRequiredCode:
+		next.Do, next.Why = "ask_user", "Ask the user to authorize this action, then rerun with --confirm."
 	case guidance.Retryability == mail.RetryObserveRequired:
 	case guidance.Retryability == mail.RetrySafe && guidance.ReplayAllowed:
 		next.Do, next.Why = "retry", "The evidence permits retrying the original invocation."
@@ -62,11 +64,16 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 	}
 	attachNextRecovery(next, guidance.Recovery)
 	if next.Do == "check_state" && next.Command != "" {
-		next.Why = boundedWhy("Run "+strings.Join(append([]string{"mailcli", strings.ReplaceAll(next.Command, ".", " ")}, next.Args...), " ")+
-			" and decide from its result; ", "do not replay.")
+		// The command and its refs are separate fields; a ref inside the
+		// sentence would push the replay warning past the length bound.
+		next.Why = "Do not replay. Inspect the state with next.command and next.args."
 	}
 	return next
 }
+
+// confirmationRequiredCode marks an action that waits for the user's
+// authorization; an agent must ask, never add the flag itself.
+const confirmationRequiredCode = "confirmation_required"
 
 // terminalWhy names the outcome for terminal codes whose message alone would
 // not tell an agent that there is nothing left to do.

@@ -115,7 +115,7 @@ func TestReferenceRoutesAcceptCanonicalHelpAndRejectLegacyFlag(t *testing.T) {
 		{"drafts", "adopt", "--message", "msg_ref"},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := Run(context.Background(), newTestService(), args, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -message") {
+		if code := Run(context.Background(), newTestService(), args, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "unknown flag --message for") {
 			t.Errorf("legacy args %q code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
 		}
 	}
