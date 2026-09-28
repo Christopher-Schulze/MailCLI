@@ -848,7 +848,7 @@ It needs no Full Disk Access or Automation permission; the first Keychain read m
 3. The app-specific password loads from the Keychain; a missing one returns `smtp_credentials_missing` naming `mailcli send setup`.
 4. MailCLI builds the RFC 5322 message with a locally generated Message-ID and atomically retains the composed bytes in a private mode-0600 `<REF>.send-spool`; the send claim records the Message-ID, envelope and versioned MIME fingerprints and the spool's size and SHA-256.
    Each attachment is read once through SHA-256 during composition; a fingerprint mismatch names the attachment and aborts before SMTP.
-5. The bytes are submitted over SMTP with STARTTLS and appended to the Sent mailbox over IMAP; each consumer reads an independent view pinned to the spool's identity, so path replacement cannot redirect bytes or cleanup.
+5. The bytes are submitted over SMTP with STARTTLS and appended to the Sent mailbox over IMAP, which always uses implicit TLS on the bound port (993 for Gmail and iCloud); an IMAP server that offers only STARTTLS is unsupported; each consumer reads an independent view pinned to the spool's identity, so path replacement cannot redirect bytes or cleanup.
 
 Cancellation stops new hashing, spooling and transport work and releases the draft lease; a send claim is kept whenever SMTP or its final outcome is unknown, so cancellation never causes an automatic resend.
 Each accepted-message recovery spool is bounded to 1 GiB and is removed after durable terminal send evidence; unresolved or corrupt evidence stays for explicit recovery.
@@ -1070,6 +1070,7 @@ A per-binary ACL becomes feasible only with a Developer-ID signing identity with
 
 MailCLI persists only review drafts, historical send and save claims, terminal send receipts, accepted-message recovery spools, account bindings and cross-process locks under `~/Library/Application Support/MailCLI`, plus the IMAP excerpt cache under `~/Library/Caches/MailCLI/excerpts`; it persists no mail corpus or search index.
 State directories use mode `0700`; drafts, claims, receipts and spools use mode `0600`.
+To remove all local state, delete `~/Library/Application Support/MailCLI` (its `drafts` folder holds unsent review drafts) and `~/Library/Caches/MailCLI/excerpts` (safe at any time), remove each stored password with `mailcli send setup --account ACCOUNT_REF --from ADDRESS --remove`, and delete the binary, the skill directory and any skill link.
 Structured output excludes body content unless requested, and diagnostics avoid subjects, bodies, headers, recipient lists and attachment bytes unless needed to identify the failed operation.
 Received attachment and content exports require new absolute destinations and refuse overwrites and unsafe path substitution.
 Mutations require explicit intent; send and destructive operations require confirmation and reviewed-state checks; handoff opens UI without sending.

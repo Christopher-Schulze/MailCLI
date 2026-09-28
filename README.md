@@ -320,10 +320,22 @@ printf '%s' '{"operation":"read","items":[{"id":"a","ref":"MESSAGE_REF"},{"id":"
 
 - macOS on Apple silicon only; a new macOS or Mail release may need an adapter update.
 - Direct sending and IMAP mutations support Gmail and iCloud by default; other providers need an account binding with explicit SMTP and IMAP hosts. Authentication uses app-specific passwords; OAuth is not implemented.
+- IMAP for direct mutations and Sent copies requires implicit TLS (port 993 by default); IMAP servers that offer only STARTTLS are unsupported, while SMTP submission uses STARTTLS.
 - Scripted Mail compose stays disabled because Mail 16 loses reviewed content; visible handoff supports new drafts with To recipients only and needs Mail.app as the default email application.
 - New mail appears after Mail.app updates its local store; there is no remote-only inbox search.
 - Body search is bounded work over local sources, not an instant index; narrow account, mailbox, sender, date, or subject for large stores.
 - A successful SMTP submission proves acceptance, not recipient delivery or conversation grouping.
+
+## Local state and removal
+
+MailCLI keeps state in four places and nowhere else:
+
+| Location | Content | Removal |
+|---|---|---|
+| `~/Library/Application Support/MailCLI` | review drafts, send claims and receipts, recovery spools, account bindings, locks | Delete the folder; deleting its `drafts` folder discards unsent review drafts |
+| `~/Library/Caches/MailCLI/excerpts` | 30-day cache of IMAP excerpt text | Delete the folder; safe at any time |
+| Keychain service `mailcli-smtp` | app-specific passwords | `mailcli send setup --account ACCOUNT_REF --from ADDRESS --remove` for each account, or delete the items in Keychain Access |
+| `~/.local/bin/mailcli` and `~/.agents/skills/mailcli` | binary, skill and any skill link such as `~/.claude/skills/mailcli` | Delete the binary, the skill directory and the link |
 
 ## JSON contract
 
@@ -379,7 +391,7 @@ The link follows `mailcli update` automatically. `scripts/tests/report-skill-dri
 | No credentials in chat, argv, or logs | App-specific passwords live only in the Keychain (`mailcli-smtp` service), entered once at a no-echo prompt |
 | No writes to Mail's database | The Envelope Index is opened read-only; unsupported store layouts fail closed |
 | No owned mail index | Searches scan current local sources on demand and persist no corpus |
-| No unreviewed sending | A send needs the reviewed `revision` and `--confirm`; any content change invalidates the review |
+| No send of unreviewed content | `drafts send` needs the reviewed `revision` and `--confirm`; any change to recipients, subject, body or attachments invalidates the revision. Authorization by the user is a rule of the agent skill, not enforced by the CLI |
 | No duplicate send or copy | Claims and operation identities block replay until the real outcome is observed |
 | No Mail.app lifecycle control | MailCLI binds to the exact running Mail process and never launches, quits, or restarts it |
 | No phantom compose objects | Scripted compose is disabled; visible handoff opens a window and never sends |
