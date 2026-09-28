@@ -405,6 +405,9 @@ Generic codes: `unknown_command` (unrecognized command), `invalid_argument` (wro
 Pre-effect failures:
 identity, binding, store, credential, editor and precondition failures that stop before any external effect (for example `account_disabled`, `keychain_load_failed`, `draft_mutation_confirmation_required`, `message_already_trashed`, `account_binding_stale`) report `effect_certainty:"none"` with `correct` or `inspect` recovery for every command, writes included.
 Outcome-uncertain codes keep observation-first guidance.
+Transient contention and network failures before any effect (`account_binding_busy`, `prune_state_changed`, `update_busy`, `update_check_failed`, `update_download_failed`) permit an unchanged retry.
+Deterministic refusals before any effect (untrusted or invalid release artifacts, unsupported platforms or capabilities, and state files that fail an integrity check) are terminal: `next.do` is `stop`.
+`check_state` with no effect is reserved for cases that need evidence first, such as a revision conflict or a busy draft.
 
 Reads:
 read failures are replayable only for explicitly classified transient errors; unknown read failures use `retryability:"observe_required"` with `recovery.action:"inspect"`.

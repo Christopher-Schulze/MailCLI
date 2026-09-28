@@ -467,7 +467,7 @@ func TestGuidanceForKnownReadErrorsHasExplicitPolicy(t *testing.T) {
 		{code: "invalid_request", command: "messages.list", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
 		{code: "mail_access_gate_corrupt", command: "doctor", phase: OperationPhaseRead, retryability: RetryUserInputRequired, recovery: RecoveryCorrect, instruction: true, instructionContains: "Quit Mail.app"},
 		{code: "mail_access_gate_unsafe", command: "doctor", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect, instruction: true, instructionContains: "No Mail.app action was dispatched"},
-		{code: "unsupported_platform", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
+		{code: "unsupported_platform", command: "doctor", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "unsupported_architecture", command: "doctor", phase: OperationPhaseRead, retryability: RetryObserveRequired, recovery: RecoveryInspect},
 		{code: "account_reference_corrupt", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},
 		{code: "account_reference_invalid", phase: OperationPhaseRead, retryability: RetryTerminal, recovery: RecoveryInspect},

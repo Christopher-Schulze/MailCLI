@@ -26,6 +26,21 @@ var (
 	errorScopeKeychain  = []string{"send.setup", "drafts.send", "drafts.reconcile", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "batch"}
 	errorScopeEditor    = []string{"drafts.edit"}
 	errorScopeUpdate    = []string{"update"}
+	// errorScopeMailStore lists the commands that open Mail's store.
+	errorScopeMailStore = []string{"doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "drafts.reconcile", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
+	// errorScopeRefs lists the commands that take a message, draft, account,
+	// mailbox or cursor reference.
+	errorScopeRefs = []string{"batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
+	// errorScopeMailStoreRefs lists the commands whose refs are bound to Mail's store.
+	errorScopeMailStoreRefs = []string{"batch", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
+	// errorScopeOutputBudget lists the commands with a --max-bytes JSON budget.
+	errorScopeOutputBudget = []string{"batch", "accounts.list", "mailboxes.list", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.thread", "attachments.list", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.update", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward"}
+	// errorScopeSubcommandFamilies lists the commands reached through a family
+	// dispatcher, where a mistyped subcommand returns unknown_command.
+	errorScopeSubcommandFamilies = []string{"accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "drafts.handoff-reconcile"}
+	// errorScopeStatefulRuntime is every command except the pure capabilities and
+	// version reports, which initialize no state and open no files.
+	errorScopeStatefulRuntime = []string{"update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
 )
 
 var errorCodeDefinitions = []errorCodeDefinition{
@@ -53,7 +68,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"account_reference_version_unsupported", "An account reference uses a version this build cannot decode.", errorScopeIdentity},
 	{"adopt_source_incomplete", "The store draft is not fully downloaded; open it in Mail.app first.", []string{"drafts.adopt"}},
 	{"ambiguous_attachment", "The attachment identifier matches more than one part.", []string{"attachments.save", "batch"}},
-	{"ambiguous_mail_store_generation", "Several Mail store generations exist without an active-generation marker.", errorScopeAll},
+	{"ambiguous_mail_store_generation", "Several Mail store generations exist without an active-generation marker.", errorScopeMailStore},
 	{"ambiguous_mailbox", "The mailbox selector matches several mailboxes; choose a returned ref.", []string{"messages.list", "messages.filter", "messages.search", "mailboxes.resolve"}},
 	{"ambiguous_message_source", "Both full and partial local sources exist for one message.", errorScopeDetail},
 	{"attachment_changed", "An attachment file changed after it was fingerprinted.", append([]string{"attachments.save"}, errorScopeDraft...)},
@@ -89,7 +104,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"editor_terminal_unavailable", "stdin and the selected output are not on the same foreground terminal.", errorScopeEditor},
 	{"editor_unavailable", "No editor is configured; pass --editor or set VISUAL or EDITOR.", errorScopeEditor},
 	{"environment_unhealthy", "doctor found a failing readiness check.", []string{"doctor"}},
-	{"finalization_failed", "Closing transports or the store failed after the command.", errorScopeAll},
+	{"finalization_failed", "Closing transports or the store failed after the command.", errorScopeStatefulRuntime},
 	{"forward_source_incomplete", "The forward source is partial, so its attachments cannot be proven.", []string{"messages.forward"}},
 	{"handoff_attachment_changed", "An attachment changed after it was recorded; handoff was not dispatched.", errorScopeHandoff},
 	{"handoff_attachment_cleanup_failed", "Staged handoff attachments could not be removed.", errorScopeHandoff},
@@ -136,7 +151,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"imap_response_malformed", "The server sent a malformed IMAP response.", errorScopeIMAP},
 	{"imap_sent_mailbox_not_found", "No Sent mailbox could be resolved on the server.", errorScopeSend},
 	{"imap_timeout", "An IMAP command timed out.", errorScopeIMAP},
-	{"initialization_failed", "MailCLI could not initialize its configuration or state.", errorScopeAll},
+	{"initialization_failed", "MailCLI could not initialize its configuration or state.", errorScopeStatefulRuntime},
 	{"interactive_required", "drafts edit needs an interactive terminal; agents use drafts update.", errorScopeEditor},
 	{"invalid_address", "An email address has invalid syntax.", append(append([]string{}, errorScopeDraft...), "send.setup")},
 	{"invalid_argument", "A flag, positional argument or combination is invalid.", errorScopeAll},
@@ -148,7 +163,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"invalid_mailbox_cache", "A mailbox cache file cannot be inspected.", errorScopeStoreRead},
 	{"invalid_message_source", "The source message has invalid structure, headers or no reply target.", []string{"messages.reply", "messages.forward", "messages.get", "attachments.list", "attachments.save", "drafts.send"}},
 	{"invalid_path_segment", "A mailbox path contains an unsafe segment.", errorScopeStoreRead},
-	{"invalid_reference", "A ref is malformed; use a current ref from a listing.", errorScopeAll},
+	{"invalid_reference", "A ref is malformed; use a current ref from a listing.", errorScopeRefs},
 	{"keychain_delete_failed", "The Keychain credential could not be deleted.", []string{"send.setup"}},
 	{"keychain_invalid_identifier", "The credential account identifier contains a NUL byte.", errorScopeKeychain},
 	{"keychain_item_duplicate", "The Keychain already holds a conflicting item.", []string{"send.setup"}},
@@ -166,8 +181,8 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"mail_not_running", "Mail.app is not running; open it and retry.", errorScopeMailApp},
 	{"mail_recovery_required", "A previous Mail.app operation may still be running; quit and reopen Mail.app.", errorScopeMailApp},
 	{"mail_service_unavailable", "The mail service is not available to the batch.", []string{"batch"}},
-	{"mail_store_not_read_only", "The Envelope Index connection is not query-only.", errorScopeAll},
-	{"mail_store_path_mismatch", "The opened Envelope Index is not the verified store path.", errorScopeAll},
+	{"mail_store_not_read_only", "The Envelope Index connection is not query-only.", errorScopeMailStore},
+	{"mail_store_path_mismatch", "The opened Envelope Index is not the verified store path.", errorScopeMailStore},
 	{"mail_store_preferences_invalid", "Mail's account ordering preferences are invalid.", errorScopeStoreRead},
 	{"mail_store_preferences_unavailable", "Mail's account ordering preferences cannot be read.", errorScopeStoreRead},
 	{"mail_store_unavailable", "The local Mail store is unavailable, usually missing Full Disk Access.", errorScopeStoreRead},
@@ -179,11 +194,11 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"message_already_trashed", "The message is already in Trash.", []string{"messages.delete", "batch"}},
 	{"message_source_missing", "The message source is not downloaded locally.", errorScopeDetail},
 	{"mime_resource_limit", "MIME parsing hit its aggregate resource budget.", errorScopeDetail},
-	{"not_found", "The requested message, draft, mailbox or attachment does not exist.", errorScopeAll},
+	{"not_found", "The requested message, draft, mailbox or attachment does not exist.", errorScopeRefs},
 	{"operation_canceled", "The operation was canceled.", []string{"messages.get", "messages.raw", "attachments.save", "batch"}},
 	{"operation_failed", "A runtime failure without a more specific code.", errorScopeAll},
 	{"operation_timeout", "The operation exceeded its deadline.", []string{"messages.get", "messages.raw", "attachments.save", "batch"}},
-	{"output_too_large", "The JSON response exceeds --max-bytes; narrow fields, export or raise the budget.", errorScopeAll},
+	{"output_too_large", "The JSON response exceeds --max-bytes; narrow fields, export or raise the budget.", errorScopeOutputBudget},
 	{"prune_candidate_limit_exceeded", "Prune classification exceeded its 64 MiB metadata bound; nothing was removed.", []string{"drafts.prune"}},
 	{"prune_failed", "One or more prune candidates could not be removed.", []string{"drafts.prune"}},
 	{"prune_state_changed", "The draft directory changed before cleanup; nothing was removed.", []string{"drafts.prune"}},
@@ -238,7 +253,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"smtp_transfer_timeout", "The SMTP DATA transfer exceeded its budget.", []string{"drafts.send"}},
 	{"smtp_utf8_unsupported", "The server lacks SMTPUTF8/8BITMIME for internationalized addresses or headers.", []string{"drafts.send"}},
 	{"special_use_mailbox_unresolved", "An account's special-use mailbox could not be resolved (degraded_reason).", []string{"accounts.list"}},
-	{"stale_reference", "The ref no longer matches the store; resolve a fresh ref.", errorScopeAll},
+	{"stale_reference", "The ref no longer matches the store; resolve a fresh ref.", errorScopeMailStoreRefs},
 	{"store_bound_reference_required", "The command needs a store-bound message ref from the local store.", []string{"messages.reply", "messages.forward", "messages.get", "batch"}},
 	{"store_changed", "The Mail store or an attachment changed during the operation.", errorScopeStoreRead},
 	{"store_profile_unverified", "The store framework version is unverified; reads continue (data.store_profile.code).", errorScopeStoreRead},
@@ -246,10 +261,10 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"sync_check_missing_local_mailbox", "A server mailbox has no local counterpart (data.sync_check.failures).", []string{"sync"}},
 	{"sync_check_server_catalog_incomplete", "The server mailbox list is incomplete (data.sync_check.failures).", []string{"sync"}},
 	{"transport_unsupported_provider", "The provider has no built-in endpoints and no explicit binding hosts.", errorScopeBinding},
-	{"unknown_command", "The command or subcommand does not exist.", errorScopeAll},
+	{"unknown_command", "The command or subcommand does not exist.", errorScopeSubcommandFamilies},
 	{"unsafe_message_source", "A local source or output path failed safety checks.", errorScopeStoreRead},
-	{"unsupported_mail_store_schema", "The Mail store version or schema is not supported.", errorScopeAll},
-	{"unsupported_platform", "The platform cannot provide the required safe file access.", errorScopeAll},
+	{"unsupported_mail_store_schema", "The Mail store version or schema is not supported.", errorScopeMailStore},
+	{"unsupported_platform", "The platform cannot provide the required safe file access.", errorScopeStatefulRuntime},
 	{"update_busy", "Another installation holds the update lock.", errorScopeUpdate},
 	{"update_check_failed", "Release metadata could not be fetched or parsed.", errorScopeUpdate},
 	{"update_checksum_invalid", "SHA256SUMS is malformed.", errorScopeUpdate},

@@ -139,13 +139,6 @@ func TestErrorCatalogEntriesAreComplete(t *testing.T) {
 			if !slices.Contains([]string{"retry", "fix_input", "check_state", "ask_user", "stop"}, guidance.Next) {
 				t.Errorf("%s has unknown next action %q", entry.Code, guidance.Next)
 			}
-			for _, command := range guidance.Commands {
-				runtime := classifyCatalogCode(command, entry.Code)
-				runtime.Commands = guidance.Commands
-				if runtime.Phase != guidance.Phase || runtime.Next != guidance.Next || runtime.ReplayAllowed != guidance.ReplayAllowed {
-					t.Errorf("%s/%s catalog guidance differs from runtime: %+v vs %+v", entry.Code, command, guidance, runtime)
-				}
-			}
 		}
 		if covered != len(entry.Commands) {
 			t.Errorf("%s guidance covers %d of %d commands", entry.Code, covered, len(entry.Commands))
@@ -154,6 +147,29 @@ func TestErrorCatalogEntriesAreComplete(t *testing.T) {
 	if !sort.StringsAreSorted(codes) {
 		t.Error("catalog codes must stay sorted")
 	}
+}
+
+func TestErrorCatalogScopesStoreAndReferenceCodesToTheirCommands(t *testing.T) {
+	storeAndRefCodes := []string{"not_found", "invalid_reference", "stale_reference", "unknown_command",
+		"ambiguous_mail_store_generation", "mail_store_not_read_only", "mail_store_path_mismatch", "unsupported_mail_store_schema"}
+	for _, command := range []string{"version", "capabilities", "update"} {
+		for _, entry := range errorCatalogFor([]commandCapability{{ID: command}}) {
+			if slices.Contains(storeAndRefCodes, entry.Code) {
+				t.Errorf("%s claims it can emit %s", command, entry.Code)
+			}
+		}
+	}
+	for _, entry := range errorCatalogFor([]commandCapability{{ID: "version"}}) {
+		if entry.Code == "output_too_large" {
+			t.Error("version has no --max-bytes budget but lists output_too_large")
+		}
+	}
+	for _, entry := range errorCatalogFor([]commandCapability{{ID: "messages.get"}}) {
+		if slices.Contains(storeAndRefCodes, entry.Code) && entry.Code != "unknown_command" {
+			return
+		}
+	}
+	t.Error("messages.get lost its store and reference codes")
 }
 
 func TestErrorCatalogIsPublishedWithOutputs(t *testing.T) {

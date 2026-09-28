@@ -21,7 +21,8 @@ var preEffectCorrectionCodes = map[string]bool{
 	"keychain_item_not_found": true, "keychain_load_failed": true, "keychain_store_failed": true,
 	"keychain_unsupported": true, "mail_service_unavailable": true, "mail_store_preferences_invalid": true,
 	"mail_store_preferences_unavailable": true, "mail_store_unavailable": true, "message_source_missing": true,
-	"not_found": true, "prune_candidate_limit_exceeded": true, "prune_state_changed": true, "raw_source_partial": true,
+	"not_found": true, "prune_candidate_limit_exceeded": true, "raw_source_partial": true,
+	"ambiguous_mailbox": true, "stale_reference": true, "attachment_changed": true,
 	"safe_write_unavailable": true, "send_transport_unavailable": true, "smtp_credentials_missing": true,
 	"unsupported_mail_store_schema":      true,
 	transport.CodeIMAPAmbiguousMessageID: true, transport.CodeIMAPMessageUIDUnknown: true,
@@ -36,21 +37,55 @@ var preEffectInspectionCodes = map[string]bool{
 	transport.CodeMessageAlreadyTrashed: true,
 }
 
+// preEffectRetryCodes are transient contention or network failures before any
+// effect; the unchanged invocation may run again.
+var preEffectRetryCodes = map[string]bool{
+	"account_binding_busy": true, "prune_state_changed": true,
+	"update_busy": true, "update_check_failed": true, "update_download_failed": true,
+}
+
+// preEffectTerminalCodes are deterministic refusals before any effect: an
+// untrusted or invalid release, an unsupported platform or capability, or a
+// state file that failed an integrity check. Repeating cannot help.
+var preEffectTerminalCodes = map[string]bool{
+	"account_binding_unsafe": true, "capability_schema_invalid": true, "compose_automation_unsupported": true,
+	"list_identity_invalid": true, "send_receipt_expired": true, "send_receipt_unavailable": true, "unsupported_platform": true,
+	"update_checksum_invalid": true, "update_checksum_mismatch": true, "update_host_untrusted": true,
+	"update_lock_failed": true, "update_package_invalid": true, "update_package_missing": true,
+	"update_redirect_invalid": true, "update_redirect_limit": true, "update_signature_invalid": true,
+	"update_unsupported_platform": true, "update_url_insecure": true, "update_url_invalid": true,
+	"update_url_invalid_port": true,
+}
+
+// readTerminalCodes are integrity refusals that prove no effect only for reads;
+// a draft mutation can meet them during cleanup after an external effect.
+var readTerminalCodes = map[string]bool{"draft_lock_changed": true, "draft_lock_unsafe": true}
+
 func guidanceForPreEffect(command, code string) (OperationGuidance, bool) {
 	phase := OperationPhaseValidation
 	if !effectfulCommand(command) {
 		phase = OperationPhaseRead
 	}
 	switch {
+	case readTerminalCodes[code] && !effectfulCommand(command):
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone,
+			Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect},
+		}, true
 	case preEffectCorrectionCodes[code]:
 		return OperationGuidance{
 			Phase: phase, EffectCertainty: EffectNone,
 			Retryability: RetryUserInputRequired, Recovery: RecoveryGuidance{Action: RecoveryCorrect},
 		}, true
-	case preEffectInspectionCodes[code]:
+	case preEffectInspectionCodes[code], preEffectTerminalCodes[code]:
 		return OperationGuidance{
 			Phase: phase, EffectCertainty: EffectNone,
 			Retryability: RetryTerminal, Recovery: RecoveryGuidance{Action: RecoveryInspect},
+		}, true
+	case preEffectRetryCodes[code]:
+		return OperationGuidance{
+			Phase: phase, EffectCertainty: EffectNone,
+			Retryability: RetrySafe, ReplayAllowed: true, Recovery: RecoveryGuidance{Action: RecoveryRetry},
 		}, true
 	}
 	return OperationGuidance{}, false

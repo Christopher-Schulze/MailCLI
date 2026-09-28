@@ -15,7 +15,11 @@ func TestPreEffectCodesClassifyWithoutEffect(t *testing.T) {
 		{"messages.delete", "draft_mutation_confirmation_required", OperationPhaseValidation, RetryUserInputRequired, RecoveryCorrect},
 		{"drafts.edit", "editor_unavailable", OperationPhaseValidation, RetryUserInputRequired, RecoveryCorrect},
 		{"drafts.handoff", "handoff_attachment_missing", OperationPhaseValidation, RetryUserInputRequired, RecoveryCorrect},
-		{"drafts.prune", "prune_state_changed", OperationPhaseValidation, RetryUserInputRequired, RecoveryCorrect},
+		{"messages.list", "ambiguous_mailbox", OperationPhaseRead, RetryUserInputRequired, RecoveryCorrect},
+		{"update", "update_signature_invalid", OperationPhaseValidation, RetryTerminal, RecoveryInspect},
+		{"update", "update_unsupported_platform", OperationPhaseValidation, RetryTerminal, RecoveryInspect},
+		{"drafts.inspect", "draft_lock_unsafe", OperationPhaseRead, RetryTerminal, RecoveryInspect},
+		{"drafts.inspect", "send_receipt_expired", OperationPhaseRead, RetryTerminal, RecoveryInspect},
 		{"accounts.list", "account_binding_ambiguous", OperationPhaseRead, RetryUserInputRequired, RecoveryCorrect},
 		{"messages.delete", "message_already_trashed", OperationPhaseValidation, RetryTerminal, RecoveryInspect},
 		{"attachments.save", "attachment_resource_limit", OperationPhaseValidation, RetryTerminal, RecoveryInspect},
@@ -28,6 +32,27 @@ func TestPreEffectCodesClassifyWithoutEffect(t *testing.T) {
 				t.Fatalf("guidance = %+v", guidance)
 			}
 		})
+	}
+}
+
+func TestTransientPreEffectCodesAllowReplay(t *testing.T) {
+	for _, test := range []struct{ command, code string }{
+		{"drafts.prune", "prune_state_changed"},
+		{"send.setup", "account_binding_busy"},
+		{"update", "update_busy"},
+		{"update", "update_download_failed"},
+	} {
+		guidance := GuidanceForError(test.command, &OperationError{Code: test.code, Message: test.code})
+		if guidance.EffectCertainty != EffectNone || guidance.Retryability != RetrySafe || !guidance.ReplayAllowed || guidance.Recovery.Action != RecoveryRetry {
+			t.Errorf("%s/%s guidance = %+v", test.command, test.code, guidance)
+		}
+	}
+}
+
+func TestDraftLockIntegrityStaysUncertainForMutations(t *testing.T) {
+	guidance := GuidanceForError("drafts.send", &OperationError{Code: "draft_lock_changed", Message: "draft_lock_changed"})
+	if guidance.EffectCertainty == EffectNone {
+		t.Fatalf("a draft mutation lost effect uncertainty: %+v", guidance)
 	}
 }
 
