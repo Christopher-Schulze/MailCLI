@@ -139,7 +139,7 @@ func TestBatchReadDefaultsFollowPrecedence(t *testing.T) {
 				`{"id":"view_override","ref":"view_ref","view":"metadata"}]}`,
 			want: map[string]mail.MessageReadIntent{
 				"field_ref": mail.MessageReadIntentHeaders,
-				"view_ref":  mail.MessageReadIntentAttachments,
+				"view_ref":  mail.MessageReadIntentHeaders,
 			},
 			views: map[string]string{"inherited": outputViewFull, "field_override": "custom", "view_override": outputViewMetadata},
 			full:  1,
@@ -267,8 +267,8 @@ func TestBatchHumanReadDefaultsToMetadataIntent(t *testing.T) {
 	}
 	gateway.intentMu.Lock()
 	defer gateway.intentMu.Unlock()
-	if len(gateway.intents) != 1 || gateway.intents[0] != mail.MessageReadIntentAttachments {
-		t.Fatalf("human metadata intents = %v, want one metadata-only intent", gateway.intents)
+	if len(gateway.intents) != 1 || gateway.intents[0] != mail.MessageReadIntentHeaders {
+		t.Fatalf("human metadata intents = %v, want one headers-only intent", gateway.intents)
 	}
 }
 

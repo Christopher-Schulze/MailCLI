@@ -435,7 +435,7 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	defer cancel()
 	intent := mail.MessageReadIntentFull
 	if *jsonOutput {
-		if output.fieldsProvided {
+		if output.fieldsProvided || output.view == outputViewMetadata {
 			output.omitUnselectedMessageState = true
 		}
 		intent = messageReadIntentForProjection(output)

@@ -165,8 +165,8 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("default metadata code = %d, stderr = %q, output = %s", code, stderr, output)
 	}
-	if sourceBytes := metrics.sourceBytes.Load(); sourceBytes < int64(len(raw))/2 || metrics.retainedBodyBytes.Load() != 0 {
-		t.Fatalf("default metadata source_bytes=%d retained_body_bytes=%d; want diagnostic MIME scan without retained body",
+	if sourceBytes := metrics.sourceBytes.Load(); sourceBytes == 0 || sourceBytes >= 64<<10 || metrics.retainedBodyBytes.Load() != 0 {
+		t.Fatalf("default metadata source_bytes=%d retained_body_bytes=%d; want a bounded header read without a MIME scan",
 			sourceBytes, metrics.retainedBodyBytes.Load())
 	}
 	t.Logf("default_metadata elapsed=%s source_bytes=%d retained_body_bytes=%d",
@@ -211,19 +211,17 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 	if !reflect.DeepEqual(visible.Summary, wantSummary) ||
 		visible.ReplyTo != baseline.ReplyTo || !reflect.DeepEqual(visible.To, baseline.To) ||
 		!reflect.DeepEqual(visible.CC, baseline.CC) || !reflect.DeepEqual(visible.BCC, baseline.BCC) ||
-		visible.ContentSource != baseline.ContentSource ||
-		visible.ContentComplete != baseline.ContentComplete ||
-		!reflect.DeepEqual(visible.MissingParts, baseline.MissingParts) ||
-		!reflect.DeepEqual(visible.Attachments, baseline.Attachments) ||
+		visible.ContentSource != "" || visible.ContentComplete || visible.MissingParts != nil || visible.Attachments != nil ||
 		metadata.Data.Projection.View != "metadata" ||
-		!reflect.DeepEqual(metadata.Data.Projection.Fields, []string{"attachments", "bcc", "cc", "content_complete", "content_source", "hydration", "missing_parts", "reply_to", "summary", "to"}) {
+		!reflect.DeepEqual(metadata.Data.Projection.Fields, []string{"bcc", "cc", "reply_to", "summary", "to"}) {
 		t.Fatalf("default metadata changed: visible=%+v baseline=%+v projection=%+v", visible, baseline, metadata.Data.Projection)
 	}
 	var visibleFields map[string]json.RawMessage
 	if err := json.Unmarshal(metadata.Data.Message, &visibleFields); err != nil {
 		t.Fatalf("unmarshal metadata fields: %v", err)
 	}
-	if len(visibleFields) != 9 || visibleFields["content"] != nil || visibleFields["headers"] != nil {
+	if len(visibleFields) != 5 || visibleFields["content"] != nil || visibleFields["headers"] != nil ||
+		visibleFields["attachments"] != nil || visibleFields["content_complete"] != nil {
 		t.Fatalf("default metadata fields = %v", visibleFields)
 	}
 	attachmentArgs := []string{"attachments", "list", "--ref", ref, "--json"}
@@ -371,6 +369,14 @@ func TestMissingSourceHeaderIntentUsesBoundedHeaderFetcher(t *testing.T) {
 		resolver.fetchCalls != 0 {
 		t.Fatalf("header result=%+v header_fetches=%d bound=%d full_fetches=%d",
 			message, resolver.headerFetchCalls, resolver.lastHeaderLimit, resolver.fetchCalls)
+	}
+	// The default metadata view of `messages get` needs the same single header
+	// fetch and never the whole message.
+	code, output, stderr := runReadIntentCLI(t, client, "messages", "get", "--ref", ref, "--json")
+	if code != 0 || stderr != "" || resolver.headerFetchCalls != 2 || resolver.fetchCalls != 0 ||
+		strings.Contains(output, `"content_complete"`) || strings.Contains(output, `"attachments"`) {
+		t.Fatalf("default metadata code=%d stderr=%q header_fetches=%d full_fetches=%d output=%s",
+			code, stderr, resolver.headerFetchCalls, resolver.fetchCalls, output)
 	}
 }
 

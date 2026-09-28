@@ -314,7 +314,9 @@ This presentation policy never modifies stored mail, JSON values, normalized exp
 
 ### Projections and output budget
 
-`messages get` and `drafts inspect` default to the `metadata` view, which keeps identity, completeness and operation-state evidence while omitting headers and bodies.
+`messages get` defaults to the `metadata` view, which returns `summary` (with `attachment_count`), `to`, `cc`, `bcc` and `reply_to` from the header block only.
+Attachments and content state (`attachments`, `content_source`, `content_complete`, `missing_parts`, `hydration`) come with `--view plain`, `--view full` or `--fields`.
+`drafts inspect` defaults to its `metadata` view, which keeps identity and operation-state evidence while omitting bodies.
 `drafts create`, `drafts update`, `drafts edit`, `messages reply` and `messages forward` default to the canonical plain draft body; `--view plain` omits draft source and HTML variants, and `--view full` includes every stored representation.
 `attachments list` defaults to attachment metadata; `messages raw` has only its `full` view.
 `--fields` selects exact JSON field names; `all` selects the complete target registry and stands alone.
@@ -326,7 +328,7 @@ Every projected message keeps `ref` and `mailbox_ref`, filter and search keep th
 Draft-list `--fields` accepts combinations of `age_days`, `created_at` and `updated_at`; the fixed core stays in every healthy summary, `state_error` appears only for corrupt summaries, and capabilities list `draft_list_core_fields` and `draft_list_optional_fields`.
 
 For `messages get --json`, an explicit `--fields` request with only `summary` and header fields reads Envelope Index values plus only the bounded RFC header block; a missing local source with IMAP configured fetches only `BODY.PEEK[HEADER]`.
-The default `metadata` view and `--fields attachments`, `content_source`, `content_complete`, `missing_parts` or `hydration` use the MIME metadata parser without retaining body text or HTML; `content` keeps the full body path.
+The default `metadata` view reads only the header block, one bounded `UID FETCH BODY.PEEK[HEADER]` for a message that is not downloaded; `--fields attachments`, `content_source`, `content_complete`, `missing_parts` or `hydration` use the MIME metadata parser without retaining body text or HTML; `content` keeps the full body path.
 
 `--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON.
 MailCLI measures the complete encoded envelope before writing it; an oversized response returns exit `1` with `error.code:"output_too_large"` and never truncates content.

@@ -303,7 +303,8 @@ func TestDefaultProjectionKeysPreserveTargetPolicies(t *testing.T) {
 			registry := projectionRegistry(target)
 			want := append(slices.Clone(registry.core), registry.optional...)
 			want = slices.DeleteFunc(want, func(field string) bool {
-				return target == projectionTargetMessage && (field == "content" || field == "headers" || field == "header_fields" || field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source") ||
+				return target == projectionTargetMessage && (field == "content" || field == "headers" || field == "header_fields" || field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source" ||
+					field == "attachments" || field == "content_source" || field == "content_complete" || field == "missing_parts" || field == "hydration") ||
 					target == projectionTargetDraft && (field == "body_source" || field == "body_html") ||
 					target == projectionTargetDraftList && field == "state_error"
 			})
@@ -396,6 +397,8 @@ func registryFixtureOptions(target projectionTarget, fields map[string]struct{})
 		if target == projectionTargetMessage || target == projectionTargetAttachment {
 			options.view = outputViewMetadata
 		}
+		// messages get omits the unselected state fields in the metadata view.
+		options.omitUnselectedMessageState = target == projectionTargetMessage
 		if target == projectionTargetDraft {
 			options.view = outputViewPlain
 		}

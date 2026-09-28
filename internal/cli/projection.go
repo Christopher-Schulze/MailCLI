@@ -531,6 +531,7 @@ func batchReadOutputOptions(item mail.BatchItem, index int, maxBytes int64) (out
 	if !validProjectionView(projectionTargetMessage, options.view) {
 		return outputOptions{}, projectionValidationError(source, "view", projectionViewError(projectionTargetMessage, options.view))
 	}
+	options.omitUnselectedMessageState = options.view == outputViewMetadata
 	return options, nil
 }
 
@@ -776,7 +777,10 @@ func messageReadIntentForProjection(options outputOptions) mail.MessageReadInten
 		return mail.MessageReadIntentFull
 	}
 	if !options.fieldsProvided && options.view == outputViewMetadata {
-		return mail.MessageReadIntentAttachments
+		// The metadata view is headers only: attachments and completeness
+		// need the whole MIME tree, which costs a full IMAP fetch when the
+		// message is not downloaded.
+		return mail.MessageReadIntentHeaders
 	}
 	for _, field := range []string{"content_source", "content_complete", "missing_parts", "hydration", "attachments"} {
 		if options.includes(field) {
@@ -792,8 +796,11 @@ func messageReadIntentForProjection(options outputOptions) mail.MessageReadInten
 }
 
 func messageStateProjectionRequired(options outputOptions, retainContent bool) bool {
-	if !options.omitUnselectedMessageState || !options.fieldsProvided || retainContent {
+	if !options.omitUnselectedMessageState || retainContent {
 		return true
+	}
+	if !options.fieldsProvided {
+		return options.view != outputViewMetadata
 	}
 	for _, field := range []string{"content", "content_source", "content_complete", "missing_parts", "hydration"} {
 		if options.includes(field) {
@@ -834,6 +841,9 @@ func (o outputOptions) includes(field string) bool {
 	case outputViewPlain:
 		return field != "headers" && field != "body_source" && field != "body_html" && !newMessageMetadataField(field)
 	case outputViewMetadata:
+		if o.target == projectionTargetMessage && field == "attachments" {
+			return false
+		}
 		return field != "headers" && field != "content" && field != "body" && field != "body_source" && field != "body_html" && !newMessageMetadataField(field)
 	default:
 		return false

@@ -70,10 +70,9 @@ func TestMessageGetSelectsNarrowReadIntentsOnlyForJSONProjections(t *testing.T) 
 			wantFields: []string{"content_complete", "content_source", "hydration", "missing_parts", "summary"}, wantState: true,
 		},
 		{
-			name: "default metadata uses no-body MIME metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--json"},
-			wantIntent: mail.MessageReadIntentAttachments,
-			wantFields: []string{"attachments", "bcc", "cc", "content_complete", "content_source", "hydration", "missing_parts", "reply_to", "summary", "to"},
-			wantState:  true,
+			name: "default metadata reads headers only", args: []string{"messages", "get", "--ref", "msg_ref", "--json"},
+			wantIntent: mail.MessageReadIntentHeaders,
+			wantFields: []string{"bcc", "cc", "reply_to", "summary", "to"},
 		},
 		{
 			name: "human output stays full", args: []string{"messages", "get", "--ref", "msg_ref", "--fields", "summary"},
@@ -146,7 +145,7 @@ func TestBatchReadUsesMessageReadIntentPolicy(t *testing.T) {
 	}
 	gateway.intentMu.Unlock()
 	wantIntents := map[string]mail.MessageReadIntent{
-		"metadata_ref":    mail.MessageReadIntentAttachments,
+		"metadata_ref":    mail.MessageReadIntentHeaders,
 		"summary_ref":     mail.MessageReadIntentHeaders,
 		"diagnostics_ref": mail.MessageReadIntentAttachments,
 	}

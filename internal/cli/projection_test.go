@@ -66,7 +66,7 @@ func TestMessageProjectionViewsSelectOnlyRequestedContent(t *testing.T) {
 		forbidden []string
 		view      string
 	}{
-		{name: "metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--json"}, want: []string{`"content_complete":true`, `"content_source":"emlx_full"`, `"view":"metadata"`}, forbidden: []string{`"headers"`, `"content":"body bytes"`}, view: outputViewMetadata},
+		{name: "metadata", args: []string{"messages", "get", "--ref", "msg_ref", "--json"}, want: []string{`"view":"metadata"`, `"summary"`}, forbidden: []string{`"headers"`, `"content":"body bytes"`, `"content_complete"`, `"content_source"`, `"attachments"`, `"missing_parts"`}, view: outputViewMetadata},
 		{name: "plain", args: []string{"messages", "get", "--ref", "msg_ref", "--view", "plain", "--json"}, want: []string{`"content":"body bytes"`, `"view":"plain"`}, forbidden: []string{`"headers"`}, view: outputViewPlain},
 		{name: "full", args: []string{"messages", "get", "--ref", "msg_ref", "--view", "full", "--json"}, want: []string{`"content":"body bytes"`, `"headers":"X-Trace: private\r\n"`, `"view":"full"`}, view: outputViewFull},
 	} {
