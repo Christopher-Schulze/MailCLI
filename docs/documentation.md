@@ -65,6 +65,7 @@ Install the signed release with the bootstrap in the repository README, or build
 Both paths install the matching binary and companion skill together; the binary defaults to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`.
 An agent host must discover that skill directory or a supported link to it.
 `mailcli update` verifies and installs the latest signed release with rollback and refreshes the canonical skill installation.
+`mailcli update --check` fetches only the release metadata and reports `update_available`; it never downloads, locks, installs or changes the contract identity.
 Check an installation with `mailcli version --json` and `mailcli doctor --json`.
 [Release and distribution](#release-and-distribution) specifies signing, verification, rollback and destination rules.
 
@@ -113,8 +114,8 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Example: `mailcli version --json`. Output: `name`, `version`, `contract_sha256`.
 - `doctor`: inspect platform, Mail store, permissions and optional live Mail access; main flags `--live`, `--diagnostics`.
   Example: `mailcli doctor --json`. Output: `checks`, `timings`.
-- `update`: verify a pinned Ed25519 release signature and checksum, then install binary and skill with rollback; main flag `--json`.
-  Example: `mailcli update --json`. Output: `update_result`.
+- `update`: verify a pinned Ed25519 release signature and checksum, then install binary and skill with rollback; main flags `--check` (read-only: report `update_available`, `updated` stays false), `--json`.
+  Example: `mailcli update --check --json`. Output: `update_result`.
 - `sync`: without `--check` ask Mail.app to synchronize; with `--check` compare local and server mailbox identities and counts over IMAP without Mail.app; main flags `--account`, `--check`, `--require-complete`.
   Example: `mailcli sync --check --account ACCOUNT_REF --json`.
   Output: `sync_check` or `sync_result`.

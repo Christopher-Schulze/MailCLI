@@ -3,6 +3,12 @@
   "version": 1,
   "flags": [
     {
+      "name": "--check",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "read-only: report whether a newer release exists; nothing is downloaded, locked or installed"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,

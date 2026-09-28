@@ -38,7 +38,7 @@ Direct reads and mutations add no work to the Mail.app process. The bounded inte
 | Composition | `drafts create`, `list`, `inspect`, `preview`, `edit`, `update`, `handoff`, `handoff-reconcile`, `open`, `adopt`, `discard`, `prune`, `reconcile` | Plain, Markdown, or safe HTML drafts, claim reconciliation, and visible compose handoff; scripted native save is unavailable |
 | Sending | `send setup`, `drafts send` | Stores an app-specific password in the Keychain once, then delivers reviewed drafts over SMTP/IMAP with `--expected-revision REVISION --confirm` |
 | Synchronization | `sync` | `--check` compares server and local counts over IMAP; without `--check` asks Mail.app to synchronize |
-| Maintenance | `update` | Verifies a pinned Ed25519 signature and checksum, then replaces binary and skill with rollback |
+| Maintenance | `update` | Verifies a pinned Ed25519 signature and checksum, then replaces binary and skill with rollback; `--check` only reports whether a newer release exists |
 
 Agents request contracts with `mailcli capabilities --for COMMAND_ID --json`, a comma-separated list for a workflow, or `--for 'messages.*'` for a family. The envelope is schema version 1; the nested `data.capabilities.schema_version` is 2 and is authoritative for effects, confirmation, typed `{kind,target,condition}` dependencies, result states, and limits. Scoped output links full parameter schemas through `schema_ref.resolve`; `--schemas` inlines them and `--outputs` adds output schemas and the error catalog with meaning and recovery guidance per code. Cache the contract per `contract_sha256`; `mailcli version --json` reports the same digest for a cheap cache check. Help text is for humans and is never parsed as capability data. See [for agents](docs/documentation.md#for-agents).
 
@@ -154,7 +154,7 @@ mailcli version --json
 
 Any failed check stops the script before `tar` or `install.sh`. Never replace the pinned key, OpenSSL path, release host, or archive name with values from the download. The installer puts the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli`, staged, verified, and committed with rollback. Start a new agent session afterwards so the skill is discovered.
 
-Later updates of both components run through `mailcli update` (`--json` for one envelope). The updater verifies the signed `SHA256SUMS` against the pinned key before it downloads the archive, accepts only exact GitHub release hosts over HTTPS, checks the binary's architecture, signature, and version, and installs through the same rollback-safe transaction; concurrent installers are serialized. When updating from an older binary that expects plain version output, use `MAILCLI_OUTPUT=human mailcli update`.
+`mailcli update --check` only reports whether a newer release exists and installs nothing. Later updates of both components run through `mailcli update` (`--json` for one envelope). The updater verifies the signed `SHA256SUMS` against the pinned key before it downloads the archive, accepts only exact GitHub release hosts over HTTPS, checks the binary's architecture, signature, and version, and installs through the same rollback-safe transaction; concurrent installers are serialized. When updating from an older binary that expects plain version output, use `MAILCLI_OUTPUT=human mailcli update`.
 
 To build from source, install the exact Go version declared in `go.mod` and the Xcode Command Line Tools:
 

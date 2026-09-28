@@ -38,6 +38,7 @@ type updateResult struct {
 	CurrentVersion   string `json:"current_version"`
 	LatestVersion    string `json:"latest_version"`
 	Updated          bool   `json:"updated"`
+	UpdateAvailable  *bool  `json:"update_available,omitempty"`
 	ReleaseURL       string `json:"release_url"`
 	BinaryPath       string `json:"binary_path"`
 	FailedPhase      string `json:"failed_phase,omitempty"`
@@ -100,6 +101,7 @@ type updateEnvironment struct {
 	client               *http.Client
 	metadataURL          string
 	currentVersion       string
+	checkOnly            bool
 	readInstalledVersion func(context.Context, string) (string, error)
 	executablePath       string
 	homeDirectory        string
@@ -130,6 +132,7 @@ func (e *updateError) ErrorCode() string {
 
 func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("update", stderr)
+	checkOnly := flags.Bool("check", false, "report whether a newer release exists without downloading or installing")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -138,6 +141,7 @@ func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.W
 	if err != nil {
 		return failCommand("update", *jsonOutput, err, stdout, stderr)
 	}
+	environment.checkOnly = *checkOnly
 	return runUpdateWithEnvironment(ctx, *jsonOutput, environment, stdout, stderr)
 }
 
@@ -166,6 +170,11 @@ func runUpdateWithEnvironment(
 	}
 	if result.Updated {
 		writeFormat(stdout, "Updated mailcli from %s to %s.\n", result.CurrentVersion, result.LatestVersion)
+		return 0
+	}
+	if result.UpdateAvailable != nil && *result.UpdateAvailable {
+		writeFormat(stdout, "Update available: mailcli %s -> %s; run `mailcli update` to install it.\n",
+			result.CurrentVersion, result.LatestVersion)
 		return 0
 	}
 	writeFormat(stdout, "Already up to date (mailcli %s).\n", result.CurrentVersion)
@@ -280,6 +289,11 @@ func prepareUpdate(
 	result := updateResult{
 		CurrentVersion: environment.currentVersion, LatestVersion: latestVersion,
 		ReleaseURL: release.HTMLURL, BinaryPath: environment.executablePath,
+	}
+	if environment.checkOnly {
+		available := comparison < 0
+		result.UpdateAvailable = &available
+		return result, nil, nil
 	}
 	if comparison >= 0 {
 		return result, nil, nil

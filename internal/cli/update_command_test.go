@@ -59,6 +59,124 @@ func TestPerformUpdateAlreadyUpToDate(t *testing.T) {
 	}
 }
 
+type recordingRoundTripper struct {
+	next  http.RoundTripper
+	mu    sync.Mutex
+	paths []string
+}
+
+func (recorder *recordingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	recorder.mu.Lock()
+	recorder.paths = append(recorder.paths, request.URL.Path)
+	recorder.mu.Unlock()
+	return recorder.next.RoundTrip(request)
+}
+
+func checkOnlyUpdateEnvironment(
+	t *testing.T,
+	releaseVersion string,
+	currentVersion string,
+) (updateEnvironment, *recordingRoundTripper) {
+	t.Helper()
+	archive := buildTestUpdateArchive(t, releaseVersion)
+	server := newUpdateTestServer(t, releaseVersion, archive,
+		checksumFile("mailcli_"+releaseVersion+"_darwin_arm64.tar.gz", archive))
+	t.Cleanup(server.Close)
+	environment := updateTestEnvironment(t, server, currentVersion)
+	recorder := &recordingRoundTripper{next: environment.client.Transport}
+	if recorder.next == nil {
+		recorder.next = http.DefaultTransport
+	}
+	environment.client.Transport = recorder
+	environment.checkOnly = true
+	environment.installPackage = func(context.Context, string, string, string, *os.File) error {
+		t.Error("update --check must never call the installer")
+		return nil
+	}
+	return environment, recorder
+}
+
+func TestUpdateCheckReportsAvailabilityWithoutInstalling(t *testing.T) {
+	tests := []struct {
+		name    string
+		release string
+		current string
+		want    bool
+	}{
+		{name: "newer release", release: "1.0.5", current: "1.0.4", want: true},
+		{name: "same release", release: "1.0.4", current: "1.0.4", want: false},
+		{name: "newer installed", release: "1.0.3", current: "1.0.4", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment, recorder := checkOnlyUpdateEnvironment(t, test.release, test.current)
+			var stdout, stderr bytes.Buffer
+			if code := runUpdateWithEnvironment(context.Background(), true, environment, &stdout, &stderr); code != 0 {
+				t.Fatalf("update --check exit code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var response envelope
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatalf("decode update --check: %v, output=%q", err, stdout.Bytes())
+			}
+			result := response.Data.UpdateResult
+			if !response.OK || result == nil || result.Updated || result.UpdateAvailable == nil ||
+				*result.UpdateAvailable != test.want || result.LatestVersion != test.release ||
+				result.CurrentVersion != test.current {
+				t.Fatalf("update --check result = %+v", response)
+			}
+			if len(recorder.paths) != 1 || recorder.paths[0] != "/latest" {
+				t.Fatalf("update --check requests = %v, want only the release metadata", recorder.paths)
+			}
+			if _, err := os.Stat(filepath.Join(environment.homeDirectory, "Library")); !os.IsNotExist(err) {
+				t.Fatalf("update --check created state under the home directory: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateCheckHumanOutputNamesTheOutcome(t *testing.T) {
+	for _, test := range []struct {
+		release string
+		want    string
+	}{
+		{release: "1.0.5", want: "Update available: mailcli 1.0.4 -> 1.0.5; run `mailcli update` to install it.\n"},
+		{release: "1.0.4", want: "Already up to date (mailcli 1.0.4).\n"},
+	} {
+		environment, _ := checkOnlyUpdateEnvironment(t, test.release, "1.0.4")
+		var stdout, stderr bytes.Buffer
+		if code := runUpdateWithEnvironment(context.Background(), false, environment, &stdout, &stderr); code != 0 ||
+			!strings.HasSuffix(stdout.String(), test.want) {
+			t.Fatalf("human update --check = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestUpdateCheckKeepsMetadataFailureCode(t *testing.T) {
+	environment, _ := checkOnlyUpdateEnvironment(t, "1.0.5", "1.0.4")
+	environment.metadataURL = strings.TrimSuffix(environment.metadataURL, "/latest") + "/missing"
+	var stdout, stderr bytes.Buffer
+	if code := runUpdateWithEnvironment(context.Background(), true, environment, &stdout, &stderr); code != 1 {
+		t.Fatalf("update --check exit code = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var response envelope
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode update --check failure: %v, output=%q", err, stdout.Bytes())
+	}
+	if response.OK || response.Error == nil || response.Error.Code != "update_check_failed" {
+		t.Fatalf("update --check failure = %+v", response)
+	}
+}
+
+func TestUpdateFlagsExposeCheck(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runUpdate(context.Background(), []string{"--check", "--bogus"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("update --check --bogus exit code = %d, stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "flag provided but not defined: -check") {
+		t.Fatalf("update does not define --check: %q", stderr.String())
+	}
+}
+
 func TestPerformUpdateInstallsVerifiedRelease(t *testing.T) {
 	archive := buildTestUpdateArchive(t, "1.0.5")
 	checksums := checksumFile("mailcli_1.0.5_darwin_arm64.tar.gz", archive)

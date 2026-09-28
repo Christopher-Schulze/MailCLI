@@ -14,7 +14,7 @@ Keychain success invalidates caches. partial_effects: keychain_store:complete, b
 
 Never unlink binding locks (legacy then new). Default account-bindings.lock; custom account-bindings-<full lowercase basename SHA256>.lock in pinned parent, independent per basename.
 
-User-requested `mailcli update --json` verifies signed binary/skill. Read `mailcli version --json`, refresh identity/contracts after replacement.
+`mailcli update --check --json` is read-only: `update_available` says whether a newer release exists, nothing is installed. User-requested `mailcli update --json` verifies signed binary/skill. Read `mailcli version --json`, refresh identity/contracts after replacement.
 
 Legacy text: `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human /absolute/path/install.sh`; entrypoints select compatible probes.
 
