@@ -67,7 +67,7 @@ flowchart LR
 - **Read path.** The store adapter opens Mail's Envelope Index strictly read-only, validates the store generation, version, and schema first, and fails closed on anything it does not support. Message and attachment files are opened through one pinned store directory without following symlinks. A message that is not fully downloaded is completed with one bounded IMAP FETCH instead of Mail scripting.
 - **Write path.** Mutations and sending use direct IMAP and SMTP with an app-specific password from the Keychain. Mutations for one account are serialized across processes, carry a stable operation identity, and report exactly which effects were proven.
 - **Mail.app path.** The few Apple Events operations go through one cross-process gate, bind to the exact running Mail process, and never launch, quit, or restart Mail. An interrupted operation latches recovery until that Mail process is replaced.
-- **No background state.** MailCLI runs no daemon, watcher, copied corpus, or index of its own; it keeps only review drafts, send evidence, and bounded recovery bytes for unresolved sends.
+- **No background state.** MailCLI runs no daemon, watcher, copied corpus, or index of its own; it keeps only review drafts, send evidence, bounded recovery bytes for unresolved sends, and a local cache of short IMAP excerpts.
 
 See the [architecture chapter](docs/documentation.md#architecture) for package boundaries, the IMAP operation contract, and timeouts.
 

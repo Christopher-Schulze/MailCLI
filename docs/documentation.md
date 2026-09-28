@@ -36,7 +36,7 @@ It reads Mail's local store, creates structured review drafts, and performs expl
 - Missing content can require targeted IMAP hydration; local inbox coverage does not prove remote freshness.
 - Mark, move, copy and delete run over IMAP and return typed server evidence.
 - Reviewed drafts are sent over SMTP with a Sent copy over IMAP; an accepted submission is never repeated.
-- MailCLI keeps no separate mail corpus, search index, daemon, watcher or background process, and never writes Mail's Envelope Index.
+- MailCLI keeps no separate mail corpus, search index, daemon, watcher or background process, and never writes Mail's Envelope Index; its only mail-derived cache holds IMAP-fetched excerpts of at most 1,000 runes (see [Commands](#commands)).
 - Every data-bearing command returns one versioned JSON envelope with typed errors and one recommended `next` action.
 
 JSON is the default for pipes and files, human text for terminals.
@@ -149,6 +149,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Each reads 256 KiB of local RFC source or less; only when the local source is partial or missing does it fetch over IMAP the `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` header fields plus a 64 KiB `BODY.PEEK[TEXT]` prefix, never the full body. Larger sources report `excerpt_complete:false`.
   A page selects each account mailbox once and fetches all of its IMAP excerpts with one `UID FETCH`; a message the server does not return gets `enrichment_error:"imap_message_not_found"`.
   Excerpts use the server UID from the local Mail store without a server search; when the local mailbox has no UIDVALIDITY, the fetched `Message-ID` must equal the local one, otherwise the row keeps its local result with `enrichment_error:"imap_message_uid_mismatch"`. The account's mailbox list is loaded once per page.
+  A successful IMAP excerpt is cached for 30 days under `~/Library/Caches/MailCLI/excerpts` (owner-only files, keyed by local store identity and server UID, at most 1,000 runes each); later pages serve it with `excerpt_source:"imap-partial"` without contacting the server.
   Unrequested keys are empty; empty or false means unknown, not absence.
 - A malformed `In-Reply-To` or `References` value keeps every valid msg-id but sets `threading_complete:false`.
   When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.
@@ -1052,7 +1053,7 @@ As measured, an item created by the ad-hoc signed CLI is readable without a prom
 The residual risk is that a same-user process can read the app-specific passwords; effective mitigations are the credential's narrow, revocable scope, optional Keychain auto-lock, and removal through `send setup --remove`.
 A per-binary ACL becomes feasible only with a Developer-ID signing identity with Keychain entitlements.
 
-MailCLI persists only review drafts, historical send and save claims, terminal send receipts, accepted-message recovery spools, account bindings and cross-process locks under `~/Library/Application Support/MailCLI`; it persists no mail corpus or search index.
+MailCLI persists only review drafts, historical send and save claims, terminal send receipts, accepted-message recovery spools, account bindings and cross-process locks under `~/Library/Application Support/MailCLI`, plus the IMAP excerpt cache under `~/Library/Caches/MailCLI/excerpts`; it persists no mail corpus or search index.
 State directories use mode `0700`; drafts, claims, receipts and spools use mode `0600`.
 Structured output excludes body content unless requested, and diagnostics avoid subjects, bodies, headers, recipient lists and attachment bytes unless needed to identify the failed operation.
 Received attachment and content exports require new absolute destinations and refuse overwrites and unsafe path substitution.

@@ -26,6 +26,11 @@ type excerptInput struct {
 	complete bool
 	source   mail.ExcerptSource
 	err      error
+	// cached marks an excerpt served from the excerpt cache instead of data.
+	cached  bool
+	excerpt string
+	// cacheKey stores a successful IMAP excerpt for later invocations.
+	cacheKey string
 }
 
 // remoteExcerpt is a row whose excerpt needs the IMAP text prefix.
@@ -76,7 +81,7 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 			return nil, err
 		}
 		for index := range summaries {
-			applyExcerpt(ctx, &summaries[index], inputs[index], request.ExcerptLength)
+			c.applyExcerpt(ctx, &summaries[index], inputs[index], request.ExcerptLength)
 		}
 	}
 	return summaries, ctx.Err()
@@ -131,6 +136,12 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 	if _, supported := c.send.ImapClient().(transport.MessageExcerptFetcher); !supported {
 		return fallback, imapTarget{}, false
 	}
+	if key, keyErr := c.store.excerptCacheKey(ctx, ref); keyErr == nil {
+		if entry, hit := c.excerpts.load(key); hit {
+			return excerptInput{source: mail.ExcerptSourceIMAPPartial, cached: true, excerpt: entry.Excerpt, complete: entry.Complete}, imapTarget{}, false
+		}
+		fallback.cacheKey = key
+	}
 	target, targetErr := c.resolveImapTargetForExcerpt(ctx, ref)
 	if targetErr != nil {
 		fallback.err = targetErr
@@ -180,7 +191,7 @@ func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt
 				case row.target.uidvalidity == 0 && !excerptMatchesMessageID(source.Source, row.target.messageID):
 					inputs[row.index].err = &transport.TransportError{Code: transport.CodeIMAPMessageUIDMismatch, Message: "IMAP excerpt Message-ID differs from the local message"}
 				default:
-					inputs[row.index] = excerptInput{data: source.Source, complete: source.Complete, source: mail.ExcerptSourceIMAPPartial}
+					inputs[row.index] = excerptInput{data: source.Source, complete: source.Complete, source: mail.ExcerptSourceIMAPPartial, cacheKey: inputs[row.index].cacheKey}
 				}
 			}
 			return nil
@@ -195,15 +206,25 @@ func excerptMatchesMessageID(source []byte, messageID string) bool {
 	return err == nil && messageID != "" && fetched == messageID
 }
 
-func applyExcerpt(ctx context.Context, summary *mail.MessageSummary, input excerptInput, length int) {
+// applyExcerpt builds the excerpt at the maximum length, stores a successful
+// IMAP excerpt in the cache and cuts it to the requested length.
+func (c *Client) applyExcerpt(ctx context.Context, summary *mail.MessageSummary, input excerptInput, length int) {
 	noteEnrichmentFailure(summary, input.err)
 	summary.ExcerptSource = input.source
 	if input.source == mail.ExcerptSourceUnavailable {
 		return
 	}
-	text, parsed := excerptText(ctx, input.data)
-	summary.Excerpt = mail.BuildExcerpt(text, length)
-	summary.ExcerptComplete = input.complete && parsed
+	excerpt, complete := input.excerpt, input.complete
+	if !input.cached {
+		text, parsed := excerptText(ctx, input.data)
+		excerpt, complete = mail.BuildExcerpt(text, mail.MaximumExcerptLength), input.complete && parsed
+		if input.source == mail.ExcerptSourceIMAPPartial && input.err == nil && ctx.Err() == nil {
+			// The cache is best effort; a failed write only costs a later fetch.
+			_ = c.excerpts.store(input.cacheKey, cachedExcerpt{Excerpt: excerpt, Complete: complete})
+		}
+	}
+	summary.Excerpt = cutExcerpt(excerpt, length)
+	summary.ExcerptComplete = complete
 }
 
 // excerptNeedsRemote allows an IMAP partial fetch only when local content is

@@ -54,6 +54,9 @@ type Config struct {
 	// scan. Zero uses mail.DefaultSenderIdentityScanLimit; values above
 	// mail.MaximumSenderIdentityScanLimit are rejected.
 	SenderIdentityScanLimit int
+	// ExcerptCacheDirectory keeps IMAP-fetched excerpts between invocations;
+	// empty disables the cache.
+	ExcerptCacheDirectory string
 }
 
 func normalizeSenderIdentityScanLimit(requested int) (int, error) {
@@ -83,6 +86,7 @@ func DefaultConfig() (Config, error) {
 			home, "Library", "Containers", "com.apple.mail", "Data", "Library",
 			"Preferences", "com.apple.mail.plist",
 		),
+		ExcerptCacheDirectory: defaultExcerptCacheDirectory(home),
 	}, nil
 }
 

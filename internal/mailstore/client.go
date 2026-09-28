@@ -30,6 +30,7 @@ type Client struct {
 	mailboxLoads      singleflight.Group
 	mutationMu        sync.Mutex
 	copyAttempts      map[string]transport.MutationEvidence
+	excerpts          excerptCache
 }
 
 type accountBindingSnapshotContextKey struct{}
@@ -105,6 +106,7 @@ func NewClient(ctx context.Context, fallback mail.FallbackGateway, config Config
 		storeOpenDuration: time.Since(started),
 		mailboxCache:      make(map[string]mailboxCacheEntry),
 		copyAttempts:      make(map[string]transport.MutationEvidence),
+		excerpts:          excerptCache{dir: config.ExcerptCacheDirectory},
 	}
 }
 

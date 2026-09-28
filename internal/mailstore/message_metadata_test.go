@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -160,6 +161,30 @@ func TestEnrichMessagesUsesLocalUIDsWithoutServerSearch(t *testing.T) {
 		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nVerified text",
 		203: "Message-ID: <other@example.com>\r\nContent-Type: text/plain\r\n\r\nWrong message",
 	}}
+	client, refs := newLocalUIDExcerptFixture(t, operator)
+	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operator.searchCalls != 0 || operator.calls != 0 || operator.listCalls != 1 {
+		t.Fatalf("server searches=%d resolver calls=%d LIST calls=%d, want 0, 0, 1", operator.searchCalls, operator.calls, operator.listCalls)
+	}
+	if len(operator.fetchUIDs) != 1 || !slices.Equal(operator.fetchUIDs[0], []uint32{202, 203}) || operator.fetchValidity[0] != 0 {
+		t.Fatalf("fetches=%v validity=%v, want one unverified fetch of 202,203", operator.fetchUIDs, operator.fetchValidity)
+	}
+	if summaries[0].ExcerptSource != mail.ExcerptSourceIMAPPartial || summaries[0].Excerpt != "Verified text" || summaries[0].EnrichmentError != "" {
+		t.Fatalf("verified row = %+v", summaries[0])
+	}
+	if summaries[2].ExcerptSource != mail.ExcerptSourceLocal || strings.Contains(summaries[2].Excerpt, "Wrong") || summaries[2].EnrichmentError != transport.CodeIMAPMessageUIDMismatch {
+		t.Fatalf("mismatched row = %+v", summaries[2])
+	}
+}
+
+// newLocalUIDExcerptFixture gives the two INBOX rows local server UIDs 202
+// and 203 and header-only partial sources, so their excerpts need IMAP while
+// their identity resolves locally.
+func newLocalUIDExcerptFixture(t *testing.T, operator *excerptBatchOperator) (*Client, []string) {
+	t.Helper()
 	client, refs := newExcerptBatchFixture(t, operator)
 	updateFixtureMessage(t, client.store, `UPDATE messages SET remote_id = ROWID + 100 WHERE ROWID IN (102, 103)`)
 	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
@@ -186,21 +211,72 @@ func TestEnrichMessagesUsesLocalUIDsWithoutServerSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	refs[0], refs[2] = messageRefWithSubject(t, page.Messages, "Status Update"), messageRefWithSubject(t, page.Messages, "Noise")
-	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+	return client, refs
+}
+
+func TestEnrichMessagesReusesCachedIMAPExcerpts(t *testing.T) {
+	operator := &excerptBatchOperator{sources: map[uint32]string{
+		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nCached remote text",
+		203: "Message-ID: <local-103@example.com>\r\nContent-Type: text/plain\r\n\r\nSecond remote text",
+	}}
+	client, refs := newLocalUIDExcerptFixture(t, operator)
+	client.excerpts = excerptCache{dir: t.TempDir()}
+	first, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operator.searchCalls != 0 || operator.calls != 0 || operator.listCalls != 1 {
-		t.Fatalf("server searches=%d resolver calls=%d LIST calls=%d, want 0, 0, 1", operator.searchCalls, operator.calls, operator.listCalls)
+	second, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 6})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(operator.fetchUIDs) != 1 || !slices.Equal(operator.fetchUIDs[0], []uint32{202, 203}) || operator.fetchValidity[0] != 0 {
-		t.Fatalf("fetches=%v validity=%v, want one unverified fetch of 202,203", operator.fetchUIDs, operator.fetchValidity)
+	if len(operator.fetchUIDs) != 1 || operator.listCalls != 1 {
+		t.Fatalf("fetches=%v LIST calls=%d, want the second page served without server contact", operator.fetchUIDs, operator.listCalls)
 	}
-	if summaries[0].ExcerptSource != mail.ExcerptSourceIMAPPartial || summaries[0].Excerpt != "Verified text" || summaries[0].EnrichmentError != "" {
-		t.Fatalf("verified row = %+v", summaries[0])
+	for _, index := range []int{0, 2} {
+		want := mail.BuildExcerpt(first[index].Excerpt, 6)
+		if first[index].ExcerptSource != mail.ExcerptSourceIMAPPartial || second[index].ExcerptSource != mail.ExcerptSourceIMAPPartial ||
+			second[index].Excerpt != want || second[index].ExcerptComplete != first[index].ExcerptComplete || second[index].EnrichmentError != "" {
+			t.Fatalf("row %d first=%+v second=%+v want excerpt %q", index, first[index], second[index], want)
+		}
 	}
-	if summaries[2].ExcerptSource != mail.ExcerptSourceLocal || strings.Contains(summaries[2].Excerpt, "Wrong") || summaries[2].EnrichmentError != transport.CodeIMAPMessageUIDMismatch {
-		t.Fatalf("mismatched row = %+v", summaries[2])
+	if second[1].ExcerptSource != mail.ExcerptSourceLocal {
+		t.Fatalf("local row = %+v", second[1])
+	}
+}
+
+func TestExcerptCacheIgnoresExpiredAndOversizedEntries(t *testing.T) {
+	cache := excerptCache{dir: t.TempDir()}
+	if err := cache.store("fresh", cachedExcerpt{Excerpt: "text", Complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if entry, hit := cache.load("fresh"); !hit || entry.Excerpt != "text" || !entry.Complete {
+		t.Fatalf("fresh entry = %+v hit=%t", entry, hit)
+	}
+	expired := time.Now().Add(-excerptCacheTTL - time.Hour)
+	if err := os.Chtimes(cache.path("fresh"), expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit := cache.load("fresh"); hit {
+		t.Fatal("an expired entry was served")
+	}
+	if err := os.WriteFile(cache.path("large"), []byte(`{"excerpt":"`+strings.Repeat("x", maximumExcerptCacheEntryBytes)+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit := cache.load("large"); hit {
+		t.Fatal("an oversized entry was served")
+	}
+	if _, hit := (excerptCache{}).load("fresh"); hit {
+		t.Fatal("a disabled cache served an entry")
+	}
+}
+
+func TestCutExcerptMatchesBuildExcerpt(t *testing.T) {
+	text := "Grüße  aus\r\n> quoted\r\nMünchen und   mehr Text"
+	full := mail.BuildExcerpt(text, mail.MaximumExcerptLength)
+	for length := 0; length <= utf8.RuneCountInString(full)+1; length++ {
+		if got, want := cutExcerpt(full, length), mail.BuildExcerpt(text, length); got != want {
+			t.Fatalf("length %d: cut=%q build=%q", length, got, want)
+		}
 	}
 }
 
