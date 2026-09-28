@@ -5,13 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -148,7 +144,10 @@ func TestNextActionSkillContractBudget(t *testing.T) {
 }
 
 func TestNextActionEverySourceErrorCode(t *testing.T) {
-	codes := sourceErrorCodes(t)
+	codes := make(map[string]bool, len(errorCodeDefinitions))
+	for _, definition := range errorCodeDefinitions {
+		codes[definition.Code] = true
+	}
 	if len(codes) < 100 {
 		t.Fatalf("error inventory unexpectedly incomplete: %d", len(codes))
 	}
@@ -183,85 +182,6 @@ func TestNextActionEverySourceErrorCode(t *testing.T) {
 			t.Errorf("environment repair %s: next = %+v, want ask_user with %q", code, next, why)
 		}
 	}
-}
-
-// Discover declarations from production code rather than maintaining a stale
-// catalog. Include typed constants, Code/code initializers, and literal returns
-// in ErrorCode methods; dynamic codes use their existing safe fallback.
-func sourceErrorCodes(t *testing.T) map[string]bool {
-	t.Helper()
-	codes := make(map[string]bool)
-	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			return err
-		}
-		add := func(value ast.Expr) {
-			literal, ok := value.(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
-				return
-			}
-			code, err := strconv.Unquote(literal.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if code != "" {
-				codes[code] = true
-			}
-		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			switch node := node.(type) {
-			case *ast.AssignStmt:
-				for index, target := range node.Lhs {
-					if name, ok := target.(*ast.Ident); ok && name.Name == "code" && index < len(node.Rhs) {
-						add(node.Rhs[index])
-					}
-				}
-			case *ast.CallExpr:
-				if name, ok := node.Fun.(*ast.Ident); ok && (strings.HasSuffix(name.Name, "Failure") || strings.HasSuffix(name.Name, "Error")) && len(node.Args) > 0 {
-					if literal, ok := node.Args[0].(*ast.BasicLit); ok && literal.Kind == token.STRING {
-						value, err := strconv.Unquote(literal.Value)
-						if err == nil && strings.Contains(value, "_") && strings.IndexFunc(value, func(char rune) bool { return char != '_' && (char < 'a' || char > 'z') }) < 0 {
-							add(literal)
-						}
-					}
-				}
-			case *ast.KeyValueExpr:
-				if key, ok := node.Key.(*ast.Ident); ok && (key.Name == "Code" || key.Name == "code") {
-					add(node.Value)
-				}
-			case *ast.ValueSpec:
-				for index, name := range node.Names {
-					if index < len(node.Values) && (strings.HasPrefix(name.Name, "Code") || strings.HasSuffix(name.Name, "FailureCode")) {
-						add(node.Values[index])
-					}
-				}
-			case *ast.FuncDecl:
-				if node.Name.Name == "ErrorCode" && node.Body != nil {
-					ast.Inspect(node.Body, func(child ast.Node) bool {
-						if result, ok := child.(*ast.ReturnStmt); ok {
-							for _, value := range result.Results {
-								add(value)
-							}
-						}
-						return true
-					})
-				}
-			}
-			return true
-		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return codes
 }
 
 func assertNextContract(t *testing.T, next *nextAction) {

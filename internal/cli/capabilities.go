@@ -67,6 +67,7 @@ type capabilityManifest struct {
 	SyncCheckPolicy   *syncCheckPolicy      `json:"sync_check_policy,omitempty"`
 	DraftSavePolicy   *draftSavePolicy      `json:"draft_save_policy,omitempty"`
 	OutputDefinitions map[string]outputNode `json:"$defs,omitempty"`
+	ErrorCodes        []errorCatalogEntry   `json:"error_codes,omitempty"`
 }
 
 type syncCheckPolicy struct {
@@ -400,6 +401,7 @@ func writeCapabilitiesWithOutputs(stdout, stderr io.Writer, jsonOutput bool, man
 		if err := attachOutputSchemas(manifest.Commands); err != nil {
 			return failCommand("capabilities", jsonOutput, err, stdout, stderr)
 		}
+		manifest.ErrorCodes = errorCatalogFor(manifest.Commands)
 	}
 	return writeCapabilities(stdout, stderr, jsonOutput, manifest)
 }

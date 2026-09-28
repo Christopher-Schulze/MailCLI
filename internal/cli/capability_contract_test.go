@@ -38,15 +38,14 @@ func TestContractSHA256IdentifiesTheFullContract(t *testing.T) {
 	if err := json.Unmarshal(output, &published); err != nil {
 		t.Fatal(err)
 	}
-	full, err := capabilities()
+	full, err := fullContractManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := attachOutputSchemas(full.Commands); err != nil {
-		t.Fatal(err)
-	}
-	if err := publishOutputDefinitions(&full); err != nil {
-		t.Fatal(err)
+	published.Data.Capabilities.Version = full.Version
+	published.Data.Capabilities.ContractSHA256 = ""
+	if digest, err := contractSHA256Of(published.Data.Capabilities); err != nil || digest != expected {
+		t.Fatalf("published --outputs contract does not reproduce the digest: %q, %v", digest, err)
 	}
 	full.Version = "9.9.9"
 	if digest, err := contractSHA256Of(full); err != nil || digest != expected {
