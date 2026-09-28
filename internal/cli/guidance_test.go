@@ -860,10 +860,11 @@ func TestRecoveryErrorEnvelopesUseOnlyRetainedTargets(t *testing.T) {
 			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
 		},
 		{
+			// Binding resolution precedes composition and SMTP, so no effect exists.
 			name: "stale account binding", command: "drafts.send", code: "account_binding_stale",
 			err:   &mail.OperationError{Code: "account_binding_stale", Message: "stale binding"},
-			phase: mail.OperationPhaseSubmission, effect: mail.EffectUnknown,
-			retryability: mail.RetryObserveRequired, action: mail.RecoveryObserve,
+			phase: mail.OperationPhaseValidation, effect: mail.EffectNone,
+			retryability: mail.RetryUserInputRequired, action: mail.RecoveryObserve,
 			recoveryCmd: "accounts.list", recoveryArgs: []string{"--json"},
 		},
 		{

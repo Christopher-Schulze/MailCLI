@@ -188,6 +188,9 @@ func GuidanceForError(command string, err error) OperationGuidance {
 			return guidance
 		}
 	}
+	if guidance, matched := guidanceForPreEffect(command, code); matched {
+		return guidance
+	}
 	if code == "search_budget_too_small" {
 		guidance := OperationGuidance{
 			Phase: OperationPhaseRead, EffectCertainty: EffectNone,

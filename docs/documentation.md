@@ -770,6 +770,10 @@ Attachment saves permit replay only when the output is proven absent and the cau
 not yet downloaded require correction; known resource-limit, integrity, and deterministic-source failures require inspection without replay. Unknown causes use `observe_required` with `recovery.action:inspect`. Complete, partial, or unknown publication outcomes always forbid replay while preserving any verified `saved_attachment` evidence. A batch `attachment_save` item's `retryable`
 value follows `error.guidance.replay_allowed`.
 
+Identity, binding, store, credential, editor and precondition failures that stop before any external effect (for example `account_disabled`, `keychain_load_failed`,
+`draft_mutation_confirmation_required`, `message_already_trashed`) report `effect_certainty:"none"` with `correct` or `inspect` recovery for every command, writes included;
+outcome-uncertain codes keep observation-first guidance.
+
 Read failures are replayable only for explicitly classified transient errors. Input or configuration failures require correction, terminal failures require inspection, and unknown read failures use `retryability:"observe_required"` with `recovery.action:"inspect"`. Known Mail-store, account and Mail.app permission/readiness failures set `recovery.action:"correct"` and name the needed
 action in `recovery.instruction`, including Full Disk Access, account or binding correction, Automation permission, or safe Mail.app recovery. A structured recovery instruction never directs callers to delete or replace the MailCLI access-gate or account-binding file.
 
