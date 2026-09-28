@@ -165,19 +165,33 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, topic := range []struct{ anchor, heading string }{
-		{"#composition", "### Composition\n"},
-		{"#scope", "### Scope\n"},
-	} {
-		if !strings.Contains(stdout.String(), topic.anchor) || !bytes.Contains(manual, []byte(topic.heading)) {
-			t.Fatalf("help manual topic %s is missing or unreachable", topic.anchor)
-		}
-	}
 	_, composition, _ := strings.Cut(string(manual), "### Composition\n")
 	composition, _, _ = strings.Cut(composition, "\n### ")
 	for _, caveat := range []string{"Mail 16", "transport_unsupported_provider", "handoff"} {
 		if !strings.Contains(composition, caveat) {
-			t.Fatalf("linked composition topic omits caveat %q", caveat)
+			t.Fatalf("manual composition topic omits caveat %q", caveat)
+		}
+	}
+}
+
+func TestHelpOmitsRepositoryPaths(t *testing.T) {
+	argumentSets := [][]string{{"help"}}
+	for _, contract := range commandContracts {
+		argumentSets = append(argumentSets, append(strings.Split(contract.ID, "."), "--help"))
+	}
+	for _, contract := range commandRootContracts() {
+		argumentSets = append(argumentSets, []string{strings.SplitN(contract.ID, ".", 2)[0], "--help"})
+	}
+	for _, args := range argumentSets {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if code := Run(context.Background(), newTestService(), args, &stdout, &stderr); code != 0 {
+			t.Fatalf("args = %q, code = %d, stderr = %q", args, code, stderr.String())
+		}
+		for _, path := range []string{"docs/", "README", ".md", "skills/", "scripts/"} {
+			if strings.Contains(stdout.String(), path) {
+				t.Errorf("args = %q help contains repository path %q: %s", args, path, stdout.String())
+			}
 		}
 	}
 }
