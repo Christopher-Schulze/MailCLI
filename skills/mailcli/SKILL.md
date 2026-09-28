@@ -54,5 +54,5 @@ Follow `next.do` with emitted command/args; never invent replay. [Recovery](refe
 | `retry` | Retry after `wait_seconds`, if present. |
 | `fix_input` | Correct the named input first. |
 | `check_state` | Observe evidence; never repeat the write. |
-| `ask_user` | Ask for environment/permission repair. |
+| `ask_user` | Ask the user for the `next.why` repair. |
 | `stop` | Stop; cancellation never authorizes restart. |

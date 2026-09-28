@@ -1,7 +1,7 @@
 # Reading, search, and attachments
 
 - Local index reads work with Mail closed; never prove current server absence/delivery or poll new mail. [Sync](mutations.md) distinguishes observing counts from requesting Mail sync.
-- `messages list`: newest-first unified inbox; --account narrows. Rows retain account/mailbox refs under fields. --mailbox: ref, case-insensitive inbox/sent/drafts/trash/junk/archive, or exact slash path. Ambiguous: choose returned ref/account. Supported store required, no global Apple Events scan. All-mail traverses every mailbox.
+- `messages list`: newest-first unified inbox; --account narrows. Rows retain account/mailbox refs under fields. --mailbox: ref, case-insensitive inbox/sent/drafts/trash/junk/archive, or exact slash path. Ambiguous: choose returned ref/account. Supported store required, no global Apple Events scan. All mail: page each mailbox.
 - Degraded/stale/ambiguous account coverage blocks transport. Check complete/identity_coverage/direct_ops_supported/reason; unsupported provider needs [setup](setup.md) with explicit hosts.
 - Lists/filter/search default 20, limit 1..200; JSON 1 MiB, --max-bytes <=64 MiB. Follow page.next_cursor until absent; overflow has no rows/new cursor.
 - Cursors bind store/query; catalogs bind command/scope/ordered refs. Invalid: restart. Refresh refs after copy/move/delete/sync; thread has the same page bounds.
@@ -14,5 +14,5 @@
 - Search: per-page exactness/partial/missing/bounds; terminal data.page.coverage.complete plus no earlier gaps required. Byte-blocked progress: inclusive cursor; no progress: search_budget_too_small/error.required_bytes rounded MiB, no new cursor. Raise --max-scan-bytes via recovery args, preserve incoming cursor/query/filters. Page/scan/message bounds mutable; filters/exact-count/store/index bound. Old/stale tokens restart; index changes invalidate progress/coverage. Obey limits.
 - Reply metadata (page opt-in): --with-threading fills summary.in_reply_to[]/references[] (bracketed msg-ids, in order), from{name,address}, threading_complete; --with-excerpt (--excerpt-length 240, 1..1000) fills excerpt, excerpt_complete, excerpt_source local/imap-partial/unavailable from <=256 KiB, no full FETCH. Empty/false=unknown, not absence. Get: --fields excerpt,header_fields.
 - Received dates: after inclusive/before exclusive; zero real, NULL empty. RFC3339 zone preferred, date-only local midnight. Exact strings stay cursor-bound; after < before.
-- Save opaque attachment IDs to absolute new 0600 files only; verify identity/size/mtime/SHA-256. Retained saved_attachment needs path/hash inspection; complete/unknown publication forbids replay. [Recovery](output-and-recovery.md).
+- Save opaque attachment IDs to absolute new 0600 files only; verify size/SHA-256. Retained saved_attachment needs path/hash inspection; complete/unknown publication forbids replay. [Recovery](output-and-recovery.md).
 - Unnamed message/global/multipart-digest embeds are attachments; save selected original MIME. Nested text absent from outer body/search. Completeness covers decode/structure/budgets; hash proves bytes, not message validity.
