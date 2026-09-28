@@ -1144,6 +1144,7 @@ Ctrl-C targets the foreground process group; automation should signal the whole 
 
 `scripts/build/install-local.sh [BINARY_DESTINATION]` builds the checkout and runs the same installer with that checkout as package root, publishing binary and skill together with the same lock, identity checks, rollback and recovery.
 The optional argument changes only the binary destination; `MAILCLI_SKILL_DESTINATION` redirects the skill.
+Source builds are ad-hoc signed, so macOS asks again for Keychain access after every rebuild. `scripts/utils/create-local-signing-identity.sh` creates, once, a self-signed identity in its own password-less keychain `~/Library/Keychains/mailcli-local-signing.keychain-db` and adds it to the user keychain search list; `install-local.sh` then signs every build with it (`MAILCLI_SIGNING_KEYCHAIN` selects another keychain, empty disables signing), so one "Always Allow" persists across rebuilds.
 
 ### Self-update
 

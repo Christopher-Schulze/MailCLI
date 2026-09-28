@@ -15,6 +15,19 @@ fi
 
 "${MAILCLI_ROOT}/scripts/build/build.sh"
 
+# Sign with the local identity from create-local-signing-identity.sh when it
+# exists, so macOS keeps its Keychain approval across rebuilds.
+SIGNING_KEYCHAIN="${MAILCLI_SIGNING_KEYCHAIN-${HOME}/Library/Keychains/mailcli-local-signing.keychain-db}"
+if [[ -n "${SIGNING_KEYCHAIN}" && -f "${SIGNING_KEYCHAIN}" ]]; then
+  security unlock-keychain -p "" "${SIGNING_KEYCHAIN}"
+  SIGNING_HASH="$(security find-certificate -c "MailCLI Local Signing" -Z "${SIGNING_KEYCHAIN}" | awk '/^SHA-1 hash:/ { print $3 }')"
+  if [[ ! "${SIGNING_HASH}" =~ ^[0-9A-F]{40}$ ]]; then
+    printf 'Local signing keychain has no usable identity: %s\n' "${SIGNING_KEYCHAIN}" >&2
+    exit 1
+  fi
+  codesign --force --sign "${SIGNING_HASH}" --identifier mailcli "${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
+fi
+
 # Test builds may redirect the compiled binary away from bin/mailcli. The
 # shared installer still consumes a package-shaped source, so stage the
 # redirected output privately instead of touching the production binary.
