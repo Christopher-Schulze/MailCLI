@@ -1,12 +1,8 @@
 # Installation, setup, and diagnostics
 
---for IDS --schemas inlines schema_ref contracts; --outputs adds schema.output/$defs.
+Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --outputs --json` when it changes. Install or update only through a signed release as the README describes.
 
-Release: verify signatures per README.
-
-Checkout: `scripts/build/install-local.sh [BINARY_DESTINATION]`, default ~/.local/bin/mailcli, MAILCLI_SKILL_DESTINATION override; binary/skill transaction, restart agent. Contract cache: `scripts/utils/mailcli-preflight.sh capabilities --binary PATH`.
-
-Obey conditional dependencies; empty=none. Store: doctor --json; refresh after store/permission/schema/account/read failure. Healthy checkout cache <=300 s. Never cache `doctor --live`; run before Apple Events/read fallback with Mail running/Automation permission. Store reads: Full Disk Access/no Automation; direct send: no Mail/Full Disk Access.
+Obey conditional dependencies; an empty list means none. Run `mailcli doctor --json` before store work and again after a store, permission, schema, account or read failure. Never cache `doctor --live`; run it before Apple Events or a read fallback, with Mail running and Automation permission granted. Store reads need Full Disk Access and no Automation; direct send needs neither Mail nor Full Disk Access.
 
 Codex ~/.agents/skills/mailcli; Claude Code ~/.claude/skills/mailcli can link verified default. Create only if absent; inspect existing/dangling entries. Links follow updates; copies use original installer/same MAILCLI_SKILL_DESTINATION, ignored by self-update. Other hosts/cloud: documented paths.
 

@@ -5,11 +5,17 @@ description: Read/search, draft/reply/forward/send, save attachments, organize a
 
 # MailCLI
 
-Use only MailCLI. Keep private content out of logs; never ask for passwords/tokens; Keychain via `mailcli send setup`.
+Use only MailCLI for mail work. Keep message content out of logs. Never ask the user for passwords or tokens; credentials go into the Keychain through `mailcli send setup`.
 
-Pin `command -v mailcli`. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. `--outputs` adds output schemas and `error_codes`. Cache per `contract_sha256` (else binary SHA-256); reread on change.
+Resolve the binary once with `command -v mailcli` and keep that path for the session.
 
-Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; reuse refs/cursors/revisions exactly, refresh refs after mutation/sync. Never replay successful/uncertain writes.
+Load the contract first:
+
+1. Run `mailcli version --json` and read `data.contract_sha256`. If a cached contract has the same digest, use it and skip step 2.
+2. Run `mailcli capabilities --for ID --schemas --outputs --json` for the command IDs you need. ID is a command ID, a comma-separated list or a family such as `messages.*`. Accept it only when `ok` is true, envelope `schema_version` is 1 and capabilities schema 2; cache it under its `contract_sha256`.
+3. Obey each command's `dependencies`, `confirmation` and parameter schema. `error_codes` explains each code a command can return.
+
+Add `--json` to every call. Check `ok` and the exit code of every call. Copy refs, cursors and revisions exactly from MailCLI output. Refresh refs after a mutation or sync. Never replay a write that succeeded or whose outcome is uncertain.
 
 ## Choose the command
 
@@ -26,28 +32,35 @@ Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; 
 
 ## Choose the execution boundary
 
-Never bypass MailCLI (private files, SQLite, UI/scripts); no index/refresh command.
+Never read Mail's private files or databases or script the Mail UI. MailCLI has no index or refresh command.
 
 ## Workflows
 
-Quote operands: REF=list `data.page.messages[].ref`, search/filter `.summary.ref`; DRAFT=`data.draft.ref`/draft list; FILE=UTF-8 body file; QUERY=requested text; REV=`data.draft_preview.revision`; NEXT=`data.page.next_cursor`.
+Placeholders come from earlier output; quote their values:
 
-| Workflow | Route/result |
-| --- | --- |
-| Triage | `mailcli messages list` → `mailcli messages get REF --view plain`: metadata/body. Unread: `mailcli messages filter --read false`. |
-| Thread | `mailcli messages thread REF`: chronological members. Same REF, `--cursor` from `data.thread.prev_cursor` (older)/`next_cursor` (newer); both until absent. |
-| Search | `mailcli messages search --query QUERY`: matches/coverage. Same query/filters, `--cursor NEXT` until absent; inspect coverage. |
-| Reply | `mailcli messages reply REF --body-file FILE` → `mailcli drafts preview DRAFT`: local reply/review. Authorized `--from ADDRESS` if needed. |
-| Send | `mailcli drafts preview DRAFT` → `mailcli drafts send DRAFT --confirm --expected-revision REV`: authorized full review then submit. Pending/unknown: reconcile. |
-| Replies | `mailcli messages search --after DATE --with-threading --with-excerpt` + NEXT: match sent Message-ID in `in_reply_to[]`/`references[]`; domain=candidate only; `threading_complete=false`=unknown. |
+- REF: `data.page.messages[].ref` from a list; search and filter nest it as `summary.ref`.
+- DRAFT: `data.draft.ref` or a `mailcli drafts list` row.
+- FILE: a UTF-8 file that holds the body text.
+- QUERY: the requested text.
+- REV: `data.draft_preview.revision` from the latest preview.
+- NEXT: `data.page.next_cursor` from the previous page.
 
-List/filter: follow NEXT until absent. Review complete content only; inspect, never recreate, completed drafts.
+| Workflow | Commands | Read next |
+| --- | --- | --- |
+| Triage | `mailcli messages list` (unread: `mailcli messages filter --read false`), then `mailcli messages get REF --view plain`. | Metadata and body. |
+| Thread | `mailcli messages thread REF`. For older or newer members repeat with `--cursor` set to `data.thread.prev_cursor` or `data.thread.next_cursor` until it is absent. | Members, oldest first. |
+| Search | `mailcli messages search --query QUERY`. Repeat with the same query and filters plus `--cursor NEXT` until NEXT is absent. | `data.page.coverage.complete` on the last page. |
+| Reply | `mailcli messages reply REF --body-file FILE`, then `mailcli drafts preview DRAFT`. Add `--from ADDRESS` only for a sender the user named. | The preview for the user. |
+| Send | `mailcli drafts preview DRAFT`, then, once the user approved it, `mailcli drafts send DRAFT --confirm --expected-revision REV`. | `data.send_result`; reconcile a pending or unknown one with `mailcli drafts reconcile`. |
+| Replies | `mailcli messages search --after DATE --with-threading --with-excerpt`, following NEXT until it is absent. | Sent Message-IDs in `in_reply_to[]` or `references[]`; `threading_complete:false` means unknown, a sender domain is only a candidate. |
 
-Send/destructive: authorization/confirmation, reused only for unchanged scope/content. Save/export to absolute new paths; verify size/hash.
+Follow NEXT on lists and filters too. Review only complete content. Inspect a completed draft instead of recreating it.
+
+Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged. Save and export only to new absolute paths, then verify size and hash.
 
 ## Error contract
 
-Follow `next.do` with emitted command/args; never invent replay. [Recovery](references/output-and-recovery.md).
+Follow `next.do` with the command and arguments MailCLI emitted. Never invent a replay. See [Recovery](references/output-and-recovery.md).
 
 | `next.do` | Action |
 | --- | --- |

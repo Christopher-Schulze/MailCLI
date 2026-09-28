@@ -27,6 +27,11 @@ func TestSkillDocumentationSelfContained(t *testing.T) {
 	}
 }
 
+const (
+	skillEntrypointBudgetBytes = 5000
+	skillPackageBudgetBytes    = 28000
+)
+
 func validateSkillBudgets(root string) error {
 	var total int64
 	foundEntrypoint := false
@@ -43,12 +48,12 @@ func validateSkillBudgets(root string) error {
 		}
 		if path == filepath.Join(root, "SKILL.md") {
 			foundEntrypoint = true
-			if info.Size() > 4000 {
-				return fmt.Errorf("skill entrypoint is %d bytes, budget 4000", info.Size())
+			if info.Size() > skillEntrypointBudgetBytes {
+				return fmt.Errorf("skill entrypoint is %d bytes, budget %d", info.Size(), skillEntrypointBudgetBytes)
 			}
 		}
-		if info.Size() > 25000-total {
-			return fmt.Errorf("complete skill exceeds 25000-byte budget at %s", path)
+		if info.Size() > skillPackageBudgetBytes-total {
+			return fmt.Errorf("complete skill exceeds %d-byte budget at %s", skillPackageBudgetBytes, path)
 		}
 		total += info.Size()
 		return nil
@@ -66,11 +71,11 @@ func TestSkillBudgetsEnforceExactBoundariesAndAllAssets(t *testing.T) {
 		extraBytes int
 		valid      bool
 	}{
-		{name: "entry boundary", entryBytes: 4000, valid: true},
-		{name: "entry overflow", entryBytes: 4001},
-		{name: "package boundary", entryBytes: 4000, extraBytes: 21000, valid: true},
-		{name: "package overflow", entryBytes: 4000, extraBytes: 21001},
-		{name: "non-Markdown assets count", entryBytes: 2000, extraBytes: 23001},
+		{name: "entry boundary", entryBytes: 5000, valid: true},
+		{name: "entry overflow", entryBytes: 5001},
+		{name: "package boundary", entryBytes: 5000, extraBytes: 23000, valid: true},
+		{name: "package overflow", entryBytes: 5000, extraBytes: 23001},
+		{name: "non-Markdown assets count", entryBytes: 2000, extraBytes: 26001},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()

@@ -671,7 +671,6 @@ var documentedBounds = []documentedBound{
 		checks: []documentedBoundCheck{
 			boundCheck("scripts/utils/mailcli-preflight.sh", `DOCTOR_TTL_SECONDS=(\d+)`, 1),
 			boundCheck("docs/documentation.md", `(\w+)-minute freshness`, 60),
-			boundCheck("skills/mailcli/references/setup.md", `cache <=(\d+) s`, 1),
 		}},
 	{name: "transport command budget", expected: int64(transport.TransferCommandBudget / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
