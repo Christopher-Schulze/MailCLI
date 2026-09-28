@@ -519,9 +519,9 @@ Reply and forward creation read the source header block from the Mail store and 
 ### References and cursors
 
 Account, mailbox, message, recipient, attachment, draft and cursor are typed values.
-Message references are opaque and bind the Envelope Index UUID, row identity, message and global identifiers, account, mailbox identity, mailbox path and subject.
+Message references are opaque and bind the Envelope Index UUID, row identity, message and global identifiers, account, mailbox identity, mailbox path and a short subject fingerprint; the subject text is not part of the ref.
 The store revalidates physical identity and mailbox membership before every read or write translation; a changed store, moved message, reused row or mismatched subject returns a typed stale-reference error instead of touching a different message.
-The `acct_`, `mbx_`, `msg_` and `cur_` reference prefixes and the `lcur_` store list-cursor prefix are stable; new payloads use a bounded, versioned compact JSON format while supported legacy JSON/base64 payloads still decode, and noncanonical base64 returns `invalid_reference` before any I/O.
+The `acct_`, `mbx_`, `msg_` and `cur_` reference prefixes and the `lcur_` store list-cursor prefix are stable; new `acct_`, `mbx_` and `msg_` refs use a short bounded binary payload, refs issued by earlier versions still decode, and a malformed or noncanonical payload returns `invalid_reference` before any I/O.
 
 Mailbox paths are account-relative arrays internally and escaped display strings externally, which keeps Gmail labels, iCloud folders and identically named nested mailboxes apart.
 

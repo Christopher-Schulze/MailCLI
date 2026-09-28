@@ -31,7 +31,7 @@ type AccountReferenceError struct {
 
 func (e *AccountReferenceError) Error() string {
 	if e.Kind == AccountReferenceVersionUnsupported {
-		return fmt.Sprintf("unsupported account reference version %d (expected %d)", e.Version, FormatVersion)
+		return fmt.Sprintf("unsupported account reference version %d (expected %d)", e.Version, BinaryFormatVersion)
 	}
 	if e.Err != nil {
 		return "corrupt account reference: " + e.Err.Error()
@@ -68,6 +68,7 @@ type Message struct {
 	ExpectedIMAPUIDValidity uint32   `json:"expected_imap_uid_validity,omitempty"`
 	ExpectedIMAPMailboxID   int64    `json:"expected_imap_mailbox_id,omitempty"`
 	ExpectedSubject         string   `json:"expected_subject,omitempty"`
+	ExpectedSubjectHash     uint32   `json:"-"`
 	ExpectedStoreUUID       string   `json:"expected_store_uuid,omitempty"`
 	ExpectedStoreMailboxID  int64    `json:"expected_store_mailbox_id,omitempty"`
 	ExpectedStoreMessageID  int64    `json:"expected_store_message_id,omitempty"`
@@ -82,9 +83,17 @@ type ListCursor struct {
 }
 
 func EncodeAccount(accountID string) (string, error) {
-	token, err := EncodeCompactTokenPayload("acct_", &compactPayload{AccountID: accountID}, compactReferenceVersion)
+	payload, err := encodeBinaryAccount(accountID)
 	if err != nil {
 		return "", fmt.Errorf("encode account ref: %w", err)
+	}
+	return encodeBinaryToken("acct_", payload, "account ref")
+}
+
+func encodeBinaryToken(prefix string, payload []byte, description string) (string, error) {
+	token, err := EncodeToken(prefix, payload)
+	if err != nil {
+		return "", fmt.Errorf("encode %s: %w", description, err)
 	}
 	return token, nil
 }
@@ -112,11 +121,11 @@ func DecodeAccount(value string) (Account, error) {
 }
 
 func EncodeMailbox(accountID string, path []string) (string, error) {
-	token, err := EncodeCompactTokenPayload("mbx_", &compactPayload{AccountID: accountID, MailboxPath: path}, compactReferenceVersion)
+	payload, err := encodeBinaryMailbox(accountID, path)
 	if err != nil {
 		return "", fmt.Errorf("encode mailbox ref: %w", err)
 	}
-	return token, nil
+	return encodeBinaryToken("mbx_", payload, "mailbox ref")
 }
 
 func DecodeMailbox(value string) (Mailbox, error) {
@@ -135,25 +144,17 @@ func DecodeMailbox(value string) (Mailbox, error) {
 }
 
 func EncodeMessage(ref Message) (string, error) {
-	ref.Version = FormatVersion
 	if ref.hasAnyStoreIdentity() && !ref.IsStoreBound() {
 		return "", fmt.Errorf("invalid message ref store identity")
 	}
 	if err := ref.validateIMAPIdentity(); err != nil {
 		return "", err
 	}
-	token, err := EncodeCompactTokenPayload("msg_", &compactPayload{
-		AccountID: ref.AccountID, MailboxPath: ref.MailboxPath, LibraryID: ref.LibraryID,
-		ExpectedMessageID: ref.ExpectedMessageID, ExpectedIMAPUID: ref.ExpectedIMAPUID,
-		ExpectedIMAPUIDValidity: ref.ExpectedIMAPUIDValidity, ExpectedIMAPMailboxID: ref.ExpectedIMAPMailboxID,
-		ExpectedSubject: ref.ExpectedSubject, ExpectedStoreUUID: ref.ExpectedStoreUUID,
-		ExpectedStoreMailboxID: ref.ExpectedStoreMailboxID, ExpectedStoreMessageID: ref.ExpectedStoreMessageID,
-		ExpectedStoreGlobalID: ref.ExpectedStoreGlobalID,
-	}, compactReferenceVersion)
+	payload, err := encodeBinaryMessage(ref)
 	if err != nil {
 		return "", fmt.Errorf("encode message ref: %w", err)
 	}
-	return token, nil
+	return encodeBinaryToken("msg_", payload, "message ref")
 }
 
 func DecodeMessage(value string) (Message, error) {
@@ -230,6 +231,10 @@ func encodeToken(prefix string, payload []byte) string {
 }
 
 func decodeAccountPayload(payload []byte) (*Account, int, error) {
+	if isBinaryPayload(payload) {
+		account, err := decodeBinaryAccount(payload)
+		return account, 0, err
+	}
 	if !isCompactPayload(payload) {
 		var ref Account
 		if err := json.Unmarshal(payload, &ref); err != nil {
@@ -252,6 +257,9 @@ func decodeAccountPayload(payload []byte) (*Account, int, error) {
 }
 
 func decodeMailboxPayload(payload []byte) (*Mailbox, error) {
+	if isBinaryPayload(payload) {
+		return decodeBinaryMailbox(payload)
+	}
 	if !isCompactPayload(payload) {
 		var ref Mailbox
 		if err := json.Unmarshal(payload, &ref); err != nil {
@@ -270,6 +278,9 @@ func decodeMailboxPayload(payload []byte) (*Mailbox, error) {
 }
 
 func decodeMessagePayload(payload []byte) (*Message, error) {
+	if isBinaryPayload(payload) {
+		return decodeBinaryMessage(payload)
+	}
 	if !isCompactPayload(payload) {
 		var ref Message
 		if err := json.Unmarshal(payload, &ref); err != nil {
@@ -410,7 +421,7 @@ func isCompactPayload(payload []byte) bool {
 }
 
 func unsupportedVersion(kind string, version int) error {
-	return fmt.Errorf("unsupported %s version %d (expected %d)", kind, version, FormatVersion)
+	return fmt.Errorf("unsupported %s version %d (expected %d)", kind, version, BinaryFormatVersion)
 }
 
 const (

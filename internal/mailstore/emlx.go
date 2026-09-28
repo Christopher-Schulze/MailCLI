@@ -124,7 +124,7 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 		!strings.EqualFold(location.AccountID, ref.AccountID) {
 		return resolvedMessage{}, operationError("stale_reference", "message account identity changed")
 	}
-	if ref.ExpectedSubject != "" && record.Subject != ref.ExpectedSubject {
+	if !ref.SubjectMatches(record.Subject) {
 		return resolvedMessage{}, operationError("stale_reference", "message subject identity changed")
 	}
 	if record.StoreMailboxID != ref.ExpectedStoreMailboxID ||

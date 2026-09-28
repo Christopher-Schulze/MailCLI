@@ -156,7 +156,7 @@ func TestLiveStoreListsMailboxesAndMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeMessage() error = %v", err)
 	}
-	if ref.Version != mailref.FormatVersion || !ref.IsStoreBound() {
+	if ref.Version != mailref.BinaryFormatVersion || !ref.IsStoreBound() {
 		t.Fatalf("store message ref = %#v", ref)
 	}
 	_, source, err := store.openMessageSource(context.Background(), page.Messages[0].Ref)

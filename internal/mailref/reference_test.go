@@ -60,7 +60,7 @@ func TestMessageReferenceKindsUseInitialFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecodeMessage() error = %v", err)
 			}
-			if got.Version != FormatVersion || got.LibraryID != "42" {
+			if got.Version != BinaryFormatVersion || got.LibraryID != "42" {
 				t.Fatalf("DecodeMessage() = %#v", got)
 			}
 		})

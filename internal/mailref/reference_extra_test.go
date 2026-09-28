@@ -176,9 +176,11 @@ func TestCompactMessagePreservesIdentityAndReducesSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeMessage() error = %v", err)
 	}
-	ref.Version = FormatVersion
-	if !reflect.DeepEqual(decoded, ref) {
-		t.Fatalf("decoded message = %+v, want %+v", decoded, ref)
+	want := ref
+	want.Version = BinaryFormatVersion
+	want.ExpectedSubjectHash, want.ExpectedSubject = SubjectHash(ref.ExpectedSubject), ""
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("decoded message = %+v, want %+v", decoded, want)
 	}
 	legacyPayload, err := json.Marshal(Message{
 		Version: LegacyFormatVersion, AccountID: ref.AccountID, MailboxPath: ref.MailboxPath,
