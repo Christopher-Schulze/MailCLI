@@ -165,7 +165,7 @@ run_go_checks() {
   "${MAILCLI_ROOT}/scripts/utils/run-vulnerability-check.sh" || exit "$?"
 
   MAILCLI_LIVE_TESTS= MAILCLI_KEYCHAIN_LIVE= \
-    go test -vet=off -count=1 -race -cover -p "${MAILCLI_TEST_PACKAGES}" \
+    go test -vet=off -count=1 -cover -p "${MAILCLI_TEST_PACKAGES}" \
     -parallel "${MAILCLI_TEST_CPUS}" ./... || exit "$?"
 }
 
@@ -215,13 +215,13 @@ printf 'Local release verification preserved branch, remote-tracking, and tag re
 # both flags so live tests execute exactly once, inside their named stage.
 if [[ "${MAILCLI_LIVE_TESTS:-}" == "1" ]]; then
   printf 'MAILCLI_LIVE_TESTS=1: running the live Mail-store gate\n'
-  go test -count=1 -race -run '^TestLive' -v ./internal/mailstore
+  go test -count=1 -run '^TestLive' -v ./internal/mailstore
 else
   printf 'Skipping live Mail-store gate (set MAILCLI_LIVE_TESTS=1 to enable)\n'
 fi
 if [[ "${MAILCLI_KEYCHAIN_LIVE:-}" == "1" ]]; then
   printf 'MAILCLI_KEYCHAIN_LIVE=1: running the live Keychain gate\n'
-  go test -count=1 -race -run '^TestLiveKeychain$' -v ./internal/keychain
+  go test -count=1 -run '^TestLiveKeychain$' -v ./internal/keychain
 else
   printf 'Skipping live Keychain gate (set MAILCLI_KEYCHAIN_LIVE=1 to enable)\n'
 fi

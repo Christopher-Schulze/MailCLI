@@ -284,7 +284,7 @@ Local state (review drafts, claims, recovery spools, locks) lives under `~/Libra
 ./scripts/tests/test-release.sh
 ```
 
-`test.sh` checks only the staged change; `--full` runs the complete non-live suite with race tests, coverage, lint, `govulncheck`, and the release, install, and skill gates. Live Mail and Keychain tests are opt-in. See [development](docs/documentation.md#development).
+`test.sh` checks only the staged change; `--full` runs the complete non-live suite with coverage, lint, `govulncheck`, and the release, install, and skill gates. Live Mail and Keychain tests are opt-in; the race detector runs only manually through `scripts/tests/run-race-tests.sh`. See [development](docs/documentation.md#development).
 
 ## License
 
