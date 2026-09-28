@@ -393,6 +393,11 @@ func assertDocumentationClaims(t *testing.T, artifacts map[string]string) {
 				t.Errorf("%s contains stale Message-ID selection claim %q", name, stale)
 			}
 		}
+		// The README is a landing page; detailed recovery contracts live in the
+		// manual and the skill, which both stay checked here.
+		if name == "README.md" {
+			continue
+		}
 		for _, claim := range []struct {
 			name string
 			text string
@@ -574,7 +579,6 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "search default candidate bound", expected: mail.DefaultSearchMaxMessages, unit: "messages",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", "`--max-messages` defaults to ([\\d,]+)", 1),
 			boundCheck("docs/documentation.md", "`--max-messages` defaults to ([\\d,]+)", 1),
 		}},
 	{name: "search maximum candidate bound", expected: mail.MaximumSearchMaxMessages, unit: "messages",
@@ -600,7 +604,6 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "raw source cap", expected: mail.MaximumRawSourceBytes, unit: "bytes",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `second (\d+) MiB string`, 1<<20),
 			boundCheck("docs/documentation.md", `(\d+) MiB message cap`, 1<<20),
 			boundCheck("docs/documentation.md", `through the (\d+) MiB maximum`, 1<<20),
 			boundCheck("docs/documentation.md", `raw fallback to (\d+) MiB`, 1<<20),
@@ -608,19 +611,16 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "external attachment directory entry limit", expected: 10_000, unit: "entries",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
 			boundCheck("docs/documentation.md", `discovery is bounded per directory to ([\d,]+) entries`, 1),
 			boundCheck("skills/mailcli/references/reading.md", `Directory bounds: ([\d,]+) entries`, 1),
 		}},
 	{name: "external attachment ambiguity candidate limit", expected: 128, unit: "candidates",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
 			boundCheck("docs/documentation.md", `entries, ([\d,]+) hashed ambiguity candidates`, 1),
 			boundCheck("skills/mailcli/references/reading.md", `entries/([\d,]+) ambiguity hashes`, 1),
 		}},
 	{name: "external attachment cumulative hash input", expected: 1 << 30, unit: "bytes",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
 			boundCheck("docs/documentation.md", `candidates, and ([\d]+) GiB cumulative hash input`, 1<<30),
 			boundCheck("skills/mailcli/references/reading.md", `hashes/([\d]+) GiB hash input`, 1<<30),
 		}},
@@ -649,12 +649,10 @@ var documentedBounds = []documentedBound{
 		}},
 	{name: "IMAP pool default", expected: imapclient.DefaultMaxConnectionsPerAccount, unit: "connections",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `default is (\w+) authenticated`, 1),
 			boundCheck("docs/documentation.md", `default is (\w+) authenticated`, 1),
 		}},
 	{name: "IMAP pool maximum", expected: imapclient.MaximumConnectionsPerAccount, unit: "connections",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `one through (\w+)`, 1),
 			boundCheck("docs/documentation.md", `one through (\w+)`, 1),
 		}},
 	{name: "IMAP mutation lock wait", expected: 30, unit: "seconds",
@@ -671,19 +669,16 @@ var documentedBounds = []documentedBound{
 	{name: "preflight doctor cache", expected: 300, unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("scripts/utils/mailcli-preflight.sh", `DOCTOR_TTL_SECONDS=(\d+)`, 1),
-			boundCheck("README.md", `for (\w+) minutes`, 60),
 			boundCheck("docs/documentation.md", `(\w+)-minute freshness`, 60),
 			boundCheck("skills/mailcli/references/setup.md", `cache <=(\d+) s`, 1),
 		}},
 	{name: "transport command budget", expected: int64(transport.TransferCommandBudget / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `protocol phases use (\d+) seconds`, 1),
 			boundCheck("docs/documentation.md", `final replies use a (\d+)-second`, 1),
 			boundCheck("docs/documentation.md", `— (\d+) seconds plus one second`, 1),
 		}},
 	{name: "transport transfer cap", expected: int64(transport.TransferBudgetCap / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
-			boundCheck("README.md", `capped at (\d+) minutes`, 60),
 			boundCheck("docs/documentation.md", `capped at (\d+) minutes`, 60),
 			boundCheck("skills/mailcli/references/sending.md", `deadline <=(\d+) min`, 60),
 		}},

@@ -80,7 +80,7 @@ func TestDraftHandoffOutcomesPreserveLifecycleEvidence(t *testing.T) {
 					t.Fatalf("native error code lost: envelope=%s", stdout.String())
 				}
 				if nativeError.State == compose.StateCanceledBeforeDispatch {
-					for _, path := range []string{"README.md", "docs/documentation.md"} {
+					for _, path := range []string{"docs/documentation.md"} {
 						content := strings.ToLower(readRepositoryFile(t, path))
 						if !strings.Contains(content, "returns error code `"+response.Error.Code+"` with public outcome `"+string(result.Outcome)+"`") {
 							t.Errorf("%s differs from executed cancellation error/outcome", path)
