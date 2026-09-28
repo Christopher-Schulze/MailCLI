@@ -116,7 +116,7 @@ var commandContracts = []commandContract{
 		published:       true,
 	},
 	{
-		ID: "version", handler: runVersionCommand, helpDescription: "Print the installed version",
+		ID: "version", helpDescription: "Print the installed version",
 		effectClass: "read", confirmation: "none",
 		storeDependency: "none",
 		resultStates:    []string{"available"},
@@ -542,11 +542,13 @@ var commandContracts = []commandContract{
 }
 
 func init() {
-	// Capabilities reads this table, so its handler is assigned after table initialization.
+	// Capabilities and version read this table, so their handlers are assigned after table initialization.
 	for index := range commandContracts {
 		switch commandContracts[index].ID {
 		case "capabilities":
 			commandContracts[index].handler = runCapabilitiesCommand
+		case "version":
+			commandContracts[index].handler = runVersionCommand
 		case "accounts.list":
 			commandContracts[index].familyHandler = runAccounts
 		case "mailboxes.list":
@@ -637,16 +639,10 @@ func commandRootContracts() []commandContract {
 	return roots
 }
 
-func capabilityCommandsForScope(command, family string) ([]commandCapability, error) {
+func publishedCommandCapabilities() ([]commandCapability, error) {
 	commands := make([]commandCapability, 0, len(commandContracts))
 	for _, contract := range commandContracts {
 		if !commandIsPublished(contract) {
-			continue
-		}
-		if command != "" && contract.ID != command {
-			continue
-		}
-		if family != "" && !strings.HasPrefix(contract.ID, family+".") && contract.ID != family {
 			continue
 		}
 		capability, err := commandCapabilityFor(contract)

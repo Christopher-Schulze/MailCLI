@@ -45,12 +45,13 @@ Help remains human text; machines discover the contract through `capabilities`.
 
 ## For agents
 
-1. `mailcli capabilities --json` lists every command with its effects, confirmations, dependencies, result states and limits.
-2. `mailcli capabilities --for <id> --schemas --outputs --json` returns one command's full parameter schema, its `schema.output` tree and the error codes it can emit.
+1. `mailcli capabilities --for <id> --json` returns the effects, confirmations, dependencies, result states and limits of the commands a workflow needs.
+2. `mailcli capabilities --for <id> --schemas --outputs --json` adds their full parameter schemas, `schema.output` trees and the error codes they can emit.
 3. The error catalog `data.capabilities.error_codes` (published with `--outputs`) gives each code's meaning, emitting commands and guidance: `phase`, `effect_certainty`, `retryability`, `replay_allowed` and the recommended `next` action.
    A live envelope's `error.guidance` and `next` stay authoritative.
 4. Cache the contract per `data.capabilities.contract_sha256`.
-   The digest is identical in every capabilities view and changes only with the contract; reread the contract when it differs.
+   `mailcli version --json` returns the same digest without the contract, so a cache check costs one small read; reread the contract when it differs.
+   `mailcli capabilities --outputs --json` is the complete export of every command.
 5. Reply matching: `mailcli messages search --after 2026-09-01 --with-threading --with-excerpt --json`, follow `data.page.next_cursor`, and match each sent Message-ID against `summary.in_reply_to[]` and `summary.references[]`.
    The sender domain is only a candidate; `threading_complete:false` means unknown.
 
@@ -109,7 +110,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Example: `mailcli capabilities --for messages.get --json`.
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.
-  Example: `mailcli version --json`. Output: `name`, `version`.
+  Example: `mailcli version --json`. Output: `name`, `version`, `contract_sha256`.
 - `doctor`: inspect platform, Mail store, permissions and optional live Mail access; main flags `--live`, `--diagnostics`.
   Example: `mailcli doctor --json`. Output: `checks`, `timings`.
 - `update`: verify a pinned Ed25519 release signature and checksum, then install binary and skill with rollback; main flag `--json`.
@@ -353,7 +354,8 @@ Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter
 
 The error catalog `data.capabilities.error_codes` has one entry per code with `code`, `meaning`, `commands` and `guidance` groups (`commands`, `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `next`); with `--for` it is restricted to the selected commands.
 Catalog guidance is the runtime classification of the bare code; a live envelope's `error.guidance` and `next` stay authoritative because retained evidence can refine them.
-Every capabilities view carries the same `data.capabilities.contract_sha256`: SHA-256 over MailCLI's canonical JSON of the complete contract (all commands with parameter and output schemas, shared `$defs`, error catalog and limits; version and digest cleared).
+Every capabilities view carries the same `data.capabilities.contract_sha256`: SHA-256 over MailCLI's canonical JSON of the complete contract (all commands with parameter and output schemas, shared `$defs`, error catalog and limits; version and digest cleared); `mailcli version --json` reports the same value.
+Shared `$defs` keys are snake_case names of the published types, such as `message_summary`.
 Agents discover support from capabilities, never by parsing help text.
 
 ### Next action and guidance

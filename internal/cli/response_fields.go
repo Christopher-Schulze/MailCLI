@@ -27,7 +27,7 @@ var commandDataFields = map[string][]string{
 	envelopeLayerOwner:         {"finalization", "store_profile", "required_bytes", "limit_bytes", "measured"},
 	projectionLayerOwner:       {"projection"},
 	"capabilities":             {"capabilities"},
-	"version":                  {"name", "version"},
+	"version":                  {"name", "version", "contract_sha256"},
 	"update":                   {"update_result"},
 	"doctor":                   {"checks", "timings"},
 	"batch":                    {"batch_result"},

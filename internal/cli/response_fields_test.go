@@ -26,7 +26,7 @@ func responseDataJSONTags() []string {
 
 func TestResponseDataFieldOrderPinned(t *testing.T) {
 	want := []string{
-		"name", "version", "capabilities", "checks", "timings",
+		"name", "version", "contract_sha256", "capabilities", "checks", "timings",
 		"accounts", "complete", "identity_coverage_complete", "mailboxes",
 		"mailbox", "page", "message", "message_state", "state", "thread",
 		"raw_source", "attachments", "projection", "content_export",

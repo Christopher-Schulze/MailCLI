@@ -189,11 +189,7 @@ func imapOperationsWithConcurrency(
 }
 
 func capabilities() (capabilityManifest, error) {
-	return capabilitiesForScope("", "")
-}
-
-func capabilitiesForScope(command, family string) (capabilityManifest, error) {
-	commands, err := capabilityCommandsForScope(command, family)
+	commands, err := publishedCommandCapabilities()
 	if err != nil {
 		return capabilityManifest{}, err
 	}
@@ -305,16 +301,11 @@ func capabilitiesForScope(command, family string) (capabilityManifest, error) {
 			SafeRecoveryCommand: "mailcli drafts reconcile --ref <DRAFT_REF> --json",
 		},
 	}
-	if command != "" {
-		manifest.Scope = command
-	} else if family != "" {
-		manifest.Scope = family
-	}
 	return manifest, nil
 }
 
 func capabilitiesForCommands(selected []string) (capabilityManifest, error) {
-	manifest, err := capabilitiesForScope("", "")
+	manifest, err := capabilities()
 	if err != nil {
 		return capabilityManifest{}, err
 	}

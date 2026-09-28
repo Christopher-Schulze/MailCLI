@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +31,14 @@ func TestContractSHA256IdentifiesTheFullContract(t *testing.T) {
 			t.Fatalf("capabilities %v: code=%d digest mismatch: %s", flags, code, output)
 		}
 	}
+	var versionOutput bytes.Buffer
+	if code := Run(context.Background(), nil, []string{"version", "--json"}, &versionOutput, io.Discard); code != 0 {
+		t.Fatalf("version --json exit %d: %s", code, versionOutput.String())
+	}
+	var version envelope
+	if err := json.Unmarshal(versionOutput.Bytes(), &version); err != nil || version.Data.ContractSHA256 != expected {
+		t.Fatalf("version --json does not report the contract digest %q: %s (%v)", expected, versionOutput.String(), err)
+	}
 
 	// The digest covers the published --outputs contract, independent of the version.
 	_, output, _ := captureCapabilitiesJSON(t, "--outputs", "--json")
@@ -37,6 +49,12 @@ func TestContractSHA256IdentifiesTheFullContract(t *testing.T) {
 	}
 	if err := json.Unmarshal(output, &published); err != nil {
 		t.Fatal(err)
+	}
+	publicDefinitionName := regexp.MustCompile(`^[a-z][a-z0-9_.-]*$`)
+	for name := range published.Data.Capabilities.OutputDefinitions {
+		if !publicDefinitionName.MatchString(name) || strings.Contains(name, "mailcli") {
+			t.Errorf("$defs key %q is not a public snake_case type name", name)
+		}
 	}
 	full, err := fullContractManifest()
 	if err != nil {

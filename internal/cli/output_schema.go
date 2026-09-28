@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"mailcli/internal/mail"
 )
@@ -81,7 +82,11 @@ type outputJSONInput struct {
 	Constraints          []outputConstraint `json:"constraints"`
 }
 
-type outputSchemaBuilder struct{ definitions map[string]outputNode }
+type outputSchemaBuilder struct {
+	definitions map[string]outputNode
+	// definitionTypes proves each public $defs key names exactly one Go type.
+	definitionTypes map[string]reflect.Type
+}
 
 type outputInputField struct {
 	Name        string   `json:"name"`
@@ -93,8 +98,23 @@ type outputInputField struct {
 	Description string   `json:"description"`
 }
 
+// outputDefinitionName is the stable public $defs key: the snake_case type name
+// without the Go package path, so internal moves do not change the contract.
 func outputDefinitionName(value reflect.Type) string {
-	return strings.ReplaceAll(value.PkgPath(), "/", "_") + "." + value.Name()
+	runes := []rune(value.Name())
+	var name strings.Builder
+	for index, character := range runes {
+		upper := unicode.IsUpper(character)
+		if upper && index > 0 {
+			previousLower := !unicode.IsUpper(runes[index-1])
+			nextLower := index+1 < len(runes) && unicode.IsLower(runes[index+1])
+			if previousLower || nextLower {
+				name.WriteByte('_')
+			}
+		}
+		name.WriteRune(unicode.ToLower(character))
+	}
+	return name.String()
 }
 
 func outputDescription(name string) string {
@@ -179,13 +199,17 @@ func (builder *outputSchemaBuilder) node(value reflect.Type, name string, presen
 		node.Type = "object"
 		key := outputDefinitionName(value)
 		node.Ref = "#/$defs/" + key
+		if existing, claimed := builder.definitionTypes[key]; claimed && existing != value {
+			return node, fmt.Errorf("output definition %s names both %s and %s", key, existing, value)
+		}
 		if _, exists := builder.definitions[key]; !exists {
+			builder.definitionTypes[key] = value
 			builder.definitions[key] = outputNode{}
 			fields, err := builder.structFields(value)
 			if err != nil {
 				return node, err
 			}
-			builder.definitions[key] = outputNode{Name: key, Type: "object", AlwaysPresent: true, Description: "Closed JSON representation of " + value.String() + ".", Fields: fields}
+			builder.definitions[key] = outputNode{Name: key, Type: "object", AlwaysPresent: true, Description: "Closed JSON object " + key + ".", Fields: fields}
 		}
 	default:
 		return node, fmt.Errorf("unsupported output type %s for %s", value, name)
@@ -374,7 +398,7 @@ func outputNullableContainer(value reflect.Type) bool {
 }
 
 func publishOutputDefinitions(manifest *capabilityManifest) error {
-	builder := outputSchemaBuilder{definitions: map[string]outputNode{}}
+	builder := outputSchemaBuilder{definitions: map[string]outputNode{}, definitionTypes: map[string]reflect.Type{}}
 	if !schemasIncludeOutput(manifest.Commands) {
 		return nil
 	}

@@ -38,6 +38,7 @@ type envelope struct {
 type responseData struct {
 	Name                     string                       `json:"name,omitempty"`
 	Version                  string                       `json:"version,omitempty"`
+	ContractSHA256           string                       `json:"contract_sha256,omitempty"`
 	Capabilities             *capabilityManifest          `json:"capabilities,omitempty"`
 	Checks                   []mail.Check                 `json:"checks,omitempty"`
 	Timings                  []mail.DiagnosticTiming      `json:"timings,omitempty"`
@@ -904,11 +905,16 @@ func runVersion(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	if jsonOutput["--json"] {
+		// The digest lets an agent check a cached contract without rereading it.
+		digest, err := contractDigest()
+		if err != nil {
+			return failCommand("version", true, err, stdout, stderr)
+		}
 		return writeJSON(stdout, envelope{
 			SchemaVersion: schemaVersion,
 			OK:            true,
 			Command:       "version",
-			Data:          responseData{Name: name, Version: version},
+			Data:          responseData{Name: name, Version: version, ContractSHA256: digest},
 		})
 	}
 
@@ -1092,6 +1098,6 @@ Commands:
 	writeRaw(writer, `
 Output: --json/--human > MAILCLI_OUTPUT=json|human > pipe:JSON, TTY:human.
 Details: mailcli <command> --help
-Contracts: mailcli capabilities --json --outputs (schemas, error codes)
+Contracts: mailcli capabilities --for <id> --schemas --outputs --json
 `)
 }
