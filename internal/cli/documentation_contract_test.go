@@ -420,7 +420,7 @@ func assertHelpClaims(t *testing.T, help string) {
 	t.Helper()
 	for _, claim := range []string{
 		"Details: mailcli <command> --help",
-		"Contracts: mailcli capabilities --for <command.id> --schemas",
+		"Contracts: mailcli capabilities --json --outputs (schemas, error codes)",
 	} {
 		if !strings.Contains(help, claim) {
 			t.Errorf("top-level help omits %q contract: %s", claim, help)

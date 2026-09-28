@@ -7,7 +7,7 @@ description: Read/search, draft/reply/forward/send, save attachments, organize a
 
 Use only MailCLI. Keep private content out of logs; never ask for passwords/tokens; Keychain via `mailcli send setup`.
 
-Keep `command -v mailcli`'s executable. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. Cache per binary SHA-256; invalidate on replacement/change/failure.
+Pin `command -v mailcli`. `mailcli capabilities --for ID --json` (comma IDs/`NAME.*`): require ok, envelope 1, capabilities schema 2, compatible identity. Resolve schema_ref.resolve; obey dependencies. `--outputs` adds output schemas and `error_codes`. Cache per `contract_sha256` (else binary SHA-256); reread on change.
 
 Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; reuse refs/cursors/revisions exactly, refresh refs after mutation/sync. Never replay successful/uncertain writes.
 
@@ -26,7 +26,7 @@ Pipes default JSON, terminals human; `--json` forces JSON. Check envelope/exit; 
 
 ## Choose the execution boundary
 
-Never bypass MailCLI (private files, SQLite, UI/scripts); no owned index/refresh command. Follow guide boundaries.
+Never bypass MailCLI (private files, SQLite, UI/scripts); no index/refresh command.
 
 ## Workflows
 

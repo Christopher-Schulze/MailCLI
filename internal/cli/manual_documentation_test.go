@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-const manualTopics = "Overview|Install|Setup|Commands|Workflows|Errors and recovery|Limits|Security|Release|Development|Design reference"
+const manualTopics = "Overview|For agents|Install|Setup|Commands|Workflows|Errors and recovery|Limits|Security|Release|Development|Design reference"
 
 func validateManualStructure(content string, commands []string) error {
 	var headings []string

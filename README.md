@@ -39,7 +39,7 @@ Direct reads and mutations add no work to the Mail.app process. The bounded inte
 | Synchronization | `sync` | `--check` compares server and local counts over IMAP; without `--check` asks Mail.app to synchronize |
 | Maintenance | `update` | Verifies a pinned Ed25519 signature and checksum, then replaces binary and skill with rollback |
 
-Agents request contracts with `mailcli capabilities --for COMMAND_ID --json`. The envelope is schema version 1; the nested `data.capabilities.schema_version` is 2 and is authoritative for effects, confirmation, dependencies, result states, and limits. Scoped output links full parameter schemas through `schema_ref.resolve`; `--schemas` inlines them and `--outputs` adds output schemas.
+Agents request contracts with `mailcli capabilities --for COMMAND_ID --json`. The envelope is schema version 1; the nested `data.capabilities.schema_version` is 2 and is authoritative for effects, confirmation, dependencies, result states, and limits. Scoped output links full parameter schemas through `schema_ref.resolve`; `--schemas` inlines them and `--outputs` adds output schemas and the error catalog. Cache the contract per `contract_sha256`. See [for agents](docs/documentation.md#for-agents).
 
 ## Architecture
 

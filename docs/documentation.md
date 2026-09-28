@@ -1,6 +1,7 @@
 # MailCLI Documentation
 
 - [Overview](#overview)
+- [For agents](#for-agents)
 - [Install](#install)
 - [Setup](#setup)
 - [Commands](#commands)
@@ -26,6 +27,20 @@ JSON is the default for pipes and files, human text for terminals. Explicit
 limits and schema retrieval references before choosing an operation. Follow
 `schema_ref.resolve` with the same executable for exact parameter contracts,
 or add `--schemas` to inline them. Help remains human text.
+
+## For agents
+
+1. `mailcli capabilities --json` lists every command with its effects, confirmations, dependencies, result states and limits.
+2. `mailcli capabilities --for <id> --schemas --outputs --json` returns one command's full parameter schema, its `schema.output` tree
+   and the error codes it can emit.
+3. The error catalog `data.capabilities.error_codes` (published with `--outputs`) gives each code's meaning, emitting commands and
+   guidance: `phase`, `effect_certainty`, `retryability`, `replay_allowed` and the recommended `next` action. A live envelope's
+   `error.guidance` and `next` stay authoritative.
+4. Cache the contract per `data.capabilities.contract_sha256`. The digest is identical in every capabilities view and changes only
+   with the contract; reread the contract when it differs.
+5. Reply matching: `mailcli messages search --after 2026-09-01 --with-threading --with-excerpt --json`, follow
+   `data.page.next_cursor`, and match each sent Message-ID against `summary.in_reply_to[]` and `summary.references[]`. The sender
+   domain is only a candidate; `threading_complete:false` means unknown.
 
 ## Install
 

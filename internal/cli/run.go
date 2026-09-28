@@ -1092,6 +1092,6 @@ Commands:
 	writeRaw(writer, `
 Output: --json/--human > MAILCLI_OUTPUT=json|human > pipe:JSON, TTY:human.
 Details: mailcli <command> --help
-Contracts: mailcli capabilities --for <command.id> --schemas
+Contracts: mailcli capabilities --json --outputs (schemas, error codes)
 `)
 }
