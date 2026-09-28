@@ -1,715 +1,264 @@
 # MailCLI Documentation
 
+This manual is the complete reference for MailCLI.
+The first chapters cover installation and daily use; the later chapters specify each subsystem's contract.
+`mailcli capabilities --json` remains the machine-readable authority for commands, schemas, limits and error codes.
+
 - [Overview](#overview)
 - [For agents](#for-agents)
-- [Install](#install)
+- [Install and update](#install-and-update)
 - [Setup](#setup)
 - [Commands](#commands)
 - [Workflows](#workflows)
+- [Output contract](#output-contract)
 - [Errors and recovery](#errors-and-recovery)
 - [Limits](#limits)
+- [Reading and search](#reading-and-search)
+- [Drafts and composition](#drafts-and-composition)
+- [Sending](#sending)
+- [Visible handoff](#visible-handoff)
+- [Mailbox mutations and batch](#mailbox-mutations-and-batch)
+- [Accounts and bindings](#accounts-and-bindings)
+- [Mail.app integration](#mailapp-integration)
 - [Security](#security)
-- [Release](#release)
+- [Platform and compatibility](#platform-and-compatibility)
+- [Release and distribution](#release-and-distribution)
+- [Architecture](#architecture)
 - [Development](#development)
-- [Design reference](#design-reference)
 
 ## Overview
 
-MailCLI reads Apple Mail's local store, creates structured review drafts, and
-performs explicit SMTP/IMAP operations. It keeps no separate mail corpus and
-never writes Mail's Envelope Index. Complete local reads need no Mail.app
-process or network. Missing content can require targeted IMAP hydration;
-local inbox coverage does not prove remote freshness.
+MailCLI is a local Go executable for the accounts already configured in Apple Mail on macOS.
+It reads Mail's local store, creates structured review drafts, and performs explicit SMTP and IMAP operations.
 
-JSON is the default for pipes and files, human text for terminals. Explicit
-`--json` or `--human` overrides `MAILCLI_OUTPUT=json|human`. Use
-`mailcli capabilities --for COMMAND_ID --json` for dependencies, effects,
-limits and schema retrieval references before choosing an operation. Follow
-`schema_ref.resolve` with the same executable for exact parameter contracts,
-or add `--schemas` to inline them. Help remains human text.
+- Reads, searches, raw source and attachments come from Mail's Envelope Index and `.emlx` sources without Apple Events.
+  Complete local reads need no Mail.app process, no network and no provider credentials.
+- Missing content can require targeted IMAP hydration; local inbox coverage does not prove remote freshness.
+- Mark, move, copy and delete run over IMAP and return typed server evidence.
+- Reviewed drafts are sent over SMTP with a Sent copy over IMAP; an accepted submission is never repeated.
+- MailCLI keeps no separate mail corpus, search index, daemon, watcher or background process, and never writes Mail's Envelope Index.
+- Every data-bearing command returns one versioned JSON envelope with typed errors and one recommended `next` action.
+
+JSON is the default for pipes and files, human text for terminals.
+Explicit `--json` or `--human` overrides `MAILCLI_OUTPUT=json|human`.
+Help remains human text; machines discover the contract through `capabilities`.
 
 ## For agents
 
 1. `mailcli capabilities --json` lists every command with its effects, confirmations, dependencies, result states and limits.
-2. `mailcli capabilities --for <id> --schemas --outputs --json` returns one command's full parameter schema, its `schema.output` tree
-   and the error codes it can emit.
-3. The error catalog `data.capabilities.error_codes` (published with `--outputs`) gives each code's meaning, emitting commands and
-   guidance: `phase`, `effect_certainty`, `retryability`, `replay_allowed` and the recommended `next` action. A live envelope's
-   `error.guidance` and `next` stay authoritative.
-4. Cache the contract per `data.capabilities.contract_sha256`. The digest is identical in every capabilities view and changes only
-   with the contract; reread the contract when it differs.
-5. Reply matching: `mailcli messages search --after 2026-09-01 --with-threading --with-excerpt --json`, follow
-   `data.page.next_cursor`, and match each sent Message-ID against `summary.in_reply_to[]` and `summary.references[]`. The sender
-   domain is only a candidate; `threading_complete:false` means unknown.
+2. `mailcli capabilities --for <id> --schemas --outputs --json` returns one command's full parameter schema, its `schema.output` tree and the error codes it can emit.
+3. The error catalog `data.capabilities.error_codes` (published with `--outputs`) gives each code's meaning, emitting commands and guidance: `phase`, `effect_certainty`, `retryability`, `replay_allowed` and the recommended `next` action.
+   A live envelope's `error.guidance` and `next` stay authoritative.
+4. Cache the contract per `data.capabilities.contract_sha256`.
+   The digest is identical in every capabilities view and changes only with the contract; reread the contract when it differs.
+5. Reply matching: `mailcli messages search --after 2026-09-01 --with-threading --with-excerpt --json`, follow `data.page.next_cursor`, and match each sent Message-ID against `summary.in_reply_to[]` and `summary.references[]`.
+   The sender domain is only a candidate; `threading_complete:false` means unknown.
 
-## Install
+Never invent refs, attachment IDs, cursors or reviewed revisions; obtain them from MailCLI output.
+Follow `schema_ref.resolve` with the same executable for exact parameter contracts, or add `--schemas` to inline them.
+The companion skill in `skills/mailcli` routes intents to commands and guides; see [Agent skill](#agent-skill).
 
-Use the signed release installer described in the repository README, or build
-from a verified source checkout with `./scripts/build/install-local.sh`.
-Both installation paths verify the matching binary and companion skill.
-The default skill destination is `~/.agents/skills/mailcli`; an agent host
-must discover that directory or a supported link to it. Self-update targets
-the canonical destination. See [Release distribution](#release-distribution)
-for verification, rollback and destination rules.
+## Install and update
 
-Check installation with `mailcli version --json` and `mailcli doctor --json`.
-For a read-only installed-skill comparison, run
-`./scripts/tests/report-skill-drift.sh --repository PATH --installed PATH`.
-It reports drift and guidance without installing anything.
+Install the signed release with the bootstrap in the repository README, or build a verified source checkout with `./scripts/build/install-local.sh`.
+Both paths install the matching binary and companion skill together; the binary defaults to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`.
+An agent host must discover that skill directory or a supported link to it.
+`mailcli update` verifies and installs the latest signed release with rollback and refreshes the canonical skill installation.
+Check an installation with `mailcli version --json` and `mailcli doctor --json`.
+[Release and distribution](#release-and-distribution) specifies signing, verification, rollback and destination rules.
+
+### Agent skill
+
+The skill uses a compact `skills/mailcli/SKILL.md` entrypoint and seven operational guides under `skills/mailcli/references/`.
+Agents read the guide for the current action and request `capabilities --for COMMAND_ID --json` for one command or `capabilities --for ID,ID,... --json` for a known multi-command workflow; family discovery is for an unknown command set.
+Source and release installations copy the entire skill tree; skill discovery is host-specific, see the [agent skill installation paths](../README.md#agent-skill).
+Self-update ignores skill-destination overrides and refreshes the canonical installation: a host-supported link follows that target, while a separate copy requires its original installer and destination override.
+`./scripts/tests/report-skill-drift.sh --repository PATH --installed PATH` compares an installed skill read-only and reports match, missing, mismatch or unstable state with reconciliation guidance.
 
 ## Setup
 
-Grant Full Disk Access to the process hosting MailCLI when the local store
-requires it. Run `mailcli accounts list --json`, then
-`mailcli mailboxes list --account ACCOUNT_REF --json` to discover opaque refs.
-Never invent refs, attachment IDs, cursors or reviewed revisions.
+Requirements are macOS on Apple silicon, `/System/Applications/Mail.app`, `/usr/bin/osascript` and at least one account already configured in Mail.app.
 
-Direct transport uses app-specific credentials in the macOS Keychain.
-Run `mailcli send setup --from me@example.com` locally to provision them.
-For an alias, use `--account ACCOUNT_REF --from ALIAS` and, when needed,
-`--credential-account LOGIN`. Gmail and iCloud domains have built-in endpoint
-definitions; other domains require a stable account binding with validated
-explicit SMTP and IMAP endpoints. Unsupported providers fail before network
-access or credential storage. See [Account identity bindings](#account-identity-bindings).
+1. Grant Full Disk Access to the process hosting MailCLI (Terminal, an IDE or an agent host) so it can read `~/Library/Mail`.
+   This one permission enables all zero-Apple-Events reads; IMAP mutations and `sync --check` also need it for local identity and comparison data.
+2. Run `mailcli accounts list --json`, then `mailcli mailboxes list --account ACCOUNT_REF --json` to discover opaque refs.
+3. For direct sending, IMAP mutations and hydration, run `mailcli send setup --from me@example.com` locally once.
+   It stores an app-specific password in the macOS Keychain at a no-echo prompt; MailCLI never asks for passwords in chat.
+   For an alias use `--account ACCOUNT_REF --from ALIAS` and, when needed, `--credential-account LOGIN`.
+   Gmail and iCloud domains have built-in endpoints; other domains need an account binding with validated explicit SMTP and IMAP endpoints (see [Accounts and bindings](#accounts-and-bindings)).
+   Unsupported providers fail before network access or credential storage.
+4. Automation permission (control Mail in System Settings) is needed only for `doctor --live`, targeted fallback listing when the store cannot open, and `sync` without `--check`.
+   macOS may show a one-time consent prompt when one of them first sends an Apple Event.
+5. Visible handoff needs Mail.app as the default email application and a human check of the resulting compose window; it never sends.
 
-Automation permission and an already-running Mail.app apply only to the
-supported scripting paths, including default sync and live diagnostics.
-Visible handoff requires Mail.app as the default email application and a
-human check of the resulting compose window. It never sends.
+Sending and direct transport-claim reconciliation need no Mail-store or Automation permission; the first Keychain read may show one macOS consent prompt.
+Accessibility and Screen Recording are never required.
+When a permission is missing, `doctor` returns the exact System Settings remediation.
 
 ## Commands
 
-Examples use discovered refs and absolute paths chosen by the caller. They
-illustrate syntax, not authorization to send, delete, install or change mail.
-Each listed output key is under `data`; conditional evidence can also appear
-on a failed envelope. All commands share the envelope and recovery contract
-in [CLI contract](#cli-contract). Read the selected capability schema for all
-flags, field registries and incompatible combinations.
+Examples use discovered refs and absolute paths chosen by the caller.
+They illustrate syntax, not authorization to send, delete, install or change mail.
+Each listed output key is under `data`; conditional evidence can also appear on a failed envelope.
+All commands share the [Output contract](#output-contract); the selected capability schema lists every flag, field registry and incompatible combination.
 
 ### Discovery and maintenance
 
 - `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--outputs`, `--limits`.
-  `--outputs` adds every selected command's `schema.output` tree plus shared `$defs`.
+  `--outputs` adds every selected command's `schema.output` tree, shared `$defs` and the error catalog.
   Example: `mailcli capabilities --for messages.get --json`.
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.
   Example: `mailcli version --json`. Output: `name`, `version`.
-- `doctor`: inspect readiness; main flags `--live`, `--diagnostics`.
+- `doctor`: inspect platform, Mail store, permissions and optional live Mail access; main flags `--live`, `--diagnostics`.
   Example: `mailcli doctor --json`. Output: `checks`, `timings`.
-- `update`: verify and install a signed release; main flag `--json`.
+- `update`: verify a pinned Ed25519 release signature and checksum, then install binary and skill with rollback; main flag `--json`.
   Example: `mailcli update --json`. Output: `update_result`.
-- `sync`: trigger local refresh or compare server/local counts; main flags
-  `--account`, `--check`, `--require-complete`.
+- `sync`: without `--check` ask Mail.app to synchronize; with `--check` compare local and server mailbox identities and counts over IMAP without Mail.app; main flags `--account`, `--check`, `--require-complete`.
   Example: `mailcli sync --check --account ACCOUNT_REF --json`.
   Output: `sync_check` or `sync_result`.
-- `send.setup`: provision or remove transport credentials and bindings;
-  main flags `--from`, `--account`, `--credential-account`, `--remove`.
+- `send.setup`: store or remove the per-account app-specific password in the Keychain and create or update account bindings; main flags `--from`, `--account`, `--credential-account`, `--remove`; explicit endpoints use `--smtp-host`, `--smtp-port`, `--imap-host` and `--imap-port`.
   Example: `mailcli send setup --from me@example.com`.
   Output: `send_setup`, conditional `partial_effects`.
 
 ### Account and mailbox discovery
 
-- `accounts.list`: discover accounts and bounded sender identity evidence;
-  main flags `--limit`, `--cursor`, `--max-bytes`.
+- `accounts.list`: list enabled accounts with sender identities from a bounded Sent-history scan, `identity_coverage`, and `direct_ops_supported` with `direct_ops_reason`; main flags `--limit`, `--cursor`, `--max-bytes`.
   Example: `mailcli accounts list --json`.
   Output: `accounts`, `complete`, `identity_coverage_complete`, `page`.
-- `mailboxes.list`: discover account-relative mailboxes; main flags
-  `--account`, `--limit`, `--cursor`, `--max-bytes`.
+- `mailboxes.list`: recursively list mailboxes with stable account-relative paths in account-reference then path order; main flags `--account`, `--limit`, `--cursor`, `--max-bytes`.
   Example: `mailcli mailboxes list --account ACCOUNT_REF --json`.
   Output: `mailboxes`, `page`.
-- `mailboxes.resolve`: resolve an exact path; main flags `--account`, `--path`.
+- `mailboxes.resolve`: resolve an exact account-relative path, one `--path` per hierarchy level; main flags `--account`, `--path`.
   Example: `mailcli mailboxes resolve --account ACCOUNT_REF --path Projects --json`.
   Output: `mailbox`.
 
 ### Message reading and search
 
-- `messages.list`: page the unified inbox or selected mailbox; main flags
-  `--account`, `--mailbox`, `--limit`, `--cursor`, `--fields`.
+- `messages.list`: page the unified inbox or a selected mailbox without loading bodies; main flags `--account`, `--mailbox`, `--limit`, `--cursor`, `--fields`.
   Example: `mailcli messages list --limit 20 --json`. Output: `page`.
-- `messages.filter`: apply metadata filters; main flags `--mailbox`,
-  `--sender`, `--subject`, `--read`, `--exact-count`, `--cursor`.
+- `messages.filter`: apply typed metadata filters through the local store; main flags `--mailbox`, `--sender`, `--subject`, `--read`, `--exact-count`, `--cursor`.
   Example: `mailcli messages filter --subject invoice --json`. Output: `page`.
-- `messages.search`: search metadata and bounded local bodies; main flags
-  `--query`, `--max-messages`, `--max-scan-bytes`, `--exact-count`, `--cursor`.
+- `messages.search`: search metadata and bounded local bodies across the selected scope; main flags `--query`, `--max-messages`, `--max-scan-bytes`, `--exact-count`, `--cursor`.
   Example: `mailcli messages search --query invoice --json`. Output: `page`.
 - Reply metadata on list, filter and search pages is opt-in and read-only.
-  `--with-threading` fills `summary.in_reply_to[]`, `summary.references[]`
-  (bracketed msg-ids in header order), `summary.from{name,address}` and
-  `summary.threading_complete` from the bounded header block (local or IMAP
-  `BODY.PEEK[HEADER]`). `--with-excerpt` fills `summary.excerpt`,
-  `summary.excerpt_complete` and `summary.excerpt_source`
-  (`local`, `imap-partial`, `unavailable`); `--excerpt-length` defaults to 240
-  runes (1 to 1000).
-- Excerpts prefer text/plain over HTML text, drop `>` quote lines and a
-  signature after an exact `-- ` line, collapse whitespace and cut at a rune
-  boundary. Each reads at most 256 KiB of RFC source (local prefix, or an IMAP
-  `BODY.PEEK[]<0.262144>` partial fetch only when the local source is partial).
-  Larger or missing sources report `excerpt_complete:false`. Unrequested keys
-  are empty; empty or false means unknown, not absence.
-- `messages.get`: retrieve normalized detail; main flags `--ref`, `--view`,
-  `--fields`, `--export`, `--max-bytes`, `--excerpt-length`. Its summary
-  always carries the threading fields; `--fields excerpt` and
-  `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
+  `--with-threading` fills `summary.in_reply_to[]`, `summary.references[]` (bracketed msg-ids in header order), `summary.from{name,address}` and `summary.threading_complete` from the bounded header block (local or IMAP `BODY.PEEK[HEADER]`).
+  `--with-excerpt` fills `summary.excerpt`, `summary.excerpt_complete` and `summary.excerpt_source` (`local`, `imap-partial`, `unavailable`); `--excerpt-length` defaults to 240 runes (1 to 1000).
+- Excerpts prefer text/plain over HTML text, drop `>` quote lines and a signature after an exact `-- ` line, collapse whitespace and cut at a rune boundary.
+  Each reads 256 KiB of RFC source or less (a local prefix, or an IMAP `BODY.PEEK[]<0.262144>` partial fetch only when the local source is partial); larger or missing sources report `excerpt_complete:false`.
+  Unrequested keys are empty; empty or false means unknown, not absence.
+- `messages.get`: read projected metadata, recipients, body and attachment metadata; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`, `--excerpt-length`.
+  Its summary always carries the threading fields; `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.
   Output: `message`, conditional `content_export`.
-- `messages.raw`: retrieve exact RFC 5322 content; main flags `--ref`,
-  `--export`, `--max-bytes`.
+- `messages.raw`: return or exclusively export the exact RFC 5322 source stored by Mail.app; main flags `--ref`, `--export`, `--max-bytes`.
   Example: `mailcli messages raw --ref MESSAGE_REF --json`.
-  Output: `raw_source`, conditional `content_export`. In human mode a complete
-  local `.emlx` source streams directly to stdout without a second in-memory copy.
-- `messages.state`: observe server flags and compare local cached state;
-  main flag `--ref`.
+  Output: `raw_source`, conditional `content_export`.
+  In human mode a complete local `.emlx` source streams directly to stdout without a second in-memory copy.
+- `messages.state`: read server flags over IMAP `UID FETCH` and compare them with the local index; main flag `--ref`.
   Example: `mailcli messages state --ref MESSAGE_REF --json`. Output: `state`.
-- `messages.thread`: traverse local conversation grouping; main flags
-  `--ref`, `--limit`, `--cursor`, `--max-bytes`.
+- `messages.thread`: list a message's conversation members chronologically from the local grouping; main flags `--ref`, `--limit`, `--cursor`, `--max-bytes`.
   Example: `mailcli messages thread --ref MESSAGE_REF --json`. Output: `thread`.
-- `attachments.list`: inspect received attachment metadata; main flags
-  `--ref`, `--limit`, `--cursor`, `--fields`, `--max-bytes`.
+- `attachments.list`: inspect received attachment metadata; main flags `--ref`, `--limit`, `--cursor`, `--fields`, `--max-bytes`.
   Example: `mailcli attachments list --ref MESSAGE_REF --json`.
   Output: `attachments`, `content_complete`, `content_source`, `missing_parts`, `page`.
-- `attachments.save`: export one decoded received attachment; main flags
-  `--ref`, `--attachment`, `--output`.
+- `attachments.save`: export one decoded received attachment to a new absolute path; main flags `--ref`, `--attachment`, `--output`.
   Example: `mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/new/file.pdf --json`.
   Output: `saved_attachment` (`attachment_id`, `path`, `size`, `sha256`).
-  Attachment IDs are deterministic MIME-part paths, also during targeted hydration;
-  saved files hold the decoded part bytes, and `attachments.list` reports media types.
+  Attachment IDs are deterministic MIME-part paths, also during targeted hydration; saved files hold the decoded part bytes, and `attachments.list` reports media types.
 
 ### Local drafts and review
 
-- `drafts.create`: create a local review draft; main flags `--input`, `--from`,
-  `--to`, `--body-file`, `--format`, `--attach`.
+- `drafts.create`: create a local plain, Markdown or safe-HTML review draft; main flags `--input`, `--from`, `--to`, `--body-file`, `--format`, `--attach`.
   Example: `mailcli drafts create --to recipient@example.com --body-file /absolute/message.txt --json`.
   Output: `draft`.
-- `drafts.list`: page local draft summaries; main flags `--limit`, `--cursor`,
-  `--fields`, `--max-bytes`.
+- `drafts.list`: page local draft summaries; main flags `--limit`, `--cursor`, `--fields`, `--max-bytes`.
   Example: `mailcli drafts list --json`. Output: `drafts`, `page`.
-- `drafts.inspect`: read a local draft; main flags `--ref`, `--view`,
-  `--fields`, `--export`, `--max-bytes`.
+- `drafts.inspect`: read a local draft; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`.
   Example: `mailcli drafts inspect --ref DRAFT_REF --view full --json`.
   Output: `draft`, conditional `content_export`.
-- `drafts.preview`: render reviewed composition; main flags `--ref`,
-  `--preview-format`, `--max-bytes`.
+- `drafts.preview`: render the reviewed composition without fetching remote resources; main flags `--ref`, `--preview-format`, `--max-bytes`.
   Example: `mailcli drafts preview --ref DRAFT_REF --json`. Output: `draft_preview`.
-- `drafts.update`: patch a reviewed local draft; main flags `--ref`,
-  `--expected-revision`, `--input`, `--body-file`.
+- `drafts.update`: patch a reviewed local draft; main flags `--ref`, `--expected-revision`, `--input`, `--body-file`.
   Example: `mailcli drafts update --ref DRAFT_REF --expected-revision REVIEWED_REVISION --body-file /absolute/message.txt --json`.
   Output: `draft`.
-- `drafts.edit`: open a local draft in a human terminal editor; main flags
-  `--ref`, `--editor`, `--editor-arg`. Agents use inspect/update instead.
+- `drafts.edit`: open a local draft in a human terminal editor; main flags `--ref`, `--editor`, `--editor-arg`.
+  Agents use inspect and update instead.
   Example: `mailcli drafts edit --ref DRAFT_REF`. Output: `draft` in JSON mode.
-- `drafts.open`: read a store message/draft, not a local `draft_*` ref;
-  main flags `--ref`, `--view`, `--fields`, `--max-bytes`.
+- `drafts.open`: read a store message or Mail.app draft through the same retrieval and hydration path as `messages get`, not a local `draft_*` ref; main flags `--ref`, `--view`, `--fields`, `--max-bytes`.
   Example: `mailcli drafts open --ref MESSAGE_REF --view plain --json`.
   Output: `message`.
-- `drafts.adopt`: create a local review draft from a store draft;
-  main flags `--ref`, `--view`, `--fields`, `--max-bytes`.
+- `drafts.adopt`: copy a Mail.app store draft into a new local review draft; main flags `--ref`, `--view`, `--fields`, `--max-bytes`.
   Example: `mailcli drafts adopt --ref MESSAGE_REF --json`. Output: `draft`.
-- `drafts.discard`: remove the selected local draft; main flags `--ref`, `--confirm`.
+- `drafts.discard`: remove only the selected local draft and its claims after confirmation; main flags `--ref`, `--confirm`.
   Example: `mailcli drafts discard --ref DRAFT_REF --confirm --json`.
   Output: no command-specific data field.
-- `drafts.prune`: inspect cleanup candidates, then optionally delete;
-  main flags `--older-than`, `--confirm`.
+- `drafts.prune`: list stale never-sent drafts, expired send receipts and orphaned claim, spool and snapshot artifacts, then optionally delete them; main flags `--older-than`, `--confirm`.
   Example: `mailcli drafts prune --older-than 30 --json`. Output: `prune`.
 
 ### Delivery and visible handoff
 
-- `drafts.send`: submit the exact reviewed revision and mirror to Sent;
-  main flags `--ref`, `--expected-revision`, `--confirm`.
+- `drafts.send`: submit the exact reviewed revision over SMTP and mirror it to Sent over IMAP; main flags `--ref`, `--expected-revision`, `--confirm`.
   Example: `mailcli drafts send --ref DRAFT_REF --expected-revision REVIEWED_REVISION --confirm --json`.
   Output: `send_receipt`, `send_result`.
-- `drafts.reconcile`: observe retained transport or historical save claims;
-  main flag `--ref`.
+- `drafts.reconcile`: recover retained transport claims over IMAP, recheck legacy send claims against Sent, or observe a historical native save claim, never sending again; main flag `--ref`.
   Example: `mailcli drafts reconcile --ref DRAFT_REF --json`.
   Output: `send_receipt`, `send_result`, or `saved_draft`.
-- `drafts.handoff`: open a visible new-message compose window without sending;
-  main flag `--ref`.
+- `drafts.handoff`: open a visible new-message compose window without sending; main flag `--ref`.
   Example: `mailcli drafts handoff --ref DRAFT_REF --json`. Output: `draft_handoff`.
-- `drafts.handoff-reconcile`: resolve retained handoff evidence after inspection;
-  main flags `--ref`, `--attempt`, `--outcome`, `--confirm`.
+- `drafts.handoff-reconcile`: record the human-observed outcome of a retained handoff attempt; main flags `--ref`, `--attempt`, `--outcome`, `--confirm`.
   Example: `mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened --confirm --json`.
   Output: `handoff_reconcile`.
 
 ### Reply, organization and batching
 
-- `messages.reply`: create a local source-bound reply draft; main flags
-  `--ref`, `--input`, `--all`, `--body-file`.
+- `messages.reply`: create a local reply or reply-all draft bound to the source message; main flags `--ref`, `--input`, `--all`, `--body-file`.
   Example: `mailcli messages reply --ref MESSAGE_REF --body-file /absolute/reply.txt --json`.
   Output: `draft`.
-- `messages.forward`: create a local source-bound forward draft; main flags
-  `--ref`, `--input`, `--to`, `--body-file`.
+- `messages.forward`: create a local forward draft bound to the source message; main flags `--ref`, `--input`, `--to`, `--body-file`.
   Example: `mailcli messages forward --ref MESSAGE_REF --to recipient@example.com --body-file /absolute/forward.txt --json`.
   Output: `draft`.
-- `messages.mark`: change and observe IMAP flags; main flags `--ref`,
-  `--read`, `--flagged`, `--junk`, `--allow-draft`.
+- `messages.mark`: change read, flagged or junk state over IMAP and read back the result; main flags `--ref`, `--read`, `--flagged`, `--junk`, `--allow-draft`.
   Example: `mailcli messages mark --ref MESSAGE_REF --read true --json`.
   Output: `message_state`.
-- `messages.move`: move to a resolved destination; main flags `--ref`,
-  `--mailbox`, `--allow-draft`.
+- `messages.move`: move to a resolved destination over IMAP; main flags `--ref`, `--mailbox`, `--allow-draft`.
   Example: `mailcli messages move --ref MESSAGE_REF --mailbox MAILBOX_REF --json`.
   Output: `message_state`.
-- `messages.copy`: copy to a resolved destination; main flags `--ref`, `--mailbox`.
+- `messages.copy`: copy to a resolved destination over IMAP; main flags `--ref`, `--mailbox`.
   Example: `mailcli messages copy --ref MESSAGE_REF --mailbox MAILBOX_REF --json`.
   Output: `message_state`.
-- `messages.delete`: move to Trash after authorization; main flags `--ref`,
-  `--confirm`, `--allow-draft`.
+- `messages.delete`: move to Trash over IMAP after authorization; main flags `--ref`, `--confirm`, `--allow-draft`.
   Example: `mailcli messages delete --ref MESSAGE_REF --confirm --json`.
   Output: `delete_result`.
-- `batch`: run an explicit bounded request with ordered item outcomes;
-  main flags `--input`, `--concurrency`, `--max-bytes`, `--confirm`.
+- `batch`: run an explicit bounded read, attachment-save, mark, move, copy or delete request with ordered item outcomes; main flags `--input`, `--concurrency`, `--max-bytes`, `--confirm`.
   Example: `mailcli batch --input /absolute/request.json --json`.
   Output: `batch_result`. Delete batches also require `--confirm`.
 
 ## Workflows
 
-Discover refs before every workflow. Evaluate only the selected command's
-conditional dependencies, keep page scope unchanged, and inspect completeness
-and recovery evidence before assuming success.
+Discover refs before every workflow.
+Evaluate only the selected command's conditional dependencies, keep page scope unchanged, and inspect completeness and recovery evidence before assuming success.
 
-1. Triage: list inbox metadata, follow `data.page.next_cursor`, then get
-   `--view plain` for selected refs. Do not load every body to select a message.
-2. Conversation: thread around a discovered seed, follow either thread cursor,
-   then read only members needed for the answer. The initial page contains the seed.
-3. Attachment: list attachments, select a returned ID, save to a new absolute
-   path, and retain byte/hash proof. Incomplete discovery is not complete content.
-4. Reply: create a reply draft, inspect the full result and its revision,
-   apply authorized updates, then send that reviewed revision only after approval.
-5. Send: set up credentials locally, create and fully review a draft, retain
-   `data.draft.revision`, then send with `--expected-revision` and `--confirm`.
+1. Triage: list inbox metadata, follow `data.page.next_cursor`, then get `--view plain` for selected refs.
+   Do not load every body to select a message; `messages filter --read false` without `--mailbox` lists unread mail across the local store.
+2. Conversation: thread around a discovered seed, follow either thread cursor, then read only members needed for the answer.
+   The initial page contains the seed.
+3. Attachment: list attachments, select a returned ID, save to a new absolute path, and retain byte and hash proof.
+   Incomplete discovery is not complete content.
+4. Reply: create a reply draft, inspect the full result and its revision, apply authorized updates, then send that reviewed revision only after approval.
+5. Send: set up credentials locally, create and fully review a draft, retain `data.draft.revision`, then send with `--expected-revision` and `--confirm`.
    Reconcile uncertain outcomes instead of submitting again.
-6. Replies: search `--after DATE --with-threading --with-excerpt`, follow
-   `data.page.next_cursor`, and match each stored sent Message-ID against both
-   `summary.in_reply_to[]` and `summary.references[]`. Treat the domain of
-   `summary.from.address` only as a candidate and `threading_complete:false`
-   as unknown. All steps are read-only.
+6. Replies: search `--after DATE --with-threading --with-excerpt`, follow `data.page.next_cursor`, and match each stored sent Message-ID against both `summary.in_reply_to[]` and `summary.references[]`.
+   Treat the domain of `summary.from.address` only as a candidate and `threading_complete:false` as unknown.
+   All steps are read-only.
 
-The packaged skill's linked guides provide the same workflows for agent hosts.
-See [Composition](#composition) for review, claims, rich text and handoff rules.
+The packaged skill's guides provide the same workflows for agent hosts.
 
-## Errors and recovery
+## Output contract
 
-Inspect `ok`, `error.code`, `error.guidance`, retained `data`, and every batch
-item. Exit 0 normally means success; 1 means runtime/operation failure; 2 means
-invalid invocation or input. An incomplete `sync --check --require-complete`
-uses exit 3 while retaining `ok:true` and typed result failures.
+### Envelope and exit codes
 
-Failed JSON includes one `next` action: `retry`, `check_state`, `fix_input`,
-`ask_user`, or `stop`. Follow its evidence and supported arguments. A completed,
-partial or unknown effect requires checking state; it never permits blind replay.
-Only explicitly transient no-effect failures permit unchanged replay.
-
-For `output_too_large`, narrow fields, export complete content, or raise the
-permitted budget using the supplied guidance. Never treat a missing page or
-cursor as a successful empty result. Stale search cursors require a fresh
-search; no guessed filters or cursor repair. Draft revision conflicts require
-reviewing and merging the competing versions, not copying a revision from an error.
-
-After SMTP acceptance, use `drafts reconcile`; never resend to repair Sent.
-An unknown handoff requires inspecting Mail.app and explicitly reconciling its
-attempt. MailCLI cannot guarantee recipient delivery or close an external window.
-See [CLI contract](#cli-contract) for exact codes and phase-aware recovery.
-
-## Limits
-
-Use `mailcli capabilities --limits --json` for the current machine contract.
-List pages default to 20 items, accept 1 through 200, and default to a 1 MiB
-JSON envelope; permitted `--max-bytes` values reach 64 MiB. Search body scanning
-defaults to 50,000 candidates and a 4 GiB scan-byte budget; coverage describes
-observed work and completeness, not a persistent snapshot or server freshness.
-
-Draft input limits are 64 KiB subject, 4 MiB reviewed body, 200 recipients,
-100 attachments and 512 MiB attachment bytes. Draft/batch JSON input is at most
-16 MiB. Raw message sources are bounded to 64 MiB. Detailed wire, discovery,
-state, transfer and cleanup bounds remain in the [Design reference](#design-reference).
-
-## Security
-
-State directories use mode `0700`; draft state, claims and recovery spools use
-mode `0600`. Transport credentials stay in the macOS Keychain and never enter
-chat, argv, logs or state files. Received attachment and content exports require
-new absolute destinations and refuse overwrites and unsafe path substitution.
-
-Mutations require explicit intent; send and destructive operations require
-their confirmation and reviewed-state checks. Handoff opens UI without sending.
-HTML retains a bounded semantic allowlist, removes active/remote resources and
-reports value-free diagnostics. See [Local security and permissions](#local-security-and-permissions).
-
-## Release
-
-Published installations verify a pinned Ed25519 signature and SHA-256 manifest
-before extraction or installation. Update retains rollback evidence across
-the binary and skill replacement steps; those separate targets are not one
-filesystem-atomic transaction. The three flat release asset paths are also
-published separately after staged verification; partial publication retains
-verified assets and reports the final paths for safe resumption.
-See [Release distribution](#release-distribution) for precise guarantees.
-
-## Development
-
-Build with `./scripts/build/build.sh`. Use `./scripts/tests/test.sh` for focused
-verification and `./scripts/tests/test.sh --full` for the integrated non-live
-suite. `--push-check` validates matching proof without publishing. Live stages
-require explicit opt-in and `--full-checks`; ordinary verification contacts no
-user Keychain, native compose UI or installed skill directory.
-
-Ordinary test success does not verify live provider authentication or delivery,
-Mail.app scripting, or visible AppKit handoff on the current host. These native
-and provider boundaries remain unverified without their explicit live checks.
-
-The public release gate is `./scripts/tests/test-release.sh`; it verifies an
-isolated temporary package and installation without publishing. Use
-`./scripts/tests/report-release-state.sh` for a read-only artifact comparison.
-Measurements and implementation constraints are in [Technical baseline](#technical-baseline).
-
-`mutation-account-resolution` measures one-item and 100-item mutation target resolution against a generated 600-message, two-account store with file-backed bindings and a fake IMAP boundary. The 20 repeated samples report p50/p95 time, median allocations, full catalog builds, Sent-scan queries, binding reads, and credential reads per operation. Fixture creation and Store.Open are outside
-the timed loop; each measured item resolves through the normal local mutation-target path.
-
-## Design reference
-
-The following topics preserve the detailed architecture and operational
-contracts. Their anchors remain stable for existing links.
-
-- [Architecture](#architecture)
-- [Account identity bindings](#account-identity-bindings)
-- [CLI contract](#cli-contract)
-- [Composition](#composition)
-- [Data model](#data-model)
-- [Local security and permissions](#local-security-and-permissions)
-- [Platform and freshness boundaries](#platform-and-freshness-boundaries)
-- [Release distribution](#release-distribution)
-- [Scope](#scope)
-- [Search](#search)
-- [Setup and usage](#setup-and-usage)
-- [Technical baseline](#technical-baseline)
-
-### Architecture
-
-IMAP FETCH hydration parses each complete logical response across literal boundaries, accepts UID and BODY attributes in either order, ignores unrelated flag-only updates, and fails closed on duplicate or contradictory BODY values while retaining the raw-source and response bounds. Authoritative UIDVALIDITY changes during FETCH also invalidate the result before publication.
-
-The optional streaming FETCH API returns an owned, replayable source only after identity validation and final tagged success; the connection and cancellation watcher are released before the caller reads it. A logical response retains less than 1 MiB of literal bytes in memory; further literals use private files unlinked before message content is written, with at most a 32 KiB copy buffer
-per literal. Unrelated response sources are closed before reading another response. The selected source survives pool Close and is closed by its consumer; errors and cancellation discard incomplete sources. The 64 MiB message cap, aggregate response bound and 128-literal limit still apply. This exchanges large heap allocations for temporary disk I/O, so fast loopback FETCH latency can
-increase. It is not an exact RSS or system page-cache cap.
-
-Message hydration, raw export and attachment extraction consume the replayable source directly. MIME detail seeks back for bounded headers without converting the entire raw message to a string. Raw-string output allocates its required owned result once; byte-returning transport and hydration APIs remain available, and operators without the reader extension retain the byte fallback.
-Reader size, copy failures and source-close errors remain visible.
-
-IMAP mark results require actual target flags. `UID STORE` responses are consumed through tagged completion, using the UID attribute rather than the sequence-number prefix and tracking subsequent flag updates and EXPUNGE. Each performed STORE phase is verified before the next; insufficient proof triggers one targeted `UID FETCH <uid> (UID FLAGS)` on the same selected, exclusively held
-session. Each response sequence is bounded to 1,024 logical responses and 4 MiB, with the existing 1 MiB line/literal limits and caller cancellation. A UIDVALIDITY change after dispatch invalidates the evidence without replaying STORE. Tagged OK alone is insufficient because nonexistent UIDs are ignored by UID STORE ([RFC 3501 section
-6.4.8](https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.8)).
-
-`messages.mark` retains `data.message_state.server_truth` on success and post-dispatch errors, including operation ID, UID/mailbox/UIDVALIDITY, `flags_source` (`STORE` or `FETCH`), `flags_state` (`observed`, `missing`, or `unverified`), and `actual_flags` when nonempty. Observed empty flags are a confirmed empty set. All summary flag booleans derive from that observation; missing or
-unverified state preserves explicitly labeled local cached booleans. Contradictory flags return `imap_flags_mismatch`, a vanished target returns `imap_message_not_found`, and unavailable verification returns `imap_flags_outcome_unknown`; JSON remains `ok:false`, exit 1, and guidance forbids blind replay. Batch items retain the same evidence, using `failed` for a known conflict and
-`uncertain` for missing or unavailable post-STORE results. A successful observation describes the state at command completion, not a guarantee against later changes by other clients.
-
-`--junk true` removes `$NotJunk` and adds `$Junk`; `--junk false` removes `$Junk` and adds `$NotJunk`. A preflight FLAGS read removes no-op changes from the request, then checks every needed addition and removal against the selected mailbox's PERMANENTFLAGS before any write. Removals precede additions, preserving unrelated flags. Explicit permissions admit listed flags; `\*` additionally
-permits keywords, never unlisted system flags. Missing PERMANENTFLAGS permits permanent changes under [RFC 9051 section 6.3.2](https://www.rfc-editor.org/rfc/rfc9051#section-6.3.2). SELECT and flag reads reconstruct logical responses so literal contents cannot act as permission codes; subsequent status-code changes are honored. A verified no-op succeeds without STORE. The standardized
-pair is exclusive; both present mean no definite classification and `junk:false`, with both values retained in `actual_flags`, per [RFC 9051 section 2.3.2](https://www.rfc-editor.org/rfc/rfc9051#section-2.3.2). Unprefixed `Junk` and `NotJunk` are deprecated by the [IANA keyword registrations](https://www.iana.org/assignments/imap-keywords/imap-keywords.xhtml); existing values are
-preserved as unrelated keywords and are neither added nor used for standardized classification.
-
-Unsupported required flag changes return `imap_flags_unsupported` with the retained observation and no initial STORE. A definitive STORE rejection triggers one read-only FLAGS observation; a rejected later phase returns `imap_flags_partial` with `outcome:partial`. Permission withdrawal between verified phases retains that partial outcome; withdrawal during a STORE can leave observed
-session flags with `outcome:unknown` because persistence is unproven. Errors retain `data.message_state`, operation identity, and `replay_allowed:false`; guidance distinguishes `effect_certainty:none` before STORE or after a first definitive rejection, `partial` after a verified phase, and `unknown` when the write outcome is unavailable. Batch items with known partial or unsupported
-results are `failed`; unknown results are `uncertain`. Every failure requires inspecting the state and permissions before another mutation.
-
-`mailcli messages state --ref MSG_REF` closes the verify-after-write gap without mutating anything. It resolves the store-bound reference through the same identity, credential, mailbox, and UIDVALIDITY path as mutations, then issues one bounded `UID FETCH <uid> (UID FLAGS)` on a shared read session. `data.state` separates `server_flags` and `server_state` (`observed` or `missing`) from
-`local_index_flags` (the Envelope Index projection that may lag until Mail.app syncs again) and reports `flags_agree` plus a `staleness_note`. A missing target is reported as `server_state:"missing"` without an error; stale references, unsupported providers without explicit binding endpoints, and transports lacking the flag-read extension fail closed before any network access.
-
-`mailcli messages thread --ref MSG_REF` lists local conversation members without network access. The store-bound seed resolves through the normal identity and staleness checks; `conversation_id` is Mail.app's opaque grouping key, not RFC References threading. `data.thread` includes the seed `ref`, `conversation_id` (zero when ungrouped), `messages`, `truncated` and available
-`next_cursor`/`prev_cursor`. Without `--cursor`, the chronological page contains the seed, balanced around it where possible and filled from the available side at an edge. NULL dates precede non-NULL dates; ROWID breaks ties. `--limit` accepts 1 through 200. Pass either cursor as `--cursor` with the same `--ref`: next continues toward newer members and previous toward older members;
-`truncated` means additional visible members exist in either direction. Active account roots are normalized in Go and compared by exact SQL parameters before the limit; full mailbox-path validation remains mandatory. Deleted and deactivated-account members are excluded. Thread cursors bind to the Mail store, seed/conversation identity and ordering keyset, without write-generation
-binding. Legacy v1 cursors continue forward and ignore their historical generation. Paging is best effort: unchanged members remain traversable, while inserts behind an already traversed boundary may require a new traversal. Search cursors retain revision binding because writes can invalidate filter membership, source-scan progress and coverage evidence. Ungrouped messages return the
-seed alone without continuation cursors.
-
-Message reads keep parseable local content when an IMAP hydration attempt fails. The returned `mail.Message` carries a `hydration` diagnostic with `state` (`failed` or `canceled`), attempted source, separate sanitized local and remote causes, and remediation. `messages.get` and `drafts.open` return that message in `data.message` with `ok:false` and exit code `1` for JSON callers; human
-output prints the retained content and the same safe diagnostic fields before returning exit code `1`. Complete local reads still return success without contacting IMAP. A definite `messages.get` `not_found` error has no effect but requires a fresh valid message ref before another lookup; its guidance sets `retryability:user_input_required`, `replay_allowed:false`, and
-`recovery.action:correct`. Transient read failures retain their safe retry guidance.
-
-MailCLI is a local Go executable for the accounts already configured in macOS Mail. Complete local reads never contact Gmail, iCloud, IMAP, SMTP, OAuth, or account-login endpoints; they use Mail's Envelope Index and `.emlx` sources. Incomplete-content hydration, mailbox mutations, `sync --check`, and sending use the provider's IMAP and SMTP endpoints with an app-specific password the
-user stores once in the macOS Keychain. MailCLI's direct transport does not implement OAuth/XOAUTH2 or provider account authorization, and it never asks for passwords in chat.
-
-Provider policy is distinct from MailCLI's supported authentication path. Google ended username-and-password-only access from third-party apps for Google Workspace accounts beginning in January 2025; this was not a blanket end to app passwords for every Google Account. Google app passwords require 2-Step Verification, are not recommended when Sign in with Google is available, and may be
-unavailable for organization-managed or Advanced Protection accounts ([Google less-secure app guidance](https://support.google.com/accounts/answer/6010255), [Google app-password guidance](https://support.google.com/mail/answer/185833)). Apple documents Apple Account authorization for supported third-party apps that access iCloud Mail; when an app does not support that flow, Apple
-documents app-specific passwords. MailCLI currently implements the app-specific-password path ([Apple Account authorization](https://support.apple.com/en-us/121539), [Apple app-specific passwords](https://support.apple.com/en-us/102654)).
-
-A Gmail OAuth2/XOAUTH2 credential path was evaluated and deferred. The Gmail `https://mail.google.com/` scope is restricted; production access generally requires Google verification unless an exception applies, and apps handling restricted data on a server also require a security assessment ([restricted-scope
-verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)). The evaluated Gmail design is an authorization-code flow with PKCE and a one-shot loopback redirect, a Keychain-stored refresh token under the same custody rules as the app password,
-a per-process in-memory access token, and XOAUTH2 beside the existing SMTP `AUTH PLAIN` and IMAP `LOGIN`; iCloud would keep app-specific passwords. Revisit the decision if provider policy invalidates app passwords, an authorization flow becomes usable with MailCLI's direct SMTP/IMAP transport, or valid app passwords are rejected. Direct SMTP/IMAP support is limited to Gmail (`gmail.com`,
-`googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`) by default; other domains fail with `transport_unsupported_provider` before credentials are stored or network connections begin, unless the account carries an explicit binding with validated SMTP/IMAP endpoints (see [Account identity bindings](#account-identity-bindings)).
-
-The implementation has these package boundaries:
-
-1. `cmd/mailcli` owns process startup, resource finalization, and process-level output routing.
-2. `internal/cli` owns command parsing, validation, output selection, exit codes, and confirmation policy.
-3. `internal/mail` owns typed use cases, filters, drafts, send claims, outcome semantics, and local filesystem I/O for draft and claim persistence, attachment handling, account bindings, and advisory locks. Mail-store access and SMTP/IMAP operations use the service's injected `Gateway` and `SendTransport` dependencies; their adapters and connections remain in `internal/mailstore` and
-  `internal/transport`. `internal/mail` consumes the failure-classification predicates in `internal/transport/classification.go` and the transport-neutral `ServerMutationOutcome` vocabulary on `ServerMutationEvidence` instead of comparing transport error codes or outcome constants; `internal/mailstore` performs that wire-to-domain mapping at the boundary.
-4. `internal/mailstore` owns the zero-Apple-Events read path: strict read-only access to Mail's existing Envelope Index, safe mailbox mapping, `.emlx` parsing, attachment extraction, on-demand search, reference revalidation, and store-based mutation observation.
-5. `internal/mailapp` owns the optional Mail.app integration: live environment diagnostics (`doctor --live`) and triggering Mail.app's local sync (`sync` without `--check`). Its fallback gateway is intentionally read-only and exposes only account listing, message listing, probing, and sync; compose-save and mutation bridges are not part of the production fallback surface.
-6. `internal/compose` owns the visible AppKit compose handoff (`drafts handoff`) without Apple Events or sending.
-7. `internal/transport` owns network transport: provider endpoint resolution, direct SMTP submission with STARTTLS, IMAP Sent mirroring, autonomous IMAP message mutations (STORE flags, COPY, MOVE with COPY+EXPUNGE fallback, DELETE-to-Trash), bounded IMAP hydration (FETCH BODY.PEEK[]), server delta checks (STATUS), and LIST mailbox discovery that reconstructs server literals, preserves
-  the exact wire name, decoded display path, hierarchy delimiter, special-use flags, and negotiated Modified UTF-7 or UTF-8 encoding, and returns malformed responses as typed `imap_response_malformed` errors. IMAP sessions use a bounded pool keyed by the exact host, port, and username tuple: the CLI default is two authenticated TLS connections per account, while
-  `imapclient.NewWithOptions` accepts one through eight. Shared-account operations may overlap on separate sessions; APPEND and every mutation acquire the full account gate and therefore exclude reads and each other. The CLI additionally requires per-account cross-process mutation locks: one `imap-mutations-<hash>.lock` file per credential-free host/port/username identity lives in the
-  MailCLI state directory, waits up to 30 seconds under contention, and reports `imap_account_busy` only when that bound expires. Configuration-directory, lock-client, and lock-file initialization failures return typed `imap_mutation_lock_unavailable` before an IMAP mutation is dispatched; read-only operations remain available. `drafts send` preflights account-lock setup before SMTP
-  submission using one nonblocking flock attempt; a current holder counts as valid setup, so the probe never waits for contention and reserves nothing. Mutation dispatch still acquires the real lock with its 30-second wait. Setup failures expose the configured directory when known, require `retryability:user_input_required`, forbid replay, and use
-  `phase:validation`/`recovery.action:correct`; create or permit that directory, or explicitly choose `MAILCLI_IMAP_MUTATION_LOCK=off`. `imap_account_busy` remains a separate transient no-effect error permitting explicit retry. Reads and hydration never take the mutation lock, and `MAILCLI_IMAP_MUTATION_LOCK=off` (or `0`, `false`, `no`) is the explicit process-local opt-out. Library
-  callers opt in through `imapclient.ClientOptions.MutationLockDir`; platforms without advisory flock support return the same typed unavailable error when locking is configured. Different account identities use independent gates and pools. Repeated selected-state reads can reuse SELECT state on one idle session, mutations and FETCH re-SELECT and verify UIDVALIDITY, IO failures discard
-  the affected session, and pool plus gate waits observe caller cancellation. Connection attempts and dedicated APPEND reservations count against the same limit. `PoolStats` reports credential-free account, pooled, in-use, connecting, and dedicated counts. `Close` advances the acquisition generation so prior pending waiters return `imap_timeout`, waits for operations that already own a
-  session, then attempts LOGOUT and closes every pooled session; later operations may reconnect, the client must not be copied after first use, and its TLS configuration must be fixed before concurrent use. Separate Client values do not coordinate, so a caller that splits one account across Clients owns cross-client mutation ordering. `imapclient.OperationContracts` is the package SSOT;
-  `mailcli capabilities --json` publishes the same contract. The pool size is library configuration only; the CLI has no flag to change it. Credential changes use `InvalidateCredentials`: each exact identity gets a non-secret in-memory generation, idle sessions close immediately, in-flight operations drain under their original ownership, and the next operation authenticates with current
-  credentials; passwords never enter session identity, logs, or persistent state. Provider support is a closed exact-domain table; a future provider must add one endpoint definition there so capability JSON, help, and validation expose it together, rather than relying on arbitrary-domain fallback.
-
-The `cmd/mailcli` entrypoint creates one invocation-owned direct transport graph and injects that graph into the mail service and local store client. After command execution it closes the IMAP pool before the local store; the close is idempotent, and cleanup errors are reported as runtime failures without replacing an existing nonzero command result.
-
-Agent preflight is cacheable without weakening readiness checks. `scripts/utils/mailcli-preflight.sh capabilities` fingerprints one regular executable with SHA-256 and stores only a valid schema-1 `ok:true` envelope in an owner-only cache keyed by binary identity and schema. `capabilities --for ID,ID,...` uses a separate cache key that includes the normalized selected-command set; the
-helper stores that selected envelope as returned and never substitutes a full manifest. `invalidate` removes full and selected capability entries for the current binary and schema. `doctor` uses the same binary/schema identity and a five-minute freshness bound for healthy local-store checks; failed envelopes are never cached, and callers refresh or invalidate after installation,
-binary/schema changes, store or permission failures, or explicit diagnostics. `doctor --live` is always run immediately before an Apple Events operation because Mail process state is live.
-
-`mailcli batch` accepts one JSON object with an explicit `operation` (`read`, `attachment_save`, `mark`, `move`, `copy`, or `delete`) and an ordered `items` array. Each item has a unique trimmed `id` and a store-bound `ref`; attachment saves additionally require `attachment_id` and an absolute `output_path`, marks require at least one of `read`, `flagged`, or `junk`, and moves/copies
-require a `mailbox` destination ref. `move` and `delete` items accept `allow_draft_mutation`; `copy` never mutates the source draft and rejects that field. A `delete` batch additionally requires the invocation's `--confirm` flag, which is rejected for every other operation. The request is capped at 16 MiB, 100 items, and eight workers (default two). Before dispatch, the service validates
-every item, duplicate IDs, attachment destinations, and operation-specific refs: mark, move, and delete require unique source refs; copy may repeat a source only across distinct destination mailbox refs and rejects repeated source/destination pairs. Conflict errors name the item IDs without exposing ref values. It then reuses the invocation's one store/transport graph and the same
-verified single-operation mutation paths with their fail-closed UIDVALIDITY handling. Results retain input order and expose per-item `completed`, `failed`, `skipped`, `skipped_budget`, or `uncertain` state plus typed error evidence; mutation items carry the same `message_state` or `delete_result` evidence as the single-operation commands.
-Cancellation leaves active mutations `uncertain` and work that
-never started `skipped`; no mutation is retried automatically, and only explicit failed items whose error says `retryable:true` may be submitted again. Successful and uncertain mutation items are never replayed. Attachment destinations are exclusive and are never overwritten. A failed attachment save retains `saved_attachment` evidence when the output is still verified, and its
-`retryable` value follows `error.guidance.replay_allowed`.
-
-Batch mutation conflicts compare decoded message identity (account, store UUID, store mailbox ID, and store message ID or library ID), rather than token spelling. Copy destinations compare account and component-wise NFC-normalized mailbox paths. Legacy JSON and compact references remain compatible and identify the same target; noncanonical base64 encodings return `invalid_reference`
-before dispatch.
-
-| IMAP operation | Class | Concurrency | Session ownership | Mailbox selection | UIDVALIDITY |
-|---|---|---|---|---|---|
-| LIST | read | shared_account | pooled | none | not_used |
-| STATUS | status | shared_account | pooled | none | observed |
-| SEARCH | read | shared_account | pooled | reuse_or_select | observed |
-| FETCH | fetch | shared_account | pooled | fresh_select | required_match |
-| APPEND | mutation | exclusive_account | dedicated | fresh_select | not_used |
-| STORE, COPY, MOVE, DELETE | mutation | exclusive_account | pooled | fresh_select | required_match |
-| CLOSE | close | exclusive_client | all_pooled | none | not_used |
-
-`internal/mailref` owns opaque store-bound references and cursors shared by the read, store, and transport adapters. Their existing `acct_`, `mbx_`, `msg_`, and `cur_` prefixes remain stable while newly emitted payloads use a bounded, explicitly versioned compact JSON-object format with short field tags and omitted zero fields (reference/list-cursor v2); supported legacy JSON/base64 v1
-payloads still decode. The message store emits the same compact framing for its `lcur_` list cursor v3 and `internal/mail` emits it for search cursor v4 while decoding the supported JSON/base64 cursor versions. String and path bounds, flag validation, and trailing-byte rejection preserve account, mailbox, store UUID, IMAP UID/UIDVALIDITY, row, query, sort, and revision bindings before
-any I/O. Representative nested Unicode message references measured 146 bytes versus 410 legacy bytes; search cursors measured 72 versus 227; and store list cursors measured 73 versus 211. `internal/keychain` stores the per-account app-specific password in the macOS Keychain under the `mailcli-smtp` service.
-
-Within `internal/mail`, draft use cases own service-level create, read, update, discard, and handoff operations. Their supporting responsibilities are bounded reference-ordered pagination and directory revision checks; streaming metadata reads and skipped-string validation; pure input, content, address, and resource validation; bounded JSON state files and atomic publication; references,
-leases, and mutation cleanup; send/save claim encoding, validation, and transitions; attachment fingerprints and snapshot checks; envelope and Sent-message identity fingerprints; replayable MIME spools and transport adapters; direct SMTP/IMAP delivery helpers and recipient normalization; send and reconciliation orchestration; retained historical native-save reconciliation; stale-draft,
-orphan-lock, and orphan-claim/spool/snapshot cleanup; and shared cancellation and lock-wait classification. Service entrypoints depend on validation, state, claims, persistence, composition, and transport helpers; those helpers do not call back into CLI, store, or one another through new package cycles, and each responsibility has one implementation.
-
-Attachment opening for local drafts uses a descriptor-level regular-file check with nonblocking Unix flags and final-path symlink rejection; hashing and handoff copying recheck the opened identity and path metadata after their bounded reads. Attachment writers return size and SHA-256 evidence from the authoritative copy pass. Hard-link publication reuses that evidence while checking the
-owned temporary and published identities, sizes and modification times, then enforces mode 0600. A cross-filesystem copy hashes the source stream once while writing and compares it with available writer evidence; legacy gateways without evidence are hashed once from the published descriptor. No path performs a second full content scan.
-
-The local Mail.app SQLite Envelope Index remains the source of truth for reads, while mutations and sends execute directly over IMAP and SMTP. MailCLI owns no mail index, copied corpus, refresh state, daemon, watcher, process-global mailbox cache, or background process. Before SQLite is opened, numeric generation directories are inventoried; a sole supported `V10` is selected, while a
-newer generation is accepted only when `PersistenceInfo.plist` identifies `V10` as active. Automatic selection refuses newer or ambiguous layouts with `unsupported_mail_store_schema` or `ambiguous_mail_store_generation`; library callers can pin and validate an exact `Config.MailStorePath`. A per-client mailbox catalog cache is bounded to five minutes and invalidated on close or
-configuration changes. The local Envelope Index is opened with SQLite `mode=ro`, a private connection cache, `query_only=1`, and WAL participation. `immutable`, `nolock`, journal-mode changes, and every SQL write are forbidden. SQLite acquisition pins its parent directory with Go's descriptor-backed `os.Root`, records the parent and final regular-file identities before connecting, and
-compares both the `PRAGMA database_list` path and device/inode identities after opening; SQLite remains path-based so WAL and SHM behavior is unchanged. Darwin and supported non-Darwin targets use descriptor-backed root traversal and final identity checks; the non-Darwin secure-open path separately validates every component and rejects root replacement as `store_changed`. `js/wasm` and
-Plan 9 reject secure Mail-store file and directory opens with `unsupported_platform` because Go's `os.Root` implementation there cannot provide race-safe descriptor-backed traversal. One verified Mail-store directory descriptor anchors message, mailbox-cache, and external-attachment opens; macOS `O_NOFOLLOW_ANY` rejects a symlink in any descendant component, and later attachment hashing
-or copying must reopen the exact selected regular-file identity. External attachment copies verify the expected source and output SHA-256 through an exclusively created output file, and failed cleanup removes the destination only while its regular-file identity is still the one created by that operation.
-
-Metadata listing, filtering, search planning, message detail, raw source, attachment listing, and downloaded attachment extraction use no Apple Events. Incomplete-content hydration uses bounded IMAP FETCH over the account's transport connection without launching Mail.app. Attachment saving first copies a matching locally materialized external file; only a missing local attachment falls
-back to full-message IMAP hydration under the same 64 MiB cap. External attachment discovery is bounded per directory to 10,000 entries, 128 hashed ambiguity candidates, and 1 GiB cumulative hash input. A limit returns `attachment_resource_limit`; no partial scan reports an attachment as complete or downloaded. External files retain precedence over complete inline MIME data because they
-can change reported metadata and saved bytes. Mutations (`messages mark`, `messages move`, `messages copy`, `messages delete`) execute over IMAP directly and return typed server-truth evidence. COPY records a deterministic operation identity before dispatch, preserves the source account, source and destination UIDVALIDITY/UID, and any strict single-UID `COPYUID` mapping. A lost or
-incomplete final response returns `imap_copy_outcome_unknown` with the evidence collected so far; the store observes the exact destination Message-ID before any replay and refuses a replay when the destination is present, duplicated, or has changed UIDVALIDITY. Every exact Message-ID match is verified before hydration or mutation; duplicate matches fail closed with
-`imap_ambiguous_message_id` before any UID becomes a target. A MOVE fallback records `source_flag` only after bounded STORE/FETCH observation proves Deleted for the selected source mailbox, UID and UIDVALIDITY. Tagged OK alone is insufficient. It dispatches UID EXPUNGE only after that proof; unsupported UID EXPUNGE always defers cleanup and counts foreign deleted UIDs without plain
-EXPUNGE. `server_truth.expunge_branch`, `foreign_deleted_count` and `completed_effects` retain the proven phases (`copy`, `source_flag`, `uid_expunge`, `cleanup_deferred`).
-A later flag failure returns `imap_move_outcome_unknown` with partial COPY evidence and actual `flags_state`, `actual_flags` and `flags_source` under `data.message_state` or `data.delete_result`; neither COPY nor STORE is automatically replayed. Source flag evidence describes
-the observation before expunge, while summary booleans remain local cached values. Account identity resolution is local-store-only. The local-store account catalog derives identities from the newest bounded Sent-history window, defaulting to 2,000 messages and permitting only a configured maximum of 10,000. Each account carries `identity_coverage` with `source`, `state`,
-`observed_messages`, `limit`, and `more_available`; `bounded` means more Sent history exists outside the scan, `not_observed` means no sender was found inside that bound, and `no_valid_sender` means the available history was exhausted without a valid sender. Account listing may return a partial catalog with `data.complete:false`; `data.identity_coverage_complete:false` separately reports
-bounded or unavailable sender history, and each degraded account carries `degraded_reason` and `degraded_remediation`. A global SQL or schema failure returns `account_catalog_incomplete` with `mailcli doctor` remediation instead of invoking Apple Events. Mutation identity resolution preserves malformed or incompatible account references as `account_reference_corrupt`,
-`account_reference_version_unsupported`, or mixed `account_reference_invalid`; messages expose only short SHA-256 fingerprints of invalid references. A disabled account returns `account_disabled`, while a present account without a provable credential-backed sender returns `account_identity_missing`. Mailbox enumeration and cross-mailbox search never fall back to recursive Mail scripting,
-and Mail `whose` queries are absent.
-
-Every Apple Events caller acquires one context-aware BSD advisory lock at `~/Library/Application Support/MailCLI/mail-access.lock`. Lock acquisition is capped at two seconds; concurrent callers return `mail_busy` before contacting Mail. The gate requires an already-running Mail process, checks its bundle identity as `com.apple.mail`, and binds the bridge to that exact PID rather than
-addressing Mail by application name. Before a compose or sync operation can invoke `osascript`, the gate writes and synchronizes an exact-PID recovery marker while still holding the lock; a write or sync failure prevents the Apple Event from starting. A definite bridge completion clears and synchronizes that state. An incomplete call or caller crash leaves the already-durable marker, so
-later live operations fail with `mail_recovery_required` until the affected Mail process has been replaced. MailCLI never starts, activates, quits, kills, or restarts Mail, even if Mail exits between the process check and the Apple Event. Each bridge invocation owns one private `osascript` process group, waits for its leader, terminates any remaining owned group members, and verifies
-group absence before releasing the gate. SIGINT, SIGTERM, and context cancellation write a separate private bridge marker; the script checks it before mutation and between bounded compose snapshots, requests closure of its owned unsent compose object, and verifies that the object no longer exists. A retained backend returns `compose_cleanup_failed` and leaves recovery latched. Only a
-bridge that exceeds the 15-second cleanup grace is force-stopped. Incomplete reads, live probes, sync triggers, and Automation denial never create false recovery state. Message mutations execute over IMAP and never touch the Apple Events gate; they use store-bound identity, include the locally verified RFC Message-ID when present, and return typed server-truth evidence.
-
-The embedded bridge creates one request-local resolution context. Enabled accounts are fetched at most once per invocation, and repeated account or mailbox references reuse the resolved objects. Message listing validates its page limit of `1..25` before accessing Mail. Direct message operations resolve one account, one mailbox path, and one message ID; Mail `whose` queries and
-mailbox-wide `messages()` reads are forbidden by tests. Production Mail 16 clients reject scripted draft save and outbound attachment insertion with `compose_automation_unsupported` before acquiring the Apple Events gate; sending uses `internal/transport` and never touches the Apple Events gate. Historical native-compose failures justify that fail-closed boundary but do not prove current
-delivery. A separate AppKit handoff uses the visible Compose Email sharing service without Apple Events or sending; a confirmed visible handoff is not send evidence. Autonomous delivery evidence comes only from the direct SMTP result and IMAP Sent-mirror/reconciliation state. The retained scripted compose implementation is reachable only through injected test clients and remains covered
-by lifecycle, resource-bound, visibility, cleanup, and at-most-once regression tests. Message-mutation outcome observation happens outside Mail through exponentially backed-off store checks.
-
-Attachment saving propagates verified size, SHA-256, and bound regular-file identity evidence from the authoritative attachment writer together with its output path. The writer pins the destination parent directory through a descriptor-backed `os.Root`, rejects symlinked or replaced parents, and creates, verifies, and cleans up the exclusive output inside that pinned directory; a parent
-swapped mid-write fails closed as `store_changed` and the owned file is removed from the pinned inode. Publication rechecks temporary and published inode identities, size, mode, and final ownership, then reuses that evidence instead of rereading an unchanged file solely to reconstruct metadata. If an error occurs after verified publication, the error retains `saved_attachment`, reports
-`effect_certainty:"complete"`, and requires inspection before replay. If output identity, size, mode or modification time no longer matches the retained publication evidence, that evidence is omitted and guidance reports an unknown effect. Reused SHA-256 evidence comes from the verified writer or copy; the final identity check does not hash the file again or prove immunity to arbitrary
-same-user content changes.
-
-Plain MIME text is trimmed while still in its decoded byte buffer; only the retained text is copied into an owned string. Unicode whitespace and invalid UTF-8 semantics are unchanged. Returned text never aliases the mutable decode buffer. Empty or heavily padded parts therefore do not require a full-size string allocation merely to discard the padding.
-
-Raw-header reads copy borrowed buffered fragments directly into the owned output, without allocating one temporary slice per physical line. Physical-line state distinguishes long-line fragments from the blank separator; exact header bytes, folded fields, read errors and the 1 MiB header cap are preserved. Long lines grow the output geometrically while small headers retain the 4 KiB
-initial allocation.
-
-MIME parsing uses one aggregate budget per message: 32 MiB of decoded text, 4,096 visited entities, 64 nesting levels, 8 MiB of retained part and header metadata, and 128 MiB of source bytes. The budget is shared by recursive multipart traversal, text decoding, attachment drains, and raw reads; overflow-safe checks stop before another allocation or recursive descent. A budget stop keeps
-validated content and parts, sets `content_complete:false`, and records one `mime:budget:<resource>` identifier in `missing_parts`, where `<resource>` is `text_bytes`, `parts`, `depth`, `metadata_bytes`, or `raw_bytes`. Context cancellation checks every read and traversal step, closes a cancelable source, returns the already validated document with `mime:canceled`, and preserves the
-cancellation error for the caller.
-
-Received HTML additionally has a 16 MiB source limit, a 262,144-token lexical preflight for dense input, and a post-parse limit of 262,144 nodes and 512 levels. Sparse markup bypasses the extra tokenizer pass when its source bytes prove the token bound. The HTML5 parser keeps responsibility for malformed-content repair and its own open-element stack limit. Lexical tokens are not DOM
-nodes: foreign content and parser repair still require the separate tree check; these limits are not an exact process-memory cap. Conversion propagates cancellation through input reads, token checks, tree traversal and rendering. Text output must fit the remaining aggregate text allowance, with expansion beyond decoded source bytes charged to that budget. A failed conversion returns no
-truncated HTML text and adds `mime:html:<stage>` to `missing_parts` (`source`, `tokens`, `parse`, `tree`, or `render`); other valid MIME parts remain available, including a later plain alternative. The legacy string-only conversion helper remains for compatibility; production MIME parsing uses the bounded, error-returning API.
-
-APPEND consumes at most 100 untagged responses before continuation, with a cumulative 64 KiB wire-byte budget including CRLF and the terminal continuation or rejection. Exceeding either bound returns `imap_resource_limit_exceeded` without reading message data. Tagged NO/BAD preserves server diagnostics. Local command-line validation writes no bytes and preserves the session's dirty
-state; interrupted I/O still discards the session.
-
-#### Read budgets
-
-Local message, raw-source, and attachment reads each have a 60-second read budget, and local message-reference resolution has a separate 60-second budget. Hydration adds a 30-second setup budget to the size-aware transfer budget. At the 64 MiB raw-source bound and a 1 MiB/s floor, the maximum computes to a 94-second FETCH budget, below the 15-minute transfer cap; setup plus transfer is
-124 seconds. The outer CLI hydration command window is 254 seconds: 60 seconds for local read + 60 seconds for resolution + 124 seconds for hydration + a 10-second parse margin (4 minutes 14 seconds total, under five minutes). Caller cancellation and earlier parent deadlines take precedence. Timeout and cancellation errors state that no external mutation was attempted, and message reads
-retain partial local-source evidence.
-
-#### Mutation identity and outcomes
-
-Before a COPY or MOVE command is written, validation, cancellation or deadline failures retain `not_started` evidence with the source UIDVALIDITY and stop without destination reconciliation. Proven no-effect cancellation and transient failures permit safe replay (`retryability:safe`, `replay_allowed:true`, `recovery.action:retry`); validation or configuration failures require correction
-(`user_input_required`, `recovery.action:correct`). This includes a MOVE fallback whose COPY has not started after a definitive native MOVE rejection. A partial command write or a missing final response remains `unknown` and requires destination verification before replay. Retained partial effects always prevent safe replay, even if a later phase did not start.
-
-Mutation identity resolution loads the referenced active account directly with the same bounded Sent-history evidence and degradation rules as account listing. If the account ID is absent from active account ordering, resolution falls back to the complete catalog to preserve inactive-account binding and account-reference error categories. Within one CLI invocation, all mutation items
-share one lazy binding snapshot; mailbox rows are selected with the normalized account-root SQL predicate and cached only in that invocation context. Credentials are still reloaded for each resolution attempt. Unrelated accounts' Sent-history queries are skipped; account listing continues to build the complete catalog.
-
-#### Wire resource limits
-
-LIST uses a 32 MiB cumulative wire-response limit, 10,000 untagged logical response lines (including ignored untagged replies), and 10,000 mailboxes per LIST operation. The 1 MiB physical-line, 8 MiB logical-response, 1 MiB per-literal, and 128-literal ceilings also apply. Exceeding an aggregate ceiling returns `imap_resource_limit_exceeded` and discards the session.
-
-### Platform and freshness boundaries
-
-SMTP submits outgoing mail; IMAP accesses and organizes server mail. Both protocols are independent of macOS, but MailCLI's supported product target remains macOS on Apple silicon. Direct protocol support does not provide a Linux/Windows credential backend, account configuration, message-discovery adapter or supported installer. The current Keychain implementation requires Darwin with
-CGO; other builds return keychain_unsupported for credential operations. Native compose uses AppKit, while explicit Mail synchronization and live diagnostics use Apple Events.
-
-| Operation | Mail.app process required | Remaining platform/data dependency |
-| --- | --- | --- |
-| List/search and complete local message or attachment reads | No | Supported Apple Mail Envelope Index, .emlx sources and Full Disk Access; results reflect the local store |
-| New-message discovery in list/search | Mail.app must update its local store | No remote-only inbox/search command; complete local coverage does not certify server freshness |
-| Local drafts and direct SMTP send/Sent reconciliation | No | Local draft state plus macOS Keychain for direct SMTP/IMAP credentials; no Mail-store startup for the direct path |
-| IMAP mark/move/copy/delete and sync --check | No | Keychain credentials and store-bound account/message identity or local counts; server writes do not update the local read index |
-| Targeted IMAP hydration | No | A locally resolved message reference and Keychain credentials; fetches missing content rather than discovering an unindexed inbox |
-| sync without --check, doctor --live, supported read fallback | Yes | Exact already-running Mail process and Automation permission; sync triggers refresh, it does not prove completion |
-| Visible new-compose handoff | Native Mail UI | AppKit and Mail.app as the default email application; acceptance never proves sending, saving or closing |
-
-Never infer recipient failure from an empty local search immediately after SMTP acceptance. Verify a recipient-side message independently with the exact Message-ID and recipient headers once available; Sent persistence alone does not prove delivery. If Mail.app is closed, complete downloaded content remains readable, but MailCLI does not independently advance the local index. sync
---check reports server/local counts and coverage without downloading or refreshing that index.
-
-### CLI contract
-
-`messages list --json` defaults to the unified inbox across active accounts. One SQL statement selects physical and label membership, deduplicates message rows, and orders received dates descending with row ID as the tie breaker; NULL dates come last. Each item carries its account ref as `account` and its resolved `mailbox_ref`, retained under projections. `--account REF` narrows the
-inbox or mailbox selection. `--mailbox` accepts an opaque ref, a case-insensitive role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`), or an exact slash-separated path. The existing resolver uses proven Sent/Drafts cache attributes and its existing localized role names; unknown attribute bits are never guessed. Ambiguity returns `ambiguous_mailbox` with candidate refs instead of
-choosing an account. Inbox cursors bind the store UUID, account scope, resolved inbox set and date/row boundary; changing the selection requires a new cursor. This is best-effort keyset pagination across invocations, not a persistent snapshot. Unified inbox and role/path selection require the supported local store and never trigger a global Apple Events scan; explicit-ref legacy fallback
-remains available.
-
-The CLI is optimized for both humans and agents:
-
-- Stable nouns and verbs; no interactive menu.
-- Each single-reference command accepts canonical `--ref REF` or one positional `REF` before or after options. When both forms or repeated `--ref` flags are supplied, every value must be identical. Missing, empty, conflicting, or excess references return `invalid_argument` before service dispatch; `--` ends option parsing. This normalization preserves message versus local-draft reference
-  semantics, and `messages.search` keeps its separate query operand.
-- Output mode is resolved before initialization: explicit global `--json`/`--human` overrides `MAILCLI_OUTPUT=json|human`; otherwise stdout pipes/files use JSON and terminals use human text. Global flags work before or after command words and options; command option values and operands after `--` remain data. Boolean `=false` selects the opposite mode. Repeated matching modes are
-  accepted; conflicting modes and any nonempty invalid environment value return `invalid_argument` with exit 2. Conflicts use a JSON error envelope; other mode errors follow the selected mode. Every data-bearing command supports JSON with `schema_version=1`; help stays human text and machine discovery uses capabilities. Interactive `drafts edit` is human-facing and requires terminal stdin;
-  JSON results remain supported, with editor output routed to stderr.
-- Tagged IMAP `NO`/`BAD` rejections from LOGIN, LIST, SEARCH, UID SEARCH, STATUS, SELECT, and APPEND expose `error.imap_rejection` with the command, status, leading response-code atom, and complete server response text bounded to 512 UTF-8 bytes after control-character removal. Response codes found later in prose are not interpreted. `imap_command_rejected` is the default; LOGIN `NO`
-  retains `imap_auth_failed`; only `NO [NONEXISTENT]` on a target-mailbox command and `NO [OVERQUOTA]` on APPEND map to `imap_mailbox_not_found` and `imap_quota_exceeded`. Only `NO [UNAVAILABLE]` permits retry for reads; `BAD` is never automatically retryable. After SMTP acceptance, every mirror rejection requires `drafts.reconcile`; never rerun `drafts.send`.
-- Message, draft, attachment, and raw detail responses support validated `--view`, `--fields`, and `--max-bytes` projections; draft-list and message-list, filter, and search pages support validated `--fields` projections. Seven target-specific field registries drive runtime validation, embedded command schemas, and capability JSON under `data.capabilities.limits.output_projection`,
-  including separate `draft_list_fields`, `list_page_fields`, and `search_page_fields`; batch read input uses the message registry. `all` selects every field in its target registry and cannot be combined with another field. Page projections can select `conversation_id`, `server_truth`, and `staleness_note`; an empty `next_cursor` is omitted consistently.
-- Standard input accepts structured payloads for long bodies and recipient lists, avoiding shell quoting problems.
-- Draft and batch JSON require one object of at most 16 MiB with unique, exact-case schema keys. Duplicate keys, case aliases, unknown fields, invalid value shapes, and trailing documents return `invalid_input` (exit 2) before draft mutation or batch dispatch. Validation covers nested recipient, batch-defaults, and batch-item objects, including escaped keys by their decoded identity;
-  identical duplicate values are still invalid. Draft attachments are path strings, not objects. Diagnostics name the field/container and byte location when available without echoing values. The same boundary validates create, update, reply, forward, and editor output; omission and intentional empty fields retain their meaning.
-- `mailcli batch --input FILE|-` accepts one bounded JSON request for `read`, `attachment_save`, `mark`, `move`, `copy`, or `delete`; `--concurrency` overrides the request's worker limit, `delete` requires `--confirm`, and ordered per-item outcomes remain under `data.batch_result`.
-- Human output is concise; message bodies and raw MIME are written only when explicitly requested. `messages get` and `drafts open` replace terminal controls (C0/C1, DEL, ESC, BEL, and CR) and Unicode line/paragraph separators with spaces in every detail field and message-read diagnostic. Body text additionally preserves LF and TAB for multiline layout; other Unicode remains unchanged.
-  This presentation policy shares the table-cell sanitizer and never modifies stored mail, decoded JSON values, normalized body exports, or exact raw MIME output/exports.
-- Focused help accepts `help`, `-h`, and `--help`; options use aligned long names, semantic value placeholders, and readable defaults.
-- In JSON mode, missing subcommands for `accounts`, `mailboxes`, `messages`, `attachments`, `drafts`, and `send` return `invalid_argument`; unknown subcommands return `unknown_command`. Both errors use exit code `2`, keep usage text off stderr, and include `error.valid_subcommands` in stable command-contract order. Unknown subcommands identify the family in the envelope `command` and add
-  `error.data` with `requested` and the same `choices`; `valid_subcommands` remains for compatibility. Human help retains the full usage text.
-- List commands default to 20 items and accept `--limit` values from 1 through 200. Message-list cursors remain store/mailbox-bound, filter and search cursors remain store/query-bound, draft cursors remain directory-revision-bound, and thread cursors retain their conversation binding under `data.thread`. The new account, mailbox, and attachment catalog cursors are versioned and bind the
-  command, scope, and ordered stable identities. JSON list responses default to a 1 MiB envelope budget, configurable with `--max-bytes` up to 64 MiB. An oversized page returns exact byte evidence and correction guidance without rows or a continuation cursor.
-- Times are emitted as RFC 3339 with an offset; sizes are bytes. Envelope Index message summaries preserve received and sent date presence independently: non-NULL Unix zero is `1970-01-01T00:00:00Z`, negative and positive timestamps render in UTC, and SQL NULL remains an empty string across list, filter/search, detail and observation results.
-- Success normally uses exit code `0`; runtime, configuration, Mail.app, or operation failure uses `1`; invalid invocation or caller-supplied input rejected during validation, including malformed references and cursors, uses `2`. Missing `--confirm`, operational failures whose recovery guidance asks for correction, and partial or uncertain effects remain exit `1`. A partial JSON batch
-  returns `ok:false`, `error.code:"batch_partial"`, and exit code `1` while preserving every item's evidence; inspect the envelope and every item. Exit code `3` is reserved for an otherwise successful `sync --check --require-complete` result whose `data.sync_check.complete` is false; its JSON keeps `ok:true` and `error:null` because incompleteness is result data, not a runtime error.
-- Each invocation owns its direct transport resources. The IMAP pool closes after command execution and before the local store. Human-mode cleanup failures are written to stderr; JSON mode merges teardown failures into the final envelope, preserving operation evidence and returning `finalization_failed` with exit code `1` when teardown is the only failure.
-- Destructive operations require an explicit command and confirmation flag. `drafts send` requires `--expected-revision REVISION` and `--confirm` and delivers over SMTP/IMAP without Mail.app.
-- `mailcli capabilities --json` is the authoritative discovery contract. The outer response envelope remains at schema version 1; the nested capability manifest has `data.capabilities.schema_version:2`. It reports release identity, every command ID, read/write class, confirmation requirement, local `store_dependency`, typed external dependencies, result states, and hard limits without
-  opening the Mail store or contacting Mail.app. Each command has one `dependencies` array of `{kind,target,condition}` objects; `kind` is `network`, `credential`, or `app`; `target` is `imap`, `smtp`, `github-release`, `keychain`, `mail-app`, `editor`, or `system-compose-service`; `condition` is `always`, `if-local-source-incomplete`, `if-local-attachment-bytes-unavailable`,
-  `if-local-store-unavailable`, `if-batch-item-requires-imap`, `if-sync-check`, `if-sync-default`, `if-doctor-live`, `if-send`, `if-smtp-accepted`, or `if-transport-claim-needs-imap-reconciliation`. An empty array means no external dependency. Each `commands[].schema` publishes its own stable ID and matching version; current schemas use `@v1`/version 1 except `batch@v2`/version 2.
-  Schemas describe flags, value types, defaults, bounds, enum values, required markers, positional arguments, and incompatible-input constraints. Draft and batch entries also describe their bounded JSON input fields and item fields; the batch schema publishes request-level `defaults` and its `view`/`fields` selectors. Its `limits.batch_operations`, `default_batch_concurrency`,
-  `maximum_batch_concurrency`, `maximum_batch_items`, and `maximum_batch_input_bytes` fields describe the separate `batch` command surface.
-- Discovery uses one `--for` selector: an exact command ID, comma-separated IDs, or family wildcards such as `--for 'messages.*'`. Selections are expanded into canonical manifest order; empty, unknown, repeated and overlapping entries return `invalid_argument`. `--limits` exposes the complete limit set without command contracts and is mutually exclusive with `--for`. Removed selector
-  flags fail normal invalid input. Scoped output retains audience, effects, conditional dependencies, confirmations and result states, `sync_check_policy` only with `sync` and `draft_save_policy` only with `drafts.*` commands, while its `limits` contains exactly the keys declared by the selected commands' `limit_refs`.
-  Complete parameter schemas are available through `schema_ref.resolve` or `--for IDS --schemas`; no-selector discovery retains all inline schemas and limits.
-  Only a single-command selection returns `data.capabilities.scope`.
-  Every capabilities view carries the same `data.capabilities.contract_sha256`: SHA-256 over MailCLI's canonical JSON of the complete contract
-  (all commands with parameter and output schemas, shared `$defs`, error catalog and limits; version and digest cleared). Cache per digest; reread on change.
-- Capability discovery, local draft create/list/inspect/preview/edit/update/discard/prune, sending, credential setup, direct transport-claim reconciliation, and missing or unknown command/subcommand routes bypass Mail-store configuration, SQLite, `plutil`, and Mail.app initialization. Reply and forward creation read the source message's header block from the Mail store (they require it,
-  like reads) but write only local draft files. Visible handoff reads only the local draft and invokes AppKit. `drafts open` uses the local store with targeted IMAP hydration and no Mail Automation; `drafts adopt` uses the same read path and writes only local draft files. Legacy baseline reconciliation uses the Mail store, while direct claims do not.
-
-`data.draft_handoff.outcome` presents `handed_off`, `not_handed_off`, or `unknown`. `handed_off` proves only native delegate acceptance, never saving, sending, delivery or window closure. `not_handed_off` covers pre-dispatch cancellation and confirmed failure. Any unconfirmed result after dispatch, including an untyped failure, is `unknown`: the attempt and snapshots remain retained,
-retry is blocked, and the single recovery is to inspect Mail.app and reconcile that exact attempt with the observed `opened` or `failed` outcome. The detailed `HandoffAttempt` lifecycle and `drafts.handoff-reconcile` results retain their existing `prepared`, `dispatched`, `outcome_unknown`, `confirmed_opened` and `confirmed_failed` vocabulary. Lifecycle-state names elsewhere in this
-document are distinct from the three public handoff outcomes; the cancellation error code remains `handoff_canceled_before_dispatch`.
-
-#### Output projections
-
-All CLI JSON output uses one encoder with HTML escaping disabled for envelopes, nested projections, pages, errors, and published command schemas. JSON control characters remain escaped; concurrent batch-read admission measures body and header strings using the same encoded-size rules before deciding what the mail layer retains.
-
-Detail JSON responses are bounded at the CLI serialization boundary. `messages get` and `drafts inspect` default to the `metadata` view, which retains identity, completeness, and operation-state evidence while omitting headers and body variants. `drafts create`, `drafts update`, `drafts edit`, `messages reply`, and `messages forward` default to the canonical plain draft body; `--view
-plain` omits draft source and HTML variants, and `--view full` includes every stored representation. `attachments list` defaults to attachment metadata, while `messages raw` exposes only its `full` view. A caller may select exact JSON field names with `--fields`; `all` selects the complete target registry and cannot be combined with another field. Combining `--fields` with `--view`,
-selecting an unknown field, or selecting a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
-
-For `messages get --json`, an explicit `--fields` request containing only `summary` and optional header fields reads Envelope Index values plus only the bounded RFC header block needed for `message_id`, recipients, or raw headers. If the local source is missing and IMAP is configured, it fetches only `BODY.PEEK[HEADER]` under the same header-size bound; it does not fetch or decode the
-body. Unselected content-completeness fields are omitted. `--fields attachments`, `content_source`, `content_complete`, `missing_parts`, or `hydration`, and the default `--view metadata`, use the MIME metadata parser without retaining normalized body text or HTML. Incomplete sources may use bounded targeted hydration to preserve truthful completeness and hydration diagnostics. Selecting
-`content` keeps the full body read path. `attachments list` uses the same non-retaining MIME metadata behavior and preserves its existing targeted-hydration semantics.
-
-For supported detail commands, `--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON. MailCLI measures that complete encoded envelope before writing it; an oversized response returns exit code `1` with `error.code:"output_too_large"` and never truncates content. The same budget applies to `batch --json` as a whole envelope. Batch read
-items default to the `metadata` projection, matching `messages get`. Request-level `defaults.view` or `defaults.fields` is valid only for `operation:"read"` and applies to items that specify neither selector; item-level `view` or `fields` overrides request defaults, and absent selectors use metadata. At either level, `view` and `fields` are mutually exclusive. Batch schema `batch@v2`
-publishes this input contract. Concurrent producers account for requested bodies and headers before retaining read results. Completed read items also undergo exact projected-envelope admission, measuring each item's encoded payload once and updating small envelope overhead.
-Output overflow stops new reads, cancels and joins owned in-flight reads, retains completed outcomes, and marks never-started items `skipped_budget`; these count as skipped. Mutation batches do not use this cancellation policy.
-Read-batch overflow returns at most the first 10 item IDs and states in input order while retaining the full total and outcome counts; it proves `effect_certainty:none`, sets `retryability:user_input_required` and `replay_allowed:true`, and directs the caller to
-narrow `view`/`fields` or raise `--max-bytes` before replaying the same read batch. Mutation-batch overflow retains effect-aware, non-replayable guidance and completed-effect evidence. Both return one bounded `output_too_large` envelope and never emit partial JSON. `messages get`, `messages raw`, and `drafts inspect` additionally accept `--export /absolute/new/path`. The exporter creates
-a mode-0600 file with exclusive creation, writes complete normalized body or raw RFC 5322 bytes, then verifies path identity, size, and SHA-256.
-JSON reports only `data.content_export` metadata for an export, a relative, existing or symlinked destination or a non-directory parent fails before retrieval, and incomplete normalized content fails without creating an export. Failed message hydration keeps the safe `data.message.hydration`
-evidence and retains recovered content only when it was not redirected to an export file.
-
-Retained draft handoff attempts appear as required `handoff_attempt` recovery metadata in every detail view, custom field selection, output-size fallback and body-export response. The shared list/detail summary includes the attempt ID, timestamps, outcome, dispatch state, snapshot retention flag, count and byte total, without snapshot names, paths or contents. An absent or successfully
-cleared attempt is omitted. Inspect the retained ID/outcome before reconciliation; projection does not authorize replay or change the native cancellation contract.
-
-Typed detail projections encode body values directly instead of constructing per-field JSON copies. When the measured success envelope already exceeds its limit, the error path immediately serializes the metadata fallback without constructing another oversized body response. Every `output_too_large` envelope carries `data.required_bytes`, `data.limit_bytes`, and `data.measured`: `exact`
-is the complete requested envelope byte length including its terminating newline; early batch read overflow uses `lower_bound` for encoded requested body/header bytes or the retained projected outcomes before remaining reads complete. Finalization still validates the complete typed envelope before output and merges cleanup failures without losing operation evidence; the output limit is not a
-whole-process memory limit. `BenchmarkProjectedRawOutput` includes serialization, size rejection and finalization.
-
-When local create, update, edit, reply or forward succeeds but its JSON response exceeds the output budget, the failure reports `effect_certainty:"complete"`, `replay_allowed:false` and `recovery.action:"inspect"` with the saved draft ref and revision. Run the supplied `drafts.inspect` command to read that existing result; do not repeat the mutation to repair output. Read-only output
-limits and rejected writes never gain completion merely from a known ref. Export is suggested only on commands that support it. The budget applies to JSON, not human summaries; a broken output writer returns failure and cannot guarantee delivery of a recovery envelope.
-
-Command surface:
-
-- **Command:** `mailcli capabilities`; **Status:** Implemented; **Purpose:** Return the versioned machine-readable command, effect, dependency, result, and limitation contract
-- **Command:** `mailcli update`; **Status:** Implemented; **Purpose:** Verify a pinned Ed25519 release signature and checksum, then install with rollback
-- **Command:** `mailcli doctor`; **Status:** Implemented; **Purpose:** Validate platform, Mail.app, scripting support, permissions, and optional live access
-- **Command:** `mailcli send setup`; **Status:** Implemented; **Purpose:** Store or remove the per-account app-specific password in the macOS Keychain; `--account REF` binds a sender alias, `--credential-account EMAIL` selects the credential lookup identity, and `--smtp-host/--smtp-port/--imap-host/--imap-port` pin validated explicit endpoints for providers outside the built-in domain
-  table
-- **Command:** `mailcli accounts list`; **Status:** Implemented; **Purpose:** List enabled local Mail accounts and sender identities derived from a bounded Sent-history scan; each account exposes `identity_coverage` with its source, state, observed-message count, configured limit, and `more_available` marker, plus `direct_ops_supported` with a machine-readable `direct_ops_reason`
-  (`provider_supported`, `binding_hosts`, or `unsupported_provider`) computed by the same provider/binding endpoint resolution the mutation and send paths use. The default limit is 2,000 and supported configuration can raise it only to the hard 10,000 maximum. Account-local cache, special-use, or sender-data failures stay listed with `state:"degraded"`, a stable `degraded_reason`, and
-  `degraded_remediation`, while `data.complete:false` records degraded catalog coverage and `data.identity_coverage_complete:false` records bounded or unavailable identity history; global SQL/schema failures still fail with `account_catalog_incomplete`
-- **Command:** `mailcli mailboxes list`; **Status:** Implemented; **Purpose:** Recursively list every mailbox with stable account-relative paths in deterministic account-reference then path order
-- **Command:** `mailcli mailboxes resolve`; **Status:** Implemented; **Purpose:** Resolve an exact account-relative mailbox path to its stable reference
-- **Command:** `mailcli messages list`; **Status:** Implemented; **Purpose:** Page through a mailbox without loading full bodies
-- **Command:** `mailcli messages filter`; **Status:** Implemented; **Purpose:** Apply typed filters through the local store and authoritative message sources
-- **Command:** `mailcli messages search`; **Status:** Implemented; **Purpose:** Run metadata search or bounded on-demand body search across selected scope
-- **Command:** `mailcli messages get`; **Status:** Implemented; **Purpose:** Read projected normalized metadata, recipients, body, and attachment metadata; export complete body bytes with verified proof
-- **Command:** `mailcli messages raw`; **Status:** Implemented; **Purpose:** Return or exclusively export the exact raw RFC 5322 source stored locally by Mail.app
-- **Command:** `mailcli messages state`; **Status:** Implemented; **Purpose:** Read server flags over IMAP `UID FETCH` and compare them with the local index projection
-- **Command:** `mailcli messages thread`; **Status:** Implemented; **Purpose:** List a message's conversation members chronologically from the local Envelope Index grouping
-- **Command:** `mailcli attachments list/save`; **Status:** Implemented; **Purpose:** Inspect or save a received attachment to an explicit non-existing destination
-- **Command:** `mailcli batch`; **Status:** Implemented; **Purpose:** Execute a bounded explicit read, attachment-save, mark, move, copy, or delete JSON batch with ordered per-item outcomes
-- **Command:** `mailcli drafts create/list/inspect/preview/edit/update/handoff/handoff-reconcile/open/adopt/send/reconcile/discard/prune`; **Status:** Implemented; **Purpose:** Manage plain/Markdown/safe-HTML drafts, visibly hand new drafts to Mail.app, inspect persisted drafts, adopt a Mail.app store draft as an editable local copy, reconcile retained handoff, historical native save,
-  and transport claims, send over SMTP, discard, and prune stale drafts
-- **Command:** `mailcli drafts open`; **Status:** Implemented; **Purpose:** Read a store message/draft ref through the same retrieval and hydration path as messages get; no Mail Automation; local draft_* refs use inspect/preview
-- **Command:** `mailcli drafts send`; **Status:** Implemented; **Purpose:** Submit the exact reviewed revision over SMTP and mirror it into Sent over IMAP after `--expected-revision REVISION --confirm`
-- **Command:** `mailcli drafts discard`; **Status:** Implemented; **Purpose:** Remove only the selected local review draft after confirmation
-- **Command:** `mailcli drafts reconcile`; **Status:** Implemented; **Purpose:** Recover direct transport claims over IMAP with local claim cleanup, recheck legacy send claims against Sent without sending again, or observe a historical native save claim and return data.saved_draft without starting a new save
-- **Command:** `mailcli drafts prune`; **Status:** Implemented; **Purpose:** List dry and, with `--confirm`, delete stale never-sent local drafts, expired terminal send receipts, and orphaned claim/spool/snapshot artifacts
-- **Command:** `mailcli messages reply`; **Status:** Implemented; **Purpose:** Create a local reply or reply-all draft bound to the source message
-- **Command:** `mailcli messages forward`; **Status:** Implemented; **Purpose:** Create a local forward draft bound to the source message
-- **Command:** `mailcli messages mark`; **Status:** Implemented; **Purpose:** Change read, flagged, or junk state over IMAP and read back the result
-- **Command:** `mailcli messages move`; **Status:** Implemented; **Purpose:** Move a message to a resolved mailbox over IMAP
-- **Command:** `mailcli messages copy`; **Status:** Implemented; **Purpose:** Copy a message to a resolved mailbox over IMAP
-- **Command:** `mailcli messages delete`; **Status:** Implemented; **Purpose:** Delete a message over IMAP by moving it to the Trash mailbox after confirmation
-- **Command:** `mailcli sync`; **Status:** Implemented; **Purpose:** `--check` compares the union of local and server mailbox identities over IMAP without Mail.app; each mailbox result reports `state` (`matched`, `local_only`, `server_only`, `inaccessible`, or `unresolved`), local/server count availability, and the exact `server_name` when known; `complete:false` and typed `failures`
-  identify any uncovered identity; `--require-complete` returns exit 3 for that valid incomplete result; without `--check` asks Mail.app to synchronize
-
-Agents must discover support from `mailcli capabilities --json`, never by parsing help text. The capability manifest explicitly reports that MailCLI owns no mail index or background process, can read raw MIME and send raw MIME it composes itself (`raw_mime_read:true`, `raw_mime_send:true`), has `compose_write:false`, `compose_attachment_write:false`, `send_transport:"smtp"`,
-`supported_providers` for Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`), and `unsupported_provider_code:"transport_unsupported_provider"`; unsupported domains are rejected before credentials or network access unless an account binding pins validated explicit endpoints. `sync_check_policy` reports that incomplete checks are successful results by
-default, the default exit code is 0, `--require-complete` is the strict automation flag, and its incomplete exit code is 3. The manifest limits account sender-identity history to a default of 2,000 and a hard configurable maximum of 10,000 observed Sent messages, with explicit `complete`, `bounded`, `not_observed`, `no_valid_sender`, `no_sent_mailbox`, `unavailable`, and `not_applicable`
-coverage states. It also limits list pages to 200 items, raw fallback to 64 MiB, reviewed draft subjects to 64 KiB, bodies to 4 MiB, recipients to 200, attachments to 100, and attachment bytes to 512 MiB. The shared 64 MiB cap binds local raw-source reads and every full-message IMAP hydration path: oversized local sources and remote literals fail with `raw_source_too_large` before
-buffering. `mailcli help` is a compact human command overview; focused flags remain under `mailcli <command> --help`.
-
-Machine responses use one envelope:
+Every data-bearing command returns one envelope:
 
 ```json
 {
@@ -721,9 +270,94 @@ Machine responses use one envelope:
 }
 ```
 
-The additive schema-1 `next` object appears on every failure and successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization or incomplete synchronization coverage. Completed results omit it; normal pagination is not recovery.
-Its fields are `do` (one of the five actions below), `why` (one sentence, at most 120 Unicode characters; for `ask_user` it names the concrete user action),
-optional `command` (published command ID), optional `args` (argument strings), and optional `wait_seconds` (positive integer). Commands and arguments come from supported recovery builders; absent arguments mean the caller must retain the original invocation or inspect the detailed evidence, not invent a command.
+`data` is one flat field union; each field belongs to one command, and the emitted key order is stable.
+Times are RFC 3339 with an offset; sizes are bytes.
+Envelope Index summaries keep received and sent date presence independently: non-NULL Unix zero is `1970-01-01T00:00:00Z`, negative and positive timestamps render in UTC, and SQL NULL remains an empty string in list, filter, search, detail and observation results.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | Runtime, configuration, Mail.app or operation failure; also missing `--confirm`, failures whose recovery asks for correction, and partial or uncertain effects. |
+| `2` | Invalid invocation or caller input rejected during validation, including malformed references and cursors. |
+| `3` | Only an otherwise successful `sync --check --require-complete` whose `data.sync_check.complete` is false; its JSON keeps `ok:true` and `error:null`. |
+
+A partial batch returns `ok:false`, `error.code:"batch_partial"` and exit `1` while preserving every item's evidence.
+
+### Output mode and arguments
+
+Output mode is resolved before initialization: explicit global `--json` or `--human` overrides `MAILCLI_OUTPUT=json|human`; otherwise pipes and files receive JSON and terminals receive human text.
+Global flags work before or after command words and options; option values and operands after `--` remain data.
+Boolean `=false` selects the opposite mode, repeated matching modes are accepted, and conflicting modes or a nonempty invalid environment value return `invalid_argument` with exit `2` (conflicts in a JSON envelope, other mode errors in the selected mode).
+Help (`help`, `-h`, `--help`) stays human text with aligned long options, semantic placeholders and readable defaults.
+
+Each single-reference command accepts canonical `--ref REF` or one positional `REF` before or after options.
+Repeated `--ref` flags and a positional ref must be identical; missing, empty, conflicting or excess references return `invalid_argument` before dispatch, and `--` ends option parsing.
+Message and local-draft references keep their distinct semantics; `messages.search` keeps its separate query operand.
+Standard input accepts structured JSON payloads for long bodies and recipient lists, avoiding shell quoting problems.
+Draft and batch JSON require one object of at most 16 MiB with unique, exact-case schema keys.
+Duplicate keys (also escaped duplicates, even with identical values), case aliases, unknown fields, invalid value shapes and trailing documents return `invalid_input` (exit `2`) before draft mutation or batch dispatch; diagnostics name the field or container and byte location without echoing values.
+The same boundary validates create, update, reply, forward and editor output; omission and intentional empty fields keep their distinct meaning, and draft attachments are path strings, not objects.
+
+In JSON mode a missing subcommand for `accounts`, `mailboxes`, `messages`, `attachments`, `drafts` or `send` returns `invalid_argument`, and an unknown subcommand returns `unknown_command`.
+Both use exit `2`, keep usage text off stderr and include `error.valid_subcommands` in stable command order; unknown subcommands name the family in the envelope `command` and add `error.data` with `requested` and the same `choices`.
+
+Human output is concise; bodies and raw MIME appear only when requested.
+`messages get` and `drafts open` replace terminal controls (C0/C1, DEL, ESC, BEL, CR) and Unicode line and paragraph separators with spaces in every human detail field and diagnostic; body text keeps LF and TAB.
+This presentation policy never modifies stored mail, JSON values, normalized exports or exact raw output.
+
+### Projections and output budget
+
+`messages get` and `drafts inspect` default to the `metadata` view, which keeps identity, completeness and operation-state evidence while omitting headers and bodies.
+`drafts create`, `drafts update`, `drafts edit`, `messages reply` and `messages forward` default to the canonical plain draft body; `--view plain` omits draft source and HTML variants, and `--view full` includes every stored representation.
+`attachments list` defaults to attachment metadata; `messages raw` has only its `full` view.
+`--fields` selects exact JSON field names; `all` selects the complete target registry and stands alone.
+Combining `--fields` with `--view`, an unknown field, or a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
+Seven target-specific field registries drive validation, embedded schemas and `data.capabilities.limits.output_projection`, including `draft_list_fields`, `list_page_fields` and `search_page_fields`; batch read input uses the message registry.
+
+`messages.list`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth` and `staleness_note`.
+Every projected message keeps `ref` and `mailbox_ref`, filter and search keep the complete coverage object, and `next_cursor` appears only when continuation is available.
+Draft-list `--fields` accepts combinations of `age_days`, `created_at` and `updated_at`; the fixed core stays in every healthy summary, `state_error` appears only for corrupt summaries, and capabilities list `draft_list_core_fields` and `draft_list_optional_fields`.
+
+For `messages get --json`, an explicit `--fields` request with only `summary` and header fields reads Envelope Index values plus only the bounded RFC header block; a missing local source with IMAP configured fetches only `BODY.PEEK[HEADER]`.
+The default `metadata` view and `--fields attachments`, `content_source`, `content_complete`, `missing_parts` or `hydration` use the MIME metadata parser without retaining body text or HTML; `content` keeps the full body path.
+
+`--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON.
+MailCLI measures the complete encoded envelope before writing it; an oversized response returns exit `1` with `error.code:"output_too_large"` and never truncates content.
+The same budget applies to list pages, `drafts list`, `drafts preview` and to `batch --json` as a whole envelope.
+Every `output_too_large` envelope carries `data.required_bytes`, `data.limit_bytes` and `data.measured`: `exact` is the complete requested envelope length including its newline, while early batch-read overflow reports `lower_bound`.
+An oversized list page returns byte evidence and correction guidance without rows or a continuation cursor; an oversized draft list offers a page at half the requested limit that keeps the cursor, fields and any explicit byte budget (at limit 1 no smaller page is offered); an oversized preview offers `drafts inspect --ref REF --view full --export /absolute/new/path --json`.
+JSON output uses one encoder with HTML escaping disabled; JSON control characters stay escaped.
+The budget applies to JSON only, not human summaries, and is not a whole-process memory limit.
+
+`messages get`, `messages raw` and `drafts inspect` accept `--export /absolute/new/path`.
+The exporter creates a mode-0600 file exclusively, writes the complete normalized body or raw RFC 5322 bytes, verifies path identity, size and SHA-256, and reports only `data.content_export` metadata.
+A relative, existing or symlinked destination or a non-directory parent fails before retrieval, incomplete normalized content fails without creating an export, and failed hydration keeps `data.message.hydration` while retaining recovered content only when it was not redirected to an export.
+
+### Capability discovery
+
+`mailcli capabilities --json` is the authoritative discovery contract and opens neither the Mail store nor Mail.app.
+The outer envelope stays at schema version 1; the nested manifest has `data.capabilities.schema_version:2`.
+It reports release identity and, per command, `audience` (`human` for `drafts.edit`, `agent` otherwise), effect class, confirmation requirement, local `store_dependency`, typed `dependencies`, result states and `limit_refs`.
+Each `dependencies` entry is `{kind,target,condition}`: `kind` is `network`, `credential` or `app`; `target` is `imap`, `smtp`, `github-release`, `keychain`, `mail-app`, `editor` or `system-compose-service`; `condition` is `always`, `if-local-source-incomplete`, `if-local-attachment-bytes-unavailable`, `if-local-store-unavailable`, `if-batch-item-requires-imap`, `if-sync-check`, `if-sync-default`, `if-doctor-live`, `if-send`, `if-smtp-accepted` or `if-transport-claim-needs-imap-reconciliation`.
+An empty array means no external dependency.
+
+Each `commands[].schema` publishes a stable ID and version (`@v1` except `batch@v2`) with flags, value types, defaults, bounds, enums, required markers, positional arguments and incompatible-input constraints; draft and batch schemas also describe their JSON input and item fields, and the batch schema publishes request-level `defaults` with `view` and `fields`.
+Discovery uses one `--for` selector: an exact command ID, comma-separated IDs or a family wildcard such as `--for 'messages.*'`, expanded in canonical order; empty, unknown, repeated and overlapping entries return `invalid_argument`.
+`--limits` returns the complete limit set without commands and excludes `--for`.
+Scoped output keeps effects, dependencies, confirmations and result states, includes `sync_check_policy` only with `sync` and `draft_save_policy` only with `drafts.*`, and limits `limits` to the keys in the selected commands' `limit_refs`; only a single-command selection returns `data.capabilities.scope`.
+Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas; run it with the same binary, or request `--for IDS --schemas` to inline them (`--schemas` requires `--for`; unscoped discovery keeps all inline schemas).
+`--outputs`, with or without `--for`, adds each command's `schema.output` tree with `$ref` pointers into `data.capabilities.$defs` (including `$defs.error` and `$defs.envelope`) and the error catalog.
+
+The error catalog `data.capabilities.error_codes` has one entry per code with `code`, `meaning`, `commands` and `guidance` groups (`commands`, `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `next`); with `--for` it is restricted to the selected commands.
+Catalog guidance is the runtime classification of the bare code; a live envelope's `error.guidance` and `next` stay authoritative because retained evidence can refine them.
+Every capabilities view carries the same `data.capabilities.contract_sha256`: SHA-256 over MailCLI's canonical JSON of the complete contract (all commands with parameter and output schemas, shared `$defs`, error catalog and limits; version and digest cleared).
+Agents discover support from capabilities, never by parsing help text.
+
+### Next action and guidance
+
+The schema-1 `next` object appears on every failure and on a successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization or incomplete synchronization coverage; completed results and normal pagination omit it.
+Its fields are `do`, `why` (one sentence of 120 Unicode characters or fewer; for `ask_user` it names the concrete user action), optional `command` (a published command ID), optional `args` and optional `wait_seconds`.
+Commands and arguments come only from supported recovery builders; absent arguments mean the caller keeps the original invocation or inspects the evidence, never invents a command.
 
 | Evidence, in precedence order | `next.do` |
 | --- | --- |
@@ -735,213 +369,484 @@ optional `command` (published command ID), optional `args` (argument strings), a
 | Safe and replay allowed, with no effect | `retry` |
 | Input correction required, with no effect | `fix_input` |
 
-Transient/busy safe retries carry `wait_seconds:1`; `search_index_changed` can retry immediately. Cancellation never produces automatic retry, including cancellation previously marked safe in detailed guidance. Unknown or partial writes always require observation before environment repair or replay. A pending send uses the retained `drafts.reconcile` route; native handoff first uses
-`drafts.inspect`, since its reconciliation requires a human-observed outcome that MailCLI cannot invent. Interactive update recovery requires reviewed stdin and is not emitted as an executable next command. Detailed `error.guidance`, item outcomes, operation IDs and partial-effect evidence remain authoritative and unchanged; a batch's next action never permits replaying successful or
-uncertain siblings.
+Transient or busy safe retries carry `wait_seconds:1`; `search_index_changed` can retry immediately.
+Cancellation never produces an automatic retry, and unknown or partial writes always require observation before repair or replay.
+A pending send uses the retained `drafts.reconcile` route; a native handoff first uses `drafts.inspect` because its reconciliation needs a human-observed outcome; interactive update recovery needs reviewed stdin and is never emitted as an executable command.
+A batch's next action never permits replaying successful or uncertain siblings.
 
-JSON invocations finalize initialization, command execution, and resource teardown before writing stdout. A configuration failure before service creation emits one `ok:false` envelope with `error.code:"initialization_failed"` (or a preserved typed initialization code) and exit code `1`. Structured output is buffered only within the existing bounded JSON response limits. If transport or
-store teardown fails, `data.finalization` reports `state:"failed"` with `error.code:"finalization_failed"`; when the command itself succeeded, the top-level `ok` becomes `false`, the same finalization error is promoted to `error`, and the exit code is `1`. An existing command failure remains the top-level error while operation evidence stays in `data`. stdout write failures remain exit
-code `1` and never fabricate a successful envelope; an invalid command payload is replaced with `serialization_failed`.
+Failed envelopes add `error.guidance` with `phase`, `effect_certainty`, `retryability`, `replay_allowed` and `recovery`.
+`retryability` is `safe`, `observe_required`, `user_input_required` or `terminal`; `observe_required` and `replay_allowed:false` forbid replay until the retained evidence is checked.
+`recovery.action` is `retry`, `observe`, `reconcile`, `correct`, `inspect` or `none`; a recovery `command` and `args` appear only for a supported command schema, and `operation_id` carries durable mutation or send identity.
+Detailed guidance, item outcomes, operation IDs and partial-effect evidence stay authoritative beside `next`.
 
-Every JSON envelope carries `data` as one flat field union; `commandDataFields` (`internal/cli/response_fields.go`) is the tested ownership table that maps each `data` field to its owning command, and a test pins the field declaration order because it is the emitted key order. Errors use stable codes and actionable messages. Failed JSON envelopes add `error.guidance` with finite `phase`,
-`effect_certainty`, `retryability`, `replay_allowed`, and `recovery` fields. `retryability` is `safe`, `observe_required`, `user_input_required`, or `terminal`; `observe_required` and `replay_allowed:false` prohibit replay until retained evidence is checked. `recovery.action` is `retry`, `observe`, `reconcile`, `correct`, `inspect`, or `none`; a recovery `command` and `args` are emitted
-only for a supported command schema, and `operation_id` carries durable mutation or send identity. Partial batch results report every item and make the top-level `ok` value false with `error.code:"batch_partial"`;
-each item carries `state` (`completed`, `failed`, `skipped`, `skipped_budget`, or `uncertain`) and, when applicable, `error.code`, `error.message`, `retryable`, and the same guidance contract.
-`batch_canceled` identifies an item that never started, while an active mutation canceled by its context is `uncertain` and must not be replayed. There is no automatic batch retry: callers may submit only explicitly selected failed items whose prior error is marked retryable, never successful or uncertain mutations. Duplicate IDs, invalid refs, repeated source refs for mark, move, or
-delete, repeated copy source/destination pairs, existing output paths, and conflicting attachment destinations fail as `invalid_argument` before dispatch. Reference-conflict errors identify the item IDs without including ref values. Generic error codes: `unknown_command` (unrecognized command ID), `invalid_argument` (wrong flag or positional argument, exit 2), `invalid_input` (malformed
-structured input such as stdin JSON, body, or format, exit 2), `missing_required` (a required flag was omitted, exit 2), `confirmation_required` (the action needs `--confirm` after explicit user authorization), `operation_failed` (a runtime failure such as store, IMAP, SMTP, or Mail.app, exit 1). `draft_operation_canceled` means a context-aware draft command stopped because its command
-context was canceled before completion; it is distinct from a confirmed transport or Mail.app failure. `search_count_limit_exceeded` means an explicit exact candidate count found more than `max-messages` candidates with a bounded `max-messages + 1` probe; narrow the search or deliberately raise the bound. `send_mirror_outcome_unknown` means a Sent APPEND may have stored the message, so
-reconciliation will search and verify but never replay the append automatically. Native handoff lifecycle errors use `handoff_canceled_before_dispatch`, `handoff_outcome_unknown`, `handoff_retry_blocked`, `handoff_attachment_cleanup_failed`, and `handoff_claim_cleanup_failed`. Before dispatch, cancellation proves no native compose was initiated and staged evidence is cleaned; after
-dispatch, cancellation, timeout, or an unparseable native result is uncertain, late success is suppressed, the attempt ID and snapshots remain retained, and `drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened|failed --confirm --json` is required before retry or cleanup. `confirmed_opened` and `confirmed_failed` describe only the sharing-service delegate
-result. AppKit has no supported compose-window cancellation or close operation, so no error or success claims that an external window was closed. Native attachment validation errors use `handoff_attachment_missing`, `handoff_attachment_unreadable`, or `handoff_attachment_changed`; they fail before dispatch rather than exposing an unverified path. Update URL policy failures use
-`update_host_untrusted`, `update_url_invalid`, `update_url_invalid_port`, `update_url_insecure`, `update_redirect_invalid`, or `update_redirect_limit`; they never echo rejected URLs, credentials, or local paths. Typed transport and store codes (`smtp_auth_failed`, `imap_connect_failed`, `imap_response_malformed`, `mail_busy`, `mail_not_running`, `mail_store_unavailable`,
-`unsupported_mail_store_schema`, `ambiguous_mail_store_generation`, `unsafe_message_source`, `local_only_mailbox`, `message_already_trashed`, etc.) surface verbatim in `error.code` or `error.message`; follow their specific remediation rather than retrying with different flags. `ambiguous_mail_store_generation` means automatic discovery found a supported `V10` beside another plausible
-generation without active-state proof; inspect `PersistenceInfo.plist` and pin an exact validated `Config.MailStorePath` only when the intended directory is known. `unsupported_mail_store_schema` for a newer generation means the active store profile is outside the supported adapter. Account-local catalog failures remain in `accounts.list` as degraded entries with `degraded_reason` and
-`degraded_remediation`; a mutation targeting one returns `account_degraded`, while global catalog failures return `account_catalog_incomplete`. An account with `identity_coverage.state:"bounded"` has usable observed identities but more Sent history remains outside the configured bound; `identity_coverage.state:"not_observed"` means no sender was observed in that bounded history, while
-`no_valid_sender` means the scanned history was exhausted without a valid sender. Mutation identity failures use `account_reference_corrupt`, `account_reference_version_unsupported`, or mixed `account_reference_invalid`; `account_disabled` and `account_identity_missing` distinguish disabled accounts from accounts without a provable sender identity. Unreadable or malformed per-account
-mailbox caches use `degraded_reason:"mailbox_cache_unreadable"`; parser-level `mailbox_cache_malformed` remains an internal diagnostic.
+### Finalization
 
-`imap_resource_limit_exceeded` reports a bounded LIST or APPEND-continuation response overflow. Its JSON `error` includes `limit:{name,value}` and `observed_at_least`, a proven lower bound; byte limits report at least `limit.value + 1` when the exact overflow size is unavailable. Standalone overflow guidance is terminal with no effect: inspect the bound and do not replay unchanged input.
-Existing partial-effect or outcome-uncertain guidance takes precedence and remains non-replayable.
+JSON invocations finalize initialization, execution and resource teardown before writing stdout.
+A configuration failure before service creation emits one `ok:false` envelope with `error.code:"initialization_failed"` (or a preserved typed initialization code) and exit `1`.
+Each invocation owns its direct transport graph; the IMAP pool closes after execution and before the local store.
+If teardown fails, `data.finalization` reports `state:"failed"` with `finalization_failed`: a successful command becomes `ok:false` with exit `1`, while an existing command failure stays the top-level error and operation evidence stays in `data`.
+Human mode writes cleanup failures to stderr.
+stdout write failures stay exit `1` and never fabricate success; an invalid payload is replaced with `serialization_failed`.
 
-Service-level attachment publication pins the output parent, retains temporary and published file identities through linking or an exclusive verified copy fallback, applies mode `0600` through the owned descriptor, hashes that same descriptor, and removes only identity-matching names; `attachment_changed` preserves replacements and reports lost ownership.
+## Errors and recovery
 
-Attachment saves permit replay only when the output is proven absent and the cause is explicitly transient: cancellation or deadline, a Mail readiness failure proven before dispatch, or IMAP connection/cancellation/disconnect/timeout and FETCH failures with a preserved network or truncation cause. TLS verification, input/configuration, missing or ambiguous attachments, and attachments
-not yet downloaded require correction; known resource-limit, integrity, and deterministic-source failures require inspection without replay. Unknown causes use `observe_required` with `recovery.action:inspect`. Complete, partial, or unknown publication outcomes always forbid replay while preserving any verified `saved_attachment` evidence. A batch `attachment_save` item's `retryable`
-value follows `error.guidance.replay_allowed`.
+Inspect `ok`, `error.code`, `error.guidance`, retained `data` and every batch item.
+Follow `next`: a completed, partial or unknown effect requires checking state and never permits blind replay; only explicitly transient no-effect failures permit unchanged replay.
+Codes surface verbatim in `error.code`; follow their specific remediation rather than retrying with different flags.
+Typed store and transport codes such as `mail_store_unavailable`, `unsupported_mail_store_schema`, `unsafe_message_source`, `local_only_mailbox` and `message_already_trashed` name their condition precisely.
+The error catalog lists every code with its meaning and guidance.
 
-Identity, binding, store, credential, editor and precondition failures that stop before any external effect (for example `account_disabled`, `keychain_load_failed`,
-`draft_mutation_confirmation_required`, `message_already_trashed`) report `effect_certainty:"none"` with `correct` or `inspect` recovery for every command, writes included;
-outcome-uncertain codes keep observation-first guidance.
+Generic codes: `unknown_command` (unrecognized command), `invalid_argument` (wrong flag or operand, exit `2`), `invalid_input` (malformed structured input, exit `2`), `missing_required` (omitted required flag, exit `2`), `confirmation_required` (the action needs `--confirm` after explicit user authorization) and `operation_failed` (runtime failure in store, IMAP, SMTP or Mail.app, exit `1`).
+`draft_operation_canceled` means a draft command's context was canceled before completion, distinct from a confirmed transport or Mail.app failure.
 
-Read failures are replayable only for explicitly classified transient errors. Input or configuration failures require correction, terminal failures require inspection, and unknown read failures use `retryability:"observe_required"` with `recovery.action:"inspect"`. Known Mail-store, account and Mail.app permission/readiness failures set `recovery.action:"correct"` and name the needed
-action in `recovery.instruction`, including Full Disk Access, account or binding correction, Automation permission, or safe Mail.app recovery. A structured recovery instruction never directs callers to delete or replace the MailCLI access-gate or account-binding file.
+Pre-effect failures:
+identity, binding, store, credential, editor and precondition failures that stop before any external effect (for example `account_disabled`, `keychain_load_failed`, `draft_mutation_confirmation_required`, `message_already_trashed`, `account_binding_stale`) report `effect_certainty:"none"` with `correct` or `inspect` recovery for every command, writes included.
+Outcome-uncertain codes keep observation-first guidance.
 
-Draft-state and mailbox-cache wrappers preserve permission causes internally: these reads require correcting file access or Full Disk Access, with no effect and no unchanged replay; malformed state remains terminal/inspect. IMAP certificate trust and hostname verification failures retain `imap_connect_failed` but require correcting TLS configuration, never disabling verification.
-Connection refusal, disconnect and timeout remain transient. `imap_fetch_failed` permits replay only with a preserved network or truncated-connection cause; invalid bounded sources and deterministic FETCH rejections require inspection. Hydration and CLI wrappers preserve this distinction while omitting raw certificate and filesystem details from public diagnostics. Outcome uncertainty
-always prevents replay.
+Reads:
+read failures are replayable only for explicitly classified transient errors; unknown read failures use `retryability:"observe_required"` with `recovery.action:"inspect"`.
+Known Mail-store, account and Mail.app permission or readiness failures set `recovery.action:"correct"` and name the action in `recovery.instruction` (Full Disk Access, account or binding correction, Automation permission, safe Mail.app recovery); no instruction ever directs deleting or replacing the MailCLI access-gate or account-binding file.
+Draft-state and mailbox-cache permission causes require correcting file access with no replay; malformed state is terminal.
+IMAP certificate and hostname failures keep `imap_connect_failed` but require correcting TLS configuration, never disabling verification; connection refusal, disconnect and timeout stay transient.
+`imap_fetch_failed` permits replay only with a preserved network or truncated-connection cause.
+`mail_busy`, `mail_automation_timeout` and `mail_process_changed` prove a read was not dispatched or was a read-only probe, so retry is safe.
+Origin-ambiguous read errors such as `imap_mutation_failed`, `imap_sent_mailbox_not_found`, `mail_error`, `bridge_cleanup_failed`, `mail_automation_failed`, other doctor or probe failures and internal `invalid_request` require inspection without replay.
+`mail_store_path_mismatch` and `content_export_changed` require terminal inspection of the store or export identity.
+Retained submission, mutation, APPEND or partial-effect evidence always takes precedence over read classifications.
 
-Message-read hydration failures preserve useful local evidence. `messages.get` and `drafts.open` return `ok:false`, exit code `1`, a typed remote error, and the retained partial `data.message`; its `hydration` object carries `state`, `attempted_source`, separate sanitized `local` and `remote` causes, and `remediation`. Human mode prints the retained content and these diagnostics before
-returning the same failure exit. A canceled hydration remains an error and must not be treated as a complete read.
+References and cursors:
+`invalid_reference` means a malformed opaque ref; obtain a current ref from the matching listing and never edit tokens.
+`ambiguous_reference` means an account or mailbox path did not resolve uniquely; refresh the listing first.
+`stale_cursor` means a Mail.app page boundary changed; restart that listing without the cursor.
+`account_reference_version_unsupported` needs a compatible MailCLI build; `account_reference_corrupt` and mixed `account_reference_invalid` are terminal catalog-integrity failures.
+`imap_message_uid_unknown` requires refreshing the local catalog or a fresh Message-ID-backed ref; `imap_ambiguous_message_id` can stop read hydration before FETCH until one verified UID and UIDVALIDITY resolve.
+`raw_source_partial` means no complete raw source was available; finish the download in Mail.app or use targeted IMAP, then retry with a verified complete source.
+Definite `messages.get` `not_found` requires a fresh valid ref and supplies no guessed lookup command.
+`search_cursor_stale` requires a fresh search without guessed filters or cursor repair; `search_index_changed` is safe to retry; neither retains the original filters for a complete command.
+Never treat a missing page or cursor as a successful empty result.
 
-Recovery guidance follows the operation boundary. `output_too_large` can follow `messages.get`, `messages.raw`, `attachments.list`, `drafts.open`, `drafts.inspect`, a projected draft response, or `batch`; a read batch proves no effect and permits replay after narrowing its projection or raising `--max-bytes`, while a mutation batch retains effect-aware guidance and forbids blind replay.
-A completed draft mutation reports a complete effect and, when its ref is available, emits `drafts.inspect --ref REF --view full --json`; `draft_revision_conflict` from `drafts.update`, `drafts.send`, or `drafts.reconcile` uses that same full view when the ref is retained. State-only draft recovery uses the default metadata view with `--ref REF --json`. `draft_busy` proves this invocation
-made no change and forbids replay. With a retained ref, its `retryability:observe_required` is paired with `recovery.action:inspect` and a runnable `drafts.inspect --ref REF --json`; the inspection reads without acquiring the competing mutation lease. Without a ref, it keeps `recovery.action:observe` and supplies no command. `search_cursor_stale` and `search_index_changed` come from
-`messages.search` and `messages.filter`; a stale cursor requires correction, while an index change is safe to retry, but neither error retains the original filters needed for a complete command. Read-only `account_binding_stale` requires inspecting `accounts.list --json` and correcting the binding to an enabled account through `send setup` before retry; effectful send-identity or IMAP
-sender-alias resolution retains observation via `accounts.list --json` without account selectors or credentials. `mail_recovery_required` from Mail.app-gated operations such as default `sync` requires the user to quit and reopen Mail.app; MailCLI has no restart command. Definite `messages.get` `not_found` requires a fresh ref and supplies no guessed lookup command.
+Output size:
+`output_too_large` can follow `messages.get`, `messages.raw`, `attachments.list`, `drafts.open`, `drafts.inspect`, a projected draft response or `batch`.
+Narrow fields, export complete content, or raise the budget as the guidance says.
+When create, update, edit, reply or forward succeeded but the JSON response is too large, the failure reports `effect_certainty:"complete"`, `replay_allowed:false` and `recovery.action:"inspect"` with the saved ref and revision; run the supplied `drafts.inspect` instead of repeating the mutation.
+Read-only output limits and rejected writes never gain completion merely from a known ref, and export is suggested only where supported.
 
-### Composition
+Drafts:
+a completed draft mutation with a known ref emits `drafts.inspect --ref REF --view full --json`, and `draft_revision_conflict` from `drafts.update`, `drafts.send` or `drafts.reconcile` uses that full view when the ref is retained.
+State-only draft recovery uses the default metadata view with `--ref REF --json`.
+`draft_busy` proves this invocation made no change and forbids replay; with a retained ref it pairs `retryability:observe_required` with `recovery.action:inspect` and a runnable `drafts.inspect --ref REF --json` that reads without taking the competing lease, otherwise it keeps `recovery.action:observe` without a command.
+Revision conflicts require reviewing and merging the competing versions, never copying a revision from an error.
 
-#### Foreign send-spool recovery
+Accounts and Mail.app:
+`account_binding_stale` requires inspecting `accounts.list --json` and correcting the binding to an enabled account through `send setup` before retry.
+`mail_recovery_required` from Mail.app-gated operations such as default `sync` requires the user to quit and reopen Mail.app; MailCLI has no restart command.
 
-When `drafts send` refuses an unclaimed spool before SMTP, `error.unclaimed_spool` reports no-follow metadata only after the exclusive draft lease confirms no send claim exists: the absolute path, object type, owner UID, and four-digit octal mode. The error is `send_recovery_spool_changed` with `effect_certainty:none`, `retryability:user_input_required`, and `drafts.inspect --ref REF
---json` guidance. Inspect the draft first; manual removal is safe only after confirming no retained send claim, a free draft lock, and current path metadata matching the observation. Remove only that exact object; if it is a symlink, unlink the link and never its target. Reporting never changes the object or target. The same error from accepted-send reconciliation carries no
-`unclaimed_spool` evidence, preserves `partial`/`observe_required` reconciliation guidance, and never recommends deletion or SMTP replay.
+Delivery:
+after SMTP acceptance use `drafts reconcile` and never resend to repair Sent.
+An unknown handoff requires inspecting Mail.app and explicitly reconciling its attempt.
+MailCLI cannot guarantee recipient delivery or close an external window.
+[Sending](#sending), [Mailbox mutations and batch](#mailbox-mutations-and-batch) and [Visible handoff](#visible-handoff) specify their phase-aware codes.
 
-`drafts list --json` and `drafts preview --json` enforce the shared output budget: 1 MiB by default and a 64 MiB ceiling through `--max-bytes`. Draft-list `--fields` accepts comma-separated combinations of `age_days`, `created_at`, and `updated_at`; `all` must stand alone. The registered fixed core remains in every healthy summary, while `state_error` is emitted only for corrupt
-summaries. Capabilities expose the accepted selector list plus separate `draft_list_core_fields` and `draft_list_optional_fields`; page revision and cursor remain available. An oversized draft list returns structured `error.guidance.recovery`: when `--limit` exceeds 1, it offers a page at half the requested limit while preserving the cursor, selected fields, and any explicitly supplied
-byte budget; at limit 1 it omits a smaller-page command. An oversized preview returns `output_too_large` with a full `drafts inspect --ref REF --view full --export /absolute/new/path --json` recovery command; preview bodies are never truncated.
+## Limits
 
-Capabilities publish `audience:human` for `drafts.edit` and `audience:agent` for every other command. Nonterminal stdin returns `interactive_required` before editor launch or candidate creation, with `drafts.update` recovery carrying the real draft ref/revision and `--input -`; review content and provide only authorized JSON changes. `drafts edit --json` reserves stdout for one MailCLI
-envelope; both editor output streams go directly to the supplied stderr without JSON buffering. Human mode keeps the supplied stdout/stderr separate. Interactive editing requires stdin and the selected output (stderr in JSON mode) on the same foreground controlling terminal; unavailable routing returns `editor_terminal_unavailable` before launch. The editor receives its own foreground
-process group, and MailCLI restores the prior foreground group and terminal settings after exit, failure, or cancellation without changing global signal handlers. Editor process failure returns `editor_failed`; parent cancellation or editor termination by SIGINT/SIGTERM returns `editor_canceled`, including when the editor traps cancellation and exits zero. Unsuccessful editor candidates
-remain in their mode-0700 private directory. Except for the existing revision-conflict evidence, errors carry `error.draft_editor` with `ref`, `expected_revision`, `candidate_path`, and the process `exit_code` and terminating `signal` when available. Validation/update failures retain their original error code. Inspect the current draft and retained candidate before an explicit reviewed
-update; never blindly replay the editor. Human errors also report the candidate path. Successful updates remove the temporary editor directory.
+`mailcli capabilities --limits --json` returns the current machine contract.
 
-SMTPUTF8 is determined from actual envelope addresses and raw headers at every MIME level. Encoded display names such as Jörg with ASCII addresses remain compatible with ordinary SMTP; UTF-8 bodies alone do not require SMTPUTF8, and transfer-encoded embedded messages are opaque on the SMTP wire. If the envelope does not already require SMTPUTF8, the client inspects the existing
-replayable source before MAIL with bounded MIME traversal (8 MiB aggregate header accounting, 4096 entities, nesting depth 64), stopping once a raw internationalized header proves the requirement. It restores the original position without rewriting message bytes. A malformed structure or exhausted scan budget that prevents classification fails with `smtp_rejected`. Internationalized
-envelopes or headers require both SMTPUTF8 and 8BITMIME in the post-STARTTLS capabilities; otherwise `smtp_utf8_unsupported` stops before AUTH, MAIL, RCPT, or DATA, clears the transient send claim, and retains the unchanged draft. Its guidance reports no external effect and requires correction before retry. SMTPUTF8 is added to MAIL only when required. Address identity and case are
-preserved, with SMTP quoting restored for parsed local parts; no transliteration or local-part substitution occurs. These rules follow [RFC 6531](https://www.rfc-editor.org/rfc/rfc6531#section-3.2) and [RFC 6532](https://www.rfc-editor.org/rfc/rfc6532#section-3.7).
+| Area | Bound |
+| --- | --- |
+| Pages | List commands default to 20 items and accept `--limit` values from 1 through 200; JSON responses default to a 1 MiB envelope, `--max-bytes` up to 64 MiB. |
+| Search | `--max-messages` defaults to 50,000 candidates, `--max-scan-bytes` to 4 GiB; see [Search](#search) for caps. |
+| Drafts | 64 KiB subject, 4 MiB reviewed body, 200 recipients, 100 attachments, 512 MiB attachment bytes. |
+| Structured input | Draft and batch JSON one object of 16 MiB or less; batch 100 items. |
+| Raw source | 64 MiB per message, local or hydrated. |
+| Recovery spool | 1 GiB per accepted message. |
+| Sender identity scan | 2,000 Sent messages by default, 10,000 at most. |
 
-MIME composition preserves decoded subjects and display names using bounded UTF-8 encoded words when textual values need encoding or lossless segmentation. Every generated header line is limited to 998 bytes excluding CRLF; fields containing encoded words use a 76-byte limit and each word stays within 75 bytes without splitting a UTF-8 character. Folding preserves whitespace and quoted
-pairs. Message-ID, thread identifiers, address specifications, and MIME parameters keep their structured syntax; they are never rewritten as encoded words. Invalid UTF-8, prohibited controls, or a structured token that cannot fit a legal physical line fail before SMTP with a header-specific `invalid_argument`, leaving the reviewed draft unchanged and creating no send claim. Thread-source
-validation retains its `invalid_message_source` code. Limits follow [RFC 5322](https://www.rfc-editor.org/rfc/rfc5322#section-2.1.1) and [RFC 2047](https://www.rfc-editor.org/rfc/rfc2047#section-2).
+The capability manifest limits list pages to 200 items, raw fallback to 64 MiB, reviewed draft subjects to 64 KiB, bodies to 4 MiB, recipients to 200, attachments to 100, and attachment bytes to 512 MiB.
+Wire, discovery, state, transfer and cleanup bounds are specified in their chapters; timeouts are collected in [Timeouts and budgets](#timeouts-and-budgets).
 
-Recipient `address` values must contain valid mailbox syntax, including required local-part quoting such as `"A B"@example.com`; JSON escapes those quotes inside the string. A separate `name` affects presentation only and never changes address validation or case-insensitive duplicate detection across To/CC/BCC. Parsed mailbox identity and case survive MIME composition, SMTP envelopes,
-reply targets, discovered sender identities, and account/credential bindings; generated address values retain necessary quoting and escaping. Existing stored draft strings and their revision fingerprints are not rewritten. Malformed unquoted values are rejected rather than repaired, and all recipient roles, including BCC, validate raw and decoded display names for prohibited controls and
-invalid UTF-8 before SMTP.
+## Reading and search
 
-Every created, inspected, previewed, edited, or updated draft exposes an opaque `revision` computed from its validated canonical send state. The identity covers reference/kind, account/sender, ordered To/CC/BCC roles, names and addresses, subject, body format/source/plain/HTML, source/thread identity, and ordered attachment path/size/SHA-256. Timestamps, attachment mtime, diagnostics,
-and operational claims do not change it; stored revision text is never trusted. List summaries are metadata discovery, not content-review snapshots. Review the complete create/update result requested with `--view full`, or fetch missing review content with `drafts inspect --ref REF --view full --json`, before sending and retain `data.draft.revision`. A complete reviewed result needs no
-duplicate inspection; a metadata-only response, truncated output or a returned revision alone does not prove that the content was reviewed.
+### Store access
 
-`drafts update` applies patch semantics: editable fields the caller does not supply keep their stored values, while explicitly supplied fields — including intentional empty strings or arrays — replace them. Attachments omitted from the input keep their recorded paths; clearing them requires an explicit empty `attachments` JSON array because native flags cannot express an empty attachment
-set. Changing `body_format` requires a new `body` because the stored source belongs to the previous format. Explicitly repeating the stored format preserves the body without resubmitting it. `drafts update` and `drafts send` require `--expected-revision REVISION`, including when update content comes from `--input FILE|-`. The revision is a separate flag, never an editable JSON content
-field; omission cannot silently select the current draft. Both operations compare it under the draft lease before replacing content, replaying or consuming send evidence, creating a claim, or contacting transport. A mismatch returns exit 1 with `draft_revision_conflict` and `error.draft_revision_conflict` containing `ref`, `expected_revision`, and `current_revision`; inspect and review
-the current full content before an explicit retry, never blindly substitute the conflict's revision. Send additionally requires `--confirm` after authorization. Attachment files are still verified against their recorded fingerprints before SMTP.
+Mail's local SQLite Envelope Index is the source of truth for reads; MailCLI owns no mail index, copied corpus, refresh state or process-global mailbox cache.
+Before SQLite is opened, numeric Mail generation directories are inventoried.
+A sole supported `V10` generation is selected; beside a newer generation, `V10` is accepted only when `PersistenceInfo.plist` identifies it as active.
+Newer or ambiguous layouts fail with `unsupported_mail_store_schema` or `ambiguous_mail_store_generation`; for the latter, inspect `PersistenceInfo.plist` and pin an exact validated `Config.MailStorePath` only when the intended directory is known.
+Library callers may pin `Config.MailStorePath` to an exact `V10` directory, which is still validated for regular `MailData/Envelope Index` files.
 
-`drafts edit` retains the revision captured before launching the editor without holding the draft lock across the child process. A concurrent edit leaves the newer stored draft intact and preserves the stale editor candidate in its private directory; the conflict additionally reports `candidate_path`. Review both versions, explicitly merge the candidate if needed, and use `drafts update
---ref REF --expected-revision REVIEWED_REVISION --input CANDIDATE_PATH --json` to save it. The candidate remains available until explicitly removed. New send claims and terminal receipts retain `draft_revision`; reviewed send retries must match that evidence as well as any remaining draft. Legacy claims/receipts without this field return `draft_revision_unavailable` from send and remain
-accessible through `drafts inspect` and `drafts reconcile`, which do not claim a new content review.
+The Envelope Index is opened with SQLite `mode=ro`, a private connection cache, `query_only=1` and WAL participation; `immutable`, `nolock`, journal-mode changes and every SQL write are forbidden.
+The parent directory is pinned through a descriptor-backed root; parent and database identities are recorded before connecting and compared with `PRAGMA database_list` and device/inode identities after opening.
+One verified Mail-store directory descriptor anchors message, mailbox-cache and external-attachment opens, and macOS `O_NOFOLLOW_ANY` rejects a symlink in any descendant component.
+Supported non-Darwin builds validate every component and report root replacement as `store_changed`; `js/wasm` and Plan 9 reject secure Mail-store opens with `unsupported_platform`.
 
-Draft creation accepts either a typed JSON document or terminal-native `--from`, repeatable recipient/attachment flags, subject, `--body`/`--body-file`, and `--format plain|markdown|html`. JSON and native modes are mutually exclusive; the JSON `body` key is mandatory even when its intentional value is empty. Markdown is rendered with Goldmark. HTML is parsed in-process, reduced to a
-strict element/link allowlist with all active and remotely loaded content removed, and stored with a canonical plain-text representation. Rich content follows this matrix:
+Mailbox catalogs are parsed in-process from bounded, descriptor-opened XML property lists and serve identity matching only while message membership stays live in SQL.
+The per-client mailbox catalog cache is bounded to five minutes, clones returned values, and is invalidated on close or configuration changes; malformed or oversized cache files keep typed diagnostics.
+EMLX frames require a bounded XML plist trailer with one `plist` root, one `dict`, strict nesting and no trailing content; root version `1.0` is checked when present.
+Only Mail's binary account-ordering preference needs one `plutil` extraction, and the store-opening context bounds that child process to 15 seconds.
+Directory enumeration is never authoritative because Mail can keep stale or partial files: store rows select candidates, safe mailbox mapping resolves sources, and every result reports whether its local content is complete.
+Spotlight is not required.
+
+The supported Envelope Index profile is store version `4`, minor version `74003`, WAL journal mode and a valid store UUID, with `3826.700.81` as the verified `last_write_framework_version`.
+Required schema properties must be unique and readable, and every required table column and index is capability-checked before the profile is accepted; duplicate, malformed, missing or unsupported values fail closed with `unsupported_mail_store_schema` before message queries, while unknown property keys are ignored.
+Only a differing framework stamp degrades instead of failing: reads continue with the profile marked `unverified`.
+Whenever a store profile is open, every JSON envelope carries `data.store_profile` with `state`, `framework_version` and `supported_framework_version`; the unverified state adds `code:"store_profile_unverified"`, human output prints one warning, and `doctor` reports the `mail-store-profile` check.
+The degraded state grants no write access, no mutation relaxation and no trust in unverified layout details.
+
+Capability discovery, `version`, `update`, help, unknown commands and subcommands, local draft create/list/inspect/preview/edit/update/discard/prune, sending, credential setup, direct transport-claim reconciliation and visible handoff bypass Mail-store configuration, SQLite, `plutil` and Mail.app initialization.
+Reply and forward creation read the source header block from the Mail store and write only local draft files; `drafts open` and `drafts adopt` use the local store with targeted IMAP hydration and no Mail Automation; legacy baseline reconciliation uses the Mail store while direct claims do not.
+
+### References and cursors
+
+Account, mailbox, message, recipient, attachment, draft and cursor are typed values.
+Message references are opaque and bind the Envelope Index UUID, row identity, message and global identifiers, account, mailbox identity, mailbox path and subject.
+The store revalidates physical identity and mailbox membership before every read or write translation; a changed store, moved message, reused row or mismatched subject returns a typed stale-reference error instead of touching a different message.
+The `acct_`, `mbx_`, `msg_` and `cur_` reference prefixes and the `lcur_` store list-cursor prefix are stable; new payloads use a bounded, versioned compact JSON format while supported legacy JSON/base64 payloads still decode, and noncanonical base64 returns `invalid_reference` before any I/O.
+
+Mailbox paths are account-relative arrays internally and escaped display strings externally, which keeps Gmail labels, iCloud folders and identically named nested mailboxes apart.
+
+Message-list cursors remain store/mailbox-bound, filter and search cursors remain store/query-bound, draft cursors remain directory-revision-bound, and thread cursors retain their conversation binding under `data.thread`.
+The account, mailbox, and attachment catalog cursors are versioned and bind the command, scope, and ordered stable identities.
+List and search cursors bind the store UUID, query or mailbox fingerprint, sort anchor, row ID and nullable received-date state; page size is excluded, so a continuation may use a different `--limit`.
+Cursors cannot be reused after a store replacement or with different filters.
+Pagination is best-effort keyset pagination across invocations, not a persistent snapshot.
+
+### Listing
+
+`messages list --json` defaults to the unified inbox across active accounts.
+One SQL statement selects physical and label membership, deduplicates rows and orders received dates descending with row ID as tie breaker; NULL dates come last.
+Each item carries its account ref as `account` and its resolved `mailbox_ref`, also under projections.
+`--account REF` narrows the inbox or mailbox selection.
+`--mailbox` accepts an opaque ref, a case-insensitive role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`) or an exact slash-separated path; roles use proven Sent/Drafts cache attributes and localized role names, never guessed attribute bits, and ambiguity returns `ambiguous_mailbox` with candidate refs.
+Inbox cursors bind the store UUID, account scope, resolved inbox set and date/row boundary.
+Unified inbox and role/path selection require the supported local store and never trigger a global Apple Events scan; an explicit ref keeps the legacy fallback.
+
+### Message detail
+
+Message detail distinguishes normalized plain content, raw source, headers, attachment metadata, `content_source`, `content_complete` and `missing_parts`.
+Large bodies, raw MIME and attachment bytes are never included in list responses.
+MIME parsing selects one representation from each `multipart/alternative`, keeps mixed-part order, and marks malformed recipient or decoding data incomplete.
+Attachment transfer-decoding errors and declared `X-Apple-Content-Length` shortfalls mark the message incomplete and list the MIME part path in `missing_parts`; recovered bytes and healthy attachment size and hash evidence remain available.
+
+Parsing uses one aggregate budget per message: 32 MiB of decoded text, 4,096 visited entities, 64 nesting levels, 8 MiB of retained part and header metadata, and 128 MiB of source bytes.
+A budget stop keeps validated content, sets `content_complete:false` and records `mime:budget:<resource>` in `missing_parts` (`text_bytes`, `parts`, `depth`, `metadata_bytes` or `raw_bytes`).
+Cancellation returns the validated document with `mime:canceled` and preserves the cancellation error.
+Raw headers are bounded to 1 MiB.
+
+Received HTML has a 16 MiB source limit, a 262,144-token lexical preflight for dense input, and a post-parse limit of 262,144 nodes and 512 levels.
+These are not an exact process-memory cap.
+A failed conversion returns no truncated HTML text and adds `mime:html:<stage>` (`source`, `tokens`, `parse`, `tree` or `render`) to `missing_parts`; other valid parts, including a later plain alternative, remain available.
+Incoming `text/html` uses the same semantic conversion as drafts and keeps image `alt` text.
+
+Embedded `message/rfc822` and `message/global` bodies appear in the attachment list even without a filename or disposition; the MIME type and opaque part ID identify them, and `multipart/digest` children without Content-Type use `message/rfc822` ([RFC 2046 section 5.1.5](https://www.rfc-editor.org/rfc/rfc2046#section-5.1.5), [RFC 6532 section 3.7](https://www.rfc-editor.org/rfc/rfc6532#section-3.7)).
+Saving such a part keeps the complete encapsulated message after decoding only its enclosing transfer encoding; nested headers and text never merge into the outer identity, body, attachment count or search text.
+Embedded structure is validated recursively within the shared budgets, including during search; malformed or missing embedded headers, unsupported nested subtypes, externalized bytes and truncation mark the containing part and message incomplete.
+A saved part's size and SHA-256 prove the extracted bytes, not structural completeness; inspect `content_complete` and `missing_parts`.
+Multipart containers are never selected in place of leaf part `1`.
+
+### Hydration
+
+Complete local reads never contact Gmail, iCloud, IMAP, SMTP, OAuth or account-login endpoints.
+Incomplete content is hydrated with bounded IMAP `FETCH BODY.PEEK[]` over the account's transport without launching Mail.app.
+The shared 64 MiB message cap binds local raw-source reads and every full-message hydration path: oversized local sources and remote literals fail with `raw_source_too_large` before buffering.
+FETCH parses complete logical responses across literal boundaries, accepts UID and BODY in either order, ignores unrelated flag updates, and fails closed on duplicate or contradictory BODY values; an authoritative UIDVALIDITY change during FETCH invalidates the result.
+Large literals spill to private unlinked temporary files instead of the heap, which can add disk I/O latency.
+
+A missing source is recovered through the reference's catalog-to-server UID mapping when it can be checked against the live row and mailbox-local `Info.plist` UIDVALIDITY.
+Without that evidence, one bounded mailbox-scoped search with exact subject and sender criteria fetches only `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)]`: one exact candidate yields a UID with SELECT-time UIDVALIDITY, ambiguity returns `imap_ambiguous_message_id`, stale evidence `stale_reference`, and insufficient evidence `imap_message_uid_unknown`.
+Discovery is capped at 128 UIDs, never scans the account and never guesses from a similar message; a renamed server mailbox stays `imap_mailbox_not_found`.
+Successful hydration updates the returned reference with the verified UID and UIDVALIDITY.
+
+Message-ID resolution treats UID SEARCH as candidate discovery, then fetches each candidate's `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` and counts only exact normalized headers.
+Substring candidates are discarded; missing, duplicate or malformed Message-ID headers fail closed, and duplicate matches return `imap_ambiguous_message_id` before any UID becomes a target.
+Malformed, zero, overflowing or duplicate UIDs, or more than one SEARCH response, return `imap_response_malformed` and discard the session.
+Message-ID inputs are normalized once: a bare identifier receives angle brackets, while partially bracketed, empty, whitespace-containing, control-containing or unbalanced input returns `invalid_imap_value` before connecting.
+
+When hydration fails, reads keep parseable local content.
+`messages.get` and `drafts.open` return `ok:false`, exit `1`, a typed remote error and the retained partial `data.message`, whose `hydration` object carries `state` (`failed` or `canceled`), `attempted_source`, separate sanitized `local` and `remote` causes and `remediation`.
+Human mode prints the retained content and the same diagnostics before exiting `1`.
+A canceled hydration stays an error and is never a complete read; `hydration` is omitted after a complete read or successful fallback.
+
+### Attachments
+
+Attachment saving first copies a matching locally materialized external file; only a missing local attachment falls back to full-message IMAP hydration under the same 64 MiB cap.
+External attachment discovery is bounded per directory to 10,000 entries, 128 hashed ambiguity candidates, and 1 GiB cumulative hash input.
+A limit returns `attachment_resource_limit`; no partial scan reports an attachment as complete or downloaded.
+External files take precedence over complete inline MIME data because they can change reported metadata and saved bytes.
+
+The writer pins the destination parent directory, rejects symlinked or replaced parents, creates the output exclusively and publishes it with mode `0600`.
+A parent swapped mid-write fails as `store_changed` and the owned file is removed; cleanup removes a name only while it still has the identity this operation created, and `attachment_changed` preserves replacements.
+Verified size, SHA-256 and file identity from the authoritative copy pass are returned without a second content scan.
+If an error follows verified publication, the error keeps `saved_attachment`, reports `effect_certainty:"complete"` and requires inspection before replay; if identity, size, mode or modification time no longer match, the evidence is omitted and the effect is unknown.
+The final identity check does not rehash the file or prove immunity to same-user content changes.
+
+Replay of an attachment save is allowed only when the output is proven absent and the cause is explicitly transient: cancellation or deadline, a Mail readiness failure proven before dispatch, or IMAP connection, cancellation, disconnect, timeout and FETCH failures with a preserved network or truncation cause.
+TLS verification, input or configuration errors, missing or ambiguous attachments and attachments not yet downloaded require correction; resource-limit, integrity and deterministic-source failures require inspection without replay; unknown causes use `observe_required` with `recovery.action:inspect`.
+Complete, partial or unknown publication outcomes always forbid replay while keeping verified `saved_attachment` evidence.
+
+### State and threads
+
+`mailcli messages state --ref MSG_REF` closes the verify-after-write gap without mutating anything.
+It resolves the reference through the same identity, credential, mailbox and UIDVALIDITY path as mutations, then issues one bounded `UID FETCH <uid> (UID FLAGS)` on a shared read session.
+`data.state` separates `server_flags` and `server_state` (`observed` or `missing`) from `local_index_flags` (which may lag until Mail.app syncs) and reports `flags_agree` plus a `staleness_note`.
+A missing target is `server_state:"missing"` without an error; stale references, unsupported providers without binding endpoints and transports lacking flag reads fail before network access.
+
+`mailcli messages thread --ref MSG_REF` lists local conversation members without network access.
+`conversation_id` is Mail.app's opaque grouping key, not RFC References threading; `data.thread` includes the seed `ref`, `conversation_id` (zero when ungrouped), `messages`, `truncated` and available `next_cursor`/`prev_cursor`.
+Without `--cursor`, the chronological page contains the seed, balanced around it where possible; NULL dates precede non-NULL dates and ROWID breaks ties.
+`--limit` accepts 1 through 200.
+Pass either cursor with the same `--ref`: next continues toward newer members, previous toward older members; `truncated` means more visible members exist in either direction.
+Deleted and deactivated-account members are excluded.
+Thread cursors bind the Mail store, seed and conversation identity and the ordering keyset, not the write generation, so paging continues while Mail syncs; legacy v1 cursors continue forward.
+Inserts behind an already traversed boundary may need a new traversal; ungrouped messages return the seed alone without cursors.
+
+### Search
+
+MailCLI never executes Mail.app `whose` searches, which can trigger unbounded mailbox work that is not reliably cancelled.
+`messages filter` and `messages search` without `--query` plan candidates through one parameterized Envelope Index query that resolves account, mailbox, sender, recipient, subject, date, read and flagged constraints.
+`--attachment` also inspects each candidate's MIME source because Mail's attachment catalog can lag; a positive catalog count proves `--attachment true` and disproves `--attachment false` without I/O (reported as catalog-proven coverage), while catalog-zero candidates keep the MIME scan.
+Partial or missing sources are excluded as unknown and make coverage incomplete.
+Results use deterministic received-date and row-ID ordering.
+
+Matching uses NFC normalization followed by Unicode simple lowercasing for queries, MIME text, attachment names, snippets and metadata SQL candidates; SQLite applies the same policy through the registered `mailcli_search_fold` function, and full case-fold expansions are excluded.
+Date filters compare received timestamps in whole Unix seconds: `--after` is inclusive and `--before` exclusive.
+Omitted bounds are unbounded; `1970-01-01T00:00:00Z` is a real boundary and negative timestamps work.
+RFC 3339 offsets select that instant; `YYYY-MM-DD` selects local midnight.
+With both bounds, after must be strictly earlier than before; NULL received dates match only without date bounds.
+Keep the same date strings when continuing with a cursor.
+
+`messages search --query TEXT` runs an on-demand, stateless MIME scan over the metadata candidates in scope and keeps no corpus after exit.
+Two bounded workers stream each `.emlx` source, decode text/plain or text/html, and skip decoding non-text bodies so attachment names stay searchable.
+The first scan window matches the requested page, doubles only after a window without a match, and never exceeds 64 candidates.
+A full result page stops loading candidates; the cursor stays anchored at the last classified candidate.
+`--max-messages` defaults to 50,000 and is capped at 100,000; it bounds body candidates and the exact-count probe for metadata filters.
+`--max-scan-bytes` defaults to 4 GiB and is capped at 8 GiB.
+These limits bound work rather than pretending that full-text search is instant; narrow account, mailbox, sender, date or subject scope for large stores.
+
+Metadata-only pages fetch the requested page plus one continuation candidate and run no count query by default: `candidate_messages` is that observed lower bound and `candidate_messages_exact` is true only when no continuation remains.
+`--exact-count` adds one bounded count probe after the current cursor (body probes cover `max-messages + 1` rows); a larger set fails with `search_count_limit_exceeded` before body scanning.
+
+Every search page includes `data.page.coverage` with backend, candidate messages, candidate-count exactness, scanned messages and bytes, full, partial and missing sources, `catalog_proven_messages` and `complete`.
+Body results are complete only when the candidate total is exact, every candidate was classified and no source was partial or missing; reaching a result, message or byte bound keeps coverage incomplete and continuation resumable.
+Known source problems (`message_source_missing`, invalid EMLX framing, an `ENOENT`-class open error) degrade only that candidate; unexpected open failures abort the search.
+Pagination over body hits reports page-level incompleteness until the final page, so a page is never mistaken for an exhaustive result.
+No refresh command exists because MailCLI maintains no index.
+
+An incomplete body search returns `next_cursor` after the last fully classified candidate when later candidates remain; a candidate blocked after earlier progress gets an inclusive cursor and is retried with the next page's byte budget.
+If no candidate was classified and the next source cannot fit, the search returns `search_budget_too_small` with `error.required_bytes` (rounded up to a binary MiB) and no cursor.
+Recovery arguments keep the original query, filters, projection and incoming cursor while raising `--max-scan-bytes`.
+Page size, `--max-scan-bytes` and `--max-messages` may change between pages; filters and `--exact-count` stay bound to the cursor.
+
+Search pagination is best-effort because a SQLite snapshot cannot survive separate processes.
+Every page exposes `coverage.consistency:"best_effort"` and a compact `coverage.index_revision` from Mail's `WriteTransactionGeneration` or a bounded Envelope Index/WAL metadata token.
+Cursor v4 binds the query, store UUID, keyset position and that revision; supported v3 cursors still decode.
+Insert, delete, move or store replacement invalidates continuation with `search_cursor_stale` or `invalid_cursor`, and a revision change during one page returns `search_index_changed`; restart without a cursor after either.
+`.emlx` replacement is outside the revision, but framing and identity revalidation mark the candidate missing or incomplete.
+This is detectable invalidation, not snapshot isolation.
+
+### Sync check
+
+`sync --check` compares the complete union of local and server mailbox identities over IMAP STATUS without Mail.app.
+Each STATUS response must identify the requested mailbox and provide exactly one valid `MESSAGES`, `UNSEEN`, `UIDNEXT` and `UIDVALIDITY`; anything else is a per-mailbox `imap_response_malformed` failure.
+Each mailbox result reports `state` (`matched`, `local_only`, `server_only`, `inaccessible` or `unresolved`), local and server count availability and the exact `server_name` when known.
+Matched entries carry both counts only when the local count is available; a zero local count never stands in for a missing local mailbox.
+A failed server LIST or an empty selectable server catalog makes coverage incomplete; `complete:false` and typed `failures` identify every uncovered identity.
+`sync_check_policy` reports that incomplete checks are successful results with exit `0` by default; automation that requires exhaustive coverage uses `--require-complete` (complete exit `0`, incomplete exit `3` with the same `ok:true` payload, runtime failure exit `1`, invalid flags exit `2`).
+`--require-complete` without `--check` is invalid.
+The check reports counts without downloading content or refreshing Mail's index.
+
+### Mailbox resolution
+
+The supported scope is every active account and every mailbox represented consistently by the Envelope Index and mailbox catalog, including Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders and nested Gmail labels.
+`mailboxes resolve` accepts one `--path` segment per server-provided hierarchy level, so localized folders such as `Gesendet` and `Entwürfe` need no guessed identifier.
+IMAP LIST keeps each exact wire name separately from its decoded display name, display path, hierarchy delimiter, special-use flags and negotiated Modified UTF-7 or UTF-8 encoding; NIL delimiters stay flat.
+Resolution prefers byte-identical display paths, then compares each segment under NFC canonical equivalence without compatibility folding; ambiguous normalized matches fail closed, and the case-insensitive INBOX identity is unchanged.
+Multiple special-use candidates fail with `imap_ambiguous_mailbox` and list their exact wire names; correct the colliding names or special-use assignments, refresh the list, and rerun only once the mailbox resolves uniquely.
+Per-client LIST results are cached by host, port, username and account identity without password material, and entries expire after five minutes.
+
+LIST uses a 32 MiB cumulative wire-response limit, 10,000 untagged logical response lines (including ignored untagged replies), and 10,000 mailboxes per LIST operation.
+The 1 MiB physical-line, 8 MiB logical-response, 1 MiB per-literal and 128-literal ceilings also apply.
+Exceeding an aggregate ceiling returns `imap_resource_limit_exceeded` with `limit:{name,value}` and `observed_at_least`, a proven lower bound (at least `limit.value + 1` bytes when the exact size is unavailable), and discards the session.
+Standalone overflow is terminal with no effect; existing partial-effect or outcome-uncertain guidance takes precedence.
+
+## Drafts and composition
+
+Local structured drafts are the review boundary.
+Drafts are private JSON files under `~/Library/Application Support/MailCLI/drafts`, not fragile unsaved Mail compose objects; creating, editing or updating one never sends mail.
+Creation and updates write a temporary file and atomically rename it into place, so a crash never leaves a partial `draft_*.json`.
+Scripted Mail compose is disabled on Mail 16 (see [Native compose boundary](#native-compose-boundary)); delivery uses direct SMTP and IMAP, and visible handoff is the only native compose path.
+Direct transport covers Gmail and iCloud domains; other domains fail with `transport_unsupported_provider` unless an account binding pins explicit endpoints.
+
+### Create and update
+
+Draft creation accepts either a typed JSON document or terminal-native `--from`, repeatable recipient and attachment flags, subject, `--body`/`--body-file` and `--format plain|markdown|html`.
+JSON and native modes are mutually exclusive; the JSON `body` key is mandatory even when intentionally empty.
+Recipient fields are arrays of `{name, address}` objects, and the same normalized address cannot occur more than once across To, CC and BCC.
+`address` values must be valid mailbox syntax, including required local-part quoting such as `"A B"@example.com`; `name` affects presentation only.
+Mailbox identity and case survive composition, SMTP envelopes, reply targets, sender identities and bindings; malformed unquoted values are rejected rather than repaired, and every role, including BCC, rejects prohibited controls and invalid UTF-8 before SMTP.
+Attachment paths must be absolute regular files; MailCLI rejects an oversized file before hashing and records accepted sizes and SHA-256 digests in the draft.
+
+Every created, inspected, previewed, edited or updated draft exposes an opaque `revision` computed from its validated canonical send state.
+It covers reference and kind, account and sender, ordered To/CC/BCC names and addresses, subject, body format, source, plain and HTML, source and thread identity, and ordered attachment path, size and SHA-256.
+Timestamps, attachment mtime, diagnostics and operational claims do not change it, and stored revision text is never trusted.
+Review the complete create or update result requested with `--view full`, or fetch it with `drafts inspect --ref REF --view full --json`, before sending, and retain `data.draft.revision`.
+A metadata-only response, truncated output or a returned revision alone does not prove the content was reviewed; list summaries are discovery, not review snapshots.
+
+`drafts update` applies patch semantics: omitted editable fields keep their values, while explicitly supplied fields, including intentional empty strings or arrays, replace them.
+Omitted attachments keep their paths; clearing them requires an explicit empty `attachments` JSON array.
+Changing `body_format` requires a new `body`; repeating the stored format keeps the body.
+`drafts update` and `drafts send` require `--expected-revision REVISION`, also with `--input FILE|-`; the revision is never an editable JSON field and omission never selects the current draft.
+Both compare it under the draft lease before replacing content, consuming send evidence, creating a claim or contacting transport.
+A mismatch returns exit `1` with `draft_revision_conflict` and `error.draft_revision_conflict` (`ref`, `expected_revision`, `current_revision`); review the current full content before an explicit retry.
+New send claims and receipts retain `draft_revision`; legacy claims or receipts without it return `draft_revision_unavailable` from send and remain readable through `drafts inspect` and `drafts reconcile`.
+
+### Rich content
+
+Markdown is rendered with Goldmark.
+HTML is parsed in-process, reduced to a strict element and link allowlist with all active and remote content removed, and stored with a canonical plain-text representation.
 
 | Scope | Supported contract |
 | --- | --- |
 | Elements | `a`, `b`, `blockquote`, `br`, `code`, `del`, `em`, `h1`-`h6`, `hr`, `i`, `li`, `ol`, `p`, `pre`, `s`, `strong`, `table`, `tbody`, `td`, `tfoot`, `th`, `thead`, `tr`, `u`, `ul`; other wrappers are unwrapped when their children are safe. |
-| Attributes | `a[href]` accepts absolute `http`, `https`, or `mailto` URLs; `a[title]` is retained. Every other attribute is removed, and every link receives `rel="nofollow noreferrer"`. |
-| Presentation | Semantic typography, headings, lists, preformatted/code whitespace, and table rows/cells are supported. CSS and `style` attributes are never retained. |
-| Resources | Images, forms, media, frames, scripts, SVG, MathML, templates, and remote resources are removed. An image `alt` value becomes plain text; images are not embedded from local paths or `cid:` references. |
-| Diagnostics | Rich drafts expose deduplicated first-seen records with codes `removed_element`, `removed_attribute`, `unsafe_attribute_removed`, `unsafe_url_removed`, `unsafe_style_removed`, or `remote_resource_removed`; records contain only the affected element and optional attribute name. |
+| Attributes | `a[href]` accepts absolute `http`, `https` or `mailto` URLs; `a[title]` is kept. Every other attribute is removed and every link receives `rel="nofollow noreferrer"`. |
+| Presentation | Semantic typography, headings, lists, preformatted and code whitespace, and table rows and cells. CSS and `style` attributes are never kept. |
+| Resources | Images, forms, media, frames, scripts, SVG, MathML, templates and remote resources are removed. An image `alt` value becomes plain text; images are not embedded from local paths or `cid:` references. |
+| Diagnostics | Deduplicated first-seen records with codes `removed_element`, `removed_attribute`, `unsafe_attribute_removed`, `unsafe_url_removed`, `unsafe_style_removed` or `remote_resource_removed`, holding only the element and optional attribute name. |
 
-Create, update, reply, and forward return and persist these diagnostics with the canonical body. New lossless rich content stores an explicit empty array (`[]`), while plain content uses `null`; absence or `null` on legacy rich content is not proof that diagnostics were already computed. Updates replace diagnostics with the new content's records, including clearing them for plain or
-lossless content. Mutation gates (update, send, handoff, and historical save reconciliation) re-render the stored source and require stored diagnostic arrays, including empty arrays, to match the canonical transformation exactly or the operation fails with `draft_state_error`.
-Inspection reads (`drafts inspect`, `drafts preview`, and internal preflight reads) validate structure, format, and limits without
-re-rendering: a present diagnostics array is trusted, while omitted or null legacy diagnostics are reconstructed by canonical preparation without rewriting the file or changing its content revision.
+The plain alternative keeps non-redundant absolute link targets as `(URL)`, preserves `<pre>` and `<code>` whitespace, emits indented list markers and pipe-delimited table rows, and omits unsafe links and active subtrees.
+Create, update, reply and forward return and persist value-free `content_diagnostics` with the canonical body: lossless rich content stores `[]`, plain content `null`.
+Mutation gates (update, send, handoff and historical save reconciliation) re-render the stored source and require stored diagnostics to match exactly, otherwise they fail with `draft_state_error`.
+Inspection reads (`drafts inspect`, `drafts preview`) validate structure without re-rendering; omitted or null legacy diagnostics are reconstructed without rewriting the file or changing its revision.
 
-Rich preparation sanitizes the owned parse tree in place and derives HTML and plain text from the same tree when its structure is stable under HTML parsing. Structures that need HTML5 repair after filtering, such as removed table captions or nested anchors, retain a bounded normalization tree for plaintext so existing canonical content keeps its meaning. Sanitization creates no detached
-subtree copies. Plaintext is emitted during tree traversal into one bounded output builder, with only the previous formatting token retained. Output overflow stops traversal immediately; link labels retain their separate cumulative budget and preserve nested-target semantics. A result normally reuses its immutable builder storage. If the backing capacity is at least 4 KiB and trimming
-leaves less than one quarter of it, the result is cloned so a tiny or empty string cannot retain a large backing array. There is no global renderer buffer or pool. Source, rendered Markdown, serialized HTML, and plaintext are each bounded at 4 MiB. The parsed tree is checked before further processing for at most 65,536 nodes and 512 levels; the HTML parser also rejects open-element
-stacks beyond 512. Link-label capture is limited to 16 MiB across a rich rendering. Limit failures return `invalid_argument`, never truncated successful content. Create/update contexts cover HTML input reads, tree processing, serialization, and plaintext output chunks. Goldmark's source parse is one bounded library phase; its output writer checks cancellation before HTML processing or
-persistence. Incoming-message plaintext conversion retains its separate rendering policy and uses the received-content limits described under MIME parsing.
+Source, rendered Markdown, serialized HTML and plaintext are each bounded at 4 MiB.
+The parsed tree is checked for at most 65,536 nodes and 512 levels, and link-label capture is limited to 16 MiB across a rich rendering.
+Limit failures return `invalid_argument`, never truncated content.
+Structures that need HTML5 repair after filtering, such as removed table captions or nested anchors, keep a bounded normalization tree so canonical plaintext keeps its meaning.
 
-The plain alternative retains non-redundant absolute link targets as `(URL)`, preserves `<pre>` and `<code>` whitespace, emits indented list markers and pipe-delimited table rows, and omits unsafe links and active subtrees. When transformation removes a meaningful element, attribute, URL, style, or resource, the stored draft exposes deterministic value-free `content_diagnostics` entries
-with `code`, `element`, and optional `attribute`; entries are deduplicated in traversal order and contain no source values. Legacy rich drafts without this field remain readable and receive computed diagnostics when inspected. Incoming `text/html` message parts use the same semantic conversion and preserve image `alt` text. Recipient fields are arrays of `{name, address}` objects; the
-same normalized address cannot occur more than once across To, CC, and BCC. Hard resource limits are 64 KiB of subject text, 4 MiB of body text, 200 total recipients, 100 attachments, and 512 MiB of attachment bytes. Attachment paths must be absolute regular files. MailCLI rejects an oversized file before hashing and records accepted sizes plus SHA-256 digests in the local review draft.
-At send time, each attachment is read once through SHA-256 into the composer; a mismatch names the attachment and aborts before SMTP submission, while encoded bodies and attachments stream into the private spool. Body encoding uses at most a 32 KiB input buffer; the spool writer uses 32 KiB for small bodies and 1 MiB when either body reaches 1 MiB. Bodies up to 4 KiB retain a small
-direct conversion to avoid an unnecessary large buffer. No complete encoded body is accumulated. Bounded buffering trades peak memory for additional file writes, so large-body latency remains filesystem-dependent. Encoding, short writes, final encoder flush failures and cancellation abort composition before the spool is returned. The compatibility byte-returning BuildMessage API still
-materializes the final message when explicitly used.
+### Replies and forwards
 
-Reply and forward drafts derive from the source message's stored header block (header-only read, no body scan): subject becomes `Re: <subject>` or `Fwd: <subject>` (stacked existing prefixes collapse to one), every valid address in Reply-To becomes a reply target in header order, and From is used only when Reply-To is absent. A malformed or partially parsed Reply-To fails with
-`invalid_message_source` instead of silently falling back. Reply-all promotes the other To/CC recipients into CC while excluding all reply targets and any final To address. Explicit input fields win over every derived value, including an intentionally empty `subject`, `to`, or `cc`; omission still requests derivation. Native recipient flags accept an empty value for that explicit-empty
-case, and JSON uses empty strings or arrays. Final recipient roles are deduplicated by normalized address before validation. The draft stores a canonical source message ID and thread chain: valid angle-bracket Message-ID entries stay in first-seen order with duplicates removed, the direct parent appears exactly once at the end, and the final chain is capped at the newest 20 entries.
-Sending emits that same bounded `In-Reply-To` and `References` chain for replies and forwards when source threading is available; manually persisted drafts without source headers remain unthreaded. Malformed Message-ID entries and control characters in thread headers are rejected. `messages reply` and `messages forward` require a fresh store-bound message reference and the Mail store.
-Sending a forward draft requires at least one explicit recipient. A successful SMTP submission does not guarantee server- or client-side conversation grouping.
+Reply and forward drafts derive from the source message's stored header block without a body scan.
+The subject becomes `Re: <subject>` or `Fwd: <subject>` with stacked prefixes collapsed.
+Every valid Reply-To address becomes a reply target in header order, and From is used only when Reply-To is absent; a malformed or partially parsed Reply-To fails with `invalid_message_source`.
+Reply-all moves the other To and CC recipients into CC, excluding reply targets and any final To address.
+Explicit input fields win over derived values, including an intentionally empty `subject`, `to` or `cc`; native recipient flags accept an empty value for that case.
+Final recipient roles are deduplicated by normalized address before validation.
+The draft stores a canonical source Message-ID and thread chain: valid entries in first-seen order without duplicates, the direct parent once at the end, capped at the newest 20 entries.
+Sending emits that `In-Reply-To` and `References` chain; malformed entries and control characters are rejected.
+Both commands require a fresh store-bound message ref and the Mail store.
+Sending a forward needs at least one explicit recipient, and SMTP success does not guarantee conversation grouping.
 
-Drafts are private JSON files under `~/Library/Application Support/MailCLI/drafts`, not fragile unsaved Mail compose objects; creating, editing or updating one never sends mail.
-Draft creation and updates both write to a temporary file and atomically rename it into place, so a crashed process never leaves a partial `draft_*.json`. `drafts list` returns summaries (ref, subject, recipients, timestamps, format, attachment count, redacted
-send/save/handoff attempt metadata; never body, HTML, raw MIME, or attachment bytes) without re-rendering bodies, so a draft with corrupt state still appears as a minimal `state_error` entry; `drafts inspect` fails closed on structurally invalid state with the affected file and remediation; mutation commands additionally verify the canonical rendering and fail closed on any mismatch.
-`drafts preview` renders plain, source, or sanitized HTML without fetching remote resources. `drafts edit` writes a mode-0600 temporary JSON file, invokes the selected editor directly without a shell and in a private process group, validates the complete result, and atomically replaces the draft only if its initial revision still matches under the draft lock. Cancellation gracefully
-terminates that group, force-cleans resistant descendants after a bounded grace period, verifies group absence, and leaves the original draft unchanged. `drafts reconcile` and `drafts send` inherit SIGINT/SIGTERM cancellation through their operation contexts, stop new attachment hashing/spooling and transport work, and release their draft leases. A send claim is retained whenever SMTP or
-its final outcome is unknown, so cancellation cannot cause an automatic resend. `drafts handoff` rechecks every attachment against its recorded size and SHA-256, copies it into a mode-0700 private staging directory with a separate subdirectory per attachment, makes each staged file mode 0400, passes only those immutable-by-path snapshots to `NSSharingServiceNameComposeEmail`, and removes
-the staging directory after confirmed completion or failure. Same-size replacements, symlinks, deletions, inode changes, and fingerprint mismatches fail closed; cleanup failure is reported explicitly. Empty recipient and attachment collections cross the Go/native boundary as JSON arrays, never `null`. The command invokes the service on the macOS main thread, waits for the sharing-service
-delegate to confirm the handoff instead of treating invocation as success, opens a visible compose, retains the local draft, never sends, and fails unless Mail.app is the current `mailto:` application.
-Before native dispatch, cancellation returns error code `handoff_canceled_before_dispatch` with public outcome `not_handed_off` and cleans the attempt and staged evidence. After dispatch, cancellation, timeout, or an unparseable native result
-returns `handoff_outcome_unknown`, suppresses a late success, retains the attempt ID and snapshots, and blocks retry. Inspect Mail.app and run `drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened|failed --confirm --json` to record the observed outcome and remove the retained claim and snapshots. `confirmed_opened` and `confirmed_failed` describe only the
-sharing-service delegate result. AppKit exposes no supported compose-window cancellation or close operation, so MailCLI never claims that an external window was closed. A 2026-09-07 Mail 16 probe opened the expected visible compose in 1.77 seconds without sending; 20 surrounding live-responsiveness runs measured baseline/operation/post p95 values of 0.14/0.11/0.11 seconds with no
-residual owned processes or repository handles. Because AppKit exposes recipients as one role-less array and no sender or reply-thread control, handoff supports new drafts with To recipients only and rejects explicit From, CC, BCC, reply, and forward semantics. Replies and forwards remain local review drafts. Store-draft adoption downloads attachments into an owned mode-0700 sibling
-staging directory `.mailcli-adopt-<REF>` outside the prune root, on the same filesystem, without holding a draft lease during network IO. After identity and SHA-256 verification, it publishes attachments under `<REF>.attachments/` and draft JSON with final paths while holding the preassigned ref lease. Pre-publication failures clean only verified owned staging objects; once publication
-starts, recoverable artifacts are retained and the error reports the ref and staging path for inspection before retry. Prune ignores sibling adoption staging. JSON publication or directory-sync failure does not roll back published attachments. `drafts discard` removes the final attachment directory with its draft, and prune sweeps it as an orphan when the draft JSON is already gone.
+### Editor
 
-`drafts list --limit N [--cursor CURSOR]` defaults to 20 summaries and accepts 1 through 200. JSON keeps summaries at `data.drafts` and exposes `limit`, `revision`, and optional `next_cursor` at `data.page`; human output includes state errors and the next cursor. Records use ascending reference order, and the page size may change between calls. Continue until `next_cursor` is absent. An
-oversized JSON page returns no summaries or cursor; recovery retains the incoming cursor while reducing the limit. This listing revision is not a reviewed draft revision and cannot authorize update or send. The service requires `ListDrafts(context.Context, ListDraftsRequest)`; a zero service limit selects the default, while CLI `--limit 0` is invalid.
+`drafts edit` is human-facing (`audience:human`) and needs stdin and the selected output (stderr in JSON mode) on the same foreground terminal; otherwise it returns `editor_terminal_unavailable` before launch.
+Nonterminal stdin returns `interactive_required` with `drafts.update` recovery carrying the real ref and revision with `--input -`.
+It writes a mode-0600 temporary JSON file in a mode-0700 private directory, runs the editor directly without a shell in its own foreground process group, validates the complete result, and replaces the draft only if the revision captured before launch still matches under the draft lock.
+`drafts edit --json` reserves stdout for one envelope; editor output goes to stderr.
+Terminal settings and the prior foreground group are restored after exit, failure or cancellation.
+Editor failure returns `editor_failed`; cancellation or SIGINT/SIGTERM returns `editor_canceled`.
+Unsuccessful candidates stay in their private directory, and errors carry `error.draft_editor` with `ref`, `expected_revision`, `candidate_path` and, when available, `exit_code` and terminating `signal`.
+A concurrent change keeps the newer stored draft and reports `candidate_path` with the conflict; merge explicitly and save with `drafts update --ref REF --expected-revision REVIEWED_REVISION --input CANDIDATE_PATH --json`.
+Successful updates remove the temporary directory; never blindly replay the editor.
 
-Continuation binds the configured root, directory identity, and modification time. Membership changes and supported atomic draft/claim publication invalidate the snapshot; changes during a page or between pages return `invalid_cursor` with no successful page, requiring a restart without `--cursor`. Reads use a pinned directory and recheck its identity and modification time before
-returning. This is change detection, not an immutable content copy: external in-place edits do not change the directory revision, but selected files are individually checked for identity, size, and modification changes while read. Each request enumerates the directory once in chunks of 256 entries and retains at most the next page plus one lookahead reference in sorted order; later page
-requests enumerate the directory again. Selection reads names without allocating a directory-entry object or fetching metadata for every file. Only names that can enter the bounded result window receive a pinned-root type check; directories are excluded, while unreadable files and symlinks remain visible to the authoritative summary validation. No metadata or claim state is cached across
-reads. Name selection reduces large-directory metadata work and allocation; tiny first-page scans can spend more time in individual rooted type checks. Selection does not retain all directory entries, and cancellation is checked between chunks. The CLI's 60-second read budget and caller cancellation cover enumeration and record reads. Prune collects all candidate pages before any
-deletion and revalidates each candidate under its draft lease.
+### Listing and preview
 
-Draft listing scans body, source, and HTML strings in borrowed buffered chunks without constructing those strings. Small selected records use a 4 KiB read buffer; records at least 64 KiB use 16 KiB, chosen from the already identity-verified file size. Borrowed chunks are consumed before refill; retained metadata is copied into its owned projection. Skipped string escapes are validated,
-and the projected record passes the same typed field and claim-state checks used by complete reads. Each file remains bounded at 20 MiB; retained summary metadata is limited to 1 MiB, with unreadable, oversized, or malformed records represented as `state_error` entries without exposing their payload. This reduces allocation rather than bytes read per selected record: listing still scans
-the complete selected JSON files. Inspection validates structure without re-rendering; mutation retains canonical content validation.
+`drafts list --limit N [--cursor CURSOR]` defaults to 20 summaries and accepts 1 through 200.
+JSON keeps summaries at `data.drafts` and exposes `limit`, `revision` and optional `next_cursor` at `data.page`; records use ascending reference order, and `--limit 0` is invalid.
+Summaries hold ref, subject, recipients, timestamps, format, attachment count, age in days, whether a send attempt was recorded, and redacted send, save and handoff attempt metadata, never bodies, HTML, raw MIME or attachment bytes.
+A corrupt draft appears as a minimal `state_error` entry; each file is bounded to 20 MiB and retained summary metadata to 1 MiB.
+The listing revision binds the root, directory identity and modification time; changes during or between pages return `invalid_cursor`, requiring a restart without `--cursor`.
+It is change detection, not a content copy, and it never authorizes update or send.
+`drafts inspect` fails closed on structurally invalid state with the file and remediation, and `drafts preview` renders plain, source or sanitized HTML without fetching remote resources or truncating bodies.
 
-Attachment fingerprinting opens only pinned regular-file descriptors, rejects special files before a blocking open, reads at most the remaining attachment budget plus one overflow byte, and rechecks descriptor identity and path size after hashing. Create and update carry the caller context through fingerprinting; handoff preparation performs a metadata-only preflight, and staging
-performs the one authoritative bounded read that rechecks the recorded size and SHA-256. Cancellation does not accept a partial fingerprint or dispatch a handoff.
+### Open and adopt
 
-Every lock-owning draft command uses a separate two-second BSD `flock` acquisition budget; the command operation keeps its own deadline and cancellation context. The operation budgets are 15 minutes for `drafts send`/`reconcile`, two minutes for `drafts prune`, and 15 seconds for `drafts edit`/`discard`. `drafts update` and handoff staging instead use a size-aware budget — 30 seconds
-plus one second per attachment MiB at a 1 MiB/s floor, capped at 15 minutes — because re-fingerprinting and staging copies are byte-proportional; the handoff dispatch phase keeps a fixed 10-second deadline. A busy lock returns `draft_busy` after its two-second wait, while SIGINT, SIGTERM, or parent-context cancellation returns `draft_operation_canceled`; a waiting command never unlocks
-another process's lease. `drafts prune` applies the same two-second budget independently to each deletion candidate.
+`drafts open --ref` reads a store message or Mail.app draft through the same retrieval and targeted hydration path as `messages get` without opening a compose window.
+Local `draft_*` refs are not message refs; review them with `drafts inspect` or `drafts preview`.
+Mail 16 exposes no reliable headless editor for a persisted draft.
 
-Draft locks are opened relative to a pinned private draft directory. Each lock-owning operation retains a descriptor-backed `os.Root` tied to the same parent identity as the lock, and every draft, claim, recovery spool, receipt, temporary, rename, and cleanup operation uses that root rather than resolving the configured pathname again. Renaming or replacing the configured root therefore
-keeps the operation on the leased directory; a changed lock or parent identity fails closed as `draft_lock_unsafe` or `draft_lock_changed` and cannot touch the replacement. Composed MIME spools retain their creation descriptor until terminal cleanup; every `Open` returns a bounded independent view, and `Remove` compares the recorded regular-file identity before unlinking, so a replaced
-pathname cannot redirect SMTP or APPEND reads or delete the replacement. Recovery retention copies from that pinned view, while retained `<REF>.send-spool` reads and cleanup remain bound to the leased storage identity. On Darwin, lock creation and cleanup additionally use `openat`, `O_NOFOLLOW_ANY`, and `unlinkat`; supported non-Darwin builds use Go's descriptor-backed `os.Root` plus
-`Lstat`/`File.Stat` identity checks, while platforms without descriptor-backed roots reject the operation explicitly.
+`drafts adopt --ref MSG_REF` copies a Mail.app store draft into a new local draft; the original store draft is never modified.
+Sender, recipients, subject and plain body map onto draft fields, and attachment bytes are saved into a draft-owned `<REF>.attachments` directory so the draft pins them by path and fingerprint.
+Limits match `drafts create`; a draft without recipients is adopted as-is, but sending still requires a recipient.
+Attachments download into an owned mode-0700 sibling staging directory `.mailcli-adopt-<REF>` on the same filesystem without holding a draft lease during network I/O, then publish under the preassigned ref lease.
+An incompletely materialized source fails with `adopt_source_incomplete`; per-attachment failures keep codes such as `attachment_not_downloaded`.
+Once publication has started or staging remains, the result is unknown and replay is forbidden: inspect `drafts list --json`, then the new ref if it exists.
+`drafts discard` removes the adopted attachment directory with the draft.
 
-Live verification against Mail 16.0 build `3826.700.81` proved that scripted compose setters can return success while body and recipient values are later missing, attachment insertion can fail with Apple Event `-10000`, automatic save can persist only a signature, and `close saving no` can leave an invisible outgoing backend. Visible compose automation also created signature-only phantom
-drafts. These are data-integrity failures, not cosmetic limitations.
+### Discard and prune
 
-The unsupported `drafts save` command is absent from dispatch, schemas and capabilities; invoking it returns the normal drafts unknown-command error before Mail contact. Scripted native composition remains disabled before baseline capture, claim creation, gate acquisition, or any Apple Event. This also prevents a false `compose_busy` result caused by an unreadable window property.
-Capabilities report `compose_write:false`, `compose_attachment_write:false`, `raw_mime_send:true`, and `send_transport:"smtp"`. Historical send/save claims remain readable through reconciliation code, but store observation succeeds only with exact final native headers, recipient roles, and attachment count plus a body matching the materialized snapshot after canonicalization: line
-separators fold to LF, leading Mail object placeholders and `> ` quote prefixes unquote, horizontal whitespace collapses per line, and bounded Mail.app send-time tails strip — a `--`/`-- ` signature-delimiter tail and a trailing `> `-quoted reply block with its colon-terminated attribution line. A stripped prefix must stay non-empty, so an unmaterialized tail alone never proves a body.
-Residual false negatives remain for signatures appended without a delimiter, quoted blocks containing non-`> ` lines, fully re-wrapped paragraph text, and HTML-derived content differences; those keep `send_outcome_unverifiable` and require manual reconciliation. A missing body snapshot or a prefix-only match still fails closed. No new Mail 16 compose operation can be created.
+`drafts discard --confirm` removes only the named local draft and its claims.
+`drafts prune` is a dry run by default.
+It lists never-sent drafts older than 30 days (`--older-than` accepts 1 through 106,751 days), expired terminal send receipts with fixed 30-day retention, draft refs whose claim, spool or handoff snapshot survives without its draft file, and eligible unpublished temporaries.
+With `--confirm` it deletes exactly those drafts with their claims and lock files, re-verifying age and claim state under each draft lease, removes only receipts without a draft or unresolved claim, and sweeps verified inactive temporaries and orphan claims and spools.
+Drafts with a send or save attempt are reconcilable state and are never pruned; busy refs are skipped.
+Handoff snapshots and their claim are swept only when a matching prepared claim proves dispatch never started; dispatched, ambiguous, changed or non-empty unclaimed evidence is kept and reported as a prune failure, while verified empty private snapshot parents can be removed.
+Temporaries matching `.<REF>.<suffix>.mailcli-<24 lowercase hex>` for the known `json`, `send-spool`, `send-claim`, `save-claim` and `handoff-claim` writers are eligible only when older than ten minutes; unknown suffixes are kept and counted with up to 20 diagnostic names.
+Prune classifies the root in one bounded streaming pass without decoding bodies; a 64 MiB classification bound returns `prune_candidate_limit_exceeded` before any deletion.
+Dry-run JSON reports the captured `revision` and whether the directory stayed unchanged (`stable`); unrelated modification-time drift returns `stable:false`, while a vanished or replaced directory is an error; confirmed prune rechecks that revision before cleanup and returns `prune_state_changed` without deleting when it changed.
+Human output lists `would sweep artifacts` and `swept_artifacts`; partial failures keep completed effects and per-ref failure rows with a nonzero exit, matching JSON.
+These checks protect supported operations but are not an atomic compare-and-unlink against another same-user process.
 
-Historical draft-save recovery uses `mailcli drafts reconcile --ref <DRAFT_REF> --json`. It revalidates the retained claim under the existing exclusive draft lease before invoking the existing observation implementation, and never starts a new save. Exact observation returns `data.saved_draft` and permits verified local cleanup. An unknown result returns `draft_save_outcome_unknown`,
-retains the claim and local draft, and supplies the same supported reconciliation command. Invalid or conflicting claims fail closed. An idle draft has no save attempt to reconcile. Explicit discard requires independent verification and authorization. Send and handoff reconciliation retain their existing distinct evidence boundaries.
+### Draft locks
 
-`drafts send --ref REF --expected-revision REVISION --confirm` bypasses Mail.app entirely. Before resolving the provider or credentials, composing, creating a send claim, or contacting SMTP or IMAP, it rejects a historical `save_attempt` with `draft_save_retry_blocked`; the original draft and save claim remain byte-identical for `drafts reconcile` historical-save recovery or explicit
-discard. For an idle draft, it resolves the provider's SMTP and IMAP endpoints from the From address, loads the app-specific password from the macOS Keychain (`smtp_credentials_missing` with remediation naming `mailcli send setup` when absent), builds the RFC 5322 message with a locally generated Message-ID, atomically retains the composed bytes from the descriptor-pinned bounded read
-view in a private mode-0600 `<REF>.send-spool` with size and SHA-256 metadata in the send claim, submits them over SMTP with STARTTLS, and appends them to the Sent mailbox over IMAP; each consumer receives an independent read view and path replacement cannot redirect the bytes or cleanup. If the process stops after publishing the spool but before creating its send claim, the next send
-holds the exclusive draft lease, verifies that no claim exists and that the exact canonical spool is a bounded regular mode-0600 file with the same inode, mode, and size when opened and immediately before cleanup, then removes it and composes a fresh message. A claimed spool is never handled by this recovery path; unreadable send-claim state follows the existing fail-closed state error,
-while an ambiguous spool is preserved with `send_recovery_spool_changed` before SMTP. Short protocol commands and final replies use a 30-second budget; each encoded SMTP DATA and IMAP APPEND transfer uses 30 seconds plus one second per MiB at a 1 MiB/s throughput floor, capped at 15 minutes, with the caller context taking precedence. Direct transport resolves endpoints from the sender's
-account binding first: explicit binding SMTP/IMAP hosts take precedence over the provider domain table, which covers Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`). Other domains fail with `transport_unsupported_provider` before keychain access or network connection unless both legs resolve to explicit binding hosts. If SMTP accepts the message but
-local finalization of the composed reader returns a close error, MailCLI retains the acceptance evidence and cleanup diagnostic, keeps the send claim non-replayable, and never submits the message again. SMTP DATA reads the declared size plus at most one probe byte. A short, oversized, or unreadable source returns `smtp_source_invalid` before the terminator, with `effect_certainty:none`,
-`retryability:observe_required`, `replay_allowed:false`, and recovery via `drafts inspect --ref REF --json`. Connection-write, deadline, and transfer failures before `DotWriter.Close` attempts the `.\r\n` terminator remain `smtp_data_incomplete`; the transient claim is cleared and an explicit send retry is safe. Once `DotWriter.Close` starts, a failed terminator write or unreadable final
-reply is `smtp_submission_unknown`; retain the claim, reconcile, and never replay while acceptance remains unknown. A confirmed result keeps compatibility outcome `sent` and exposes canonical `submission_accepted:true` only for the final SMTP 2yz response after DATA, plus `sent_copy_observed:true` only for exact Sent persistence; neither field confirms recipient delivery. After terminal
-evidence is recorded, MailCLI writes a bounded private `<REF>.send-receipt` sidecar before removing the draft, transient claim, and recovery spool; the receipt retains only the reviewed `draft_revision`, attempt and completion timestamps, final outcome, canonical submission and Sent-copy booleans, SMTP response, Message-ID, Sent mailbox, optional UIDVALIDITY/UID, and append state.
-Repeating `drafts send` with the same expected revision, or `drafts reconcile`, for a consumed reference returns that immutable receipt without network writes, and `drafts inspect` exposes it under `data.send_receipt`; the receipt expires after 30 days and `drafts prune --confirm` removes only expired receipts with no unresolved claim or draft. If SMTP accepted the message but the Sent
-mirror failed, the outcome is `sent_mirror_pending` with `submission_accepted:true` and `sent_copy_observed:false`; recipient delivery is unverified, MailCLI never resends the submission, and `drafts reconcile` searches and verifies existing Sent evidence before retrying a known failed APPEND from the retained exact bytes, even when original attachment paths have changed or disappeared.
-An APPEND literal copy, source-length, transfer-deadline, or flush failure before its terminating CRLF is attempted returns `imap_append_incomplete`; the session is discarded. During an initial send, the accepted SMTP submission remains `sent_mirror_pending`, and reconcile searches Sent before retrying only that incomplete APPEND from the retained exact bytes. After the terminating CRLF
-is attempted, a write failure or unreadable final reply returns `imap_append_outcome_unknown`; reconciliation searches and verifies Sent but never retries that APPEND automatically. Every Sent APPEND is preceded by a durable mirror-attempt marker containing a unique attempt ID and unknown-outcome state; a known pre-APPEND failure may retry only after a fresh Sent search and persists a
-new marker before dispatch. A post-APPEND duplicate or an unprovable result remains retained with `send_mirror_outcome_unknown` or typed duplicate evidence. Missing or changed recovery-spool bytes block APPEND and retain the draft for explicit resolution. After DATA, a syntactically complete SMTP 4xx or 5xx final reply is a definitive `smtp_rejected`; `error.message` retains the full
-reply and enhanced status, 4xx is transient and may be retried only by a later explicit send after the server condition is resolved, and 5xx is permanent and requires correcting the message or recipients first. Typed transport codes surface verbatim: `smtp_auth_failed`, `smtp_rejected`, `smtp_tls_failed`, `smtp_timeout`, `smtp_transfer_timeout`, `smtp_data_incomplete`,
-`smtp_source_invalid`, `smtp_submission_unknown`, `imap_connect_failed`, `imap_auth_failed`, `imap_sent_mailbox_not_found`, `imap_ambiguous_mailbox`, `imap_append_failed`, `imap_append_incomplete`, `imap_append_outcome_unknown`, `imap_ambiguous_message_id`, and `imap_timeout`. `smtp_data_incomplete` proves no SMTP acceptance and permits explicit retry; `smtp_submission_unknown` and
-`imap_append_outcome_unknown` mean the remote side may already have stored the message and forbid automatic replay. Sending requires no Full Disk Access or Automation permission; the first keychain read may show one macOS consent prompt.
+Every lock-owning draft command takes a two-second BSD `flock` on a per-draft lock opened relative to the pinned private draft directory; the command keeps its own deadline.
+A busy lock returns `draft_busy`, and cancellation returns `draft_operation_canceled`; a waiting command never unlocks another process's lease.
+Each operation keeps a descriptor-backed root tied to the lock's parent identity and performs every draft, claim, spool, receipt, temporary and cleanup operation through it, so renaming or replacing the configured root cannot redirect the operation; a changed identity fails as `draft_lock_unsafe` or `draft_lock_changed`.
+Draft JSON publication holds the exclusive ref lease from before temporary creation until publication or verified cleanup.
+Mark, move and delete reject messages identified as drafts unless `--allow-draft` is explicit; close any Mail editor for that draft first, because Mail can recreate it when the editor later saves.
+Copy leaves the source draft unchanged and needs no draft flag.
 
-Transport code lookup traverses wrapped and joined causes. When an error tree includes an outcome-uncertain transport code, that code remains public even if cleanup or rejection failures are joined, while the full error text keeps both diagnostics.
+### Native compose boundary
 
-Send evidence matrix:
+Live verification against Mail 16.0 build `3826.700.81` showed that scripted compose setters can report success while body and recipients are later missing, attachment insertion can fail with Apple Event `-10000`, automatic save can persist only a signature, and `close saving no` can leave an invisible outgoing backend.
+These are data-integrity failures.
+Scripted native composition remains disabled before baseline capture, claim creation, gate acquisition, or any Apple Event.
+Capabilities report `compose_write:false`, `compose_attachment_write:false`, `raw_mime_send:true` and `send_transport:"smtp"`.
+The unsupported `drafts save` command is absent from dispatch, schemas and capabilities; invoking it returns the normal drafts unknown-command error.
+
+Historical send and save claims stay readable through reconciliation.
+Historical draft-save recovery uses `mailcli drafts reconcile --ref <DRAFT_REF> --json`: it revalidates the claim under the exclusive draft lease and never starts a new save.
+Exact observation returns `data.saved_draft` and permits verified cleanup; an unknown result returns `draft_save_outcome_unknown` and keeps the claim and draft.
+Store observation requires exact final native headers, recipient roles and attachment count plus a body matching the materialized snapshot after canonicalization (line separators fold to LF, Mail placeholders and `> ` prefixes unquote, whitespace collapses, and bounded send-time signature and quoted-reply tails strip).
+Signatures without a delimiter, re-wrapped text and HTML differences can remain `send_outcome_unverifiable` and need manual reconciliation.
+
+## Sending
+
+`drafts send --ref REF --expected-revision REVISION --confirm` bypasses Mail.app entirely.
+It needs no Full Disk Access or Automation permission; the first Keychain read may show one macOS consent prompt.
+
+1. Before provider or credential resolution, composition, claim creation or any network contact, a historical `save_attempt` returns `draft_save_retry_blocked`; the draft and save claim stay byte-identical for `drafts reconcile` or explicit discard.
+2. Endpoints resolve from the sender's account binding first: explicit binding hosts take precedence over the provider table for Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`).
+   Other domains fail with `transport_unsupported_provider` before Keychain access or network connection unless both legs resolve to explicit binding hosts.
+3. The app-specific password loads from the Keychain; a missing one returns `smtp_credentials_missing` naming `mailcli send setup`.
+4. MailCLI builds the RFC 5322 message with a locally generated Message-ID and atomically retains the composed bytes in a private mode-0600 `<REF>.send-spool`; the send claim records the Message-ID, envelope and versioned MIME fingerprints and the spool's size and SHA-256.
+   Each attachment is read once through SHA-256 during composition; a fingerprint mismatch names the attachment and aborts before SMTP.
+5. The bytes are submitted over SMTP with STARTTLS and appended to the Sent mailbox over IMAP; each consumer reads an independent view pinned to the spool's identity, so path replacement cannot redirect bytes or cleanup.
+
+Cancellation stops new hashing, spooling and transport work and releases the draft lease; a send claim is kept whenever SMTP or its final outcome is unknown, so cancellation never causes an automatic resend.
+Each accepted-message recovery spool is bounded to 1 GiB and is removed after durable terminal send evidence; unresolved or corrupt evidence stays for explicit recovery.
+
+### SMTP rules
+
+SMTP DATA reads the declared size plus one probe byte.
+A short, oversized or unreadable source returns `smtp_source_invalid` before the terminator with `effect_certainty:none`, `retryability:observe_required`, `replay_allowed:false` and recovery `drafts inspect --ref REF --json`.
+Write, deadline and transfer failures before the `.\r\n` terminator is attempted return `smtp_data_incomplete`; the transient claim is cleared and an explicit send retry is safe.
+Once the terminator write starts, a failed write or unreadable final reply is `smtp_submission_unknown`: keep the claim, reconcile, and never replay while acceptance is unknown.
+After DATA, a complete SMTP 4xx or 5xx final reply is a definitive `smtp_rejected` whose `error.message` keeps the full reply and enhanced status; 4xx may be retried by a later explicit send once the server condition is resolved, 5xx needs corrected content or recipients.
+If SMTP accepted the message but closing the composed reader fails, MailCLI keeps the acceptance evidence and diagnostic and never submits again.
+
+SMTPUTF8 is decided from actual envelope addresses and raw headers at every MIME level; encoded display names with ASCII addresses and UTF-8 bodies alone do not need it.
+When the envelope does not already require it, the client inspects the replayable source before MAIL with bounded MIME traversal (8 MiB aggregate header accounting, 4096 entities, nesting depth 64) without rewriting bytes; an unclassifiable structure fails with `smtp_rejected`.
+Internationalized envelopes or headers require SMTPUTF8 and 8BITMIME after STARTTLS; otherwise `smtp_utf8_unsupported` stops before AUTH, MAIL, RCPT or DATA, clears the transient claim and keeps the unchanged draft.
+Address identity and case are preserved with SMTP quoting restored; there is no transliteration ([RFC 6531](https://www.rfc-editor.org/rfc/rfc6531#section-3.2), [RFC 6532](https://www.rfc-editor.org/rfc/rfc6532#section-3.7)).
+
+MIME composition keeps decoded subjects and display names using bounded UTF-8 encoded words only when needed.
+Every generated header line is 998 bytes or shorter excluding CRLF; fields with encoded words use a 76-byte limit and each word stays within 75 bytes without splitting a UTF-8 character.
+Message-ID, thread identifiers, address specifications and MIME parameters keep their structured syntax and are never encoded words.
+Invalid UTF-8, prohibited controls or a structured token that cannot fit a legal line fail before SMTP with a header-specific `invalid_argument` and no send claim; thread-source validation keeps `invalid_message_source` ([RFC 5322](https://www.rfc-editor.org/rfc/rfc5322#section-2.1.1), [RFC 2047](https://www.rfc-editor.org/rfc/rfc2047#section-2)).
+Encoded bodies and attachments stream into the private spool; no complete encoded body is accumulated in memory.
+
+### Sent mirror and evidence
+
+A confirmed result keeps compatibility outcome `sent` and exposes `submission_accepted:true` only for the final SMTP 2yz reply after DATA, plus `sent_copy_observed:true` only for exact Sent persistence; neither confirms recipient delivery.
 
 | Compatibility outcome | `submission_accepted` | `sent_copy_observed` | Meaning |
 | --- | --- | --- | --- |
@@ -950,402 +855,411 @@ Send evidence matrix:
 | `outcome_unknown` | `false` | `false` | Submission or recording ended before a deterministic boundary; the retained claim blocks replay. |
 | explicit SMTP rejection | `false` | `false` | The server rejected the submission; no Sent-copy or recipient-delivery claim is made. |
 
-In one controlled live verification on 2026-09-08, MailCLI submitted an iCloud-to-Gmail reply with an iCloud BCC, empty CC, HTML and canonical plain-text alternatives, reply threading, and a 356-byte attachment. The single send invocation returned `outcome:"sent"`, `submission_accepted:true`, and `sent_copy_observed:true`. Separate post-send mailbox inspection found the same Message-ID
-in iCloud Sent, the iCloud Inbox BCC copy, and Gmail All Mail; those observations remain dated operational evidence, not a live test of the current HEAD or a recipient-delivery confirmation. Persisted raw MIME retained exact From/To, `In-Reply-To`, `References`, `multipart/mixed` plus `multipart/alternative`, and the byte-identical attachment while containing no BCC header. Reusing the
-consumed draft reference failed with `not_found` before transport, the Sent count stayed unchanged, and no local draft or temporary verification artifact remained.
+If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending`; MailCLI never resubmits, and `drafts reconcile` searches and verifies Sent before retrying a known failed APPEND from the retained exact bytes, even when the original attachment paths changed or vanished.
+Every Sent APPEND is preceded by a durable mirror-attempt marker with a unique attempt ID; a known pre-APPEND failure may retry only after a fresh Sent search and a new marker.
+A literal copy, source-length, deadline or flush failure before the terminating CRLF returns `imap_append_incomplete` and discards the session; reconcile searches Sent, then retries only that APPEND.
+After the terminating CRLF, a failed write or unreadable reply returns `imap_append_outcome_unknown`; reconciliation searches and verifies Sent but never retries automatically, and a duplicate or unprovable result stays `send_mirror_outcome_unknown`.
+Missing or changed recovery-spool bytes block APPEND and keep the draft.
+After SMTP acceptance every mirror rejection requires `drafts.reconcile`; never rerun `drafts.send`.
 
-Crash recovery closes the submit-to-record window: the send claim is written before submission and already carries the generated `message_id`, envelope and versioned MIME fingerprints, and the size/hash identity of the retained accepted-message spool. The recovery copy is streamed from the descriptor-pinned composed view, so replacing the transient pathname cannot alter accepted bytes or
-cleanup decisions. If the process dies after SMTP submission acceptance but before the claim is updated, `drafts reconcile` finds the claim outcome `outcome_unknown` with a Message-ID and verifies it against the Sent mailbox over IMAP: exactly one match is fetched and checked against the claimed Message-ID, sender, recipients, subject, body, and complete MIME fingerprint before upgrading
-the claim to `sent` (mailbox recorded in the transport evidence); this proves a Sent copy, not recipient delivery. Duplicate matches, an identity mismatch, or an unreadable candidate fail closed with typed reconciliation evidence. Absence returns typed `send_outcome_unverifiable` with Message-ID, attempt timestamp, recipients, and manual remediation, and a fingerprint mismatch returns
-`send_fingerprint_mismatch`. Absence in Sent never triggers an automatic retry (at-most-once is preserved); legacy claims without a Message-ID stay blocked with `send_reconcile_unavailable`; claims with a Message-ID but without a versioned MIME fingerprint stay blocked with `send_identity_unverifiable`.
+After terminal evidence, MailCLI writes a private `<REF>.send-receipt` before removing the draft, claim and spool.
+The receipt keeps the reviewed `draft_revision`, attempt and completion times, final outcome, `submission_accepted`, `sent_copy_observed`, SMTP response, Message-ID, Sent mailbox, optional UIDVALIDITY and UID, and append state.
+Repeating `drafts send` with the same revision, or `drafts reconcile`, on a consumed ref returns that receipt without network writes, and `drafts inspect` shows it under `data.send_receipt`.
 
-`drafts open --ref` reads a store message/draft ref using the same retrieval and targeted hydration path as `messages get` without opening a compose window; body, recipients, headers, and attachment metadata are returned through the normal typed message shape. Local `draft_*` refs are not message refs; review them with `drafts inspect` or `drafts preview`. Mail 16 exposes no reliable
-headless in-place editor for an already persisted draft.
+Crash recovery closes the submit-to-record window.
+If the process dies after SMTP acceptance but before the claim update, `drafts reconcile` finds `outcome_unknown` with a Message-ID and verifies it against Sent: exactly one match is fetched and checked against Message-ID, sender, recipients, subject, body and complete MIME fingerprint before the claim becomes `sent`, proving a Sent copy, not delivery.
+Duplicate matches, an identity mismatch or an unreadable candidate fail closed; absence returns `send_outcome_unverifiable` with manual remediation and never triggers an automatic retry, and a fingerprint mismatch returns `send_fingerprint_mismatch`.
+Legacy claims without a Message-ID stay blocked with `send_reconcile_unavailable`, and claims without a versioned MIME fingerprint with `send_identity_unverifiable`.
 
-`drafts adopt --ref MSG_REF` copies a persisted Mail.app draft into a new local draft through the same local-store read path (with targeted IMAP hydration where needed). Sender, recipients, subject, and plain body map onto the normal draft fields; attachment bytes are saved into a draft-owned `<REF>.attachments` directory inside the draft root so the local draft pins them by path and
-fingerprint like any other attachment. Adoption is a copy, never a move — the original store draft is never modified — and the returned `draft_*` ref supports the full inspect/update/send/discard lifecycle. A store draft without recipients is adopted as-is; sending still requires at least one recipient. Limits match `drafts create`: 100 attachments, 512 MiB total attachment bytes, 64 KiB
-subject, 4 MiB body. An incompletely materialized source fails with `adopt_source_incomplete`; per-attachment failures keep their typed codes such as `attachment_not_downloaded`. Known validation and not-found failures, plus classified source-read failures, retain correction or retry guidance. If publication has started or staging artifacts remain, the result is unknown and replay is
-forbidden; inspect `drafts list --json`, then inspect the new ref with `drafts inspect --ref REF --json` if it exists. `drafts discard` removes the adopted attachment directory with the draft, and the orphan sweep reclaims it when the draft file is already gone.
+If the process stopped after publishing a spool but before creating its claim, the next send holds the exclusive draft lease, verifies that no claim exists and that the exact spool is a bounded regular mode-0600 file with unchanged identity, removes it and composes afresh.
+An ambiguous or foreign spool is kept and `drafts send` refuses before SMTP with `send_recovery_spool_changed` (`effect_certainty:none`, `retryability:user_input_required`, recovery `drafts.inspect --ref REF --json`).
+Its `error.unclaimed_spool` reports only no-follow metadata (absolute path, object type, owner UID, four-digit octal mode) after the lease confirms no claim exists.
+Manual removal is safe only after confirming no retained claim, a free draft lock and unchanged metadata; remove only that object, and for a symlink only the link.
+The same code from accepted-send reconciliation carries no spool evidence, keeps `partial`/`observe_required` guidance and never recommends deletion or SMTP replay.
 
-Mark, move, and delete reject messages identified as drafts unless `--allow-draft` is explicit. The caller must first close any Mail editor for that draft because Mail itself can recreate a moved or deleted draft when an open editor later saves. Deletion additionally requires `--confirm`. Copy does not alter the source draft and therefore does not require the draft mutation flag.
+Typed transport codes surface verbatim: `smtp_auth_failed`, `smtp_rejected`, `smtp_tls_failed`, `smtp_timeout`, `smtp_transfer_timeout`, `smtp_data_incomplete`, `smtp_source_invalid`, `smtp_submission_unknown`, `imap_connect_failed`, `imap_auth_failed`, `imap_sent_mailbox_not_found`, `imap_ambiguous_mailbox`, `imap_append_failed`, `imap_append_incomplete`, `imap_append_outcome_unknown`, `imap_ambiguous_message_id` and `imap_timeout`.
+Lookup traverses wrapped and joined causes, and an outcome-uncertain code stays public even when cleanup failures are joined.
+A controlled live send on 2026-09-08 (iCloud to Gmail with BCC, HTML and plain alternatives, reply threading and an attachment) returned `sent` with both evidence booleans, kept the attachment byte-identical and no BCC header, and refused the consumed ref with `not_found`; this is dated evidence, not a test of the current source.
+Never infer recipient failure from an empty local search right after SMTP acceptance; verify the recipient side with the exact Message-ID once available.
 
-### Data model
+## Visible handoff
 
-Account, mailbox, message, recipient, attachment, draft, and cursor are typed domain values. Message references are opaque and bind the Envelope Index UUID, row identity, message/global identifiers, account, mailbox identity, mailbox path, and subject. The store revalidates physical identity and current mailbox membership before every read or write translation. A changed store, moved
-message, reused row, or mismatched subject produces a typed stale-reference error instead of accessing a different message.
+`drafts handoff` opens a visible new-message compose window through the macOS Compose Email sharing service, linked into the binary without Apple Events, a helper executable or UI coordinates, and never sends.
+It requires Mail.app as the current `mailto:` application and supports new drafts with To recipients only; explicit From, CC, BCC, reply and forward semantics are rejected because AppKit exposes one role-less recipient array.
+Every attachment is rechecked against its recorded size and SHA-256 and copied into a mode-0700 private staging directory with one subdirectory per attachment and mode-0400 files; only those snapshots reach the sharing service.
+Same-size replacements, symlinks, deletions, inode changes and fingerprint mismatches fail closed with `handoff_attachment_missing`, `handoff_attachment_unreadable` or `handoff_attachment_changed` before dispatch.
+The command waits for the sharing-service delegate instead of treating invocation as success; the dispatch phase has a fixed 10-second deadline.
 
-Mailbox paths are account-relative arrays internally and escaped display strings externally. This prevents collisions between Gmail labels, iCloud folders, and identically named nested mailboxes. Mailbox listings sort the complete account reference and path together, so equal display names remain attached to their account and hierarchy while the output order stays deterministic.
+`data.draft_handoff.outcome` is `handed_off`, `not_handed_off` or `unknown`.
+`handed_off` proves only native delegate acceptance, never saving, sending, delivery or window closure.
+Before native dispatch, cancellation returns error code `handoff_canceled_before_dispatch` with public outcome `not_handed_off` and cleans the attempt and staged evidence.
+After dispatch, cancellation, timeout, an untyped failure or an unparseable native result returns `handoff_outcome_unknown`, suppresses a late success, keeps the attempt ID and snapshots, and blocks retry with `handoff_retry_blocked`.
+Inspect Mail.app and run `drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened|failed --confirm --json` to record the observed outcome and remove the claim and snapshots.
+The attempt lifecycle uses `prepared`, `dispatched`, `outcome_unknown`, `confirmed_opened` and `confirmed_failed`; the confirmed states describe only the sharing-service delegate result.
+AppKit has no supported compose-window close operation, so MailCLI never claims a window was closed.
+Cleanup failures return `handoff_attachment_cleanup_failed` or `handoff_claim_cleanup_failed`.
 
-List and search cursors bind the store UUID, query or mailbox fingerprint, sort anchor, row ID, and the nullable received-date state. Cursor fingerprints exclude page size, so a cursor may continue with a different `--limit` while remaining bound to the same query and store. They cannot be reused after a store replacement or with different filters. Message detail distinguishes normalized
-plain content, raw source, headers, attachment metadata, `content_source`, `content_complete`, and `missing_parts`. When local content is retained after failed IMAP hydration, `hydration` identifies the canceled or failed attempt and its safe recovery guidance; it is omitted after a complete read or successful fallback. MIME parsing selects one representation from each
-`multipart/alternative`, preserves mixed-part order, and marks malformed recipient or decoding data incomplete. Attachment transfer-decoding errors and declared `X-Apple-Content-Length` shortfalls also mark the containing message incomplete and list the stable MIME part path in `missing_parts`; recovered bytes and healthy attachment size/hash evidence remain available. Large bodies, raw
-MIME, and attachment bytes are never included in list responses.
+Retained attempts appear as `handoff_attempt` recovery metadata in every draft detail view, field selection, output-size fallback and export response: attempt ID, timestamps, outcome, dispatch state, snapshot retention, count and byte total, without names, paths or contents.
+A prepared retry rechecks the exact attempt ID and requires `prepared` state with dispatch not started before cleaning staging.
+A 2026-09-07 Mail 16 probe opened the expected visible compose without sending and left no residual processes.
 
-Embedded `message/rfc822` and `message/global` bodies appear in the existing attachment list even without a filename or disposition. A missing name remains empty; the MIME type and opaque part ID identify the object. `multipart/digest` children without Content-Type use `message/rfc822`, as specified by [RFC 2046 section 5.1.5](https://www.rfc-editor.org/rfc/rfc2046#section-5.1.5). Saving
-the part preserves the complete encapsulated message after decoding only its enclosing transfer encoding: original embedded headers, nested MIME encodings and body bytes remain unchanged. The object contains its nested messages and attachments once; their headers and text are not merged into outer identity, body text, attachment counts or search text. [RFC 6532 section
-3.7](https://www.rfc-editor.org/rfc/rfc6532#section-3.7) defines `message/global` for internationalized embedded messages.
+## Mailbox mutations and batch
 
-Embedded structure and decoding are validated recursively within the shared MIME budgets, including during search; ordinary non-message attachment bodies retain the existing search skip policy. Malformed or missing embedded headers, unsupported decoding or nested message subtypes, externalized bytes and structural truncation mark the containing part and outer message incomplete and clear
-its complete hash proof. Budget and cancellation diagnostics remain explicit. Local saving requires a complete selected part; a raw extraction's size and SHA-256 prove the extracted bytes, not that an embedded message is structurally complete. Inspect `content_complete` and `missing_parts` separately. Multipart containers are never selected in place of leaf part `1`.
+Mutations (`messages mark`, `messages move`, `messages copy`, `messages delete`) execute over IMAP directly and return typed server-truth evidence; they never touch the Apple Events gate.
+They use store-bound identity with the locally verified RFC Message-ID when present, and server writes do not update Mail's local index until it syncs.
+Mutation identity resolution loads the referenced active account with the same bounded Sent-history evidence as account listing, falls back to the complete catalog for inactive-account errors, shares one binding snapshot per invocation and reloads credentials per attempt.
+Resolution errors are `account_reference_corrupt`, `account_reference_version_unsupported`, mixed `account_reference_invalid`, `account_disabled`, `account_identity_missing` and `account_degraded`; messages expose only short SHA-256 fingerprints of invalid references.
 
-### Account identity bindings
+### Mark
 
-The account catalog separates the transport `type`, stable `display_name`, `discovered_sender_identities`, and `configured_sender_aliases`; `email_addresses` remains their compatibility union. Explicit bindings live in a private versioned JSON file under the MailCLI application-support directory and contain only the stable account ID, permitted sender aliases, the credential lookup
-identity, and optionally explicit SMTP/IMAP host-port endpoints. Passwords remain in the macOS Keychain; binding files never carry secret material.
+`messages.mark` keeps `data.message_state.server_truth` on success and post-dispatch errors: operation ID, UID, mailbox, UIDVALIDITY, `flags_source` (`STORE` or `FETCH`), `flags_state` (`observed`, `missing` or `unverified`) and nonempty `actual_flags`.
+Observed empty flags are a confirmed empty set, and summary booleans derive from that observation; missing or unverified state keeps labeled local cached booleans.
+`UID STORE` responses are consumed through tagged completion by UID attribute; each performed phase is verified, and insufficient proof triggers one targeted `UID FETCH <uid> (UID FLAGS)` on the same exclusive session, because tagged OK alone ignores nonexistent UIDs ([RFC 3501 section 6.4.8](https://www.rfc-editor.org/rfc/rfc3501.html#section-6.4.8)).
+Each response sequence is bounded to 1,024 logical responses and 4 MiB; a UIDVALIDITY change after dispatch invalidates the evidence without replaying STORE.
+Contradictory flags return `imap_flags_mismatch`, a vanished target `imap_message_not_found`, and unavailable verification `imap_flags_outcome_unknown`, all `ok:false` with exit `1` and no blind replay.
 
-Binding updates serialize the file read, merge, and atomic publication under cross-process locks acquired in stable order: legacy binding lock first, then `account-bindings.lock` for the standard `account-bindings.json` basename. Custom basenames use `account-bindings-<full lowercase SHA256 of basename>.lock` in their pinned parent, keeping different binding owners independent. Both lock
-inodes remain retained, including during mixed-version operation; they are never unlinked merely because they are unlocked. Lock contention returns the typed `account_binding_busy` error after at most two seconds, or earlier when the command context is canceled. Publication uses a pinned parent directory and rejects identity changes; ordinary binding reads do not repair filesystem
-permissions.
+`--junk true` removes `$NotJunk` and adds `$Junk`; `--junk false` does the reverse.
+A preflight FLAGS read drops no-op changes and checks every needed change against the mailbox's PERMANENTFLAGS before any write; removals precede additions and unrelated flags are kept.
+`\*` permits keywords but never unlisted system flags, and missing PERMANENTFLAGS permits permanent changes ([RFC 9051 section 6.3.2](https://www.rfc-editor.org/rfc/rfc9051#section-6.3.2)); a verified no-op succeeds without STORE.
+Both standardized junk keywords present means no classification and `junk:false` ([RFC 9051 section 2.3.2](https://www.rfc-editor.org/rfc/rfc9051#section-2.3.2)); unprefixed `Junk` and `NotJunk` are deprecated ([IANA keyword registrations](https://www.iana.org/assignments/imap-keywords/imap-keywords.xhtml)) and kept as unrelated keywords.
+Unsupported required changes return `imap_flags_unsupported` with the observation and no STORE; a rejected later phase returns `imap_flags_partial` with `outcome:partial`, and a permission withdrawal during a STORE can leave `outcome:unknown`.
+Guidance reports `effect_certainty:none` before STORE or after a first definitive rejection, `partial` after a verified phase, and `unknown` when the outcome is unavailable; every failure requires inspecting state and permissions before another mutation.
+A successful observation describes the state at completion, not a guarantee against later changes by other clients.
 
-Under the binding-path lock, updates sweep only their own basename-hashed temporaries older than ten minutes after verifying regular mode-0600 ownership, single-link and pinned parent/file identities. Fresh, legacy generic and other binding files' temporaries remain untouched. Publication verifies the pinned parent and the exact written file after rename and directory sync; an identity
-mismatch retains `binding_publish:unknown` for inspection.
+### Copy, move and delete
 
-Configure a supported account with `mailcli send setup --account ACCOUNT_REF --from ALIAS [--credential-account LOGIN]`. The command validates that all aliases and the credential identity resolve to the same supported provider, stores the password under the credential identity, and atomically upserts the alias binding. Accounts on other domains use `--smtp-host HOST --smtp-port PORT
---imap-host HOST --imap-port PORT` together with `--account`; each host-port pair must be complete, ports must be in 1–65535, and hosts must be fully qualified public DNS names or public IP literals — loopback, private, link-local, multicast, unspecified addresses and reserved names (`localhost`, `.localhost`, `.local`, `.internal`, `.home.arpa`, `.lan`, `.corp`) are rejected with
-`account_binding_host_invalid` before the password prompt or credential storage. With explicit endpoints the provider domain check is skipped per leg: a fully explicit binding covers both SMTP and IMAP, while a single explicit leg falls back to the provider table for the other. Once a binding pins explicit hosts, re-running `send setup --account REF` for it skips the provider check and
-preserves the endpoints unless host flags are supplied again; any supplied host flag replaces all four fields as one coherent set. Explicit host flags without `--account` are rejected, because only a stable binding may carry them. Re-running setup for an existing binding preserves its credential identity unless `--credential-account` is supplied; `--remove` deletes the selected Keychain
-credential and leaves the binding available for reconfiguration. A configured IMAP account can therefore resolve with no Sent history; its coverage is reported as `identity_coverage.source:"account_binding"` and `state:"configured"`, while discovered history remains in `discovered_sender_identities`. Send-time binding validation loads the same catalog but skips the bounded Sent-history
-scan for bound accounts, because permitted senders come from the configured aliases and the scan cannot change that decision; `accounts list` still reports discovered history, and unbound accounts keep full identity resolution. If an alias is shared by multiple bindings, send and mutation resolution returns `account_binding_ambiguous` until an explicit account ref is supplied. A binding
-whose account is no longer enabled returns `account_binding_stale`; malformed files and unsupported providers retain typed validation errors. `accounts list` surfaces the same endpoint resolution per account as `direct_ops_supported` and `direct_ops_reason` (`provider_supported`, `binding_hosts`, `unsupported_provider`), so callers can see upfront whether sends and mutations can reach a
-provider instead of learning only from `transport_unsupported_provider` failures; the capability manifest publishes the reason vocabulary under `limits.direct_ops_support_reasons`.
+COPY records a deterministic operation identity before dispatch with the source account, source and destination UIDVALIDITY and UID, and any strict single-UID `COPYUID` mapping.
+A lost or incomplete final response returns `imap_copy_outcome_unknown` with the evidence so far; the destination is observed by exact Message-ID before any replay, and replay is refused when the destination is present, duplicated or has changed UIDVALIDITY.
+Before a COPY or MOVE is written, validation, cancellation or deadline failures keep `not_started` evidence with the source UIDVALIDITY and stop without destination reconciliation.
+Proven no-effect cancellation and transient failures permit safe replay (`retryability:safe`, `replay_allowed:true`, `recovery.action:retry`); validation and configuration failures require correction (`user_input_required`, `recovery.action:correct`), including a MOVE fallback whose COPY never started after a definitive native MOVE rejection.
+A partial command write or missing final response stays `unknown`, and retained partial effects always forbid safe replay.
 
-Immediately after a successful Keychain write, credential caches invalidate independently of later binding publication. A subsequent failure returns `data.partial_effects` in order: `keychain_store:complete`, then `binding_publish:none|unknown|complete`, followed by `lock_release:failed` when releasing either lock fails. `none` means the atomic rename did not happen; `unknown` means the
-rename completed but directory sync or post-publication identity verification failed; `complete` means publication and verification succeeded, even when lock release later fails. A lock-release failure has its own warning and never downgrades publication. The locked merge compares implicit credential and endpoint fields with the pre-prompt snapshot; divergence returns
-`account_binding_changed`, `binding_publish:none`, `retryability:user_input_required`, and no replay. Explicit flags win, and unchanged implicit fields come from the locked document. Recovery directs read-only observation with `mailcli accounts list --json`; inspect that result and make an explicit setup decision before another change. MailCLI does not automatically retry or roll back
-the Keychain credential. Validation and Keychain storage failures retain no-effect guidance.
+MOVE uses native MOVE or a COPY plus flag plus expunge fallback.
+The fallback records `source_flag` only after bounded STORE/FETCH observation proves `\Deleted` for the selected source UID and UIDVALIDITY, and dispatches `UID EXPUNGE` only after that proof; without UID EXPUNGE it defers cleanup and counts foreign deleted UIDs without a plain EXPUNGE.
+`server_truth.expunge_branch`, `foreign_deleted_count` and `completed_effects` keep the proven MOVE phases (`copy`, `source_flag`, `uid_expunge`, `cleanup_deferred`).
+A later flag failure returns `imap_move_outcome_unknown` with partial COPY evidence and actual flag state under `data.message_state` or `data.delete_result`; neither COPY nor STORE is replayed automatically.
+`messages delete` moves to the account's Trash after `--confirm` and returns `delete_result`; a message already in Trash returns `message_already_trashed`.
+Permanent irreversible deletion is not offered.
 
-### Local security and permissions
+### Batch
 
-MailCLI reuses Mail.app's configured account identities and local files. Complete local reads use no provider credentials. Direct SMTP/IMAP work uses separately provisioned app-specific credentials; it does not extract Mail.app's own passwords, OAuth tokens or cookies, and never exposes credentials in command output or logs. The one stored secret is the per-account app-specific SMTP
-password that `mailcli send setup` writes to the macOS Keychain (`mailcli-smtp` service) at the user's no-echo prompt; MailCLI never displays it, includes it in output or logs, or sends it anywhere except the provider's SMTP submission and IMAP endpoints. Credential material lifetime is bounded: every `C.CString`/`C.CBytes` buffer on the Keychain bridge is zeroed before `C.free`, the
-IMAP LOGIN command is assembled and quoted as `[]byte` and wiped after the write, and the release keygen encodes the private key into a byte buffer that is wiped after the exclusive write alongside the raw key. Unavoidable residual copies remain where platform or language boundaries require immutable strings: the `CredentialStore` contract returns the password as a Go string,
-`SecItemCopyMatching` delivers a CoreFoundation-owned `CFData` whose bytes cannot be wiped before release, and Go's garbage collector may retain earlier copies; wiping bounds exposure time rather than guaranteeing erasure. Account identifiers containing an embedded NUL byte are rejected with `keychain_invalid_identifier` before any platform keychain or CoreFoundation bridge call; valid
-Unicode identifiers remain supported.
+`mailcli batch --input FILE|-` accepts one JSON object with an `operation` (`read`, `attachment_save`, `mark`, `move`, `copy` or `delete`) and an ordered `items` array.
+Each item has a unique trimmed `id` and a store-bound `ref`; attachment saves also need `attachment_id` and an absolute `output_path`, marks at least one of `read`, `flagged` or `junk`, and moves and copies a `mailbox` ref.
+`move` and `delete` items accept `allow_draft_mutation`; `copy` rejects it.
+A `delete` batch requires the invocation's `--confirm`, which every other operation rejects, and `--concurrency` overrides the request's worker limit.
+The request is capped at 16 MiB, 100 items, and eight workers (default two).
+Capabilities publish these bounds as `limits.batch_operations`, `default_batch_concurrency`, `maximum_batch_concurrency`, `maximum_batch_items` and `maximum_batch_input_bytes`.
+Before dispatch, every item, duplicate ID, attachment destination and operation-specific ref is validated: mark, move and delete need unique sources compared by decoded message identity (account, store UUID, store mailbox ID and message or library ID), copy may repeat a source only across distinct destinations compared by account and NFC-normalized path, and conflict errors name item IDs without ref values.
+Items then run on the invocation's single store and transport graph through the same single-operation paths.
 
-The keychain items carry no explicit per-binary access control, and binding one is not currently viable: `kSecAttrAccessControl` on a generic password requires keychain entitlements the ad-hoc signed binary does not have (`errSecMissingEntitlement`), partition-list APIs (`SecAccessControlSetProtection` with `teamid:`/`cdhash:`) are iOS-only, and the deprecated
-`kSecAttrAccess`/`SecAccess` API cannot express a stronger identity than the implicit ACL on an ad-hoc signed binary. Measured behavior: an item created by an ad-hoc signed CLI binary is readable without a prompt by other unsigned same-user processes, while Apple-signed tools trigger the macOS consent dialog. Residual: a process running as the same user can silently read the stored
-app-specific passwords. The mitigations that remain effective are the credential's own scope — a revocable app-specific SMTP/IMAP password, not an account login — plus optional keychain auto-lock settings and removal via `send setup --remove` or Keychain Access. A per-binary ACL binding becomes feasible only if a Developer-ID signing identity with keychain entitlements is adopted; that
-dependency is recorded, not assumed.
+Results keep input order under `data.batch_result`; each item has `state` (`completed`, `failed`, `skipped`, `skipped_budget` or `uncertain`) and, when applicable, `error.code`, `error.message`, `retryable` and the same guidance, and mutation items carry the same `message_state` or `delete_result` evidence as single commands.
+`batch_canceled` marks an item that never started, while an active mutation canceled by its context is `uncertain` and must not be replayed.
+There is no automatic retry: submit again only failed items whose error says `retryable:true`, never successful or uncertain mutations.
+A failed attachment save keeps verified `saved_attachment` evidence, and its `retryable` value follows `error.guidance.replay_allowed`.
 
-macOS may show a one-time Automation consent prompt when `mailcli doctor --live`, targeted fallback listing, or `sync` (without `--check`) first sends an Apple Event. The calling host, such as Terminal or Codex, must be allowed to control Mail in System Settings for those operations.
+Read items default to the `metadata` projection like `messages get`; request-level `defaults.view` or `defaults.fields` is valid only for `operation:"read"`, item-level selectors override them, and `view` and `fields` are mutually exclusive at each level.
+Concurrent reads account for requested bodies and headers before retaining results, and completed items pass exact projected-envelope admission.
+Read overflow stops new reads, cancels and joins in-flight reads, keeps completed outcomes and marks never-started items `skipped_budget`.
+It returns one bounded `output_too_large` envelope with at most the first 10 item IDs and states plus full counts, proves `effect_certainty:none`, and sets `retryability:user_input_required` and `replay_allowed:true` so the caller can narrow `view` or `fields` or raise `--max-bytes` and replay the same read batch.
+Mutation batches do not use this cancellation policy; their overflow keeps effect-aware, non-replayable guidance and completed-effect evidence.
 
-The calling host needs Full Disk Access to read `~/Library/Mail`; this is the one-time permission that enables fast zero-Apple-Events reads. Automation permission is required only for `doctor --live`, targeted fallback listing when the store open fails, and `sync` without `--check`. Message mutations (`mark`, `move`, `copy`, `delete`) and `sync --check` execute over IMAP and need no
-Automation permission; they load the IMAP credential from the Keychain, so the first keychain read may show one macOS consent prompt. The IMAP mutations and sync checks still need Full Disk Access for their local account/message identity and comparison data. Sending and direct transport-claim reconciliation need no Mail-store or Automation permission: `send setup`, `drafts send`, and
-direct `drafts reconcile` use the Keychain and direct SMTP/IMAP transports, and the first keychain read may show one macOS consent prompt. Accessibility and Screen Recording are never required. When permission is missing, `doctor` returns the exact System Settings remediation and does not weaken the read-only boundary.
+## Accounts and bindings
 
-Structured output excludes body content unless the command requests it. Diagnostics avoid subjects, bodies, headers, recipient lists, and attachment bytes unless needed to identify the failed operation.
-MailCLI persists only review drafts, historical send/save claims, terminal send receipts, accepted-message recovery spools, and cross-process access/update locks under `~/Library/Application Support/MailCLI`; it persists
-no mail corpus or search index. Each accepted-message recovery spool is bounded to 1 GiB and is removed after durable terminal send evidence; unresolved or corrupt evidence remains for explicit recovery.
-SMTP credentials live only in the macOS Keychain, never in files. State directories use mode `0700` and files use mode `0600`. `drafts discard --confirm` removes only the named local draft and its claims. `drafts list` reports each draft's age in days and whether any send attempt was ever recorded. `drafts prune` defaults to a dry run that lists never-sent
-drafts older than 30 days (`--older-than` overrides the stale-draft threshold), expired terminal send receipts, which use fixed 30-day retention, and draft refs whose claim, spool or handoff snapshot survives without its draft file; it also reports eligible unpublished temporaries for live and orphan refs. With `--confirm` it deletes exactly those drafts with their claims and lock files,
-re-verifying age and claim state under the draft lease before each deletion, removes only receipts with no draft or unresolved claim, and sweeps verified inactive temporaries and orphan send/save claims and spools under the draft lease. Handoff snapshot content and its claim are swept only when a valid matching prepared claim proves dispatch never started; dispatched, ambiguous, changed,
-or non-empty unclaimed handoff evidence is retained and reported as a prune failure. Verified empty private snapshot parents can be removed without a claim. Drafts with a send or save attempt are reconcilable state and are never pruned.
+### Account catalog
 
-Draft JSON publication holds the exclusive ref lease from before temporary creation until publication or verified cleanup, after attachment preparation and network downloads. Prune skips busy refs regardless of temporary age. Recovery accepts exactly `.<REF>.<suffix>.mailcli-<24 lowercase hex>` for known `json`, `send-spool`, `send-claim`, `save-claim` and `handoff-claim` writers;
-eligible files must be older than ten minutes and their pinned regular-file identity is rechecked before removal. Cleanup applies to live and orphan refs while final JSON, claims and spools remain protected. Dry-run reports eligible temporary names and byte sizes. Unknown suffixes remain preserved with a total count and at most 20 diagnostic names; malformed, non-regular or replaced
-paths are preserved. Terminal handoff cleanup removes verified empty mode-0700 owner-owned snapshot parents; cleanup refusal preserves the owning claim, and uncertain dispatch retains reconciliation evidence.
+The account catalog separates the transport `type`, stable `display_name`, `discovered_sender_identities` and `configured_sender_aliases`; `email_addresses` remains their compatibility union.
+Account identity resolution is local-store-only.
+Sender identities come from the newest bounded Sent-history window, defaulting to 2,000 messages; supported configuration can raise that default of 2,000 only up to a maximum of 10,000.
+Each account carries `identity_coverage` with `source`, `state`, `observed_messages`, `limit` and `more_available`.
+States are `complete`, `bounded` (usable identities, more Sent history outside the bound), `not_observed` (no sender inside the bound), `no_valid_sender` (history exhausted without a valid sender), `no_sent_mailbox`, `unavailable`, `not_applicable`, and `configured` with `source:"account_binding"` for a bound account without Sent history.
+The capability manifest publishes this bound: the default limit is 2,000 and the hard 10,000 maximum applies.
 
-Prepared handoff retries recheck the exact claim attempt ID and require `prepared` state with dispatch not started before cleaning staging. Snapshot cleanup pins each directory separately and checks its no-symlink identity through its pinned parent before descent and removal. Only the matching generated handoff-attempt/numeric-index/single-regular-file layout with attachment names from
-the draft or claim is eligible; partial staging is accepted only for a contiguous unpublished attempt. Unexpected types, names, replacement identities, dispatched claims, or reappearing drafts stop that ref and retain its claims. Enumeration is chunked and cancellation is checked throughout. Other independently safe orphan refs may still be cleaned, with completed refs and failures
-reported separately. Human prune output lists orphan candidates as `would sweep artifacts` and completed cleanup as `swept_artifacts`; partial failures retain actual completed effects and per-ref failure rows with a nonzero exit code, matching the JSON result. Busy orphan refs are skipped by the service and are never reported as swept. These identity checks and the draft lease protect
-supported operations; they are not an atomic compare-and-unlink primitive against an arbitrary same-user process modifying the final name between the last check and unlink.
+Account listing may return a partial catalog with `data.complete:false`; `data.identity_coverage_complete:false` separately reports bounded or unavailable sender history.
+Account-local cache, special-use or sender-data failures keep the account listed with `state:"degraded"`, a stable `degraded_reason` and `degraded_remediation`; unreadable or malformed mailbox caches use `degraded_reason:"mailbox_cache_unreadable"`, while parser-level `mailbox_cache_malformed` stays an internal diagnostic.
+A mutation targeting a degraded account returns `account_degraded`, while a global SQL or schema failure returns `account_catalog_incomplete` with `mailcli doctor` remediation instead of invoking Apple Events.
+A disabled account returns `account_disabled`; an account without a provable credential-backed sender returns `account_identity_missing`.
+`accounts list` reports per account `direct_ops_supported` and `direct_ops_reason` (`provider_supported`, `binding_hosts` or `unsupported_provider`) from the same endpoint resolution that sends and mutations use; the manifest publishes the vocabulary under `limits.direct_ops_support_reasons`.
 
-Operational residue cleanup starts with a read-only inventory of every local draft, claim, per-draft lock, runtime sidecar, installer transaction, owned helper process, open file, and relevant Mail Drafts mailbox. Empty `mail-access.lock` and `update.lock` files are reusable coordination state, and `release-signing-key` is user-owned release authority; none is residue. Cleanup requires
-an explicit allowlist, uses `drafts discard --confirm` for local drafts, terminates only a proven MailCLI-owned process group, and moves exact reproducible filesystem artifacts to the system Trash. Postflight repeats the local state counts, helper/open-file checks, and complete per-account Drafts queries while preserving historical Sent, Archive, and Trash records unless the user
-separately authorizes mail deletion.
+### Bindings and send setup
 
-`doctor --diagnostics` reports only named phase durations in milliseconds. It measures store opening and platform/live probing without including message content, addresses, attachment data, source paths, or draft paths.
+Explicit bindings live in a private versioned JSON file in the MailCLI application-support directory and hold only the stable account ID, permitted sender aliases, the credential lookup identity and optional explicit SMTP and IMAP host-port endpoints; passwords stay in the Keychain.
 
-Mail.app access-gate state is opened relative to pinned, no-follow directory descriptors. Before changing permissions or reading recovery bytes, MailCLI verifies real directory ownership and descriptor/path identity; the lock must be a current-user-owned regular file with one link. FIFO paths are opened nonblocking, and symlinks, hardlinks, foreign owners, non-regular files, or
-parent/file identity replacements detected during acquisition fail closed before bridge dispatch with `mail_access_gate_unsafe`. That code requires inspection and a verified recovery plan; it does not authorize automatic retry or lock replacement. MailCLI revalidates pinned identities around lock acquisition, every state mutation and release; a replacement detected after acquisition
-stops later gate-state changes but cannot undo an operation already dispatched. A corrupt marker remains untouched while Mail is running or process lookup fails; acquisition returns `mail_access_gate_corrupt`, or `mail_busy` when lookup is cancelled or times out. Quit Mail.app and retry the same existing operation; only a successful stopped-process check under the exclusive gate lock
-permits MailCLI to clear the verified file contents, after which it returns `mail_not_running` without dispatch. Reopen Mail.app and retry. The lock inode remains in place for waiters; never remove or replace `mail-access.lock`.
+Configure a supported account with `mailcli send setup --account ACCOUNT_REF --from ALIAS [--credential-account LOGIN]`.
+The command checks that all aliases and the credential identity resolve to the same supported provider, stores the password under the credential identity, and atomically upserts the alias binding.
+Accounts on other domains add `--smtp-host HOST --smtp-port PORT --imap-host HOST --imap-port PORT` together with `--account`.
+Each host-port pair must be complete, ports must be in 1–65535, and hosts must be fully qualified public DNS names or public IP literals; loopback, private, link-local, multicast, unspecified addresses and reserved names (`localhost`, `.localhost`, `.local`, `.internal`, `.home.arpa`, `.lan`, `.corp`) fail with `account_binding_host_invalid` before the password prompt.
+Explicit endpoints skip the provider check per leg: a fully explicit binding covers both SMTP and IMAP, while a single explicit leg falls back to the provider table for the other.
+Rerunning setup for a binding keeps its endpoints and credential identity unless host flags or `--credential-account` are supplied again; any host flag replaces all four fields together, and host flags without `--account` are rejected.
+`--remove` deletes the selected Keychain credential and keeps the binding for reconfiguration.
+Send-time validation skips the Sent-history scan for bound accounts because permitted senders come from the configured aliases.
+An alias shared by several bindings returns `account_binding_ambiguous` until an explicit account ref is supplied; a binding whose account is no longer enabled returns `account_binding_stale`.
 
-### Release distribution
+Updates serialize read, merge and atomic publication under cross-process locks in stable order: the legacy binding lock first, then `account-bindings.lock` for the standard `account-bindings.json` (custom basenames use `account-bindings-<full lowercase SHA256 of basename>.lock`).
+Lock inodes are never unlinked; contention returns `account_binding_busy` after two seconds or earlier on cancellation.
+Publication uses a pinned parent directory, verifies the written file after rename and directory sync, and sweeps only its own basename-hashed temporaries older than ten minutes; ordinary reads never repair permissions.
+Credential caches are invalidated right after a successful Keychain write.
+A later failure returns `data.partial_effects` in order: `keychain_store:complete`, then `binding_publish:none|unknown|complete`, then `lock_release:failed` when a lock release fails.
+`none` means the rename did not happen, `unknown` that the rename completed but directory sync or identity verification failed, and `complete` that publication succeeded even if a lock release failed later.
+The locked merge compares implicit credential and endpoint fields with the pre-prompt snapshot; divergence returns `account_binding_changed` with `binding_publish:none` and no replay.
+Recovery is read-only `mailcli accounts list --json` followed by an explicit setup decision; MailCLI never retries or rolls back the Keychain credential automatically.
 
-Installer, updater, preflight and release-state version probes set invocation-local `MAILCLI_OUTPUT=human`, preserving plain `mailcli MAJOR.MINOR.PATCH` checks across old and new binaries without requiring a new flag on old binaries. For an upgrade through an unchanged older updater or installer, invoke `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human
-/absolute/path/install.sh`; the old parent inherits that setting into the new binary's version probes. An old updater invoked without that transition setting may reject the new piped JSON version result. Normal build destinations remain controlled by `MAILCLI_BUILD_OUTPUT`, separate from output-mode configuration.
+## Mail.app integration
 
-Release verification has independent local layers. `scripts/tests/test-release.sh` is the repeatable macOS `darwin/arm64` harness: it checks the exact Go pin, required tools, module integrity, `go build ./...`, native packaging, generated-key signature verification, checksum verification, archive contents, installation, and SIGKILL rollback recovery in a temporary release directory and
-test home. `scripts/tests/test-install-local.sh` runs the source wrapper against isolated destinations and verifies matching binary/skill bytes, destination protections, and recovery after each live rename. `scripts/tests/test-skill-drift.sh` checks a package copied from the current checkout, an isolated installation, missing and stale fixtures, and a skill that changes during
-comparison; it never uses the user's skill directory. `scripts/tests/report-skill-drift.sh` is the separate read-only comparison for a real installation and accepts explicit `--repository PATH --installed PATH` inputs, reporting match, missing, mismatch, or unstable state with reconciliation guidance. `scripts/tests/report-release-state.sh` is read-only and compares the source version,
-current HEAD, local and optional origin tag, current-version `dist/` assets and checksum entry, checkout binary, installed binary, installed skill, and optional GitHub release object independently. Use `--strict` when drift must fail the command and `--remote-required` when network access and the GitHub release object are part of the evidence. Neither command publishes, tags, updates
-`dist/`, or treats a historical report as proof for the current HEAD. The CI workflow (`.github/workflows/ci.yml`) is optional and starts only through manual `workflow_dispatch`, with no automatic push or pull-request runs. Its one ARM64 job on `macos-26` asserts Darwin/arm64, runs `go build ./...`, and invokes the shared full gate `scripts/tests/test.sh --full`.
-Use focused local checks during development and one final integrated local full proof before an authorized source push; request online CI explicitly when an independent environment check is needed. Actions use immutable commit SHAs; Go selection is exact and checked, and verification tools use
-pinned versions. After setup-go exports its bundled-toolchain policy, CI restores and verifies the exact go.mod pin and propagates it to subsequent steps; other conflicting overrides still fail closed.
-Full verification includes uncached coverage tests, configured lint, blocking vulnerability scanning, shell/documentation/policy checks, and isolated packaging/install verification. It runs no live tests, holds only `contents: read`, and contains no push, tag, release, or GitHub-API step.
+Mail.app is involved only in `sync` without `--check`, `doctor --live`, targeted fallback listing when the store cannot open, and visible handoff.
+Every Apple Events caller acquires one BSD advisory lock at `~/Library/Application Support/MailCLI/mail-access.lock`; acquisition is capped at two seconds and concurrent callers return `mail_busy` before contacting Mail.
+The gate requires an already-running Mail process with bundle identity `com.apple.mail` and binds the bridge to that exact PID.
+MailCLI never starts, activates, quits, kills or restarts Mail.
+Before a potentially mutating Apple Event, the gate writes and synchronizes an exact-PID recovery marker under the lock; a failed write prevents the event, a definite completion clears it, and an incomplete call leaves it so later live operations fail with `mail_recovery_required` until that Mail process has been replaced.
+Each bridge call owns one private `osascript` process group, terminates remaining members and verifies group absence before releasing the gate; large requests pass through a private temporary file rather than process arguments.
+SIGINT, SIGTERM and cancellation write a private bridge marker that the script checks before mutation; a retained compose backend returns `compose_cleanup_failed`, and only a bridge exceeding the 15-second cleanup grace is force-stopped.
+Incomplete reads, live probes, sync triggers and Automation denial never create false recovery state.
 
-The first-install bootstrap in the README requires an independently trusted OpenSSL 3 verifier because macOS `/usr/bin/openssl` is LibreSSL without Ed25519 support. It authenticates the exact `SHA256SUMS` bytes with the pinned Ed25519 public key, downloads the exact `darwin/arm64` archive only after that signature succeeds, checks the one expected archive entry and safe package layout,
-and extracts or executes `install.sh` only after the archive digest succeeds. `scripts/tests/test-bootstrap.sh` exercises the same ordering with a local signed fixture and proves tampered manifests, signatures, keys, archive bytes, names, duplicate entries, and unsupported archive entries cannot reach extraction or execution.
+Gate state is opened relative to pinned no-follow directory descriptors; the lock must be a current-user-owned regular file with one link.
+Symlinks, hardlinks, foreign owners, non-regular files or identity replacements fail before dispatch with `mail_access_gate_unsafe`, which requires inspection and a verified recovery plan.
+A corrupt marker stays untouched while Mail runs and returns `mail_access_gate_corrupt` (`mail_busy` when process lookup times out); quit Mail.app and retry, and only a verified stopped-process check lets MailCLI clear the file contents and return `mail_not_running`.
+Never remove or replace `mail-access.lock`.
 
-The user is the sole release authority. A normal TASK may edit, commit, build, sign test fixtures, package into an isolated directory, install into an isolated home, verify artifacts, and read release state; none of those actions authorizes a version change, push, tag mutation, GitHub release mutation, asset upload, or publication consumed by the updater. Any one of those external
-actions requires an explicit user instruction naming the exact action; version changes, tags, releases, and release-asset publication additionally require the exact version.
-An ordinary source push requires explicit push authorization without inventing a release version, and each instruction authorizes only the named action.
-Prior releases, task text, generated assets, successful gates, existing tags, and adjacent authorized actions are never reusable authorization. The repository intentionally has no publication script or release workflow.
-`scripts/tests/test-release-authority.sh` makes that absence a gate by rejecting publication commands and known publishing actions in normal scripts/workflows; `scripts/tests/test.sh` also snapshots branch, remote-tracking, and tag refs around local release verification and fails if they change. This negative gate is network-independent: it proves the canonical local path contains no
-remote mutator and preserves repository refs, while `report-release-state.sh --remote-required` remains the separate read-only observation of live remote state.
+The bridge resolves accounts at most once per invocation, validates the fallback listing page limit of `1..25` before contacting Mail, and resolves one account, mailbox path and message ID per direct operation; Mail `whose` queries and mailbox-wide `messages()` reads are forbidden.
+The fallback gateway is read-only (account listing, message listing, probing and sync).
+Production clients reject scripted draft save and outbound attachment insertion with `compose_automation_unsupported` before acquiring the gate.
+`sync` without `--check` triggers Mail's refresh; it does not prove completion.
+`doctor` checks the read store without Apple Events; `doctor --live` verifies the Mail process identity and asks for the Mail version through one read-only Apple Event and never creates, saves or sends a message.
+`doctor --diagnostics` reports only named phase durations in milliseconds, without message content, addresses, attachment data or paths.
 
-The current release gate contract is `raw_mime_send:true` and a stripped `darwin/arm64` binary with uncapped, reported `release_binary_bytes`. Reports asserting `raw_mime_send:false` or a size limit describe earlier contracts, not the current source, tag, installed artifact, or remote release. A prerequisite failure is an environment result, a source/build/test failure is a real
-gate failure, and a state-report mismatch is artifact drift that requires explicit remediation rather than an automatic overwrite.
+## Security
 
-A shared version string does not establish artifact identity. A published tag and release may remain internally valid while current HEAD, `origin/main`, local `dist/`, the checkout binary, installed binary, repository skill, and installed skill represent different trees. Report and compare each surface independently by commit or SHA-256; scope a green gate to the exact clean HEAD that ran it.
+MailCLI reuses Mail.app's configured accounts and local files; complete local reads use no provider credentials.
+Direct SMTP and IMAP use separately provisioned app-specific credentials; MailCLI never extracts Mail.app's passwords, OAuth tokens or cookies.
+The one stored secret is the per-account app-specific password that `mailcli send setup` writes to the macOS Keychain (`mailcli-smtp` service) at a no-echo prompt; it never appears in output, logs, chat, argv or state files and goes only to the provider's SMTP and IMAP endpoints.
+Keychain bridge buffers are zeroed before release and the IMAP LOGIN command is wiped after writing; platform boundaries (a Go string password, CoreFoundation-owned `CFData`, garbage-collected copies) mean wiping bounds exposure time rather than guaranteeing erasure.
+Account identifiers with an embedded NUL byte fail with `keychain_invalid_identifier` before any Keychain call.
 
-Each release `vX.Y.Z` publishes `mailcli_X.Y.Z_darwin_arm64.tar.gz`, `SHA256SUMS`, and `SHA256SUMS.sig`. The signature covers the exact checksum-manifest bytes with Ed25519; the public key is pinned in source and the updater, while the mode-0600 private key stays outside the repository. `mailcli-release-sign` opens that key through a pinned parent descriptor, rejects symlinks,
-replacement identities, non-regular files, and group/world-readable permissions, and keeps decoded key material only for the signing operation; Darwin uses `openat` with `O_NOFOLLOW_ANY`, supported non-Darwin builds use descriptor-backed `os.Root`, and Plan 9 plus js/wasm fail closed. Exclusive signer outputs retain their descriptor identity through write, sync, size/path validation, and
-close; failed output cleanup removes only the file created by that invocation and refuses attacker replacements. `build-release.sh` builds and verifies the archive, checksum, signature, and a signed staging manifest inside mode-0700 staging on the destination filesystem. It publishes each final path by a no-overwrite hard link; an interrupted partial set retains the authenticated staging
-files and reports the exact matching, missing, and divergent final paths. A rerun verifies staged signatures and bytes, byte-compares every existing final asset, and publishes only missing paths. The three flat final paths do not form one filesystem-atomic transaction. The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md`, and `LICENSE`. The
-version requested from `build-release.sh`, the CLI's embedded version, archive root, Git tag, and GitHub release title must agree. Builds disable environment-dependent Go VCS stamping, use read-only module resolution, retain `-trimpath`, strip the linker symbol table plus DWARF debug sections with `-s -w`, and ask the Darwin external linker to dead-strip unreachable native stubs with
-`-extldflags=-dead_strip`. Identical source and toolchain inputs therefore produce byte-identical release binaries.
-Native stripping preserves the Go-derived Mach-O `LC_UUID` required for macOS 26 startup; source-install verification checks that load command on the actual installed binary, and release verification byte-compares repeated builds.
+Keychain items carry no per-binary access control: `kSecAttrAccessControl` needs entitlements an ad-hoc signed binary lacks (`errSecMissingEntitlement`), partition-list controls are iOS-only, and the deprecated `SecAccess` API cannot express a stronger identity.
+As measured, an item created by the ad-hoc signed CLI is readable without a prompt by other unsigned same-user processes, while Apple-signed tools trigger the consent dialog.
+The residual risk is that a same-user process can read the app-specific passwords; effective mitigations are the credential's narrow, revocable scope, optional Keychain auto-lock, and removal through `send setup --remove`.
+A per-binary ACL becomes feasible only with a Developer-ID signing identity with Keychain entitlements.
 
-Release staging is authenticated by an Ed25519-signed manifest recording the full source commit, actual Go version, binary SHA-256 and staged asset digests. Resume requires the same clean checkout and toolchain; legacy manifests without source binding are refused and preserved. `--discard-stale-staging` rebuilds only verified owner-only staging when no final assets exist. Existing
-conflicting final assets require a different empty absolute `MAILCLI_RELEASE_DIRECTORY`; all three final paths are checked before build, signing or staging creation. Verified private publication temporaries, including truncated copies, are recoverable; replaced objects and divergent final assets remain preserved. `scripts/tests/test-release.sh --staging-only` runs isolated native staging
-regressions without the full installation suite.
+MailCLI persists only review drafts, historical send and save claims, terminal send receipts, accepted-message recovery spools, account bindings and cross-process locks under `~/Library/Application Support/MailCLI`; it persists no mail corpus or search index.
+State directories use mode `0700`; drafts, claims, receipts and spools use mode `0600`.
+Structured output excludes body content unless requested, and diagnostics avoid subjects, bodies, headers, recipient lists and attachment bytes unless needed to identify the failed operation.
+Received attachment and content exports require new absolute destinations and refuse overwrites and unsafe path substitution.
+Mutations require explicit intent; send and destructive operations require confirmation and reviewed-state checks; handoff opens UI without sending.
+HTML keeps a bounded semantic allowlist, removes active and remote resources and reports value-free diagnostics (see [Rich content](#rich-content)).
 
-The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` may select other safe absolute paths. It rejects unsafe parent or destination symlinks and pre-existing backup paths. Both payloads are staged in their target parents, snapshotted, byte-compared, and recorded in a mode-0600 transaction
-manifest before any live rename. The manifest records every backup and install transition plus the original and staged artifact identities; a restart rolls back an incomplete transaction using snapshot- and identity-checked paths, while a committed transaction only removes its own backups after both artifacts verify. Replaced artifacts, including byte-identical replacements, are
-preserved. Legacy manifests without original identities retain any unverifiable original destinations or backups for manual inspection. Directory synchronization follows manifest writes and live renames. The installer never executes staged content, never deletes unrelated paths, and never changes Full Disk Access, Automation consent, quarantine attributes, or global Gatekeeper settings.
+## Platform and compatibility
 
-Self-update, direct release installation, and local source installation share the persistent mode-0600 BSD flock file `~/Library/Application Support/MailCLI/update.lock`. Every installer acquires it before scanning transaction state and holds it through verification, rollback, and cleanup; a live transaction is never treated as abandoned based on age or PID. Direct installers use the
-macOS `lockf` descriptor interface and wait at most 30 seconds before failing without touching transactions. The updater waits within its command context and passes its owned descriptor to the child, retaining ownership through child termination, final verification, and private package cleanup. Child exit cannot unlock the parent. Lock files are never unlinked or stolen; invalid file
-types, symlinks, multiple hard links, and replaced lock or transaction-directory identities fail closed with recovery evidence retained. Ctrl-C targets the foreground process group; automation should likewise signal the whole installer group so waiting helpers and mutating descendants stop together.
+The supported product target is macOS on Apple silicon (`darwin/arm64`).
+The verified development host is macOS 15.6.1 with Mail 16.0 build 3826.700.81 and the exact Go version pinned in `go.mod`.
+SMTP and IMAP are independent of macOS, but there is no Linux or Windows credential backend, account configuration, message-discovery adapter or installer.
+The Keychain requires Darwin with CGO; other builds return `keychain_unsupported` for credential operations.
 
-`mailcli update` queries the public latest-release endpoint, compares strict `MAJOR.MINOR.PATCH` versions, requires the exact `darwin/arm64` archive plus `SHA256SUMS` and `SHA256SUMS.sig`, downloads bounded metadata and manifest bodies over HTTPS, and verifies the signature against the pinned Ed25519 public key before downloading or trusting the archive. Metadata, release-page, asset,
-checksum, signature, and redirect URLs must use exact trusted GitHub hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, or `release-assets.githubusercontent.com`), HTTPS with the default port, and at most 10 redirects; credentials, fragments, malformed URLs, untrusted hosts, alternate ports, and HTTP downgrades fail with typed update errors. The HTTP client remains
-time- and size-bounded, and the signature/checksum gates remain mandatory before installation. Before acquiring the shared installation lock, the updater authenticates the manifest and archive in memory and retains the verified archive bytes without redundant disk staging.
-After acquiring the lock, it reads the on-disk installed version and reports an already-installed equal or newer version without reinstalling.
-No network request or compressed-archive read-back occurs while the lock is held. Necessary one-time extraction remains under owned lock: it rejects traversal, links, unexpected roots, oversized expansion, or excess entries, validates Mach-O architecture, code signature, and embedded version, and invokes the packaged
-rollback-safe installer for the current binary and standard companion skill under the shared installation lock. The `codesign --verify --strict` step proves only that the binary carries a kernel-acceptable signature for arm64 execution; it asserts no signer identity because releases are ad-hoc signed and byte authenticity is exclusively the Ed25519 plus `SHA256SUMS` chain upstream.
-Inside the installer the source binary's SHA-256 and the skill tree's content digest are pinned once around the version check, and every staged, snapshot, and installed artifact is compared against those pinned digests rather than re-reading the source paths, so a replaced package file cannot change what gets installed after verification. Interactive mode renders progress; `--json` emits
-exactly one non-animated envelope. The installer subprocess strips shell startup and function-injection variables plus ambient `MAILCLI_INSTALL_PACKAGE_ROOT`, so its binary and skill sources remain bound to the authenticated extracted package. The local source wrapper retains its explicit checkout override. The subprocess owns a private process group. Cancellation sends `SIGTERM` so the
-installer's EXIT rollback receives a five-second grace period, then synchronously force-cleans resistant descendants and verifies group absence before returning.
+| Operation | Mail.app process required | Remaining platform/data dependency |
+| --- | --- | --- |
+| List/search and complete local message or attachment reads | No | Supported Apple Mail Envelope Index, .emlx sources and Full Disk Access; results reflect the local store |
+| New-message discovery in list/search | Mail.app must update its local store | No remote-only inbox/search command; complete local coverage does not certify server freshness |
+| Local drafts and direct SMTP send/Sent reconciliation | No | Local draft state plus macOS Keychain for direct SMTP/IMAP credentials; no Mail-store startup for the direct path |
+| IMAP mark/move/copy/delete and sync --check | No | Keychain credentials and store-bound account/message identity or local counts; server writes do not update the local read index |
+| Targeted IMAP hydration | No | A locally resolved message reference and Keychain credentials; fetches missing content rather than discovering an unindexed inbox |
+| sync without --check, doctor --live, supported read fallback | Yes | Exact already-running Mail process and Automation permission; sync triggers refresh, it does not prove completion |
+| Visible new-compose handoff | Native Mail UI | AppKit and Mail.app as the default email application; acceptance never proves sending, saving or closing |
 
-After an installation attempt, an error preserves `data.update_result` with `binary_path`, target `latest_version`, `updated`, and `failed_phase` (`installer`, `installed_binary_verification`, `package_cleanup`, `update_lock_validation`, or `update_lock_close`). `updated:true` and `error.guidance.effect_certainty:"complete"` require successful installed-version verification; an installer
-or verification error without that evidence reports `unknown`. Cleanup or lock errors after successful verification report `complete`. Recovery uses read-only `mailcli version --json` to inspect the installed identity before another update decision; guidance never reruns the installer or assumes rollback.
+If Mail.app is closed, complete downloaded content stays readable, but MailCLI does not advance the local index itself.
+A new macOS or Mail release may need an adapter update; unsupported store versions fail closed instead of guessing.
 
-The native release is linker ad-hoc signed but not Apple-notarized because the release host has no Developer ID signing identity. Browser downloads may therefore require an explicit user-approved Gatekeeper remediation after SHA-256 verification. Notarized distribution requires a future Developer ID certificate and Apple notary credentials; absence of those credentials must never be
-hidden by automatically clearing quarantine.
+### Providers and authentication
 
-Release builds retain normal compiler inlining for mail operations, store access, CLI dispatch, and IMAP parsing. Stripping, path trimming and native dead-code removal remain enabled, and the release gate reports the executable size without a cap. Size is minimized, but not at the cost of hot-path speed: do not disable package-wide inlining solely to reduce size; compare representative hot
-paths under the actual build flags.
+Direct SMTP and IMAP support Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`) by default; other domains need an account binding with explicit validated endpoints.
+The capability manifest reports `supported_providers` and `unsupported_provider_code:"transport_unsupported_provider"`, and a new provider needs one entry in the closed exact-domain table so capabilities, help and validation change together.
+MailCLI implements the app-specific-password path with SMTP `AUTH PLAIN` and IMAP `LOGIN`; it does not implement OAuth/XOAUTH2 or provider account authorization.
+
+Provider policy is distinct from that path.
+Google ended username-and-password-only access from third-party apps for Google Workspace accounts beginning in January 2025, not app passwords for every Google Account; app passwords need 2-Step Verification and may be unavailable for organization-managed or Advanced Protection accounts ([Google less-secure app guidance](https://support.google.com/accounts/answer/6010255), [Google app-password guidance](https://support.google.com/mail/answer/185833)).
+Apple documents Apple Account authorization for supported third-party apps and app-specific passwords otherwise ([Apple Account authorization](https://support.apple.com/en-us/121539), [Apple app-specific passwords](https://support.apple.com/en-us/102654)).
+A Gmail OAuth2/XOAUTH2 path (authorization code with PKCE, a Keychain-stored refresh token and XOAUTH2 beside the existing mechanisms) was evaluated and deferred because the `https://mail.google.com/` scope is restricted and needs Google verification ([restricted-scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)).
+Revisit it if provider policy invalidates app passwords, an authorization flow works with direct SMTP and IMAP, or valid app passwords are rejected.
 
 ### Scope
 
-`drafts prune --older-than` accepts 1 through 106,751 days, the largest whole-day value representable by a positive `time.Duration`; larger values fail as `invalid_argument` before scanning or deleting drafts. Prune classifies every root entry once in one bounded streaming pass as draft JSON, receipts, artifacts, locks, temporaries, or unknowns, without decoding draft bodies; unreadable
-or incomplete files remain untouched. The 64 MiB classification bound covers retained names, inventory and pre-cleanup classification-result slice capacity, references, file-identity metadata, and parsed candidate metadata; exceeding it returns `prune_candidate_limit_exceeded` before cleanup or deletion. Dry-run JSON reports the captured `revision` and whether the same directory's mtime
-stayed unchanged through report completion (`stable`); unrelated mtime drift returns a report with `stable:false`, while a vanished/replaced directory or stat failure remains an error. Confirmed prune keeps its existing response shape and checks the captured full directory revision immediately before cleanup; changes return `prune_state_changed` without deleting drafts.
+The implemented surface covers account and mailbox discovery, paginated listing, normalized and streamed raw reading, received-attachment inspection and saving, cross-mailbox search, local plain, Markdown and HTML drafts with preview and editor update, visible new-draft handoff, reply, reply-all, forward, native-draft inspection and adoption, direct SMTP sending with IMAP Sent mirroring, copy, move, delete to Trash, read, flag and junk state, and synchronization.
+The capability manifest reports that MailCLI owns no mail index or background process and reports `raw_mime_read:true` and `raw_mime_send:true`.
+Out of scope: account creation and login, password management beyond the `send setup` credential, provider APIs beyond the SMTP and IMAP operations above, Mail-store writes, UI-coordinate automation, Mail rules administration, permanent trash emptying and Mail 16 scripted draft export.
+The store adapter is strictly read-only; permanent deletion may be added only as a separate explicitly confirmed capability.
 
-The supported scope is every active account and every mailbox represented consistently by Mail's Envelope Index and mailbox catalog, including Inbox, Sent, Drafts, Archive, Junk, Trash, custom folders, and nested Gmail labels. `mailboxes resolve` accepts one `--path` segment per server-provided display hierarchy level, so localized folders such as `Gesendet` and `Entwürfe` require no
-guessed identifier. Each IMAP LIST result retains its exact wire name separately from its decoded display name, display path, hierarchy delimiter, special-use flags, and negotiated encoding; NIL delimiters remain flat namespaces. Resolution first prefers byte-identical display paths, then compares each segment under NFC canonical equivalence without compatibility folding; segment
-boundaries stay distinct and ambiguous normalized matches fail closed. The protocol-defined case-insensitive INBOX identity remains unchanged. Resolution returns the preserved wire name for every command, and localized display-name and role-alias fallbacks use the same canonical normalization. Multiple special-use candidates fail closed with `imap_ambiguous_mailbox` and list their exact
-wire names. A pre-dispatch mutation collision requires correcting the conflicting mailbox identities, by renaming a colliding server mailbox or correcting duplicate special-use assignments, refreshing the mailbox list, and only then rerunning the command once the requested mailbox resolves uniquely; do not replay the unchanged mutation. Source mutations record the selected account's UID
-and UIDVALIDITY through the normal IMAP search/select validation before changing state. Per-client IMAP LIST results are cached by host, port, username, and account identity with no password material; cache entries clone all mailbox metadata and expire after five minutes. Full and partial local message sources are reported truthfully. A targeted IMAP FETCH may hydrate one uncached body
-or a missing attachment without launching Mail.app; attachment hydration uses the capped full-message fallback until a part-scoped fetch is proven safe.
+## Release and distribution
 
-The implemented surface includes account and mailbox discovery, paginated listing, normalized and streamed raw reading, received-attachment inspection and saving, cross-mailbox search, local plain/Markdown/HTML draft creation, preview, editor-based update, visible new-draft handoff, reply, reply-all, forward, native-draft inspection, autonomous SMTP/IMAP draft sending with IMAP Sent
-mirroring, copy, move, delete, read/unread, flag/unflag, junk state, and account synchronization. Mail 16 scripted draft export remains explicitly unavailable.
+### Release artifacts
 
-Account creation, login, interactive password management beyond the `send setup` keychain credential, direct provider APIs beyond the SMTP submission, IMAP Sent mirroring, IMAP mutations, IMAP hydration, and IMAP status checks used by `drafts send`, `messages mark/move/copy/delete`, hydration, and `sync --check`, Mail-store mutation, UI-coordinate automation, Mail rules administration,
-and permanent trash emptying are out of scope. The private store adapter is strictly read-only and supports only the exact capability-gated profile. Permanent irreversible deletion may be added only as a separate explicitly confirmed capability.
+Each release `vX.Y.Z` publishes `mailcli_X.Y.Z_darwin_arm64.tar.gz`, `SHA256SUMS` and `SHA256SUMS.sig`.
+The signature covers the exact checksum-manifest bytes with Ed25519; the public key is pinned in source and the updater, and the mode-0600 private key stays outside the repository.
+`mailcli-release-sign` opens that key through a pinned parent descriptor, rejects symlinks, replacements, non-regular files and group- or world-readable permissions, and keeps decoded key material only for the signing operation.
+The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md` and `LICENSE`.
+The version requested from `build-release.sh`, the embedded CLI version, archive root, Git tag and GitHub release title must agree.
 
-### Search
+Builds disable Go VCS stamping, use read-only module resolution, keep `-trimpath`, strip symbols and DWARF with `-s -w`, and dead-strip native stubs with `-extldflags=-dead_strip`, so identical source and toolchain produce byte-identical binaries.
+Stripping keeps the Go-derived Mach-O `LC_UUID` that macOS 26 needs to launch the binary.
+Normal compiler inlining stays enabled for hot paths; the release gate reports `release_binary_bytes` without a cap.
+Dynamic SQLite linking, executable packing, more aggressive C optimization and delegating HTTPS to external tools are deliberately excluded because the size gain does not justify weaker diagnostics, host-dependent behaviour or less reliable updates.
+The binary is ad-hoc signed but not notarized, because the release host has no Developer ID identity; browser downloads may need an explicit user-approved Gatekeeper step after SHA-256 verification, and quarantine is never cleared automatically.
 
-MailCLI does not execute Mail.app `whose` searches. Those Apple Events can trigger unbounded mailbox work that is not reliably cancelled when the caller exits. Mailbox scoping reduces the amount of work but does not provide a hard execution bound, so the production bridge forbids this search form completely.
+`build-release.sh` builds and verifies archive, checksum, signature and a signed staging manifest inside mode-0700 staging on the destination filesystem, then publishes each final path by a no-overwrite hard link.
+The staging manifest records the full source commit, actual Go version, binary SHA-256 and asset digests; resuming requires the same clean checkout and toolchain, and legacy manifests without source binding are refused.
+An interrupted publication keeps the authenticated staging and reports matching, missing and divergent final paths; a rerun verifies staged bytes, byte-compares existing final assets and publishes only missing paths.
+The three final paths do not form one filesystem-atomic transaction.
+`--discard-stale-staging` rebuilds only verified owner-only staging when no final assets exist; conflicting final assets need a different empty absolute `MAILCLI_RELEASE_DIRECTORY`, and all three final paths are checked before building.
 
-Search matching uses NFC normalization followed by Unicode simple lowercasing for query terms, MIME text, attachment names, snippets, and metadata SQL candidates. SQLite applies the same policy through the registered `mailcli_search_fold` function; full case-fold expansions are excluded until offset-preserving mapping is available. ASCII input is already normalized: unchanged lowercase
-strings are reused without allocating an output copy, while non-ASCII input retains the Unicode normalization and invalid-UTF-8 replacement policy. `BenchmarkSearchFold` measures lowercase ASCII, mixed ASCII and decomposed Unicode separately; its allocation results are not whole-command memory peaks.
+Releases are published only on an explicit owner instruction naming the exact version and action.
+Committing, building, packaging into an isolated directory, installing into an isolated home and reading release state never authorize a version change, push, tag, GitHub release or asset upload.
+The repository has no publication script or release workflow.
 
-Date filters compare received timestamps in whole Unix seconds: `--after` is inclusive and `--before` is exclusive. Omitted bounds are unbounded; an explicit `1970-01-01T00:00:00Z` is a real zero-valued boundary, and negative timestamps remain supported. RFC3339 offsets select the specified instant; `YYYY-MM-DD` selects midnight in the process's local timezone. When both bounds are
-present, after must be strictly earlier than before at that resolution. SQL NULL received dates match only when neither date bound is present. Keep the same date strings when continuing with a cursor: both supported cursor formats bind those original filters, including their presence, while allowing a different page size.
+### Installer
 
-An incomplete body search returns `next_cursor` after the last fully classified candidate when later candidates remain. A candidate blocked after earlier page progress gets an inclusive cursor at that candidate and is retried with the next page's fresh byte budget. If no candidate was classified and the next source cannot fit within the remaining scan budget, the search returns
-`search_budget_too_small` with `error.required_bytes` and no new cursor; the required value is rounded up to a binary MiB and is also supplied in recovery arguments. Retry the same page with `--max-scan-bytes` at least that size, retaining the incoming `--cursor` if one was supplied; an initial page needs no cursor. Recovery arguments preserve the original query, filters, projection, and
-incoming cursor while changing the scan budget. Page size, `--max-scan-bytes`, and `--max-messages` may change between pages; search filters and `--exact-count` remain bound to the cursor. Tokens generated before this fingerprint change may require restarting the search. A cursor is omitted only when the candidate stream has reached its end or the page fails before progress.
+The first-install bootstrap in the README needs an independently trusted OpenSSL 3 because macOS `/usr/bin/openssl` is LibreSSL without Ed25519.
+It authenticates the exact `SHA256SUMS` bytes with the pinned public key, downloads the `darwin/arm64` archive only after that, checks the one expected archive entry and safe layout, and extracts or runs `install.sh` only after the archive digest matches.
 
-At a result-page boundary, body-search cursors advance to the last candidate actually examined, so sparse and dense matches do not rescan or skip the intervening candidate stream.
+The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` select other safe absolute paths.
+It rejects unsafe parent or destination symlinks and pre-existing backup paths.
+Both payloads are staged in their target parents, snapshotted, byte-compared and recorded in a mode-0600 transaction manifest before any live rename.
+A restart rolls back an incomplete transaction through snapshot- and identity-checked paths; a committed transaction removes only its own backups after both artifacts verify, and replaced artifacts are preserved.
+The installer never executes staged content, never deletes unrelated paths and never changes Full Disk Access, Automation consent, quarantine attributes or Gatekeeper settings.
 
-Search pagination uses bounded best-effort consistency because a SQLite snapshot cannot survive separate CLI processes. Every page exposes `coverage.consistency:"best_effort"` and a compact `coverage.index_revision`. Cursor v4 binds the query, store UUID, keyset position, and that revision; the decoder still accepts the supported v3 JSON/base64 cursor. MailCLI uses Mail's
-`WriteTransactionGeneration` property when available and a bounded Envelope Index/WAL metadata token otherwise; no corpus scan is added. Insert, delete, move, or store replacement invalidates continuation with `search_cursor_stale` or `invalid_cursor`, and a revision change during one page returns `search_index_changed`. Restart the search without a cursor after either index-change
-error. Unchanged stores replay across close/reopen. `.emlx` source replacement is outside the index revision, but source framing and identity revalidation mark the affected candidate missing or incomplete instead of treating the page as exhaustive. This is detectable invalidation, not snapshot isolation.
+Self-update, release installation and local source installation share the mode-0600 lock file `~/Library/Application Support/MailCLI/update.lock`.
+Every installer holds it from transaction scanning through verification, rollback and cleanup, and a live transaction is never treated as abandoned by age or PID.
+Direct installers use the macOS `lockf` interface and wait at most 30 seconds; the updater waits within its command context and passes its owned descriptor to the installer child.
+Lock files are never unlinked or stolen; invalid types, symlinks, extra hard links and replaced identities fail closed with recovery evidence kept.
+Ctrl-C targets the foreground process group; automation should signal the whole installer group.
 
-IMAP Message-ID resolution treats UID SEARCH as bounded candidate discovery, then fetches each candidate's `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` block and counts only exact normalized headers. Valid substring candidates are discarded; missing, duplicate, or malformed Message-ID headers fail closed with explicit identity evidence, and only the verified UID plus SELECT-time UIDVALIDITY
-reaches hydration or mutation. The search still rejects malformed, zero, overflowing, or duplicate UIDs, or more than one SEARCH response; it returns `imap_response_malformed` and discards the session. Duplicate UIDs are rejected rather than normalized so a server cannot silently alter mutation identity evidence.
+`scripts/build/install-local.sh [BINARY_DESTINATION]` builds the checkout and runs the same installer with that checkout as package root, publishing binary and skill together with the same lock, identity checks, rollback and recovery.
+The optional argument changes only the binary destination; `MAILCLI_SKILL_DESTINATION` redirects the skill.
 
-IMAP Message-ID inputs are normalized exactly once: a bare identifier receives both angle brackets, while a partially bracketed, empty, whitespace-containing, control-containing, or otherwise unbalanced identifier returns `invalid_imap_value` before connecting.
+### Self-update
 
-`sync --check` compares the complete local and server mailbox identity union. Each IMAP STATUS response must identify the requested mailbox and provide exactly one valid `MESSAGES`, `UNSEEN`, `UIDNEXT`, and `UIDVALIDITY` value. Missing, duplicated, unknown, overflowing, inconsistent, or malformed fields become per-mailbox `imap_response_malformed` failures; malformed sessions are
-discarded. LIST, STATUS, SELECT, SEARCH, and UID SEARCH retain semantic rejection codes only for parsed tagged `NO` or `BAD` replies; command cancellation, timeout, connection loss, and malformed tagged status use `imap_canceled`, `imap_timeout`, `imap_disconnected`, and `imap_response_malformed`. Recovery guidance allows retry for these read commands and keeps a potentially dispatched
-mutation observation-required until its outcome is proven. Matched entries carry both counts and their exact server wire name only when the local count is available; a cached local identity without a count remains `unresolved` with the server evidence and no delta. Local-only, server-only, inaccessible, and unresolved entries remain in the result with their known identity, availability
-flags, and typed failures; a zero local count never stands in for a missing local mailbox. A failed server LIST or an empty selectable server catalog makes coverage incomplete before mailbox pairing. Human and JSON output always retain every checked mailbox plus every typed account- or mailbox-level failure and explicitly report completeness. Default incomplete checks remain exit 0 for
-compatibility. Automation that requires exhaustive coverage must use `sync --check --require-complete`: complete results exit 0, incomplete results exit 3 with the same `ok:true` result payload, runtime failures exit 1 with `ok:false`, and invalid flag combinations exit 2. `--require-complete` without `--check` is invalid.
+`mailcli update` queries the public latest-release endpoint, compares strict `MAJOR.MINOR.PATCH` versions, requires the exact `darwin/arm64` archive plus `SHA256SUMS` and `SHA256SUMS.sig`, and verifies the signature before downloading or trusting the archive.
+Metadata, asset and redirect URLs must use exact trusted GitHub hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`), HTTPS on the default port and at most 10 redirects.
+Credentials, fragments, malformed URLs, untrusted hosts, alternate ports and HTTP downgrades fail with `update_host_untrusted`, `update_url_invalid`, `update_url_invalid_port`, `update_url_insecure`, `update_redirect_invalid` or `update_redirect_limit`, which never echo rejected URLs, credentials or paths.
+The archive is authenticated in memory before the shared lock; after acquiring it, the updater reads the installed version and reports an equal or newer installation without reinstalling, and no network request happens while the lock is held.
+Extraction rejects traversal, links, unexpected roots, oversized expansion and excess entries, and validates Mach-O architecture, code signature and embedded version.
+`codesign --verify --strict` only proves a kernel-acceptable arm64 signature; byte authenticity comes from the Ed25519 and `SHA256SUMS` chain.
+The installer pins the binary's SHA-256 and the skill tree digest once and compares every staged and installed artifact against them.
+Its subprocess strips shell startup and function-injection variables and ambient `MAILCLI_INSTALL_PACKAGE_ROOT`, runs in a private process group, and on cancellation receives `SIGTERM` with a five-second grace before descendants are force-cleaned.
+Interactive mode shows progress; `--json` emits exactly one envelope.
 
-`messages filter` and `messages search` without `--query` plan candidates through one parameterized query against the existing Envelope Index. Account, mailbox, sender, recipient, subject, date, read, and flagged constraints are resolved entirely in that metadata query. The `--attachment` constraint additionally inspects each candidate's authoritative MIME source because Mail's
-attachment catalog can lag behind a fully downloaded message. Attachment-only queries never open a candidate whose catalog count is positive: the count proves `--attachment true` and disproves `--attachment false` without I/O, reported as catalog-proven coverage; catalog-zero candidates keep the MIME scan either way. Partial or missing sources are excluded as unknown and make coverage
-incomplete. Results use deterministic received-date and row-ID ordering. Query-bound cursors reject filter changes and store replacement.
+After an installation attempt, errors keep `data.update_result` with `binary_path`, `latest_version`, `updated` and `failed_phase` (`installer`, `installed_binary_verification`, `package_cleanup`, `update_lock_validation` or `update_lock_close`).
+`updated:true` and `effect_certainty:"complete"` require a verified installed version; an installer or verification error without it reports `unknown`, while cleanup or lock errors after verification report `complete`.
+Recovery inspects `mailcli version --json` and never reruns the installer or assumes rollback.
 
-Metadata-only `messages filter` and `messages search` pages fetch the requested page plus one continuation candidate and run no candidate-count query by default. Their default `candidate_messages` is that observed lower bound, and `candidate_messages_exact` is true only when no continuation candidate remains. `messages search --query TEXT` then performs an on-demand, stateless MIME scan
-over only the metadata candidates in scope. Two bounded workers stream each authoritative `.emlx` source, decode text/plain or text/html, skip decoding non-text part bodies so attachment names stay searchable without paying transfer-decode, and retain no corpus after the process exits. The first scan window is sized to the requested page, doubles only after a window without a match, and
-never exceeds 64 candidates. Matching text is collapsed into one pre-sized buffer, repeated query terms are deduplicated, nonmatching attachment filters avoid building search text, and the next cursor reuses the matched store row instead of decoding and scanning result references. A full result page stops loading further candidate chunks; the cursor remains anchored at the last
-classified candidate, and a bounded keyset lookahead is used only when the loaded prefix is fully classified. The default body path runs no candidate-count query: it derives continuation and coverage from streamed rows plus at most one keyset lookahead. `--exact-count` adds one explicit bounded count probe for either metadata or body search after the current cursor. Body probes cover at
-most `max-messages + 1` rows; metadata filters use the normalized default bound because `--max-messages` remains a body-search option. A larger set fails with `search_count_limit_exceeded` before body scanning. `--max-messages` defaults to 50,000 and is capped at 100,000; it bounds body candidate scanning and the exact-count probe for metadata filters. `--max-scan-bytes` defaults to 4
-GiB and is capped at 8 GiB. These limits bound work rather than pretending that arbitrary full-text search is instant; narrow account, mailbox, sender, date or subject scope for large stores.
+Installer, updater, preflight and release-state version probes set `MAILCLI_OUTPUT=human` locally, so plain `mailcli MAJOR.MINOR.PATCH` checks work across old and new binaries.
+To upgrade through an older updater or installer, run `MAILCLI_OUTPUT=human mailcli update` or `MAILCLI_OUTPUT=human /absolute/path/install.sh`; an old updater without that setting may reject the new piped JSON version output.
 
-Every search page includes `data.page.coverage`: backend, candidate messages, candidate-count exactness, scanned messages and bytes, full sources, partial sources, missing sources, catalog-proven messages (`catalog_proven_messages`, attachment-only candidates decided by the catalog without opening the source), and `complete`. Metadata-only default candidate totals are observed lower
-bounds from the page plus one continuation row; they become exact when that query returns no continuation or when `--exact-count` completes its bounded count. Body `candidate_messages` is the observed lower bound unless `candidate_messages_exact` is true because stream exhaustion or explicit bounded counting proved the total. Body results are complete only when the candidate total is
-exact, every candidate was classified, and no source was partial or missing; reaching a result, message, or byte bound keeps coverage incomplete and continuation resumable. Known source problems (`message_source_missing`, invalid EMLX framing, or an `ENOENT`-class open error) degrade only that candidate to missing coverage and let the rest of the page complete; unexpected open failures
-still abort the search. Pagination over body hits also reports page-level incompleteness until the final page, so an agent cannot mistake a page for an exhaustive result. No refresh command exists because MailCLI maintains no index.
+A shared version string does not establish artifact identity: HEAD, `origin/main`, local `dist/`, the checkout binary, the installed binary and both skills can differ.
+`scripts/tests/report-release-state.sh` compares the source version, HEAD, local and optional origin tag, current-version `dist/` assets, checkout and installed binary, installed skill and optional GitHub release independently and read-only; `--strict` makes drift fail and `--remote-required` includes the live GitHub release.
 
-`messages.list`, `messages.filter`, and `messages.search` accept opt-in `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `size`, and `attachment_count`; filter and search also accept `snippet`. Every projected message keeps `ref` and `mailbox_ref`; projected pages include `next_cursor` only when continuation is available, and
-filter/search keep the complete coverage object. Use `--fields all` alone to retain every default page field; unknown or duplicate fields fail before a store read. Omitting `--fields` preserves the current page schema.
+## Architecture
 
-### Setup and usage
+### Package boundaries
 
-Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas. Execute that argv with the retained binary before using uninspected parameters, or request `--for IDS --schemas --json` to inline complete canonical schemas. Effects, confirmation, dependencies, result states, referenced limits and the policies those commands use remain directly available.
-Unscoped discovery retains all inline schemas; `--schemas` requires `--for`. Output trees are opt-in through `--outputs`, with or without `--for`: each command's `schema.output` describes its `data` payload with `$ref` pointers into `data.capabilities.$defs`, projection variants and success requirements; `$defs.error` and `$defs.envelope` describe the shared envelope.
+1. `cmd/mailcli` owns process startup, resource finalization and process-level output routing.
+   It creates one invocation-owned direct transport graph, injects it into the mail service and local store client, and closes the IMAP pool before the local store.
+2. `internal/cli` owns command parsing, validation, output selection, exit codes and confirmation policy.
+3. `internal/mail` owns typed use cases, filters, drafts, send claims, outcome semantics, and local filesystem I/O for drafts, claims, attachments, account bindings and advisory locks.
+   Mail-store access and SMTP/IMAP operations go through the injected `Gateway` and `SendTransport` dependencies, whose adapters stay in `internal/mailstore` and `internal/transport`.
+   It consumes the failure-classification predicates in `internal/transport/classification.go` and the transport-neutral `ServerMutationOutcome` vocabulary on `ServerMutationEvidence` instead of comparing transport codes; `internal/mailstore` maps wire results to that vocabulary.
+4. `internal/mailstore` owns the zero-Apple-Events read path: read-only Envelope Index access, safe mailbox mapping, `.emlx` parsing, attachment extraction, on-demand search, reference revalidation and store-based mutation observation.
+5. `internal/mailapp` owns the optional Mail.app integration: `doctor --live` and Mail's local sync; its fallback gateway is read-only.
+6. `internal/compose` owns the visible AppKit handoff without Apple Events or sending.
+7. `internal/transport` owns provider endpoint resolution, SMTP submission with STARTTLS, IMAP Sent mirroring, IMAP mutations (STORE, COPY, MOVE with COPY plus EXPUNGE fallback, delete to Trash), bounded hydration, STATUS checks and LIST discovery.
+8. `internal/mailref` owns opaque store-bound references and cursors; `internal/keychain` stores the per-account password under the `mailcli-smtp` service.
 
-`--outputs` also publishes the error catalog `data.capabilities.error_codes`, one entry per code with `code`, `meaning`, `commands` and `guidance` groups
-(`commands`, `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `next`). With `--for`, entries are restricted to the selected commands. Guidance is the runtime
-classification of the bare code; a live envelope's `error.guidance` and `next` stay authoritative because retained evidence can refine them. `internal/cli/error_codes.go` is
-the single definition of codes, meanings and emitting commands; a test fails when production code emits an undeclared code or the catalog keeps a removed one.
+Within `internal/mail`, draft use cases own service-level create, read, update, discard and handoff operations.
+Their supporting responsibilities are bounded reference-ordered pagination and directory revision checks; streaming metadata reads and skipped-string validation; pure input, content, address, and resource validation; bounded JSON state files and atomic publication; references, leases, and mutation cleanup; send/save claim encoding, validation, and transitions; attachment fingerprints and snapshot checks; envelope and Sent-message identity fingerprints; replayable MIME spools and transport adapters; direct SMTP/IMAP delivery helpers and recipient normalization; send and reconciliation orchestration; retained historical native-save reconciliation; stale-draft, orphan-lock, and orphan-claim/spool/snapshot cleanup; and shared cancellation and lock-wait classification.
+Service entrypoints depend on these helpers, and those helpers do not call back into CLI, store, or one another through new package cycles; each responsibility has one implementation.
 
-The companion skill uses a compact `skills/mailcli/SKILL.md` entrypoint and seven portable operational guides under `skills/mailcli/references/`. Read the guide for the current action and request `capabilities --for COMMAND_ID --json` for one command or `capabilities --for ID,ID,... --json` for a known multi-command workflow; use family discovery only when the exact command set is
-unknown and retain inspected contracts for the same binary identity. Follow each command's credential, network, store, and Mail.app dependencies; local draft work and direct sending do not trigger unrelated store diagnostics. Default detail views retain completeness and replay evidence; explicit field projections return selected values and any required evidence fields. Header-only
-message projections read only the bounded RFC header block, while attachment listing scans MIME metadata without retaining normalized body text or HTML. Explicit detail projections/exports keep selected responses bounded. Batch input and JSON output are bounded. Agent batch-read examples set per-item `view:"metadata"` by default; the CLI also defaults to metadata unless request-level
-read defaults select another projection, and `--max-bytes` bounds the complete response. Source and release installations copy the entire skill tree. The gate validates every linked Markdown guide from the repository and both isolated installed trees, rejects links outside the skill, and enforces a 4000-byte entrypoint budget and a 25000-byte complete-package budget, including
-non-Markdown assets. Repository-only installer/cache helpers are optional checkout tools, not installed-skill prerequisites.
+Main libraries are `github.com/emersion/go-message` for streaming MIME, Goldmark for Markdown, `golang.org/x/net/html` for sanitization and text extraction, and `github.com/mattn/go-sqlite3` for one strict read-only connection.
+No service, daemon, process-global cache, watcher, child process or goroutine survives an invocation; `osascript`, the update installer and an external editor each run in a private process group that is reaped and checked, and a process-start failure never becomes a send claim.
 
-Requirements are macOS on Apple silicon, the exact Go version declared in `go.mod` for development, `/System/Applications/Mail.app`, `/usr/bin/osascript`, and at least one account already configured in Mail.app. Grant Full Disk Access to the calling host for reads. Grant Automation access to Mail only when live diagnostics, `sync` without `--check`, or fallback listing is needed.
+### IMAP transport
 
-`scripts/build/install-local.sh [BINARY_DESTINATION]` builds the source checkout and invokes the shared release installer with that checkout as its package root. The transaction stages and verifies the native binary and `skills/mailcli` together, then publishes both with the same lock, identity checks, rollback, and interrupted-install recovery used by packaged releases. The binary
-defaults to `~/.local/bin/mailcli`; the skill defaults to `~/.agents/skills/mailcli` and can be redirected with `MAILCLI_SKILL_DESTINATION`. The optional positional argument changes only the binary destination. The source wrapper rejects more than one argument and refuses unsafe package roots or destination paths before publication. Skill discovery is host-specific; see the [agent skill
-installation paths](../README.md#agent-skill). Self-update ignores skill-destination overrides and refreshes the canonical installation; a host-supported link follows that target, while a separate copy requires its original installer and destination override.
+IMAP sessions use a bounded pool keyed by exact host, port and username: the CLI default is two authenticated TLS connections per account, while `imapclient.NewWithOptions` accepts one through eight; the CLI has no flag to change it.
+Reads may overlap on separate sessions; APPEND and every mutation take the full account gate and exclude reads and each other.
+Repeated selected-state reads can reuse SELECT on an idle session, while mutations and FETCH re-SELECT and verify UIDVALIDITY; I/O failures discard the session, and waits observe cancellation.
+`Close` makes pending waiters return `imap_timeout`, waits for owned operations, then logs out and closes every session.
+Credential changes use `InvalidateCredentials`: idle sessions close, in-flight operations drain, and the next operation authenticates with current credentials; passwords never enter session identity, logs or state.
+`imapclient.OperationContracts` is the package source of truth, and `mailcli capabilities --json` publishes the same contract.
 
-`scripts/benchmarks/run-performance-evidence.sh` runs the reproducible performance matrix for MIME composition, attachment verification and streaming, MIME search parsing, generated-store metadata/body search and lifecycle, 25-row list-summary scans, 10k/100k mailbox-list query plans, the catalog shortcut, rich-content preparation, draft metadata pagination, generated raw-source builder
-allocation and latency, and loopback IMAP STATUS/FETCH concurrency. Rich-content fixtures cover repeated tags, rich HTML, plain text, links, captioned tables, Markdown, depth and large text beneath removed wrappers. It fixes `GOMAXPROCS=4`, input shapes, benchtime, and repetition counts; prints the exact environment and raw `ns/op`, `B/op`, and `allocs/op`; and reports nearest-rank
-p50/p95 across repeated run means. The `mailbox-list-plan` group compares forced CTE and production label-probe paths for first and later 25-message pages, with labels absent or present; it runs one 20-operation sample set per case and reports operation-level `sample_p50_ns` and `sample_p95_ns`. Run `--group NAME` to execute one named matrix group; the default runs the full matrix.
-Generated-store groups report the fixture message count, SQLite index bytes, and summed EMLX source bytes with their summary. The 600-message fixture covers two active accounts, three indexed mailboxes, an exact 25-message page and a complete message read; fixture creation is outside timed operations, and a newly created fixture does not imply a cold OS page cache. The `open_warm_cache`
-group measures the first Store.Open after writing that fixture without evicting OS page-cache entries. Allocation medians are sorted independently from latency samples. The environment includes compiler flags, CGO and staged or unstaged worktree changes. Ownership fixtures cover ordinary, empty, heavily trimmed and untrimmed large text plus single, repeated and distinct diagnostics.
-Their raw `retained_B` metric is the net process heap change after GC with the result kept alive; runtime noise makes it unsuitable as an exact object-size assertion. Cumulative `B/op`, retained heap and peak RSS are separate measurements. Every path uses generated fixtures or loopback fake servers, so the runner never opens Mail.app, reads the user's Mail store, loads credentials, or
-contacts a mail provider.
+| IMAP operation | Class | Concurrency | Session ownership | Mailbox selection | UIDVALIDITY |
+|---|---|---|---|---|---|
+| LIST | read | shared_account | pooled | none | not_used |
+| STATUS | status | shared_account | pooled | none | observed |
+| SEARCH | read | shared_account | pooled | reuse_or_select | observed |
+| FETCH | fetch | shared_account | pooled | fresh_select | required_match |
+| APPEND | mutation | exclusive_account | dedicated | fresh_select | not_used |
+| STORE, COPY, MOVE, DELETE | mutation | exclusive_account | pooled | fresh_select | required_match |
+| CLOSE | close | exclusive_client | all_pooled | none | not_used |
 
-```bash
-./scripts/tests/test.sh
-./scripts/benchmarks/run-performance-evidence.sh
-./scripts/build/build.sh
-./scripts/release/build-release.sh "${VERSION:?set to the release version}"
-./scripts/tests/test-live-responsiveness.sh
-./scripts/build/install-local.sh
-command -v mailcli
-mailcli update
-mailcli doctor --live --json
-./bin/mailcli doctor
-./bin/mailcli doctor --live
-./bin/mailcli version --json
-./bin/mailcli accounts list --json
-./bin/mailcli mailboxes list --json
-./bin/mailcli mailboxes resolve --account ACCOUNT_REF --path Gesendet --json
-./bin/mailcli messages list --mailbox MBX_REF --limit 10 --json
-./bin/mailcli messages filter --mailbox MBX_REF --read false --attachment true --json
-./bin/mailcli messages get --ref MSG_REF --json
-./bin/mailcli messages raw --ref MSG_REF
-./bin/mailcli messages thread --ref MSG_REF --json
-./bin/mailcli messages thread --ref MSG_REF --cursor THREAD_NEXT_OR_PREV_CURSOR --json
-./bin/mailcli attachments list --ref MSG_REF --json
-./bin/mailcli attachments save --ref MSG_REF --attachment ATTACHMENT_ID --output /absolute/path/file.pdf --json
-printf '%s' '{"operation":"read","concurrency":2,"items":[{"id":"first","ref":"MSG_REF"},{"id":"second","ref":"OTHER_MSG_REF"}]}' | ./bin/mailcli batch --input - --json
-printf '%s' '{"from":"me@example.com","to":[{"address":"recipient@example.com"}],"cc":[],"bcc":[],"subject":"Subject","body":"Readable plain text.\n","attachments":[]}' | ./bin/mailcli drafts create --input - --json
-./bin/mailcli drafts create --account ACCOUNT_REF --from alias@icloud.com --to recipient@example.com --subject Subject --body 'Readable plain text.' --json
-./bin/mailcli drafts create --to recipient@example.com --subject Subject --body-file /absolute/path/body.md --format markdown --json
-./bin/mailcli drafts inspect --ref DRAFT_REF --view full --json
-./bin/mailcli drafts preview --ref DRAFT_REF --preview-format plain
-./bin/mailcli send setup --from me@example.com
-./bin/mailcli drafts send --ref DRAFT_REF --expected-revision REVIEWED_REVISION --confirm --json
-./bin/mailcli drafts handoff --ref DRAFT_REF
-./bin/mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt ATTEMPT_ID --outcome opened --confirm --json
-./bin/mailcli drafts open --ref MAIL_DRAFT_MESSAGE_REF --json
-./bin/mailcli drafts reconcile --ref RETAINED_DRAFT_REF --json
-./bin/mailcli drafts prune --json
-printf '%s' '{"body":"Thanks.\n"}' | ./bin/mailcli messages reply --ref MSG_REF --input - --all --json
-printf '%s' '{"to":[{"address":"recipient@example.com"}],"body":"For your review.\n"}' | ./bin/mailcli messages forward --ref MSG_REF --input - --json
-./bin/mailcli messages mark --ref MSG_REF --read true --flagged false --json
-./bin/mailcli messages move --ref MSG_REF --mailbox MBX_REF --json
-./bin/mailcli messages copy --ref MSG_REF --mailbox MBX_REF --json
-./bin/mailcli messages delete --ref MSG_REF --confirm --json
-./bin/mailcli messages delete --ref DRAFT_MSG_REF --confirm --allow-draft --json
-./bin/mailcli sync --json
-./bin/mailcli messages search --query "project update" --after 2026-08-01 --json
-./bin/mailcli messages search --sender example.com --attachment true --json
-```
+The CLI requires a cross-process mutation lock per credential-free host, port and username identity (`imap-mutations-<hash>.lock` in the MailCLI state directory).
+A mutation waits up to 30 seconds under contention and reports `imap_account_busy` (transient, no effect, retry allowed) only when that bound expires.
+Directory, lock-client or lock-file setup failures return `imap_mutation_lock_unavailable` before dispatch with `phase:validation`, `retryability:user_input_required` and `recovery.action:correct`, naming the directory when known; read-only commands stay usable.
+`drafts send` preflights lock setup before SMTP with one nonblocking attempt that counts a current holder as valid and reserves nothing.
+Reads and hydration never take the mutation lock.
+`MAILCLI_IMAP_MUTATION_LOCK=off` (or `0`, `false`, `no`) is the explicit process-local opt-out; library callers opt in through `imapclient.ClientOptions.MutationLockDir`, and platforms without advisory `flock` return the same unavailable error.
 
-The fast default (`scripts/tests/test.sh`) checks the exact staged product: changed-source formatting/shell syntax, configured lint, changed Go packages and their transitive reverse dependencies through normal, internal-test and external-test imports, applicable documentation contracts, and registered shell checks. Baseline and staged graphs preserve deletion/rename dependency coverage;
-module changes select actual affected consumers. Fast checks omit vulnerability scanning. No gate, CI run or full proof uses the race detector;
-run `scripts/tests/run-race-tests.sh [PACKAGE...]` manually when a race check is wanted. The integrated full suite (`scripts/tests/test.sh --full`) checks that every repository shell script is executable and parses, then runs `gofmt`, module verification, one configured `golangci-lint` pass (errcheck, govet, ineffassign, staticcheck and unused), blocking `govulncheck`,
-coverage tests, forbidden-path architecture checks, commit/release authority checks, and isolated release, source installation, and skill-validation tests. Repository/package identity is checked only through temporary package and installation roots; the gate never reads or writes the user's `~/.agents/skills/mailcli`. Use `scripts/tests/report-skill-drift.sh` separately for a real
-installation; it is read-only and reports match, missing, mismatch, or unstable state with reconciliation guidance. The documentation contract test additionally pins every shared operational bound (page limits, search caps, byte budgets, timeouts, pool sizes) to one normalized value wherever it appears in `README.md`, this document, the skill guides, and the implementing scripts or exported
-constants, so a changed number in any single file fails the suite. MIME regression tests lock parsed Parts, To/CC roles, BCC parsing and wire exclusion, multipart alternatives, attachment structure, and reply threading. `scripts/tests/test-commit-authority.sh` detects its own `git add`/`git commit` fixtures, proves a failing child test's exact status reaches the orchestrator while the
-later commit-step sentinel remains absent, and rejects staging or commit commands in every other repository script and workflow. It defaults to `GOMAXPROCS=4` and four concurrent Go packages, and the full suite
-runs its shell regressions in one ordered lane beside the Go checks; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` accept positive-integer overrides. With explicit `--full-checks`, opt-in live stages run last: `MAILCLI_LIVE_TESTS` (live Mail-store tests),
-`MAILCLI_KEYCHAIN_LIVE` (live Keychain round trip), and `MAILCLI_LIVE_RESPONSIVENESS` (Mail responsiveness gate) — and each unset flag prints an explicit skip line. Install the two external tools with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2` and `go install golang.org/x/vuln/cmd/govulncheck@v1.7.0`; the gate also accepts binaries from `$(go env
-GOPATH)/bin`. `go.mod` is the version source of truth. Build/test entry points select its exact version with invocation-scoped `GOTOOLCHAIN`, check actual `GOVERSION`, and reject conflicting overrides without changing global Go configuration. Vulnerability scanning uses text output because structured govulncheck output does not provide advisory failure status. Advisory findings fail;
-offline or unavailable scanning is incomplete, never a successful full proof. Targeted checks omit the scan and defer full verification to the integrated queue end.
+Tagged `NO` or `BAD` replies from LOGIN, LIST, SEARCH, UID SEARCH, STATUS, SELECT and APPEND expose `error.imap_rejection` with the command, status, leading response-code atom and the server text (512 UTF-8 bytes or less after control-character removal); response codes later in prose are not interpreted.
+`imap_command_rejected` is the default; LOGIN `NO` keeps `imap_auth_failed`, and only `NO [NONEXISTENT]` on a target-mailbox command and `NO [OVERQUOTA]` on APPEND map to `imap_mailbox_not_found` and `imap_quota_exceeded`.
+Only `NO [UNAVAILABLE]` permits retry for reads, and `BAD` is never automatically retryable.
+Cancellation, timeout, connection loss and malformed tagged status use `imap_canceled`, `imap_timeout`, `imap_disconnected` and `imap_response_malformed`; reads may retry these, while a possibly dispatched mutation stays observation-required.
+APPEND consumes 100 untagged responses or fewer before continuation within a cumulative 64 KiB wire budget; exceeding either returns `imap_resource_limit_exceeded` without sending message data.
+Local command-line validation writes no bytes; interrupted I/O discards the session.
 
-Keychain tests cover the Go wrapper, SecItem status mapping, and CoreFoundation string/data helpers without touching the login keychain; on darwin the real SecItem add/read/update/delete calls also run deterministically against an isolated temporary keychain pinned per query (`kSecUseKeychain`/`kSecMatchSearchList`), which mutates no session keychain state and requires no consent prompt.
-Compose Handoff is tested through a native seam without AppKit. AppKit remains the live/GUI wall.
+### Timeouts and budgets
 
-A historical package-local coverage inventory used `go test -count=1 -coverprofile=/tmp/mailcli-task164-final-cover.out ./...` followed by `go tool cover -func=/tmp/mailcli-task164-final-cover.out`. Its 2026-09-07 working-tree result was 75.7% aggregate: `cmd/mailcli` 71.0%, `cmd/mailcli-release-sign` 73.3%, `internal/cli` 74.2%, `internal/compose` 66.7%, `internal/keychain` 24.8%,
-`internal/mail` 74.5%, `internal/mailapp` 73.6%, `internal/mailref` 82.6%, `internal/mailstore` 77.1%, `internal/transport` 93.4%, `internal/transport/imapclient` 84.3%, and `internal/transport/smtpclient` 83.8%; `internal/releaseauth` contains constants and therefore has no statements. These dated percentages are an inventory, not acceptance targets or proof of current-HEAD coverage.
-The uncovered executable `main` functions are one-line `os.Exit` boundaries; their `run` functions are tested without terminating the test process, including a complete keygen/sign/verify dispatcher round trip. Direct transport delivery, draft reconciliation fallback evidence, materialization cloning, lock replacement, oversized IMAP responses, dial classification, and cause preservation
-have failable tests. The remaining zero-coverage Security.framework surface is limited to live-only paths, while `nativeComposeEmail` requires a live GUI AppKit sharing service; the SecItem calls run against the isolated test keychain so the suite cannot mutate user credentials or open compose windows.
+| Operation | Budget |
+| --- | --- |
+| Local message, raw-source and attachment reads | 60-second read budget, plus a separate 60 seconds for reference resolution |
+| IMAP hydration | 30-second setup budget plus the transfer budget; at the 64 MiB raw-source bound and a 1 MiB/s floor the maximum computes to a 94-second FETCH budget, 124 seconds with setup |
+| CLI hydration window | The outer CLI hydration command window is 254 seconds: 60 local read, 60 resolution, 124 hydration and a 10-second parse margin |
+| SMTP and IMAP commands | Short protocol commands and final replies use a 30-second budget |
+| SMTP DATA and IMAP APPEND | 30 seconds plus one second per MiB at a 1 MiB/s throughput floor, capped at 15 minutes |
+| Draft commands | 15 minutes for `drafts send` and `drafts reconcile`, two minutes for `drafts prune`, 15 seconds for `drafts edit` and `drafts discard` |
+| Draft update and handoff staging | 30 seconds plus one second per attachment MiB at the same floor, with the same 15-minute cap |
+| Handoff dispatch | fixed 10-second deadline |
+| Draft lock | two-second BSD `flock` per command and per prune candidate |
+| Mail.app access gate | acquisition capped at two seconds; 15-second cleanup grace before force-stop |
+| IMAP mutation lock | waits up to 30 seconds |
+| Installer lock | 30 seconds for direct installers |
+| Account-binding lock | two seconds |
+| Body search | 60-second command deadline |
+| Caches | mailbox catalog and IMAP LIST results for five minutes |
 
-`doctor` is non-invasive and checks the read store without Apple Events. `doctor --live` verifies the exact Mail process identity and asks for the Mail version through one read-only Apple Event; it never creates, saves, or sends a message. This is deliberate because Mail 16 can retain an invisible outgoing backend even after `close saving no`. Live gates are opt-in through environment
-flags on `scripts/tests/test.sh --full-checks`: `MAILCLI_LIVE_TESTS=1` adds the live Mail-store tests, `MAILCLI_KEYCHAIN_LIVE=1` adds the live Keychain round trip, and `MAILCLI_LIVE_RESPONSIVENESS=1` builds a fresh temporary binary and passes it through `MAILCLI_BINARY` and runs `test-live-responsiveness.sh` against one already-running verified Mail process with Automation permission;
-each unset flag prints an explicit skip line so the default suite prompts nothing live. The responsiveness gate preserves the exact Mail PID and baseline compose-object count and rejects residual processes or repository handles. Body search is bounded per invocation with `--max-messages`, `--max-scan-bytes`, and a 60-second command deadline. Deletion requires `--confirm`; draft mutations
-require `--allow-draft`. Native scripted save attempts remain blocked, `drafts send` delivers over SMTP/IMAP without Mail.app, direct `drafts reconcile` recovers retained transport claims over IMAP with local claim cleanup, and legacy baseline reconciliation remains store-backed.
+Caller cancellation and earlier parent deadlines always take precedence, and timeout and cancellation errors state that no external mutation was attempted where that is proven.
 
-Missing-source recovery uses a message reference's optional catalog-to-server IMAP UID and mailbox mapping when the mapping can be checked against the live row and mailbox-local `Info.plist` UIDVALIDITY. That path can hydrate a missing EMLX source without reading its body. If the mapping is absent or its UIDVALIDITY evidence is unavailable, an IMAP transport may run one bounded
-mailbox-scoped metadata search using exact subject and sender criteria, then fetch only `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)]`; one exact candidate yields a UID and SELECT-time UIDVALIDITY, while ambiguity returns `imap_ambiguous_message_id`, stale evidence returns `stale_reference`, and insufficient evidence returns `imap_message_uid_unknown`. Discovery is capped at 128
-UIDs, never scans the account, and never guesses from a similar message. A renamed server mailbox remains `imap_mailbox_not_found`. Successful hydration updates the returned summary reference with the verified UID and UIDVALIDITY.
+## Development
 
-Read identity and source failures are non-replayable until their cause is corrected. `invalid_reference` means the caller supplied a malformed opaque ref; obtain a current ref from the matching MailCLI listing command and do not edit tokens manually. `ambiguous_reference` means a Mail.app account or mailbox path did not resolve uniquely; refresh the corresponding listing and retry with a
-current ref only after one target resolves. `stale_cursor` means the Mail.app page boundary changed or its prior offset disappeared; restart that listing without the stale cursor and continue with the fresh `next_cursor`. `account_reference_version_unsupported` means this build cannot decode a local catalog account-ref version; use a compatible MailCLI build and preserve the catalog
-entry. `account_reference_corrupt` and mixed `account_reference_invalid` are terminal catalog-integrity failures that require inspection, not guessed replacement refs. `imap_message_uid_unknown` requires refreshing the local catalog or using a fresh Message-ID-backed ref with verified mailbox UID. `imap_ambiguous_message_id` can stop read hydration before FETCH; resolve the ambiguous
-message matches or refresh to a uniquely verified UID and UIDVALIDITY before retrying. Its diagnostic describes refused identity resolution, not a refused mutation. `raw_source_partial` means no complete raw source was available; finish the download in Mail.app or use a configured targeted IMAP source, then retry only with a verified complete source. `mail_busy`,
-`mail_automation_timeout`, and `mail_process_changed` prove the read was not dispatched or was a read-only probe, so retry is safe. Origin-ambiguous read errors such as `imap_mutation_failed`, `imap_sent_mailbox_not_found`, `mail_error`, `bridge_cleanup_failed`, `mail_automation_failed`, other doctor/probe failures, and internal `invalid_request` require inspection and must not be
-replayed. `mail_store_path_mismatch` and `content_export_changed` require terminal inspection of the store or export identity; do not replay unchanged input. Retained submission, mutation, APPEND, or partial-effect evidence always takes precedence over these read classifications.
+Build with `./scripts/build/build.sh`; it writes `bin/mailcli` unless `MAILCLI_BUILD_OUTPUT` names another destination.
+`./scripts/tests/test.sh` checks the exact staged change: changed-source formatting and shell syntax, configured lint, changed Go packages and their transitive reverse dependencies, applicable documentation contracts, and registered shell checks; it omits vulnerability scanning.
+`./scripts/tests/test.sh --full` is the integrated non-live suite: shell script checks, `gofmt`, module verification, one configured `golangci-lint` pass (errcheck, govet, ineffassign, staticcheck and unused), blocking `govulncheck`, coverage tests, forbidden-path architecture checks, commit and release authority checks, and isolated release, source-installation and skill-validation tests.
+`--push-check` validates a matching full proof without publishing.
+It runs four Go packages concurrently with `GOMAXPROCS=4` and runs the shell regressions in one ordered lane beside the Go checks; `MAILCLI_TEST_CPUS` and `MAILCLI_TEST_PACKAGES` accept positive-integer overrides.
+No gate, CI run or full proof uses the race detector; run `scripts/tests/run-race-tests.sh [PACKAGE...]` manually when a race check is wanted.
+Install the tools with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2` and `go install golang.org/x/vuln/cmd/govulncheck@v1.7.0`; binaries in `$(go env GOPATH)/bin` are accepted.
+`go.mod` is the version source of truth: entry points select its exact version with invocation-scoped `GOTOOLCHAIN`, check `GOVERSION` and reject conflicting overrides.
+Vulnerability findings fail, and offline or unavailable scanning is incomplete, never a successful full proof.
 
-### Technical baseline
+Live stages run only with `--full-checks` and explicit flags: `MAILCLI_LIVE_TESTS=1` (live Mail-store tests), `MAILCLI_KEYCHAIN_LIVE=1` (live Keychain round trip) and `MAILCLI_LIVE_RESPONSIVENESS=1` (a fresh temporary binary passed as `MAILCLI_BINARY` to `test-live-responsiveness.sh` against the running Mail process with Automation permission); each unset flag prints a skip line.
+Ordinary verification contacts no user Keychain, native compose UI, Mail store or installed skill directory, and does not verify live provider authentication, delivery, Mail.app scripting or visible AppKit handoff.
+Keychain tests run the real SecItem calls against an isolated temporary keychain, and handoff is tested through a native seam without AppKit.
+The documentation contract test pins every shared operational bound (page limits, search caps, byte budgets, timeouts, pool sizes) to one value wherever `README.md`, this document, the skill guides and the implementing scripts or constants state it.
 
-Test binaries are isolated: skill-drift checks always build fresh into their own temporary root; source-install checks run real scripts from a private source copy and exercise failure cleanup without changing checkout assets. The opt-in responsiveness gate builds into temporary `MAILCLI_BUILD_OUTPUT` and passes it as `MAILCLI_BINARY`.
+`scripts/tests/test-release.sh` is the repeatable `darwin/arm64` release harness: exact Go pin, required tools, module integrity, native packaging, generated-key signing, checksum verification, archive contents, installation and SIGKILL rollback recovery in a temporary directory and home; `--staging-only` runs the staging regressions alone.
+`scripts/tests/test-install-local.sh` checks the source wrapper against isolated destinations, `scripts/tests/test-skill-drift.sh` checks skill packaging without the user's skill directory, and `scripts/tests/test-bootstrap.sh` proves that tampered manifests, signatures, keys, archives and entries never reach extraction or execution.
+`scripts/tests/test-release-authority.sh` rejects publication commands in normal scripts and workflows, `scripts/tests/test-commit-authority.sh` rejects staging and commit commands outside its fixtures, and the full suite snapshots branch, remote-tracking and tag refs around release verification.
+The CI workflow (`.github/workflows/ci.yml`) is optional and starts only through manual `workflow_dispatch`, with no automatic push or pull-request runs.
+Its one ARM64 job on `macos-26` asserts Darwin/arm64, runs `go build ./...`, and invokes the shared full gate `scripts/tests/test.sh --full`.
+Actions use immutable commit SHAs, the exact `go.mod` toolchain is restored and verified, and the job holds only `contents: read` with no push, tag, release or GitHub API step.
+Use focused checks during development; the final integrated local full proof runs when the owner requests it, and online CI is requested explicitly for an independent environment check.
 
-The verified development host is macOS 15.6.1 on `darwin/arm64`, Mail 16.0 build 3826.700.81, and Go 1.27.0. The supported Mail store generation is the `V10` directory. Discovery inventories all numeric generation directories before opening a database; a newer directory beside `V10` requires an active-generation marker in `PersistenceInfo.plist`, and an unresolved or duplicate candidate
-set fails with a typed generation error. Library callers may set `Config.MailStorePath` to an exact `V10` directory, which is still validated for regular `MailData/Envelope Index` files. The supported Envelope Index profile is store version `4`, minor version `74003`, WAL journal mode, and a valid store UUID; `3826.700.81` is the verified `last_write_framework_version`. Required schema
-properties must be unique and readable; duplicate, malformed, missing, or unsupported profile values fail closed with `unsupported_mail_store_schema` before message queries, and unknown property keys remain ignored for forward-compatible metadata. Every required table column and index is capability-checked before the profile is accepted at all. Only a differing framework stamp degrades
-rather than fails: when version, minor version, UUID, and all schema capabilities verify, reads continue with the profile marked `unverified`. Whenever an opened store profile exists, every JSON envelope carries `data.store_profile` with `state`, `framework_version`, and `supported_framework_version`; the unverified state adds `code:"store_profile_unverified"`, human output prints one
-`store_profile_unverified` warning, and `doctor` reports the distinct `mail-store-profile` check as verified or unverified. The degraded state is read-only evidence; it implies no write access, no mutation relaxation, and no trust in unverified layout details. Store version, minor version, UUID, column, index, and property drift still fail closed before message queries.
+`scripts/utils/mailcli-preflight.sh capabilities` caches a valid `capabilities` envelope in an owner-only cache keyed by binary SHA-256, schema and selected command set; `invalidate` removes the entries for the current binary.
+`doctor` results use the same identity with a five-minute freshness bound for healthy checks, failed envelopes are never cached, and `doctor --live` always runs immediately before an Apple Events operation.
 
-Directory enumeration is never authoritative because Mail can retain stale or partial filesystem sources. Store rows select candidates, safe mailbox mapping resolves their sources, and every result reports whether the corresponding local content is complete. Spotlight is not a required dependency; full-text search uses the deterministic on-demand MIME scanner and never creates another
-persistent index.
-
-Mailbox catalogs are parsed in-process from bounded, descriptor-opened XML property lists, memoized once per Store lifetime (repeated mailbox-identity checks cost one table scan per process), and every catalog copy serves identity matching only while message membership stays live in SQL. Mailstore clients cache the catalog per client for five minutes, clone returned mailbox values, and
-invalidate that cache on close or configuration changes; malformed or over-bounded cache files retain typed diagnostics. EMLX frames likewise require a bounded XML plist trailer with one `plist` root, one `dict` object, strict nesting, and no trailing document content; root version `1.0` is checked when present while Mail-compatible namespace and extra-attribute forms remain accepted.
-Only Mail's binary account-ordering preference requires one `plutil` extraction, and the store-opening context bounds that child process to 15 seconds. `version`, `update`, capabilities, help, command help, unknown commands and subcommands, local draft create/list/inspect/preview/edit/update/discard/prune, sending, credential setup, and visible handoff bypass Mail-store configuration,
-SQLite, and `plutil` initialization entirely. Reply and forward creation need the Mail store for the source header block and write only local draft files. Mailbox enumeration launches no per-account conversion processes. On the supported release host, process-inclusive `drafts list --json` peak RSS fell from 10.13-10.45 MB to 6.59-6.78 MB after the original local-command boundary was
-enforced. The expanded boundary reduced repeated reply validation, blocked save, and unknown-subcommand paths from about 13 ms to about 5-7 ms per process. These figures are host-specific reference measurements.
-
-Release acceptance requires isolated process-inclusive metadata-list p95 below 50 ms and metadata-search p95 below 100 ms on the supported host profile. Direct-store list, filter, and search operations must produce no measurable Mail process CPU increase. On-demand body search is separately bounded by candidate and byte limits because its cost depends on the selected corpus and source
-completeness. SMTP submission and IMAP APPEND use a 30 s budget per short command or final reply; each encoded DATA or APPEND transfer adds one second per MiB at a conservative 1 MiB/s floor, capped at 15 min, and the caller context always wins. A DATA transfer failure before the SMTP terminator attempt reports `smtp_data_incomplete`, including a live-context transfer-budget timeout;
-after the terminator attempt, an unreadable final reply reports `smtp_submission_unknown`. Draft lock acquisition is always capped at two seconds independently of the outer command deadline. Draft send and reconcile use a 15-minute outer deadline, draft prune uses two minutes, and discard and edit use 15 seconds. Draft update and handoff staging scale with attachment bytes under the same
-1 MiB/s floor model, while handoff dispatch keeps a fixed 10-second deadline.
-
-The implementation uses `github.com/emersion/go-message` for streaming RFC 5322/MIME parsing, Goldmark for Markdown, `golang.org/x/net/html` for allowlist sanitization and safe text extraction, `golang.org/x/sync/errgroup` for the bounded two-worker body scan, `golang.org/x/sys/unix` for descriptor-relative macOS opens and terminal sizing, Unicode normalization from `golang.org/x/text`,
-and `github.com/mattn/go-sqlite3` for one strict read-only SQLite connection. Terminal tables use a compact in-process display-cell implementation for CJK, combining characters, emoji modifiers, ZWJ sequences, and flag pairs instead of linking another width database. The visible handoff links AppKit directly into the same binary, so it needs no helper executable, shell, UI coordinates,
-or Apple Event. Incomplete-content hydration uses IMAP, not Mail scripting. Mail scripting serves account and mailbox fallbacks, default sync, and explicit live probes; its supported operations are checked against the installed scripting definition. Cross-process serialization uses BSD `flock`; each potentially large bridge request is a private temporary file rather than an `ARG_MAX`-bounded
-process argument, and `osascript`, the update installer, and an external draft editor each run in a private
-process group that is synchronously reaped and checked. A process-start failure never becomes a send claim. No service, daemon, process-global cache, watcher, child process, or goroutine survives a CLI invocation.
-
-Copy avoidance follows ownership boundaries: immutable search strings and builder results can be reused, buffered JSON/header fragments are consumed before refill, and large MIME/FETCH data streams through owned replayable sources. Escaped JSON output, transfer encoding, TLS and mutable-to-owned return values still need copies. No unsafe string/slice alias, global large-buffer pool or
-custom SIMD is used. Byte scanning uses standard-library primitives, including the Go arm64 vectorized byte search; additional SIMD is not justified by the measured paths.
-
-The release target is a native `darwin/arm64` binary packaged with the companion skill and verified installer. The stripped release executable (size reported by `scripts/tests/test-release.sh`, kept minimal, not capped) ships direct SMTP/IMAP send transport, RFC 5322 MIME composition, and macOS Keychain credentials without external runtime dependencies. The HTML
-sanitizer deliberately reuses `golang.org/x/net/html` instead of adding a CSS-capable sanitizer dependency, saving about 83 KiB in the final executable and reducing parser surface. More aggressive C optimization, dynamic SQLite linking, executable packing, or delegating HTTPS to external tools is deliberately excluded because a marginal size win is not worth weaker diagnostics,
-host-dependent behavior, slower startup, or reduced update reliability.
+`scripts/benchmarks/run-performance-evidence.sh` runs the reproducible performance matrix: MIME composition, attachment verification and streaming, search parsing, generated-store list, filter, search and lifecycle, mailbox-list query plans, rich-content preparation, draft pagination, raw-source building, mutation-account resolution and loopback IMAP STATUS/FETCH concurrency.
+It fixes `GOMAXPROCS=4`, input shapes and repetitions, prints the environment and raw `ns/op`, `B/op` and `allocs/op`, and reports p50 and p95; `--group NAME` runs one group.
+Every path uses generated fixtures or loopback fake servers and never opens Mail.app, reads the user's store, loads credentials or contacts a provider.
+Release acceptance targets isolated process-inclusive metadata-list p95 below 50 ms and metadata-search p95 below 100 ms on the supported host, with no measurable Mail process CPU increase from direct-store operations.

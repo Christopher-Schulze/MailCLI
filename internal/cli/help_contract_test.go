@@ -165,7 +165,7 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, composition, _ := strings.Cut(string(manual), "### Composition\n")
+	_, composition, _ := strings.Cut(string(manual), "\n## Drafts and composition\n")
 	composition, _, _ = strings.Cut(composition, "\n### ")
 	for _, caveat := range []string{"Mail 16", "transport_unsupported_provider", "handoff"} {
 		if !strings.Contains(composition, caveat) {

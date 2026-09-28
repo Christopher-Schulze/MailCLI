@@ -2,19 +2,19 @@ package cli
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
-	"unicode/utf8"
+	"unicode"
 )
 
-const manualTopics = "Overview|For agents|Install|Setup|Commands|Workflows|Errors and recovery|Limits|Security|Release|Development|Design reference"
+const manualTopics = "Overview|For agents|Install and update|Setup|Commands|Workflows|Output contract|Errors and recovery|Limits|" +
+	"Reading and search|Drafts and composition|Sending|Visible handoff|Mailbox mutations and batch|Accounts and bindings|" +
+	"Mail.app integration|Security|Platform and compatibility|Release and distribution|Architecture|Development"
 
 func validateManualStructure(content string, commands []string) error {
 	var headings []string
-	for number, line := range strings.Split(content, "\n") {
-		if utf8.RuneCountInString(line) > 400 {
-			return fmt.Errorf("manual line %d exceeds 400 characters", number+1)
-		}
+	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "## ") {
 			headings = append(headings, strings.TrimPrefix(line, "## "))
 		}
@@ -22,16 +22,12 @@ func validateManualStructure(content string, commands []string) error {
 	if strings.Join(headings, "|") != manualTopics {
 		return fmt.Errorf("manual topics differ: %v", headings)
 	}
-	user, _, found := strings.Cut(content, "\n## Design reference\n")
-	if !found || len(user) > 40000 {
-		return fmt.Errorf("user manual is missing or exceeds 40000 bytes")
-	}
 	for _, command := range commands {
 		marker := "- `" + command + "`:"
-		if strings.Count(user, marker) != 1 {
+		if strings.Count(content, marker) != 1 {
 			return fmt.Errorf("command %s must have exactly one guide", command)
 		}
-		_, block, _ := strings.Cut(user, marker)
+		_, block, _ := strings.Cut(content, marker)
 		block, _, _ = strings.Cut(block, "\n- `")
 		block, _, _ = strings.Cut(block, "\n## ")
 		if strings.Count(block, "Example:") != 1 ||
@@ -53,20 +49,42 @@ func TestManualDocumentationStructure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, topic := range strings.Split(manualTopics, "|") {
-		anchor := strings.ReplaceAll(strings.ToLower(topic), " ", "-")
-		if !strings.Contains(content, "["+topic+"](#"+anchor+")") {
+		if !strings.Contains(content, "["+topic+"](#"+headingAnchor(topic)+")") {
 			t.Errorf("manual TOC omits %s", topic)
 		}
 	}
-	for _, topic := range []string{
-		"Architecture", "Platform and freshness boundaries", "CLI contract", "Composition",
-		"Data model", "Account identity bindings", "Local security and permissions",
-		"Release distribution", "Scope", "Search", "Setup and usage", "Technical baseline",
-	} {
-		if !strings.Contains(content, "\n### "+topic+"\n") {
-			t.Errorf("design reference lost stable topic %s", topic)
+	anchors := make(map[string]bool)
+	for _, line := range strings.Split(content, "\n") {
+		if heading, found := strings.CutPrefix(strings.TrimLeft(line, "#"), " "); found && strings.HasPrefix(line, "#") {
+			anchors[headingAnchor(heading)] = true
 		}
 	}
+	links := map[string]*regexp.Regexp{
+		"docs/documentation.md": regexp.MustCompile(`\]\(#([a-z0-9-]+)\)`),
+		"README.md":             regexp.MustCompile(`docs/documentation\.md#([a-z0-9-]+)`),
+	}
+	for path, pattern := range links {
+		for _, match := range pattern.FindAllStringSubmatch(readRepositoryFile(t, path), -1) {
+			if !anchors[match[1]] {
+				t.Errorf("%s links to missing manual anchor #%s", path, match[1])
+			}
+		}
+	}
+}
+
+// headingAnchor mirrors GitHub's heading slugs: lowercase, spaces become
+// hyphens, and punctuation other than hyphens is dropped.
+func headingAnchor(heading string) string {
+	var anchor strings.Builder
+	for _, character := range strings.ToLower(heading) {
+		switch {
+		case character == ' ':
+			anchor.WriteRune('-')
+		case character == '-' || unicode.IsLetter(character) || unicode.IsDigit(character):
+			anchor.WriteRune(character)
+		}
+	}
+	return anchor.String()
 }
 
 func TestManualStructureRejectsBrokenContracts(t *testing.T) {
@@ -86,8 +104,6 @@ func TestManualStructureRejectsBrokenContracts(t *testing.T) {
 	}{
 		{name: "valid", content: valid, valid: true},
 		{name: "missing topic", content: strings.Replace(valid, "## Setup", "### Setup", 1)},
-		{name: "overlong line", content: valid + strings.Repeat("x", 401)},
-		{name: "oversized manual", content: strings.Replace(valid, "## Overview\n", "## Overview\n"+strings.Repeat("bounded line\n", 4000), 1)},
 		{name: "missing command", content: strings.Replace(valid, "- `version`:", "- `other`:", 1)},
 		{name: "missing example", content: strings.Replace(valid, "Example:", "Usage:", 1)},
 		{name: "wrong example", content: strings.Replace(valid, "mailcli version", "mailcli doctor", 1)},

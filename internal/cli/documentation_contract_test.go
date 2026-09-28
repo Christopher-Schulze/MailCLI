@@ -676,7 +676,7 @@ var documentedBounds = []documentedBound{
 	{name: "transport command budget", expected: int64(transport.TransferCommandBudget / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
 			boundCheck("docs/documentation.md", `final replies use a (\d+)-second`, 1),
-			boundCheck("docs/documentation.md", `— (\d+) seconds plus one second`, 1),
+			boundCheck("docs/documentation.md", `(\d+) seconds plus one second`, 1),
 		}},
 	{name: "transport transfer cap", expected: int64(transport.TransferBudgetCap / time.Second), unit: "seconds",
 		checks: []documentedBoundCheck{
