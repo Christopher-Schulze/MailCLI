@@ -147,6 +147,9 @@ All commands share the [Output contract](#output-contract); the selected capabil
 - Excerpts prefer text/plain over HTML text, drop `>` quote lines and a signature after an exact `-- ` line, collapse whitespace and cut at a rune boundary.
   Each reads 256 KiB of RFC source or less (a local prefix, or an IMAP `BODY.PEEK[]<0.262144>` partial fetch only when the local source is partial); larger or missing sources report `excerpt_complete:false`.
   Unrequested keys are empty; empty or false means unknown, not absence.
+- A malformed `In-Reply-To` or `References` value keeps every valid msg-id but sets `threading_complete:false`.
+  When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.
+  A page enriches at most four messages at a time in row order and reads no more than 8 MiB of excerpt source in total; later rows get `enrichment_error:"enrichment_page_budget_exhausted"` and can be fetched on a smaller page.
 - `messages.get`: read projected metadata, recipients, body and attachment metadata; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`, `--excerpt-length`.
   Its summary always carries the threading fields; `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.
@@ -338,7 +341,7 @@ A relative, existing or symlinked destination or a non-directory parent fails be
 `mailcli capabilities --json` is the authoritative discovery contract and opens neither the Mail store nor Mail.app.
 The outer envelope stays at schema version 1; the nested manifest has `data.capabilities.schema_version:2`.
 It reports release identity and, per command, `audience` (`human` for `drafts.edit`, `agent` otherwise), effect class, confirmation requirement, local `store_dependency`, typed `dependencies`, result states and `limit_refs`.
-Each `dependencies` entry is `{kind,target,condition}`: `kind` is `network`, `credential` or `app`; `target` is `imap`, `smtp`, `github-release`, `keychain`, `mail-app`, `editor` or `system-compose-service`; `condition` is `always`, `if-local-source-incomplete`, `if-local-attachment-bytes-unavailable`, `if-local-store-unavailable`, `if-batch-item-requires-imap`, `if-sync-check`, `if-sync-default`, `if-doctor-live`, `if-send`, `if-smtp-accepted` or `if-transport-claim-needs-imap-reconciliation`.
+Each `dependencies` entry is `{kind,target,condition}`: `kind` is `network`, `credential` or `app`; `target` is `imap`, `smtp`, `github-release`, `keychain`, `mail-app`, `editor` or `system-compose-service`; `condition` is `always`, `if-local-source-incomplete`, `if-enrichment-source-incomplete` (list, filter and search with `--with-threading` or `--with-excerpt`), `if-local-attachment-bytes-unavailable`, `if-local-store-unavailable`, `if-batch-item-requires-imap`, `if-sync-check`, `if-sync-default`, `if-doctor-live`, `if-send`, `if-smtp-accepted` or `if-transport-claim-needs-imap-reconciliation`.
 An empty array means no external dependency.
 
 Each `commands[].schema` publishes a stable ID and version (`@v1` except `batch@v2`) with flags, value types, defaults, bounds, enums, required markers, positional arguments and incompatible-input constraints; draft and batch schemas also describe their JSON input and item fields, and the batch schema publishes request-level `defaults` with `view` and `fields`.

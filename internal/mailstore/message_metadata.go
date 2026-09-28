@@ -14,24 +14,36 @@ import (
 
 func (c *Client) EnrichMessage(ctx context.Context, ref string, request mail.MessageEnrichmentRequest) (mail.MessageSummary, error) {
 	var summary mail.MessageSummary
+	// The first local or remote failure is reported per row instead of being
+	// hidden behind threading_complete:false or excerpt_source:unavailable.
+	noteFailure := func(err error) {
+		if err != nil && summary.EnrichmentError == "" {
+			summary.EnrichmentError = hydrationErrorCode(err)
+		}
+	}
 	if request.Threading {
 		// No full-source fallback: production transports implement headers.
 		local, err := c.store.GetMessageWithIntent(ctx, ref, mail.MessageReadIntentHeaders)
-		if err == nil {
+		switch {
+		case err == nil:
 			summary.MessageID = local.Summary.MessageID
 			mail.ApplyThreadingHeaders(&summary, local.Headers)
-		} else if safeTargetedFallback(err) {
-			if _, ok := c.send.ImapClient().(transport.MessageHeaderFetcher); ok {
-				headers, _, remoteErr := c.hydrateMessageHeaders(ctx, ref)
-				if remoteErr == nil {
-					summary.MessageID = headers.MessageID
-					mail.ApplyThreadingHeaders(&summary, headers.Raw)
-				}
+		case !safeTargetedFallback(err):
+			noteFailure(err)
+		default:
+			if _, ok := c.send.ImapClient().(transport.MessageHeaderFetcher); !ok {
+				noteFailure(err)
+			} else if headers, _, remoteErr := c.hydrateMessageHeaders(ctx, ref); remoteErr != nil {
+				noteFailure(remoteErr)
+			} else {
+				summary.MessageID = headers.MessageID
+				mail.ApplyThreadingHeaders(&summary, headers.Raw)
 			}
 		}
 	}
 	if request.Excerpt {
-		data, complete, source := c.excerptSource(ctx, ref)
+		data, complete, source, sourceErr := c.excerptSource(ctx, ref)
+		noteFailure(sourceErr)
 		summary.ExcerptSource = source
 		if source != mail.ExcerptSourceUnavailable {
 			text, parsed := excerptText(ctx, data)
@@ -42,33 +54,37 @@ func (c *Client) EnrichMessage(ctx context.Context, ref string, request mail.Mes
 	return summary, ctx.Err()
 }
 
-func (c *Client) excerptSource(ctx context.Context, ref string) ([]byte, bool, mail.ExcerptSource) {
+// excerptSource returns the bounded source and, when a read or fetch failed,
+// that failure even if a partial local source still produced an excerpt.
+func (c *Client) excerptSource(ctx context.Context, ref string) ([]byte, bool, mail.ExcerptSource, error) {
 	if c.store == nil {
-		return nil, false, mail.ExcerptSourceUnavailable
+		return nil, false, mail.ExcerptSourceUnavailable, nil
 	}
 	data, complete, localPartial, err := c.store.readExcerptSource(ctx, ref)
 	if !excerptNeedsRemote(err, localPartial) {
 		if err != nil {
-			return nil, false, mail.ExcerptSourceUnavailable
+			return nil, false, mail.ExcerptSourceUnavailable, err
 		}
-		return data, complete, mail.ExcerptSourceLocal
+		return data, complete, mail.ExcerptSourceLocal, nil
 	}
-	fetcher, supported := c.send.ImapClient().(transport.MessagePrefixFetcher)
-	if supported {
+	remoteErr := err
+	if fetcher, supported := c.send.ImapClient().(transport.MessagePrefixFetcher); supported {
 		target, targetErr := c.resolveImapTarget(ctx, ref)
+		remoteErr = targetErr
 		if targetErr == nil {
 			fetchCtx, cancel := hydrationFetchContext(ctx, mail.MaximumExcerptSourceBytes)
 			defer cancel()
-			remote, remoteErr := fetcher.FetchMessagePrefix(fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, mail.MaximumExcerptSourceBytes)
+			var remote []byte
+			remote, remoteErr = fetcher.FetchMessagePrefix(fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, mail.MaximumExcerptSourceBytes)
 			if remoteErr == nil && int64(len(remote)) <= mail.MaximumExcerptSourceBytes {
-				return remote, int64(len(remote)) < mail.MaximumExcerptSourceBytes, mail.ExcerptSourceIMAPPartial
+				return remote, int64(len(remote)) < mail.MaximumExcerptSourceBytes, mail.ExcerptSourceIMAPPartial, nil
 			}
 		}
 	}
 	if err == nil {
-		return data, complete, mail.ExcerptSourceLocal
+		return data, complete, mail.ExcerptSourceLocal, remoteErr
 	}
-	return nil, false, mail.ExcerptSourceUnavailable
+	return nil, false, mail.ExcerptSourceUnavailable, remoteErr
 }
 
 // excerptNeedsRemote allows an IMAP partial fetch only when local content is

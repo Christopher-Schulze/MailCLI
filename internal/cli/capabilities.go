@@ -39,6 +39,7 @@ type dependencyCondition string
 const (
 	dependencyConditionAlways                                  dependencyCondition = "always"
 	dependencyConditionIfLocalSourceIncomplete                 dependencyCondition = "if-local-source-incomplete"
+	dependencyConditionIfEnrichmentSourceIncomplete            dependencyCondition = "if-enrichment-source-incomplete"
 	dependencyConditionIfLocalAttachmentBytesUnavailable       dependencyCondition = "if-local-attachment-bytes-unavailable"
 	dependencyConditionIfLocalStoreUnavailable                 dependencyCondition = "if-local-store-unavailable"
 	dependencyConditionIfBatchItemRequiresIMAP                 dependencyCondition = "if-batch-item-requires-imap"

@@ -17,7 +17,10 @@ func TestReplyMetadataHeaders(t *testing.T) {
 	}{
 		{"folded and comments", "From: =?UTF-8?Q?J=C3=B6rg?= <Local@EXAMPLE.COM>\r\nIn-Reply-To: <a@b>, (ignore <bad@id>) <c@d>\r\nReferences: <first@x>\r\n\t(second (nested)) <next@x>, <last@x>\r\n\r\n", []string{"<a@b>", "<c@d>"}, []string{"<first@x>", "<next@x>", "<last@x>"}, Recipient{Name: "Jörg", Address: "Local@example.com"}, true},
 		{"missing", "From: person@example.com\n\n", []string{}, []string{}, Recipient{Address: "person@example.com"}, true},
-		{"malformed ID", "In-Reply-To: <broken\r\nReferences: (unclosed <x@y>\r\n\r\n", []string{}, []string{}, Recipient{}, true},
+		// Malformed values make threading incomplete instead of claiming "no reply".
+		{"malformed ID", "In-Reply-To: <broken\r\nReferences: (unclosed <x@y>\r\n\r\n", []string{}, []string{}, Recipient{}, false},
+		{"valid IDs kept beside broken ones", "In-Reply-To: <a@b> <nodomain>\r\nReferences: <x@example.com> <broken@example.com\r\n\r\n", []string{"<a@b>"}, []string{"<x@example.com>"}, Recipient{}, false},
+		{"stray closing parenthesis", "References: <x@y>) <z@y>\r\n\r\n", []string{}, []string{"<x@y>", "<z@y>"}, Recipient{}, false},
 		{"header boundary missing", "From: a@b\r\n", []string{}, []string{}, Recipient{Address: "a@b"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -74,12 +74,12 @@ func runMessagesQuery(
 		}
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
+	summaries := make([]*mail.MessageSummary, len(page.Messages))
 	for index := range page.Messages {
-		summary, enrichErr := service.EnrichMessage(operationCtx, page.Messages[index].Summary, *enrichment)
-		if enrichErr != nil {
-			return failCommand(command, *jsonOutput, enrichErr, stdout, stderr)
-		}
-		page.Messages[index].Summary = summary
+		summaries[index] = &page.Messages[index].Summary
+	}
+	if err := enrichSummaries(operationCtx, service, summaries, *enrichment); err != nil {
+		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
 		pageData := searchResponsePage(&page)

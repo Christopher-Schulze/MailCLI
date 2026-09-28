@@ -649,6 +649,8 @@ type MessageSummary struct {
 	Excerpt           string                  `json:"excerpt"`
 	ExcerptComplete   bool                    `json:"excerpt_complete"`
 	ExcerptSource     ExcerptSource           `json:"excerpt_source"`
+	// EnrichmentError names why requested threading or excerpt data is missing.
+	EnrichmentError string `json:"enrichment_error,omitempty"`
 }
 type MarkMessageRequest struct {
 	Ref                string

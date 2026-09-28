@@ -244,9 +244,13 @@ func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 		"accounts.list":     {{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
 		"mailboxes.list":    {},
 		"mailboxes.resolve": {},
-		"messages.list":     {{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
-		"messages.filter":   {},
-		"messages.search":   {},
+		"messages.list": {
+			{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+		},
+		"messages.filter": enrichmentDependencies,
+		"messages.search": enrichmentDependencies,
 		"messages.get": {
 			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
 			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},
@@ -333,6 +337,7 @@ func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 	}
 	validConditions := map[dependencyCondition]struct{}{
 		dependencyConditionAlways: {}, dependencyConditionIfLocalSourceIncomplete: {},
+		dependencyConditionIfEnrichmentSourceIncomplete:      {},
 		dependencyConditionIfLocalAttachmentBytesUnavailable: {}, dependencyConditionIfLocalStoreUnavailable: {},
 		dependencyConditionIfBatchItemRequiresIMAP: {}, dependencyConditionIfSyncCheck: {},
 		dependencyConditionIfSyncDefault: {}, dependencyConditionIfDoctorLive: {},

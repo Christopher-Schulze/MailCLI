@@ -342,7 +342,11 @@ func runMessagesList(ctx context.Context, service *mail.Service, args []string, 
 	if err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
-	if err := enrichMessagePage(operationCtx, service, page.Messages, *enrichment); err != nil {
+	summaries := make([]*mail.MessageSummary, len(page.Messages))
+	for index := range page.Messages {
+		summaries[index] = &page.Messages[index]
+	}
+	if err := enrichSummaries(operationCtx, service, summaries, *enrichment); err != nil {
 		return failCommand("messages.list", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput && projection != nil {

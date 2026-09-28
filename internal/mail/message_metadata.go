@@ -62,6 +62,7 @@ func (s *Service) EnrichMessage(ctx context.Context, summary MessageSummary, req
 	if request.Excerpt {
 		summary.Excerpt, summary.ExcerptComplete, summary.ExcerptSource = metadata.Excerpt, metadata.ExcerptComplete, metadata.ExcerptSource
 	}
+	summary.EnrichmentError = metadata.EnrichmentError
 	return summary, nil
 }
 
@@ -140,10 +141,16 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	summary.ThreadingComplete = complete
 	for _, field := range fields {
 		switch strings.ToLower(field.Name) {
-		case "in-reply-to":
-			summary.InReplyTo = append(summary.InReplyTo, scanMessageIDs(field.Value)...)
-		case "references":
-			summary.References = append(summary.References, scanMessageIDs(field.Value)...)
+		case "in-reply-to", "references":
+			ids, valid := scanMessageIDs(field.Value)
+			if !valid {
+				summary.ThreadingComplete = false
+			}
+			if strings.EqualFold(field.Name, "in-reply-to") {
+				summary.InReplyTo = append(summary.InReplyTo, ids...)
+			} else {
+				summary.References = append(summary.References, ids...)
+			}
 		case "from":
 			if summary.From.Address != "" {
 				continue
@@ -160,8 +167,11 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	}
 }
 
-func scanMessageIDs(value string) []string {
+// scanMessageIDs returns every well-formed msg-id in order and reports whether
+// the whole value parsed; a malformed part never hides the valid IDs.
+func scanMessageIDs(value string) ([]string, bool) {
 	ids := []string{}
+	valid := true
 	var cleaned strings.Builder
 	depth := 0
 	escaped := false
@@ -183,7 +193,8 @@ func scanMessageIDs(value string) []string {
 		}
 		if character == ')' {
 			if depth == 0 {
-				return []string{}
+				valid = false
+				continue
 			}
 			depth--
 			continue
@@ -193,7 +204,7 @@ func scanMessageIDs(value string) []string {
 		}
 	}
 	if depth != 0 || escaped {
-		return []string{}
+		valid = false
 	}
 	remaining := cleaned.String()
 	for {
@@ -204,16 +215,18 @@ func scanMessageIDs(value string) []string {
 		remaining = remaining[start+1:]
 		end := strings.IndexByte(remaining, '>')
 		if end < 0 {
-			return []string{}
+			return ids, false
 		}
 		token := remaining[:end]
 		at := strings.LastIndexByte(token, '@')
 		if at > 0 && at < len(token)-1 && !strings.ContainsAny(token, "<>\r\n\t ,") {
 			ids = append(ids, "<"+token+">")
+		} else {
+			valid = false
 		}
 		remaining = remaining[end+1:]
 	}
-	return ids
+	return ids, valid
 }
 
 func BuildExcerpt(text string, length int) string {

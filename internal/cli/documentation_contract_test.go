@@ -94,7 +94,7 @@ func TestCapabilityDependencyDocumentationMatchesRuntimeContract(t *testing.T) {
 	}
 	documentation := readRepositoryFile(t, "docs/documentation.md")
 	for _, condition := range []string{
-		"if-local-source-incomplete", "if-local-attachment-bytes-unavailable",
+		"if-local-source-incomplete", "if-enrichment-source-incomplete", "if-local-attachment-bytes-unavailable",
 		"if-local-store-unavailable", "if-batch-item-requires-imap", "if-sync-check",
 		"if-sync-default", "if-doctor-live", "if-send", "if-smtp-accepted",
 		"if-transport-claim-needs-imap-reconciliation",

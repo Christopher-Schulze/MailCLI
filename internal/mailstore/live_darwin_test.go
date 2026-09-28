@@ -39,6 +39,43 @@ func TestLiveStoreCapabilities(t *testing.T) {
 	}
 }
 
+// Read-only: enriches the five newest inbox rows and checks only the shape;
+// no message content is logged.
+func TestLiveReplyMetadataShape(t *testing.T) {
+	if os.Getenv("MAILCLI_LIVE_TESTS") != "1" {
+		t.Skip("set MAILCLI_LIVE_TESTS=1 for the local Mail store gate")
+	}
+	config, err := DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig() error = %v", err)
+	}
+	store, err := Open(context.Background(), config)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	closeTestResource(t, store, "live Mail store")
+	client := &Client{store: store}
+	page, err := client.ListMessages(context.Background(), mail.ListMessagesRequest{Limit: 5})
+	if err != nil || len(page.Messages) == 0 {
+		t.Fatalf("ListMessages() rows=%d error=%v", len(page.Messages), err)
+	}
+	request := mail.MessageEnrichmentRequest{Threading: true, Excerpt: true, ExcerptLength: 80}
+	for index, message := range page.Messages {
+		summary, err := client.EnrichMessage(context.Background(), message.Ref, request)
+		if err != nil {
+			t.Fatalf("row %d: EnrichMessage() error = %v", index, err)
+		}
+		if summary.ExcerptSource == "" || (summary.ExcerptSource == mail.ExcerptSourceUnavailable && summary.EnrichmentError == "") {
+			t.Fatalf("row %d: source=%q enrichment_error=%q", index, summary.ExcerptSource, summary.EnrichmentError)
+		}
+		for _, id := range append(append([]string{}, summary.InReplyTo...), summary.References...) {
+			if !strings.HasPrefix(id, "<") || !strings.HasSuffix(id, ">") || !strings.Contains(id, "@") {
+				t.Fatalf("row %d: malformed reply ID shape", index)
+			}
+		}
+	}
+}
+
 func TestLiveClientListsSendersWithoutAutomation(t *testing.T) {
 	if os.Getenv("MAILCLI_LIVE_TESTS") != "1" {
 		t.Skip("set MAILCLI_LIVE_TESTS=1 for the local Mail store gate")

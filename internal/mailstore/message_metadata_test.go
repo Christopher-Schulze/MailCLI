@@ -62,6 +62,20 @@ func TestExcerptUsesCompleteLargeLocalSourceWithoutIMAP(t *testing.T) {
 	}
 }
 
+func TestEnrichmentReportsTheFailureInsteadOfHidingIt(t *testing.T) {
+	store, _, _ := newLargeReadIntentFixture(t, 1024)
+	client := &Client{store: store}
+	for _, request := range []mail.MessageEnrichmentRequest{
+		{Threading: true, ExcerptLength: 240},
+		{Excerpt: true, ExcerptLength: 240},
+	} {
+		result, err := client.EnrichMessage(context.Background(), "msg_not-a-reference", request)
+		if err != nil || result.EnrichmentError == "" || result.ThreadingComplete || result.Excerpt != "" {
+			t.Fatalf("request=%+v result=%+v err=%v", request, result, err)
+		}
+	}
+}
+
 func TestExcerptDecodedTextCap(t *testing.T) {
 	text, complete := excerptText(context.Background(), []byte("Content-Type: text/plain\r\n\r\n"+strings.Repeat("x", int(mail.MaximumExcerptSourceBytes))))
 	if complete || int64(len(text)) > mail.MaximumExcerptSourceBytes {

@@ -7,7 +7,9 @@ import (
 	"mailcli/internal/mail"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -104,5 +106,75 @@ func TestRealStoreMessageExcerptAndOrderedHeaders(t *testing.T) {
 	headers := captureOutputFixture(t, service, "messages", "get", "--ref", ref, "--fields", "header_fields")
 	if !strings.Contains(string(headers), `"header_fields":[{"name":"From"`) {
 		t.Fatalf("ordered headers=%s", headers)
+	}
+}
+
+type enrichmentProbeGateway struct {
+	testGateway
+	inFlight, peak atomic.Int32
+}
+
+func (g *enrichmentProbeGateway) EnrichMessage(_ context.Context, ref string, request mail.MessageEnrichmentRequest) (mail.MessageSummary, error) {
+	current := g.inFlight.Add(1)
+	defer g.inFlight.Add(-1)
+	for peak := g.peak.Load(); current > peak && !g.peak.CompareAndSwap(peak, current); peak = g.peak.Load() {
+	}
+	time.Sleep(20 * time.Millisecond)
+	summary := mail.MessageSummary{MessageID: "<" + ref + "@example.com>", ThreadingComplete: request.Threading}
+	if request.Excerpt {
+		summary.Excerpt, summary.ExcerptSource = "text", mail.ExcerptSourceLocal
+	}
+	return summary, nil
+}
+
+func enrichmentProbeRows(count int, size int64) []*mail.MessageSummary {
+	rows := make([]*mail.MessageSummary, count)
+	for index := range rows {
+		rows[index] = &mail.MessageSummary{Ref: "row" + strconv.Itoa(index), Size: size}
+	}
+	return rows
+}
+
+func TestEnrichSummariesKeepsOrderWithBoundedConcurrency(t *testing.T) {
+	gateway := &enrichmentProbeGateway{}
+	rows := enrichmentProbeRows(12, 1024)
+	request := mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: mail.DefaultExcerptLength}
+	if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, request); err != nil {
+		t.Fatal(err)
+	}
+	for index, row := range rows {
+		if row.MessageID != "<row"+strconv.Itoa(index)+"@example.com>" || !row.ThreadingComplete || row.EnrichmentError != "" {
+			t.Fatalf("row %d = %+v", index, row)
+		}
+	}
+	if peak := gateway.peak.Load(); peak > enrichmentConcurrency || peak < 2 {
+		t.Fatalf("peak concurrent enrichments = %d, want 2..%d", peak, enrichmentConcurrency)
+	}
+}
+
+func TestEnrichSummariesStopsAtThePageSourceBudget(t *testing.T) {
+	rows := enrichmentProbeRows(40, mail.MaximumExcerptSourceBytes)
+	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: mail.DefaultExcerptLength}
+	if err := enrichSummaries(context.Background(), mail.NewService(&enrichmentProbeGateway{}), rows, request); err != nil {
+		t.Fatal(err)
+	}
+	withinBudget := int(enrichmentPageSourceBytes / mail.MaximumExcerptSourceBytes)
+	for index, row := range rows {
+		enriched := row.ExcerptSource == mail.ExcerptSourceLocal && row.EnrichmentError == ""
+		skipped := row.ExcerptSource == "" && row.EnrichmentError == enrichmentBudgetExhausted
+		if (index < withinBudget && !enriched) || (index >= withinBudget && !skipped) {
+			t.Fatalf("row %d of %d-row budget = %+v", index, withinBudget, row)
+		}
+	}
+}
+
+func TestExcerptLengthHelpNamesTheCommandsSelector(t *testing.T) {
+	for command, want := range map[string]string{"get": "requires --fields excerpt", "search": "requires --with-excerpt", "list": "requires --with-excerpt"} {
+		var stdout, stderr bytes.Buffer
+		Run(context.Background(), newTestService(), []string{"messages", command, "--help"}, &stdout, &stderr)
+		help := stdout.String() + stderr.String()
+		if !strings.Contains(help, want) || (command == "get" && strings.Contains(help, "--with-excerpt")) {
+			t.Fatalf("messages %s help lacks %q: %s", command, want, help)
+		}
 	}
 }

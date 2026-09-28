@@ -99,6 +99,13 @@ func capabilityDependencyList(dependencies []commandDependency) []commandDepende
 // commandContracts stays ordered so the human and JSON manifests remain
 // deterministic. Every command ID is also resolved here for pre-dispatch
 // dependency checks.
+// enrichmentDependencies cover --with-threading and --with-excerpt, which fetch
+// headers or a bounded prefix over IMAP when the local source is incomplete.
+var enrichmentDependencies = []commandDependency{
+	{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+	{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+}
+
 var commandContracts = []commandContract{
 	{
 		ID: "capabilities", helpDescription: "Print the machine-readable command contract",
@@ -182,16 +189,21 @@ var commandContracts = []commandContract{
 		limitRefs:   []string{"maximum_page_size"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
-		dependencies:    []commandDependency{{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable}},
-		resultStates:    []string{"complete"},
-		mailService:     mailServiceAlwaysRequired,
-		published:       true,
+		dependencies: []commandDependency{
+			{Kind: dependencyKindApp, Target: dependencyTargetMailApp, Condition: dependencyConditionIfLocalStoreUnavailable},
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfEnrichmentSourceIncomplete},
+		},
+		resultStates: []string{"complete"},
+		mailService:  mailServiceAlwaysRequired,
+		published:    true,
 	},
 	{
 		ID: "messages.filter", handler: runMessagesFilter,
 		limitRefs:   []string{"maximum_page_size", "search_pagination_consistency", "search_cursor_detects_index_drift", "search_candidate_count_default", "search_exact_count_bounded"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
+		dependencies:    enrichmentDependencies,
 		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded"},
 		mailService:     mailServiceAlwaysRequired,
 		published:       true,
@@ -201,6 +213,7 @@ var commandContracts = []commandContract{
 		limitRefs:   []string{"maximum_page_size", "search_pagination_consistency", "search_cursor_detects_index_drift", "search_candidate_count_default", "search_exact_count_bounded"},
 		effectClass: "read", confirmation: "none",
 		storeDependency: "mail-store",
+		dependencies:    enrichmentDependencies,
 		resultStates:    []string{"complete", "partial", "search_cursor_stale", "search_index_changed", "search_count_limit_exceeded", "search_budget_too_small"},
 		mailService:     mailServiceAlwaysRequired,
 		published:       true,
