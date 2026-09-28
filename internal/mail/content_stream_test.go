@@ -192,18 +192,20 @@ func (renderer *bufferedReferenceRenderer) renderElement(node *html.Node) {
 	switch name {
 	case "a":
 		renderer.renderLink(node)
-	case "br", "hr":
+	case "br":
 		renderer.appendBreak()
+	case "hr":
+		renderer.appendParagraphBreak()
 	case "code":
 		renderer.codeDepth++
 		renderer.renderChildren(node)
 		renderer.codeDepth--
 	case "pre":
-		renderer.appendBlockBreak()
+		renderer.appendParagraphBreak()
 		renderer.preDepth++
 		renderer.renderChildren(node)
 		renderer.preDepth--
-		renderer.appendBlockBreak()
+		renderer.appendParagraphBreak()
 	case "ul", "ol":
 		renderer.renderList(node, name == "ol")
 	case "li":
@@ -215,13 +217,18 @@ func (renderer *bufferedReferenceRenderer) renderElement(node *html.Node) {
 	case "td", "th":
 		renderer.renderTableCell(node)
 	default:
-		if isPlainTextBlock(name) {
-			renderer.appendBlockBreak()
-		}
+		renderer.appendElementBreak(name)
 		renderer.renderChildren(node)
-		if isPlainTextBlock(name) {
-			renderer.appendBlockBreak()
-		}
+		renderer.appendElementBreak(name)
+	}
+}
+
+func (renderer *bufferedReferenceRenderer) appendElementBreak(name string) {
+	switch {
+	case isPlainTextParagraph(name):
+		renderer.appendParagraphBreak()
+	case isPlainTextBlock(name):
+		renderer.appendBlockBreak()
 	}
 }
 
@@ -250,12 +257,21 @@ func (renderer *bufferedReferenceRenderer) renderLink(node *html.Node) {
 	}
 }
 
+func (renderer *bufferedReferenceRenderer) appendListBreak(nested bool) {
+	if nested {
+		renderer.appendBlockBreak()
+		return
+	}
+	renderer.appendParagraphBreak()
+}
+
 func (renderer *bufferedReferenceRenderer) renderList(node *html.Node, ordered bool) {
-	renderer.appendBlockBreak()
+	nested := len(renderer.lists) > 0
+	renderer.appendListBreak(nested)
 	renderer.lists = append(renderer.lists, plainTextList{ordered: ordered, next: 1})
 	renderer.renderChildren(node)
 	renderer.lists = renderer.lists[:len(renderer.lists)-1]
-	renderer.appendBlockBreak()
+	renderer.appendListBreak(nested)
 }
 
 func (renderer *bufferedReferenceRenderer) renderListItem(node *html.Node) {
@@ -276,11 +292,12 @@ func (renderer *bufferedReferenceRenderer) renderListItem(node *html.Node) {
 }
 
 func (renderer *bufferedReferenceRenderer) renderTable(node *html.Node) {
-	renderer.appendBlockBreak()
+	nested := len(renderer.tables) > 0
+	renderer.appendListBreak(nested)
 	renderer.tables = append(renderer.tables, plainTextTable{})
 	renderer.renderChildren(node)
 	renderer.tables = renderer.tables[:len(renderer.tables)-1]
-	renderer.appendBlockBreak()
+	renderer.appendListBreak(nested)
 }
 
 func (renderer *bufferedReferenceRenderer) renderTableRow(node *html.Node) {
@@ -339,6 +356,12 @@ func (renderer *bufferedReferenceRenderer) appendText(value string) {
 	if renderer.tableCellDepth > 0 {
 		value = strings.ReplaceAll(value, "|", `\|`)
 	}
+	if strings.TrimSpace(value) == "" && renderer.preDepth == 0 && renderer.codeDepth == 0 && len(renderer.tokens) > 0 {
+		last := renderer.tokens[len(renderer.tokens)-1]
+		if last.lineBreak || last.blockBreak {
+			return
+		}
+	}
 	renderer.tokens = append(renderer.tokens, plainTextToken{
 		text: value, preserve: renderer.preDepth > 0 || renderer.codeDepth > 0,
 		block: renderer.preDepth > 0,
@@ -357,11 +380,21 @@ func (renderer *bufferedReferenceRenderer) appendBreak() {
 	renderer.linePrefix = false
 }
 
+func (renderer *bufferedReferenceRenderer) appendParagraphBreak() {
+	if renderer.linePrefix {
+		return
+	}
+	if len(renderer.tokens) > 0 && renderer.tokens[len(renderer.tokens)-1].blockBreak {
+		return
+	}
+	renderer.tokens = append(renderer.tokens, plainTextToken{blockBreak: true})
+}
+
 func (renderer *bufferedReferenceRenderer) appendBlockBreak() {
 	if renderer.linePrefix {
 		return
 	}
-	if len(renderer.tokens) > 0 && renderer.tokens[len(renderer.tokens)-1].lineBreak {
+	if len(renderer.tokens) > 0 && (renderer.tokens[len(renderer.tokens)-1].lineBreak || renderer.tokens[len(renderer.tokens)-1].blockBreak) {
 		return
 	}
 	if len(renderer.tokens) > 0 {

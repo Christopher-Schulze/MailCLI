@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,14 @@ func TestPrepareDraftContent(t *testing.T) {
 		wantError bool
 	}{
 		{name: "plain", source: "Hello\n", wantPlain: "Hello\n"},
-		{name: "markdown", format: DraftBodyMarkdown, source: "**Hello**\n\n- One\n- Two\n", wantPlain: "Hello\n- One\n- Two", wantHTML: "<strong>Hello</strong>"},
+		{name: "markdown", format: DraftBodyMarkdown, source: "**Hello**\n\n- One\n- Two\n", wantPlain: "Hello\n\n- One\n- Two", wantHTML: "<strong>Hello</strong>"},
+		{name: "markdown paragraphs", format: DraftBodyMarkdown, source: "Hello,\n\nthis is a **review test** draft.\n\n- one\n- two\n", wantPlain: "Hello,\n\nthis is a review test draft.\n\n- one\n- two"},
+		{name: "markdown heading", format: DraftBodyMarkdown, source: "# Title\n\nbody\n", wantPlain: "Title\n\nbody"},
+		{name: "markdown nested list", format: DraftBodyMarkdown, source: "- one\n  - inner\n- two\n\nafter\n", wantPlain: "- one\n  - inner\n- two\n\nafter"},
+		{name: "markdown table", format: DraftBodyMarkdown, source: "| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n", wantPlain: "| a | b |\n| 1 | 2 |\n\nafter", wantHTML: "<table>"},
+		{name: "markdown strikethrough", format: DraftBodyMarkdown, source: "~~strike~~ text\n", wantPlain: "strike text", wantHTML: "<del>strike</del>"},
+		{name: "markdown autolink", format: DraftBodyMarkdown, source: "see https://example.com now\n", wantPlain: "see https://example.com now", wantHTML: `href="https://example.com"`},
+		{name: "html blocks", format: DraftBodyHTML, source: `<p>Hello</p><p>Second <a href="https://example.com">link</a></p><table><tr><td>a</td><td>b</td></tr></table><h2>Head</h2><p>after</p>`, wantPlain: "Hello\n\nSecond link (https://example.com)\n\n| a | b |\n\nHead\n\nafter"},
 		{name: "markdown link", format: DraftBodyMarkdown, source: "[Read report](https://example.com/report)", wantPlain: "Read report (https://example.com/report)", wantHTML: `href="https://example.com/report"`},
 		{name: "safe html", format: DraftBodyHTML, source: `<p>Hello <a href="https://example.com">there</a></p>`, wantPlain: "Hello there (https://example.com)", wantHTML: `href="https://example.com"`},
 		{name: "safe table", format: DraftBodyHTML, source: `<table onclick="alert(1)"><tr><td>A</td><td>2</td></tr></table>`, wantPlain: "| A | 2 |", wantHTML: "<table>"},
@@ -53,6 +61,38 @@ func TestPrepareDraftContent(t *testing.T) {
 	}
 }
 
+func TestStoredRichDraftsFromThePreviousRenderingGenerationStayValid(t *testing.T) {
+	const source = "Hello,\n\nthis is **bold**.\n\n- one\n- two\n"
+	current, err := prepareDraftContent(DraftBodyMarkdown, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := prepareDraftContentWithObserver(withLegacyDraftRendering(context.Background()), DraftBodyMarkdown, source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Plain != "Hello,\nthis is bold.\n- one\n- two" || current.Plain == legacy.Plain {
+		t.Fatalf("legacy plain = %q, current plain = %q", legacy.Plain, current.Plain)
+	}
+	for name, content := range map[string]preparedDraftContent{"current": current, "legacy": legacy} {
+		draft := Draft{
+			BodyFormat: DraftBodyMarkdown, BodySource: content.Source, Body: content.Plain, BodyHTML: content.HTML,
+			ContentDiagnostics: content.Diagnostics,
+		}
+		if err := validateStoredDraftContent(draft); err != nil {
+			t.Fatalf("%s rendering: validateStoredDraftContent() error = %v", name, err)
+		}
+		draft.ContentDiagnostics = nil
+		if err := validateStoredDraftContentStructuralWithObserver(&draft, nil); err != nil {
+			t.Fatalf("%s rendering: structural validation error = %v", name, err)
+		}
+	}
+	tampered := Draft{BodyFormat: DraftBodyMarkdown, BodySource: source, Body: "Hello", BodyHTML: current.HTML}
+	if err := validateStoredDraftContent(tampered); err == nil {
+		t.Fatal("validateStoredDraftContent() accepted a body that matches neither rendering generation")
+	}
+}
+
 func TestPrepareDraftContentReportsDeterministicLoss(t *testing.T) {
 	source := `<p style="color:red;background:url(https://remote.example/pixel)" onclick="alert(1)" data-label="ignored"><strong>Visible</strong></p>` +
 		`<p><img alt="Logo" src="https://remote.example/logo.png"></p>` +
@@ -70,8 +110,8 @@ func TestPrepareDraftContentReportsDeterministicLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if content.Plain != "Visible\nLogo\nLink" {
-		t.Fatalf("plain = %q, want %q", content.Plain, "Visible\nLogo\nLink")
+	if content.Plain != "Visible\n\nLogo\n\nLink" {
+		t.Fatalf("plain = %q, want %q", content.Plain, "Visible\n\nLogo\n\nLink")
 	}
 	if !contentDiagnosticsEqual(content.Diagnostics, wantDiagnostics) {
 		t.Fatalf("diagnostics = %+v, want %+v", content.Diagnostics, wantDiagnostics)
@@ -165,7 +205,7 @@ func TestHTMLToPlainTextSkipsUnsafeSubtreesAndEscapesTablePipes(t *testing.T) {
 	source := `<script>alert(1)</script><p><a href="javascript:alert(2)">Click</a> <a href="data:text/plain,hidden">Data</a></p>` +
 		`<img alt="must not be copied" src="https://example.com/pixel.png">` +
 		`<table><tr><td>A|B</td><td>1</td></tr></table>`
-	want := "Click Data\nmust not be copied\n| A\\|B | 1 |"
+	want := "Click Data\n\nmust not be copied\n\n| A\\|B | 1 |"
 	if got := HTMLToPlainText([]byte(source)); got != want {
 		t.Fatalf("HTMLToPlainText() = %q, want %q", got, want)
 	}

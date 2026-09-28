@@ -7,11 +7,36 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
 
 // markdown is a package-level goldmark instance to avoid re-allocating the
-// parser/renderer on every draft body conversion.
-var markdown = goldmark.New()
+// parser/renderer on every draft body conversion. It accepts the GFM tables,
+// strikethrough and autolinks that agents commonly write; task lists stay
+// literal because the sanitizer removes form controls.
+var markdown = goldmark.New(goldmark.WithExtensions(extension.Table, extension.Strikethrough, extension.Linkify))
+
+// markdownLegacy renders CommonMark only, as drafts stored before the GFM
+// extensions were rendered.
+var markdownLegacy = goldmark.New()
+
+// matchStoredDraftRendering renders a stored rich draft's source with the
+// current generation and, when the stored rendering came from the previous
+// one, returns that generation instead. A draft that matches neither keeps the
+// current result so the caller reports the mismatch.
+func matchStoredDraftRendering(draft *Draft, observer draftContentObserver) (preparedDraftContent, error) {
+	prepared, err := prepareDraftContentWithObserver(context.Background(), draft.BodyFormat, draft.BodySource, observer)
+	if err != nil || (prepared.Plain == draft.Body && prepared.HTML == draft.BodyHTML) {
+		return prepared, err
+	}
+	legacy, legacyErr := prepareDraftContentWithObserver(
+		withLegacyDraftRendering(context.Background()), draft.BodyFormat, draft.BodySource, nil,
+	)
+	if legacyErr == nil && legacy.Plain == draft.Body && legacy.HTML == draft.BodyHTML {
+		return legacy, nil
+	}
+	return prepared, nil
+}
 
 type draftContentObserver interface {
 	ContentRendered()
@@ -79,7 +104,7 @@ func validateStoredDraftContentWithObserver(draft *Draft, observer draftContentO
 		if draft.BodySource == "" && (draft.Body != "" || draft.BodyHTML != "") {
 			return validationError("rich draft is missing its source body")
 		}
-		prepared, err := prepareDraftContentWithObserver(context.Background(), draft.BodyFormat, draft.BodySource, observer)
+		prepared, err := matchStoredDraftRendering(draft, observer)
 		if err != nil {
 			return err
 		}
@@ -122,9 +147,7 @@ func validateStoredDraftContentStructuralWithObserver(draft *Draft, observer dra
 			return validationError("draft body exceeds 4 MiB")
 		}
 		if draft.ContentDiagnostics == nil {
-			prepared, err := prepareDraftContentWithObserver(
-				context.Background(), draft.BodyFormat, draft.BodySource, observer,
-			)
+			prepared, err := matchStoredDraftRendering(draft, observer)
 			if err != nil {
 				return err
 			}
@@ -141,7 +164,11 @@ func validateStoredDraftContentStructuralWithObserver(draft *Draft, observer dra
 
 func renderMarkdownContent(ctx context.Context, source string) (preparedDraftContent, error) {
 	rendered := draftHTMLWriter{ctx: ctx}
-	if err := markdown.Convert([]byte(source), &rendered); err != nil {
+	converter := markdown
+	if legacyDraftRendering(ctx) {
+		converter = markdownLegacy
+	}
+	if err := converter.Convert([]byte(source), &rendered); err != nil {
 		return preparedDraftContent{}, fmt.Errorf("render Markdown body: %w", err)
 	}
 	return canonicalRichContent(ctx, DraftBodyMarkdown, source, strings.NewReader(rendered.value.String()))

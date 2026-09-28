@@ -30,6 +30,8 @@ type plainTextToken struct {
 	block     bool
 	raw       bool
 	lineBreak bool
+	// blockBreak requests a blank line between two block elements.
+	blockBreak bool
 }
 
 type plainTextLink struct {
@@ -63,6 +65,7 @@ type plainTextRenderer struct {
 	codeDepth      int
 	tableCellDepth int
 	linePrefix     bool
+	legacy         bool
 }
 
 func htmlDraftText(reader io.Reader) (string, error) {
@@ -84,9 +87,26 @@ func renderDraftText(ctx context.Context, root *html.Node, maximumBytes int) (st
 	return text, err
 }
 
+// legacyRenderingKey marks a context whose rendering must reproduce the
+// previous generation: single line breaks between all blocks, no GFM.
+type legacyRenderingKey struct{}
+
+// withLegacyDraftRendering selects the rendering that produced drafts stored
+// before blank-line paragraph separation. Stored rich drafts are verified
+// against their canonical rendering, so both generations stay valid.
+func withLegacyDraftRendering(ctx context.Context) context.Context {
+	return context.WithValue(ctx, legacyRenderingKey{}, true)
+}
+
+func legacyDraftRendering(ctx context.Context) bool {
+	legacy, _ := ctx.Value(legacyRenderingKey{}).(bool)
+	return legacy
+}
+
 func renderPlainText(ctx context.Context, root *html.Node, maximumBytes int) (string, error) {
-	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes,
-		output: plainTextOutput{ctx: ctx, maximumBytes: maximumBytes}}
+	legacy := legacyDraftRendering(ctx)
+	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes, legacy: legacy,
+		output: plainTextOutput{ctx: ctx, maximumBytes: maximumBytes, legacyBreaks: legacy}}
 	capacity := 256
 	if maximumBytes > 0 {
 		capacity = min(capacity, maximumBytes)
@@ -147,18 +167,24 @@ func (renderer *plainTextRenderer) renderElement(node *html.Node) {
 	switch name {
 	case "a":
 		renderer.renderLink(node)
-	case "br", "hr":
+	case "br":
 		renderer.appendBreak()
+	case "hr":
+		if renderer.legacy {
+			renderer.appendBreak()
+			break
+		}
+		renderer.appendParagraphBreak()
 	case "code":
 		renderer.codeDepth++
 		renderer.renderChildren(node)
 		renderer.codeDepth--
 	case "pre":
-		renderer.appendBlockBreak()
+		renderer.appendParagraphBreak()
 		renderer.preDepth++
 		renderer.renderChildren(node)
 		renderer.preDepth--
-		renderer.appendBlockBreak()
+		renderer.appendParagraphBreak()
 	case "ul", "ol":
 		renderer.renderList(node, name == "ol")
 	case "li":
@@ -170,13 +196,30 @@ func (renderer *plainTextRenderer) renderElement(node *html.Node) {
 	case "td", "th":
 		renderer.renderTableCell(node)
 	default:
-		if isPlainTextBlock(name) {
-			renderer.appendBlockBreak()
-		}
+		renderer.appendElementBreak(name)
 		renderer.renderChildren(node)
-		if isPlainTextBlock(name) {
-			renderer.appendBlockBreak()
-		}
+		renderer.appendElementBreak(name)
+	}
+}
+
+// isPlainTextParagraph reports the elements separated by a blank line.
+func isPlainTextParagraph(name string) bool {
+	switch name {
+	case "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "p":
+		return true
+	default:
+		return false
+	}
+}
+
+// appendElementBreak separates paragraphs, headings and quotes by a blank line
+// and other block elements by a line break.
+func (renderer *plainTextRenderer) appendElementBreak(name string) {
+	switch {
+	case isPlainTextParagraph(name):
+		renderer.appendParagraphBreak()
+	case isPlainTextBlock(name):
+		renderer.appendBlockBreak()
 	}
 }
 
@@ -213,11 +256,22 @@ func (renderer *plainTextRenderer) renderLink(node *html.Node) {
 }
 
 func (renderer *plainTextRenderer) renderList(node *html.Node, ordered bool) {
-	renderer.appendBlockBreak()
+	nested := len(renderer.lists) > 0
+	renderer.appendListBreak(nested)
 	renderer.lists = append(renderer.lists, plainTextList{ordered: ordered, next: 1})
 	renderer.renderChildren(node)
 	renderer.lists = renderer.lists[:len(renderer.lists)-1]
-	renderer.appendBlockBreak()
+	renderer.appendListBreak(nested)
+}
+
+// appendListBreak puts a blank line around a top-level list and a line break
+// around a nested one.
+func (renderer *plainTextRenderer) appendListBreak(nested bool) {
+	if nested {
+		renderer.appendBlockBreak()
+		return
+	}
+	renderer.appendParagraphBreak()
 }
 
 func (renderer *plainTextRenderer) renderListItem(node *html.Node) {
@@ -238,11 +292,12 @@ func (renderer *plainTextRenderer) renderListItem(node *html.Node) {
 }
 
 func (renderer *plainTextRenderer) renderTable(node *html.Node) {
-	renderer.appendBlockBreak()
+	nested := len(renderer.tables) > 0
+	renderer.appendListBreak(nested)
 	renderer.tables = append(renderer.tables, plainTextTable{})
 	renderer.renderChildren(node)
 	renderer.tables = renderer.tables[:len(renderer.tables)-1]
-	renderer.appendBlockBreak()
+	renderer.appendListBreak(nested)
 }
 
 func (renderer *plainTextRenderer) renderTableRow(node *html.Node) {
@@ -301,6 +356,12 @@ func (renderer *plainTextRenderer) appendText(value string) {
 	if renderer.tableCellDepth > 0 {
 		value = strings.ReplaceAll(value, "|", `\|`)
 	}
+	if !renderer.legacy && strings.TrimSpace(value) == "" && renderer.preDepth == 0 && renderer.codeDepth == 0 &&
+		renderer.hasPrevious && (renderer.previous.lineBreak || renderer.previous.blockBreak) {
+		// Whitespace at the start of a line is never written; keeping the
+		// break as the previous token lets the next block break dedupe.
+		return
+	}
 	renderer.appendToken(plainTextToken{
 		text: value, preserve: renderer.preDepth > 0 || renderer.codeDepth > 0,
 		block: renderer.preDepth > 0,
@@ -328,11 +389,26 @@ func (renderer *plainTextRenderer) appendToken(token plainTextToken) {
 	renderer.previous, renderer.hasPrevious = token, true
 }
 
+// appendParagraphBreak requests a blank line before the next text.
+func (renderer *plainTextRenderer) appendParagraphBreak() {
+	if renderer.legacy {
+		renderer.appendBlockBreak()
+		return
+	}
+	if renderer.linePrefix {
+		return
+	}
+	if renderer.hasPrevious && renderer.previous.blockBreak {
+		return
+	}
+	renderer.appendToken(plainTextToken{blockBreak: true})
+}
+
 func (renderer *plainTextRenderer) appendBlockBreak() {
 	if renderer.linePrefix {
 		return
 	}
-	if renderer.hasPrevious && renderer.previous.lineBreak {
+	if renderer.hasPrevious && (renderer.previous.lineBreak || renderer.previous.blockBreak) {
 		return
 	}
 	if renderer.hasPrevious {
@@ -369,6 +445,7 @@ type plainTextOutput struct {
 	output        strings.Builder
 	pendingBreaks int
 	pendingSpace  bool
+	legacyBreaks  bool
 }
 
 func (output *plainTextOutput) write(token plainTextToken) {
@@ -376,6 +453,13 @@ func (output *plainTextOutput) write(token plainTextToken) {
 		return
 	}
 	if output.err = output.ctx.Err(); output.err != nil {
+		return
+	}
+	if token.blockBreak {
+		output.pendingSpace = false
+		if output.output.Len() > 0 {
+			output.pendingBreaks = 2
+		}
 		return
 	}
 	if token.lineBreak {
@@ -441,11 +525,21 @@ func (output *plainTextOutput) writeProse(value string) {
 	}
 }
 
+// flushBreaks writes the pending line breaks, counting newlines that already
+// end the output (for example after preformatted text) toward them.
 func (output *plainTextOutput) flushBreaks() {
-	for output.pendingBreaks > 0 {
+	existing := 0
+	if !output.legacyBreaks {
+		written := output.output.String()
+		for existing < 2 && existing < len(written) && written[len(written)-1-existing] == '\n' {
+			existing++
+		}
+	}
+	for output.pendingBreaks > existing {
 		output.writeString("\n")
 		output.pendingBreaks--
 	}
+	output.pendingBreaks = 0
 }
 
 func (output *plainTextOutput) writeString(value string) {

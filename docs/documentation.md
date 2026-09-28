@@ -715,7 +715,9 @@ New send claims and receipts retain `draft_revision`; legacy claims or receipts 
 
 ### Rich content
 
-Markdown is rendered with Goldmark.
+Markdown is rendered with Goldmark, including GFM tables, strikethrough and autolinks; task-list markers stay literal.
+The plain-text part separates paragraphs, headings, quotes, top-level lists and tables by one blank line.
+Drafts stored by an earlier version keep their original rendering and stay valid.
 HTML is parsed in-process, reduced to a strict element and link allowlist with all active and remote content removed, and stored with a canonical plain-text representation.
 
 | Scope | Supported contract |

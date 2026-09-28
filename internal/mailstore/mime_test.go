@@ -178,12 +178,12 @@ func TestHTMLToTextPreservesReadableLayout(t *testing.T) {
 		{
 			name:   "blocks and entities",
 			source: "<DIV>Hello&nbsp;   world</DIV> \n <p>Second<br/>line</p>",
-			want:   "Hello world\nSecond\nline",
+			want:   "Hello world\n\nSecond\nline",
 		},
 		{
 			name:   "script and style",
 			source: `<style>hidden</style><p>Visible</p><SCRIPT>ignored</SCRIPT>tail`,
-			want:   "Visible\ntail",
+			want:   "Visible\n\ntail",
 		},
 		{
 			name:   "nested skipped content",
@@ -206,7 +206,7 @@ func TestHTMLToTextPreservesSemanticContent(t *testing.T) {
 		`<pre>  first` + "\n" + `    second</pre>` +
 		`<ul><li>One<ul><li>Nested</li></ul></li></ul>` +
 		`<table><tr><th>Item</th><th>Qty</th></tr><tr><td>12</td><td>34</td></tr></table>`
-	want := "Read report (https://example.com/report)\n  first\n    second\n- One\n  - Nested\n| Item | Qty |\n| 12 | 34 |"
+	want := "Read report (https://example.com/report)\n\n  first\n    second\n\n- One\n  - Nested\n\n| Item | Qty |\n| 12 | 34 |"
 	if got := htmlToText([]byte(source)); got != want {
 		t.Fatalf("htmlToText() = %q, want %q", got, want)
 	}

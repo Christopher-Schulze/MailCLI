@@ -376,6 +376,24 @@ func TestBuildMessageWithHTMLBody(t *testing.T) {
 	}
 }
 
+func TestBuildMessageKeepsParagraphBreaksInThePlainPart(t *testing.T) {
+	content, err := prepareDraftContent(DraftBodyMarkdown, "First paragraph.\n\nSecond paragraph.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := Draft{
+		From: "sender@example.com", To: []Recipient{{Address: "recipient@example.com"}}, Subject: "Paragraphs",
+		Body: content.Plain, BodySource: content.Source, BodyHTML: content.HTML, BodyFormat: DraftBodyMarkdown,
+	}
+	msg, err := BuildMessage(draft, "<test@example.com>")
+	if err != nil {
+		t.Fatalf("BuildMessage error = %v", err)
+	}
+	if !strings.Contains(string(msg), "First paragraph.\r\n\r\nSecond paragraph.") {
+		t.Fatalf("text/plain part lacks the blank line between paragraphs: %q", msg)
+	}
+}
+
 func TestBuildMessageReplyWithThreading(t *testing.T) {
 	draft := Draft{
 		From:             "sender@example.com",
