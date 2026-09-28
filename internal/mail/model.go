@@ -651,6 +651,11 @@ type MessageSummary struct {
 	ExcerptSource     ExcerptSource           `json:"excerpt_source"`
 	// EnrichmentError names why requested threading or excerpt data is missing.
 	EnrichmentError string `json:"enrichment_error,omitempty"`
+	// ThreadingRequested and ExcerptRequested record that the reply metadata or
+	// excerpt was asked for; only then do their JSON keys appear, because an
+	// empty value means unknown and an unrequested one carries no information.
+	ThreadingRequested bool `json:"-"`
+	ExcerptRequested   bool `json:"-"`
 }
 type MarkMessageRequest struct {
 	Ref                string

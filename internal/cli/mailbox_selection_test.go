@@ -35,7 +35,7 @@ func TestMessagesListMailboxSelectorAndProjectedAccount(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			gateway := &mailboxSelectionGateway{}
 			var stdout, stderr bytes.Buffer
-			args := append([]string{"messages", "list", "--json", "--fields", "subject"}, test.args...)
+			args := append([]string{"messages", "list", "--json", "--fields", "subject,mailbox_ref,account"}, test.args...)
 			code := Run(context.Background(), mail.NewService(gateway), args, &stdout, &stderr)
 			if code != 0 || stderr.Len() != 0 {
 				t.Fatalf("code=%d output=%s stderr=%s", code, stdout.String(), stderr.String())

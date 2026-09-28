@@ -60,7 +60,13 @@ func TestRealStorePageEnrichmentFlagMatrix(t *testing.T) {
 					if summary.ThreadingComplete != (mask&1 != 0) || (summary.From.Address != "") != (mask&1 != 0) || summary.ExcerptComplete != (mask&2 != 0) || (summary.Excerpt != "") != (mask&2 != 0) {
 						t.Fatalf("mask=%d row=%s", mask, row)
 					}
-					if summary.InReplyTo == nil || summary.References == nil {
+					threadingKeys := strings.Contains(string(row), `"in_reply_to"`) || strings.Contains(string(row), `"references"`) ||
+						strings.Contains(string(row), `"threading_complete"`) || strings.Contains(string(row), `"from"`)
+					excerptKeys := strings.Contains(string(row), `"excerpt"`) || strings.Contains(string(row), `"excerpt_source"`)
+					if threadingKeys != (mask&1 != 0) || excerptKeys != (mask&2 != 0) {
+						t.Fatalf("mask=%d has unrequested or missing enrichment keys: %s", mask, row)
+					}
+					if mask&1 != 0 && (summary.InReplyTo == nil || summary.References == nil) {
 						t.Fatalf("null metadata arrays: %s", row)
 					}
 				}

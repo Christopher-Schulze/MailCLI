@@ -207,7 +207,9 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 	// from the same bounded header block, and excerpts stay unrequested.
 	wantSummary := baseline.Summary
 	mail.ApplyThreadingHeaders(&wantSummary, baseline.Headers)
-	wantSummary.ExcerptSource = mail.ExcerptSourceUnavailable
+	// The decoded summary carries no request markers; the excerpt keys were
+	// not requested and are absent.
+	wantSummary.ThreadingRequested = false
 	if !reflect.DeepEqual(visible.Summary, wantSummary) ||
 		visible.ReplyTo != baseline.ReplyTo || !reflect.DeepEqual(visible.To, baseline.To) ||
 		!reflect.DeepEqual(visible.CC, baseline.CC) || !reflect.DeepEqual(visible.BCC, baseline.BCC) ||

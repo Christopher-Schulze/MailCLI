@@ -96,6 +96,30 @@ func TestMessageProjectionViewsSelectOnlyRequestedContent(t *testing.T) {
 	}
 }
 
+func TestFullViewOmitsHeaderFieldsUnlessSelected(t *testing.T) {
+	code, full, stderr := runProjectionCommand(t, &projectionGateway{message: projectionMessage()},
+		"messages", "get", "--ref", "msg_ref", "--view", "full", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(full, `"headers"`) || strings.Contains(full, `"header_fields"`) {
+		t.Fatalf("full view: code=%d stderr=%q output=%s", code, stderr, full)
+	}
+	code, selected, stderr := runProjectionCommand(t, &projectionGateway{message: projectionMessage()},
+		"messages", "get", "--ref", "msg_ref", "--fields", "summary,header_fields", "--json")
+	if code != 0 || stderr != "" || !strings.Contains(selected, `"header_fields"`) {
+		t.Fatalf("selected header_fields: code=%d stderr=%q output=%s", code, stderr, selected)
+	}
+}
+
+func TestDraftProjectionKeepsEmptyListsArrays(t *testing.T) {
+	encoded, err := json.Marshal(draftProjectionFor(mail.Draft{Ref: "draft"},
+		outputOptions{target: projectionTargetDraft, view: outputViewPlain}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"content_diagnostics":[]`) || strings.Contains(string(encoded), "null") {
+		t.Fatalf("draft projection = %s", encoded)
+	}
+}
+
 func TestProjectionValidationPrecedesMessageRetrieval(t *testing.T) {
 	for _, args := range [][]string{
 		{"messages", "get", "--ref", "msg_ref", "--view", "unknown", "--json"},

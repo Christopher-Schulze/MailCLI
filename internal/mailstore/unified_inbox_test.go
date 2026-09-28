@@ -25,7 +25,7 @@ func TestUnifiedInboxCLIUsesRealStoreInOneCall(t *testing.T) {
 	}
 	closeTestResource(t, store, "CLI inbox fixture")
 	var stdout, stderr bytes.Buffer
-	code := cli.Run(context.Background(), mail.NewService(&Client{store: store}), []string{"messages", "list", "--json", "--fields", "subject"}, &stdout, &stderr)
+	code := cli.Run(context.Background(), mail.NewService(&Client{store: store}), []string{"messages", "list", "--json", "--fields", "subject,mailbox_ref,account"}, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 {
 		t.Fatalf("code=%d output=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

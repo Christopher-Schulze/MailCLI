@@ -5,7 +5,7 @@
 - Degraded/stale/ambiguous account coverage blocks transport. Check complete/identity_coverage/direct_ops_supported/reason; unsupported provider needs [setup](setup.md) with explicit hosts.
 - Lists/filter/search default 20, limit 1..200; JSON 1 MiB, --max-bytes <=64 MiB. Follow page.next_cursor until absent; overflow has no rows/new cursor.
 - Cursors bind store/query; catalogs bind command/scope/ordered refs. Invalid: restart. Refresh refs after copy/move/delete/sync; thread has the same page bounds.
-- --fields uses published selectors; all alone retains defaults. Duplicate/unknown fails before reading; identities/coverage remain. Terminal next_cursor omitted. List refs direct; search/filter under summary.
+- --fields uses published selectors and returns ref plus the named fields (mailbox_ref, account only when named); all alone retains defaults. Duplicate/unknown fails before reading; coverage remains. Terminal next_cursor omitted. List refs direct; search/filter under summary. Reply-metadata and excerpt keys exist only when requested.
 - Message-ID candidates need one exact normalized header match. Missing/malformed/substring/duplicate matches fail imap_ambiguous_message_id before hydration/mutation.
 - Get defaults metadata: summary, to/cc/bcc, reply_to from bounded headers only (missing local may hydrate HEADER, never body FETCH); no attachments or completeness. --view plain adds normalized text plus attachments and completeness; raw is the exact RFC source. Require content_complete, check missing_parts/source/hydration; partial is evidence only.
 - Attachments list scans bounded MIME metadata, retains no body; hydrates incomplete sources only when needed.

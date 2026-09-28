@@ -145,6 +145,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
 - Reply metadata on list, filter and search pages is opt-in and read-only.
   `--with-threading` fills `summary.in_reply_to[]`, `summary.references[]` (bracketed msg-ids in header order), `summary.from{name,address}` and `summary.threading_complete` from the bounded header block (local or IMAP `BODY.PEEK[HEADER]`).
   `--with-excerpt` fills `summary.excerpt`, `summary.excerpt_complete` and `summary.excerpt_source` (`local`, `imap-partial`, `unavailable`); `--excerpt-length` defaults to 240 runes (1 to 1000).
+  The reply-metadata and excerpt keys appear only when their flag (or `--fields`) asked for them; without the flag they are absent, not empty. `message_id` is omitted while unknown.
 - Excerpts prefer text/plain over HTML text, drop `>` quote lines and a signature after an exact `-- ` line, collapse whitespace and cut at a rune boundary.
   Each reads 256 KiB of local RFC source or less; only when the local source is partial or missing does it fetch over IMAP the `MIME-Version`, `Content-Type` and `Content-Transfer-Encoding` header fields plus a 64 KiB `BODY.PEEK[TEXT]` prefix, never the full body. Larger sources report `excerpt_complete:false`.
   A page selects each account mailbox once and fetches all of its IMAP excerpts with one `UID FETCH`; a message the server does not return gets `enrichment_error:"imap_message_not_found"`.
@@ -155,7 +156,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   When a requested read or IMAP fetch fails, the row names the first failure code in `summary.enrichment_error` (for example `imap_timeout` or `raw_source_partial`) and the page still succeeds.
   A page reads local sources for at most four messages at a time, keeps row order and reads no more than 8 MiB of excerpt source in total; later rows get `enrichment_error:"enrichment_page_budget_exhausted"` and can be fetched on a smaller page.
 - `messages.get`: read projected metadata, recipients, body and attachment metadata; main flags `--ref`, `--view`, `--fields`, `--export`, `--max-bytes`, `--excerpt-length`.
-  Its summary always carries the threading fields; `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in.
+  Its summary carries the threading fields (`get` always reads the header block); `--fields excerpt` and `--fields header_fields` (ordered, unfolded `[{name, value}]`) are opt-in, and `--view full` returns `headers` but not `header_fields`.
   Example: `mailcli messages get --ref MESSAGE_REF --view plain --json`.
   Output: `message`, conditional `content_export`.
 - `messages.raw`: return or exclusively export the exact RFC 5322 source stored by Mail.app; main flags `--ref`, `--export`, `--max-bytes`.
@@ -323,8 +324,9 @@ Attachments and content state (`attachments`, `content_source`, `content_complet
 Combining `--fields` with `--view`, an unknown field, or a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
 Seven target-specific field registries drive validation, embedded schemas and `data.capabilities.limits.output_projection`, including `draft_list_fields`, `list_page_fields` and `search_page_fields`; batch read input uses the message registry.
 
-`messages.list`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth` and `staleness_note`.
-Every projected message keeps `ref` and `mailbox_ref`, filter and search keep the complete coverage object, and `next_cursor` appears only when continuation is available.
+`messages.list`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth`, `staleness_note`, `mailbox_ref`, `account` (list only) and the reply-metadata and excerpt keys.
+Every projected message keeps `ref` and exactly the named fields (`mailbox_ref` and `account` only when named; reply metadata and excerpts also when `--with-threading` or `--with-excerpt` was given), filter and search keep the complete coverage object, and `next_cursor` appears only when continuation is available.
+Draft JSON lists (`content_diagnostics`, recipients, attachments) and `missing_parts` are `[]` when empty, never `null`.
 Draft-list `--fields` accepts combinations of `age_days`, `created_at` and `updated_at`; the fixed core stays in every healthy summary, `state_error` appears only for corrupt summaries, and capabilities list `draft_list_core_fields` and `draft_list_optional_fields`.
 
 For `messages get --json`, an explicit `--fields` request with only `summary` and header fields reads Envelope Index values plus only the bounded RFC header block; a missing local source with IMAP configured fetches only `BODY.PEEK[HEADER]`.

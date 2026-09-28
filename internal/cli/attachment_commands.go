@@ -69,7 +69,7 @@ func runAttachmentsList(
 	}
 	if *jsonOutput {
 		complete := message.ContentComplete
-		missing := message.MissingParts
+		missing := nonNilSlice(message.MissingParts)
 		recovery := listOutputRecovery("attachments.list")
 		data := responseData{
 			Attachments: &attachments, ContentSource: message.ContentSource,

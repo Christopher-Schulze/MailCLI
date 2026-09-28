@@ -62,13 +62,34 @@ func TestBoundedExcerptText(t *testing.T) {
 }
 
 func TestEmptySummaryMetadataStableJSON(t *testing.T) {
-	payload, err := json.Marshal(MessageSummary{Sender: "unchanged"})
+	// Requested reply metadata and excerpts keep their empty values: empty means unknown.
+	payload, err := json.Marshal(MessageSummary{Sender: "unchanged", ThreadingRequested: true, ExcerptRequested: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"in_reply_to":[]`, `"references":[]`, `"from":{"name":"","address":""}`, `"threading_complete":false`, `"excerpt_source":"unavailable"`, `"sender":"unchanged"`} {
+	for _, field := range []string{`"in_reply_to":[]`, `"references":[]`, `"from":{"name":"","address":""}`, `"threading_complete":false`, `"excerpt":""`, `"excerpt_complete":false`, `"excerpt_source":"unavailable"`, `"sender":"unchanged"`} {
 		if !strings.Contains(string(payload), field) {
 			t.Fatalf("missing %s in %s", field, payload)
 		}
+	}
+}
+
+func TestUnrequestedEnrichmentAndEmptyMessageIDStayOutOfTheJSON(t *testing.T) {
+	payload, err := json.Marshal(MessageSummary{Ref: "ref", Sender: "s", Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"message_id", "in_reply_to", "references", `"from"`, "threading_complete", "excerpt"} {
+		if strings.Contains(string(payload), field) {
+			t.Fatalf("unrequested %s present in %s", field, payload)
+		}
+	}
+	payload, err = json.Marshal(MessageSummary{MessageID: "<id@example.com>", ThreadingRequested: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"message_id":"`) || !strings.Contains(string(payload), "id@example.com") ||
+		!strings.Contains(string(payload), `"in_reply_to":[]`) || strings.Contains(string(payload), "excerpt") {
+		t.Fatalf("threading-only summary = %s", payload)
 	}
 }

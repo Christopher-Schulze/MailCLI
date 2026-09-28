@@ -196,7 +196,7 @@ type searchPageMessageProjection struct {
 
 type messagePageItemProjection struct {
 	Ref               string                       `json:"ref"`
-	MailboxRef        string                       `json:"mailbox_ref"`
+	MailboxRef        string                       `json:"mailbox_ref,omitempty"`
 	Account           string                       `json:"account,omitempty"`
 	MessageID         *string                      `json:"message_id,omitempty"`
 	Subject           *string                      `json:"subject,omitempty"`
@@ -212,13 +212,13 @@ type messagePageItemProjection struct {
 	ConversationID    *int64                       `json:"conversation_id,omitempty"`
 	ServerTruth       *mail.ServerMutationEvidence `json:"server_truth,omitempty"`
 	StalenessNote     *string                      `json:"staleness_note,omitempty"`
-	InReplyTo         []string                     `json:"in_reply_to"`
-	References        []string                     `json:"references"`
-	From              mail.Recipient               `json:"from"`
-	ThreadingComplete bool                         `json:"threading_complete"`
-	Excerpt           string                       `json:"excerpt"`
-	ExcerptComplete   bool                         `json:"excerpt_complete"`
-	ExcerptSource     mail.ExcerptSource           `json:"excerpt_source"`
+	InReplyTo         *[]string                    `json:"in_reply_to,omitempty"`
+	References        *[]string                    `json:"references,omitempty"`
+	From              *mail.Recipient              `json:"from,omitempty"`
+	ThreadingComplete *bool                        `json:"threading_complete,omitempty"`
+	Excerpt           *string                      `json:"excerpt,omitempty"`
+	ExcerptComplete   *bool                        `json:"excerpt_complete,omitempty"`
+	ExcerptSource     *mail.ExcerptSource          `json:"excerpt_source,omitempty"`
 }
 
 type outputSizeMeasurement string
@@ -645,11 +645,11 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 		return projectionFieldRegistry{core: []string{"ref", "kind", "account_ref", "subject", "from", "to", "cc", "body_format", "attachment_count", "ever_sent", "send_attempt", "save_attempt", "handoff_attempt", "state_error"},
 			optional: []string{"age_days", "created_at", "updated_at"}}
 	case projectionTargetListPage:
-		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "account", "in_reply_to", "references", "from", "threading_complete", "excerpt", "excerpt_complete", "excerpt_source"},
-			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "staleness_note", "subject"}}
+		return projectionFieldRegistry{core: []string{"ref"},
+			optional: []string{"account", "attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "staleness_note", "subject", "threading_complete"}}
 	case projectionTargetSearchPage:
-		return projectionFieldRegistry{core: []string{"ref", "mailbox_ref", "in_reply_to", "references", "from", "threading_complete", "excerpt", "excerpt_complete", "excerpt_source"},
-			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "flagged", "junk", "message_id", "read", "sender", "server_truth", "size", "snippet", "staleness_note", "subject"}}
+		return projectionFieldRegistry{core: []string{"ref"},
+			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "snippet", "staleness_note", "subject", "threading_complete"}}
 	default:
 		return projectionFieldRegistry{}
 	}
@@ -714,18 +714,51 @@ func projectSearchPage(page mail.SearchPage, fields map[string]struct{}) *json.R
 }
 
 func projectMessageSummary(message mail.MessageSummary, fields map[string]struct{}) messagePageItemProjection {
-	projected := messagePageItemProjection{Ref: message.Ref, MailboxRef: message.MailboxRef, Account: message.Account}
-	projected.InReplyTo, projected.References = message.InReplyTo, message.References
-	if projected.InReplyTo == nil {
-		projected.InReplyTo = []string{}
+	selected := func(name string) bool {
+		_, include := fields[name]
+		return include
 	}
-	if projected.References == nil {
-		projected.References = []string{}
+	projected := messagePageItemProjection{Ref: message.Ref}
+	if selected("mailbox_ref") {
+		projected.MailboxRef = message.MailboxRef
 	}
-	projected.From, projected.ThreadingComplete = message.From, message.ThreadingComplete
-	projected.Excerpt, projected.ExcerptComplete, projected.ExcerptSource = message.Excerpt, message.ExcerptComplete, message.ExcerptSource
-	if projected.ExcerptSource == "" {
-		projected.ExcerptSource = mail.ExcerptSourceUnavailable
+	if selected("account") {
+		projected.Account = message.Account
+	}
+	// Reply metadata and excerpts appear when the page requested them or the
+	// field is named; an unrequested value would only be an empty placeholder.
+	if message.ThreadingRequested || selected("in_reply_to") {
+		inReplyTo := message.InReplyTo
+		if inReplyTo == nil {
+			inReplyTo = []string{}
+		}
+		projected.InReplyTo = &inReplyTo
+	}
+	if message.ThreadingRequested || selected("references") {
+		references := message.References
+		if references == nil {
+			references = []string{}
+		}
+		projected.References = &references
+	}
+	if message.ThreadingRequested || selected("from") {
+		projected.From = &message.From
+	}
+	if message.ThreadingRequested || selected("threading_complete") {
+		projected.ThreadingComplete = &message.ThreadingComplete
+	}
+	if message.ExcerptRequested || selected("excerpt") {
+		projected.Excerpt = &message.Excerpt
+	}
+	if message.ExcerptRequested || selected("excerpt_complete") {
+		projected.ExcerptComplete = &message.ExcerptComplete
+	}
+	if message.ExcerptRequested || selected("excerpt_source") {
+		source := message.ExcerptSource
+		if source == "" {
+			source = mail.ExcerptSourceUnavailable
+		}
+		projected.ExcerptSource = &source
 	}
 	if _, include := fields["message_id"]; include {
 		projected.MessageID = &message.MessageID
@@ -837,7 +870,9 @@ func (o outputOptions) includes(field string) bool {
 	}
 	switch o.view {
 	case outputViewFull:
-		return true
+		// header_fields repeats the headers block field by field; it is
+		// returned only when selected explicitly.
+		return o.target != projectionTargetMessage || field != "header_fields"
 	case outputViewPlain:
 		return field != "headers" && field != "body_source" && field != "body_html" && !newMessageMetadataField(field)
 	case outputViewMetadata:
@@ -882,7 +917,8 @@ func messageProjectionFor(message mail.Message, options outputOptions, retainCon
 	if messageStateProjectionRequired(options, retainContent) {
 		projection.ContentSource = &message.ContentSource
 		projection.ContentComplete = &message.ContentComplete
-		projection.MissingParts = &message.MissingParts
+		missing := nonNilSlice(message.MissingParts)
+		projection.MissingParts = &missing
 		projection.Hydration = message.Hydration
 	}
 	if options.includes("reply_to") {
@@ -922,6 +958,14 @@ func messageProjectionFor(message mail.Message, options outputOptions, retainCon
 	return projection
 }
 
+// nonNilSlice keeps an empty list a JSON array instead of null.
+func nonNilSlice[T any](values []T) []T {
+	if values == nil {
+		return []T{}
+	}
+	return values
+}
+
 func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjection {
 	projection := &draftProjection{AttachmentCount: len(draft.Attachments)}
 	for _, field := range projectionFieldNames(projectionTargetDraft) {
@@ -951,11 +995,14 @@ func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjectio
 		case "from":
 			projection.From = &draft.From
 		case "to":
-			projection.To = &draft.To
+			recipients := nonNilSlice(draft.To)
+			projection.To = &recipients
 		case "cc":
-			projection.CC = &draft.CC
+			recipients := nonNilSlice(draft.CC)
+			projection.CC = &recipients
 		case "bcc":
-			projection.BCC = &draft.BCC
+			recipients := nonNilSlice(draft.BCC)
+			projection.BCC = &recipients
 		case "subject":
 			projection.Subject = &draft.Subject
 		case "body":
@@ -967,9 +1014,11 @@ func draftProjectionFor(draft mail.Draft, options outputOptions) *draftProjectio
 		case "body_html":
 			projection.BodyHTML = &draft.BodyHTML
 		case "content_diagnostics":
-			projection.ContentDiagnostics = &draft.ContentDiagnostics
+			diagnostics := nonNilSlice(draft.ContentDiagnostics)
+			projection.ContentDiagnostics = &diagnostics
 		case "attachments":
-			projection.Attachments = &draft.Attachments
+			attachments := nonNilSlice(draft.Attachments)
+			projection.Attachments = &attachments
 		case "attachment_count":
 			projection.AttachmentCount = len(draft.Attachments)
 		case "created_at":

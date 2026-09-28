@@ -259,7 +259,7 @@ func TestOutputValidatorRejectsUndeclaredAndMissingFields(t *testing.T) {
 		case "extra":
 			object["undeclared"] = json.RawMessage(`true`)
 		case "remove":
-			delete(object, "in_reply_to")
+			delete(object, "ref")
 		case "wrong-type":
 			object["references"] = json.RawMessage(`"not a list"`)
 		}

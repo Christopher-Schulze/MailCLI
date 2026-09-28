@@ -160,10 +160,8 @@ func checkTerminalMessageJSON(t *testing.T, output []byte, stderr string, messag
 	if err := json.Unmarshal(output, &response); err != nil || stderr != "" {
 		t.Fatalf("JSON error=%v stderr=%q output=%q", err, stderr, output)
 	}
-	// messages get/drafts open publish the additive reply metadata keys with
-	// stable empty values when no header evidence is available.
-	message.Summary.InReplyTo, message.Summary.References = []string{}, []string{}
-	message.Summary.ExcerptSource = mail.ExcerptSourceUnavailable
+	// The fixture gateway cannot enrich, so no reply metadata was requested
+	// and none of its keys is published.
 	if response.Data.Message == nil || !reflect.DeepEqual(*response.Data.Message, message) {
 		t.Fatalf("JSON message changed: %+v, want %+v", response.Data.Message, message)
 	}

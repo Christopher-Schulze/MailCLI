@@ -120,19 +120,19 @@ func outputDefinitionName(value reflect.Type) string {
 func outputDescription(name string) string {
 	switch name {
 	case "in_reply_to":
-		return "Every valid In-Reply-To msg-id in header order, including angle brackets; [] when absent or unavailable."
+		return "Every valid In-Reply-To msg-id in header order, including angle brackets; [] when absent or unavailable; present only when reply metadata was requested."
 	case "references":
-		return "Every valid References msg-id in header order, including angle brackets; [] when absent or unavailable."
+		return "Every valid References msg-id in header order, including angle brackets; [] when absent or unavailable; present only when reply metadata was requested."
 	case "from":
-		return "Structured From identity; decoded name and address with only its domain lowercased; existing sender is unchanged."
+		return "Structured From identity; decoded name and address with only its domain lowercased; existing sender is unchanged; present only when reply metadata was requested."
 	case "threading_complete":
-		return "True only after a complete readable RFC header block; false for unrequested, unavailable or bounded-out headers."
+		return "True only after a complete readable RFC header block; false for unavailable or bounded-out headers; present only when reply metadata was requested."
 	case "excerpt":
 		return "Plain-first, HTML-fallback excerpt with quoted lines/signature removed, whitespace collapsed and at most --excerpt-length runes."
 	case "excerpt_complete":
 		return "True only when the available RFC source and MIME text parse fit the 256 KiB source/decoded-text and 64-part bounds; rune truncation is intentional."
 	case "excerpt_source":
-		return "local, imap-partial or unavailable; bounded-out, unrequested and missing text must be interpreted with excerpt_complete."
+		return "local, imap-partial or unavailable; bounded-out and missing text must be interpreted with excerpt_complete; the excerpt keys are present only when an excerpt was requested."
 	case "header_fields":
 		return "Ordered unfolded RFC header name/value pairs; duplicates and original field spelling are retained."
 	case "headers":
@@ -251,12 +251,27 @@ func (builder *outputSchemaBuilder) structFields(value reflect.Type) ([]outputNo
 		if value == reflect.TypeFor[mail.MessageSummary]() && (name == "in_reply_to" || name == "references") {
 			node.Nullable = false
 		}
+		if value == reflect.TypeFor[mail.MessageSummary]() && optionalSummaryField(name) {
+			node.AlwaysPresent = false
+		}
 		if value == reflect.TypeFor[capabilityLimits]() || value == reflect.TypeFor[outputProjectionCapability]() {
 			node.AlwaysPresent = false
 		}
 		fields = append(fields, node)
 	}
 	return fields, nil
+}
+
+// optionalSummaryField reports the summary keys that appear only when known or
+// requested: message_id when non-empty, reply metadata with --with-threading,
+// the excerpt keys with --with-excerpt.
+func optionalSummaryField(name string) bool {
+	switch name {
+	case "message_id", "in_reply_to", "references", "from", "threading_complete", "excerpt", "excerpt_complete", "excerpt_source":
+		return true
+	default:
+		return false
+	}
 }
 
 func outputFieldType(owner reflect.Type, name string, original reflect.Type) reflect.Type {

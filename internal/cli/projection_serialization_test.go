@@ -371,7 +371,7 @@ func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map
 
 func TestMessageListProjectionPreservesAvailableAccountIdentity(t *testing.T) {
 	for _, account := range []string{"", "account"} {
-		for _, selector := range []string{"subject", "all"} {
+		for _, selector := range []string{"subject,mailbox_ref,account", "all"} {
 			t.Run(account+"/"+selector, func(t *testing.T) {
 				fields, err := parseProjectionFields(projectionTargetListPage, selector)
 				if err != nil {
@@ -438,6 +438,10 @@ func serializedPageRegistryFixture(t *testing.T, target projectionTarget, summar
 	t.Helper()
 	if fields == nil {
 		fields = map[string]struct{}{"all": {}}
+	}
+	if _, all := fields["all"]; all {
+		// The complete page of a request that asked for both enrichments.
+		summary.ThreadingRequested, summary.ExcerptRequested = true, true
 	}
 	if target == projectionTargetListPage {
 		page := projectMessageListPage(mail.MessagePage{Messages: []mail.MessageSummary{summary}}, fields)

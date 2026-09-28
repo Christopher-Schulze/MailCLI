@@ -83,9 +83,11 @@ func applyEnrichment(summary *MessageSummary, metadata MessageSummary, request M
 		}
 		summary.InReplyTo, summary.References = metadata.InReplyTo, metadata.References
 		summary.From, summary.ThreadingComplete = metadata.From, metadata.ThreadingComplete
+		summary.ThreadingRequested = true
 	}
 	if request.Excerpt {
 		summary.Excerpt, summary.ExcerptComplete, summary.ExcerptSource = metadata.Excerpt, metadata.ExcerptComplete, metadata.ExcerptSource
+		summary.ExcerptRequested = true
 	}
 	summary.EnrichmentError = metadata.EnrichmentError
 }
@@ -94,19 +96,43 @@ func applyEnrichment(summary *MessageSummary, metadata MessageSummary, request M
 // rules remain those of MessageSummary's original JSON tags.
 func (summary MessageSummary) MarshalJSON() ([]byte, error) {
 	type encodedSummary MessageSummary
-	if summary.InReplyTo == nil {
-		summary.InReplyTo = []string{}
+	// The outer fields shadow the embedded ones of the same JSON name; a nil
+	// pointer omits the key.
+	type leanSummary struct {
+		encodedSummary
+		MessageID         *string        `json:"message_id,omitempty"`
+		InReplyTo         *[]string      `json:"in_reply_to,omitempty"`
+		References        *[]string      `json:"references,omitempty"`
+		From              *Recipient     `json:"from,omitempty"`
+		ThreadingComplete *bool          `json:"threading_complete,omitempty"`
+		Excerpt           *string        `json:"excerpt,omitempty"`
+		ExcerptComplete   *bool          `json:"excerpt_complete,omitempty"`
+		ExcerptSource     *ExcerptSource `json:"excerpt_source,omitempty"`
 	}
-	if summary.References == nil {
-		summary.References = []string{}
+	lean := leanSummary{encodedSummary: encodedSummary(summary)}
+	if summary.MessageID != "" {
+		lean.MessageID = &summary.MessageID
 	}
-	if summary.ExcerptSource == "" {
-		summary.ExcerptSource = ExcerptSourceUnavailable
+	if summary.ThreadingRequested {
+		if summary.InReplyTo == nil {
+			summary.InReplyTo = []string{}
+		}
+		if summary.References == nil {
+			summary.References = []string{}
+		}
+		lean.InReplyTo, lean.References = &summary.InReplyTo, &summary.References
+		lean.From, lean.ThreadingComplete = &summary.From, &summary.ThreadingComplete
+	}
+	if summary.ExcerptRequested {
+		if summary.ExcerptSource == "" {
+			summary.ExcerptSource = ExcerptSourceUnavailable
+		}
+		lean.Excerpt, lean.ExcerptComplete, lean.ExcerptSource = &summary.Excerpt, &summary.ExcerptComplete, &summary.ExcerptSource
 	}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(encodedSummary(summary)); err != nil {
+	if err := encoder.Encode(lean); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(output.Bytes(), []byte{'\n'}), nil
@@ -163,6 +189,7 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	fields, complete := ParseHeaderFields(raw)
 	summary.InReplyTo, summary.References = []string{}, []string{}
 	summary.ThreadingComplete = complete
+	summary.ThreadingRequested = true
 	for _, field := range fields {
 		switch strings.ToLower(field.Name) {
 		case "in-reply-to", "references":

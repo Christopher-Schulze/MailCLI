@@ -511,8 +511,8 @@ func assertPageProjectionSavings(t *testing.T, command, fields string) {
 		t.Fatalf("projected coverage = %+v", projected.Coverage)
 	}
 	if !bytes.Contains(projected.Messages[0], []byte(`"ref":"msg_ref_00"`)) ||
-		!bytes.Contains(projected.Messages[0], []byte(`"mailbox_ref":"mbx_ref"`)) {
-		t.Fatalf("projected row dropped mandatory refs: %s", projected.Messages[0])
+		bytes.Contains(projected.Messages[0], []byte(`"mailbox_ref"`)) || bytes.Contains(projected.Messages[0], []byte(`"in_reply_to"`)) {
+		t.Fatalf("projected row must carry its ref and only the requested fields: %s", projected.Messages[0])
 	}
 	pageReduction := 100 * float64(len(fullPage)-len(projectedPage)) / float64(len(fullPage))
 	outputReduction := 100 * float64(len(fullOutput)-len(projectedOutput)) / float64(len(fullOutput))
