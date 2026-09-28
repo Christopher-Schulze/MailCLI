@@ -405,7 +405,7 @@ func InitializationErrorCode(err error) string {
 func FinalizeJSON(writer io.Writer, args []string, payload []byte, code int, cleanupErr error) int {
 	normalized, _ := NormalizeGlobalJSON(args)
 	command := AttemptedCommand(normalized)
-	if helpOnly(normalized) || (len(normalized) > 1 && helpOnly(normalized[1:])) {
+	if helpInvocation(normalized) {
 		if writeEnvelopeBytes(writer, payload) != 0 {
 			return 1
 		}
@@ -1042,6 +1042,13 @@ func AttemptedCommand(args []string) string {
 		}
 	}
 	return command
+}
+
+// helpInvocation reports whether args request only help at the top level, a
+// command family, or the full attempted command path.
+func helpInvocation(args []string) bool {
+	pathLength := strings.Count(AttemptedCommand(args), ".") + 1
+	return helpOnly(args) || (len(args) > 1 && helpOnly(args[1:])) || (len(args) > pathLength && helpOnly(args[pathLength:]))
 }
 
 func firstOutputLine(value string) string {

@@ -174,6 +174,24 @@ func TestTopLevelHelpIsCompact(t *testing.T) {
 	}
 }
 
+func TestHelpSurvivesJSONFinalization(t *testing.T) {
+	for _, contract := range commandContracts {
+		path := strings.Split(contract.ID, ".")
+		for _, suffix := range [][]string{{"--help"}, {"help"}, {"--help", "--json"}} {
+			args := append(append([]string(nil), path...), suffix...)
+			var help bytes.Buffer
+			var stderr bytes.Buffer
+			if code := Run(context.Background(), newTestService(), args, &help, &stderr); code != 0 {
+				t.Fatalf("args = %q, code = %d, stderr = %q", args, code, stderr.String())
+			}
+			var stdout bytes.Buffer
+			if code := FinalizeJSON(&stdout, args, help.Bytes(), 0, nil); code != 0 || stdout.String() != help.String() {
+				t.Errorf("args = %q, finalized code = %d, stdout = %q", args, code, stdout.String())
+			}
+		}
+	}
+}
+
 func TestHelpOmitsRepositoryPaths(t *testing.T) {
 	argumentSets := [][]string{{"help"}}
 	for _, contract := range commandContracts {
