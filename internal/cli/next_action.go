@@ -181,6 +181,8 @@ func pendingNextAction(data responseData) *nextAction {
 	}
 	if check := data.SyncCheck; check != nil && !check.Complete {
 		return &nextAction{Do: "ask_user", Why: "Synchronization coverage is incomplete; resolve the reported inaccessible or unresolved identities."}
+	} else if check != nil && !check.CountsMatch {
+		return &nextAction{Do: "check_state", Why: "Local and server counts differ; Mail.app has not synced every mailbox yet. Check again after it synced."}
 	}
 	if data.Complete != nil && !*data.Complete {
 		return &nextAction{Do: "ask_user", Why: "The account catalog is degraded; repair the reported account configuration before relying on complete coverage."}

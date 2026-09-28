@@ -173,6 +173,13 @@ func appendMatchedSyncStatusResult(
 		delta.ServerMessages = status.status.Messages
 		delta.Unseen = status.status.Unseen
 		result.Mailboxes = append(result.Mailboxes, delta)
+		if status.status.Messages == 0 {
+			// Nothing on the server means nothing is missing locally.
+			result.Skipped = append(result.Skipped, mail.SyncCheckSkip{
+				Account: account, Mailbox: job.mailbox, Reason: mail.SyncCheckSkipEmptyWithoutLocalCount,
+			})
+			return
+		}
 		result.Failures = append(result.Failures, mail.SyncCheckFailure{
 			Account: account,
 			Mailbox: job.mailbox,
@@ -303,6 +310,10 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 				Code:    "account_degraded",
 				Message: "account is degraded: " + acct.DegradedReason + "; remediation: " + acct.DegradedRemediation,
 			})
+			continue
+		}
+		if skip, skipped := syncSkipForAccount(acct); skipped {
+			result.Skipped = append(result.Skipped, skip)
 			continue
 		}
 		if len(acct.EmailAddresses) == 0 {
@@ -477,9 +488,41 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 		}
 	}
 	sortSyncCheckMailboxes(result.Mailboxes)
-	result.Complete = len(result.Failures) == 0
+	finishSyncCheck(&result)
 
 	return result, nil
+}
+
+// syncSkipForAccount reports an account that has no remote mailbox to compare:
+// a local ("On My Mac") account without any address.
+func syncSkipForAccount(account mail.Account) (mail.SyncCheckSkip, bool) {
+	if account.Type == mail.AccountTypeLocal && len(account.EmailAddresses) == 0 {
+		return mail.SyncCheckSkip{Account: account.Ref, Reason: mail.SyncCheckSkipLocalAccount}, true
+	}
+	return mail.SyncCheckSkip{}, false
+}
+
+// finishSyncCheck derives the completeness and count-agreement summary.
+func finishSyncCheck(result *mail.SyncCheckResult) {
+	result.Complete = len(result.Failures) == 0
+	result.MismatchedMailboxes = 0
+	for _, mailbox := range result.Mailboxes {
+		switch mailbox.State {
+		case mail.MailboxDeltaStateMatched:
+			if mailbox.Delta != 0 {
+				result.MismatchedMailboxes++
+			}
+		case mail.MailboxDeltaStateServerOnly:
+			if mailbox.ServerMessages > 0 {
+				result.MismatchedMailboxes++
+			}
+		case mail.MailboxDeltaStateLocalOnly:
+			if mailbox.LocalMessages > 0 {
+				result.MismatchedMailboxes++
+			}
+		}
+	}
+	result.CountsMatch = result.Complete && result.MismatchedMailboxes == 0
 }
 
 func localMailboxDelta(

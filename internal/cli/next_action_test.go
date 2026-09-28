@@ -87,6 +87,29 @@ func TestCheckStateWhyKeepsTheReplayWarning(t *testing.T) {
 	}
 }
 
+func TestSyncCheckNextActionFollowsTheVerdict(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		check mail.SyncCheckResult
+		want  string
+	}{
+		{"failures need the user", mail.SyncCheckResult{Complete: false}, "ask_user"},
+		{"differing counts wait for Mail", mail.SyncCheckResult{Complete: true, MismatchedMailboxes: 2}, "check_state"},
+		{"agreeing counts need nothing", mail.SyncCheckResult{Complete: true, CountsMatch: true}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check := test.check
+			next := pendingNextAction(responseData{SyncCheck: &check})
+			switch {
+			case test.want == "" && next != nil:
+				t.Fatalf("next = %+v, want none", next)
+			case test.want != "" && (next == nil || next.Do != test.want || next.Command != ""):
+				t.Fatalf("next = %+v, want %s without a command", next, test.want)
+			}
+		})
+	}
+}
+
 func TestConfirmationRequiredAsksTheUser(t *testing.T) {
 	for _, command := range []string{"drafts.send", "messages.delete", "drafts.discard", "batch"} {
 		err := confirmationRequired("the action")

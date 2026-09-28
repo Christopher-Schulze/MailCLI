@@ -779,9 +779,30 @@ type SyncCheckResult struct {
 	AccountRef string             `json:"account_ref,omitempty"`
 	Mailboxes  []MailboxDelta     `json:"mailboxes"`
 	Failures   []SyncCheckFailure `json:"failures,omitempty"`
+	// Skipped lists accounts and mailboxes that have nothing to compare and
+	// therefore do not make the check incomplete.
+	Skipped []SyncCheckSkip `json:"skipped,omitempty"`
 	// Complete is true only when every mailbox of every targeted account
 	// was checked. False means partial coverage: see Failures.
 	Complete bool `json:"complete"`
+	// CountsMatch is true when the check is complete and every compared
+	// mailbox has equal local and server counts; MismatchedMailboxes counts
+	// the mailboxes whose counts differ. Equal counts do not prove equal mail.
+	CountsMatch         bool `json:"counts_match"`
+	MismatchedMailboxes int  `json:"mismatched_mailboxes"`
+}
+
+// SyncCheckSkip reasons.
+const (
+	SyncCheckSkipLocalAccount           = "local_account"
+	SyncCheckSkipEmptyWithoutLocalCount = "empty_without_local_count"
+)
+
+// SyncCheckSkip names an account or mailbox the check did not compare and why.
+type SyncCheckSkip struct {
+	Account string `json:"account"`
+	Mailbox string `json:"mailbox,omitempty"`
+	Reason  string `json:"reason"`
 }
 
 // SyncCheckFailure records one skipped account or mailbox: the check ran,

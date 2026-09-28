@@ -1665,6 +1665,87 @@ func TestSyncCheckReportsUnavailableLocalCount(t *testing.T) {
 	t.Fatalf("Failures = %+v, want unavailable-local-count evidence", result.Failures)
 }
 
+// A mailbox that Mail keeps no local count for and that is empty on the server
+// has nothing to compare: it is skipped, not a failure.
+func TestSyncCheckSkipsEmptyMailboxWithoutLocalCount(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "empty-notes-sync@gmail.com")
+	cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>[Gmail]</key><dict>
+<key>MailboxPathComponent</key><string>[Gmail]</string>
+<key>IMAPMailboxChildren</key><dict><key>Archive</key><dict>
+<key>MailboxPathComponent</key><string>Archive</string>
+<key>IMAPMailboxChildren</key><dict/></dict><key>Sent</key><dict>
+<key>MailboxPathComponent</key><string>Sent</string>
+<key>IMAPMailboxAttributes</key><integer>32768</integer>
+<key>IMAPMailboxChildren</key><dict/></dict></dict></dict></dict></dict></plist>`)
+	if err := os.WriteFile(filepath.Join(store.versionRoot, testAccountID, ".mboxCache.plist"), cache, 0o600); err != nil {
+		t.Fatalf("write mailbox cache: %v", err)
+	}
+	fakeImap := &stubImapOperator{
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}, {Name: "Sent"}, {Name: "Archive"}},
+		statusByMailbox: map[string]transport.MailboxStatus{
+			"Archive": {Messages: 0, Unseen: 0},
+		},
+	}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap: fakeImap, Credentials: stubCredentials{"empty-notes-sync@gmail.com": "secret"},
+	}}
+	result, err := client.SyncCheck(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SyncCheck() error = %v", err)
+	}
+	for _, failure := range result.Failures {
+		if failure.Mailbox == "Archive" {
+			t.Fatalf("empty mailbox without a local count is a failure: %+v", failure)
+		}
+	}
+	skipped := false
+	for _, skip := range result.Skipped {
+		skipped = skipped || (skip.Mailbox == "Archive" && skip.Reason == mail.SyncCheckSkipEmptyWithoutLocalCount)
+	}
+	if !skipped || !result.Complete {
+		t.Fatalf("Skipped = %+v complete = %t, want Archive skipped as empty without a local count", result.Skipped, result.Complete)
+	}
+}
+
+func TestSyncCheckSkipsAccountsWithoutARemoteSide(t *testing.T) {
+	skip, skipped := syncSkipForAccount(mail.Account{Ref: "acct_local", Type: mail.AccountTypeLocal})
+	if !skipped || skip.Account != "acct_local" || skip.Reason != mail.SyncCheckSkipLocalAccount {
+		t.Fatalf("local account skip = %+v, %v", skip, skipped)
+	}
+	if _, skipped := syncSkipForAccount(mail.Account{Ref: "acct_imap", Type: mail.AccountTypeIMAP}); skipped {
+		t.Fatal("an IMAP account without an address is a failure, not a skip")
+	}
+	if _, skipped := syncSkipForAccount(mail.Account{Type: mail.AccountTypeLocal, EmailAddresses: []string{"a@example.com"}}); skipped {
+		t.Fatal("a local account with an address is checked")
+	}
+}
+
+func TestSyncCheckSummarizesCountAgreement(t *testing.T) {
+	result := mail.SyncCheckResult{Mailboxes: []mail.MailboxDelta{
+		{State: mail.MailboxDeltaStateMatched, Delta: 0},
+		{State: mail.MailboxDeltaStateMatched, Delta: 1},
+		{State: mail.MailboxDeltaStateServerOnly, ServerMessages: 3},
+		{State: mail.MailboxDeltaStateLocalOnly, LocalMessages: 0},
+	}}
+	finishSyncCheck(&result)
+	if result.MismatchedMailboxes != 2 || result.CountsMatch || !result.Complete {
+		t.Fatalf("summary = %+v, want two mismatched mailboxes on a complete check", result)
+	}
+	agreeing := mail.SyncCheckResult{Mailboxes: []mail.MailboxDelta{{State: mail.MailboxDeltaStateMatched}}}
+	finishSyncCheck(&agreeing)
+	if !agreeing.CountsMatch || agreeing.MismatchedMailboxes != 0 {
+		t.Fatalf("agreeing summary = %+v", agreeing)
+	}
+	failed := mail.SyncCheckResult{Failures: []mail.SyncCheckFailure{{Code: "imap_timeout"}}}
+	finishSyncCheck(&failed)
+	if failed.Complete || failed.CountsMatch {
+		t.Fatalf("failed summary = %+v", failed)
+	}
+}
+
 // A server LIST failure makes the account catalog incomplete before any
 // mailbox pairing is attempted.
 func TestSyncCheckReportsServerCatalogFailure(t *testing.T) {

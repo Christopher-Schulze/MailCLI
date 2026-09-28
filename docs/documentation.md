@@ -367,7 +367,7 @@ Agents discover support from capabilities, never by parsing help text.
 
 ### Next action and guidance
 
-The schema-1 `next` object appears on every failure and on a successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization or incomplete synchronization coverage; completed results and normal pagination omit it.
+The schema-1 `next` object appears on every failure and on a successful result with an outstanding claim, incomplete content, degraded account catalog, submitted synchronization, incomplete synchronization coverage or differing synchronization counts; completed results and normal pagination omit it.
 Its fields are `do`, `why` (one sentence of 120 Unicode characters or fewer; for `ask_user` it names the concrete user action), optional `command` (a published command ID), optional `args` and optional `wait_seconds`.
 Commands and arguments come only from supported recovery builders; absent arguments mean the caller keeps the original invocation or inspects the evidence, never invents a command.
 
@@ -671,6 +671,8 @@ Each STATUS response must identify the requested mailbox and provide exactly one
 Each mailbox result reports `state` (`matched`, `local_only`, `server_only`, `inaccessible` or `unresolved`), local and server count availability and the exact `server_name` when known.
 Matched entries carry both counts only when the local count is available; a zero local count never stands in for a missing local mailbox.
 A failed server LIST or an empty selectable server catalog makes coverage incomplete; `complete:false` and typed `failures` identify every uncovered identity.
+Nothing to compare is not a failure: a local account without an address (`local_account`) and a mailbox with no local count that is empty on the server (`empty_without_local_count`) are listed under `skipped` and keep `complete:true`; a mailbox with no local count but server messages stays an `unresolved` failure.
+`counts_match` is true when the check is complete and every compared mailbox has equal local and server counts, and `mismatched_mailboxes` counts the others (equal counts do not prove equal mail); when counts differ on a complete check `next` is `check_state` without a command, because the differences close once Mail.app has synced.
 `sync_check_policy` reports that incomplete checks are successful results with exit `0` by default; automation that requires exhaustive coverage uses `--require-complete` (complete exit `0`, incomplete exit `3` with the same `ok:true` payload, runtime failure exit `1`, invalid flags exit `2`).
 `--require-complete` without `--check` is invalid.
 The check reports counts without downloading content or refreshing Mail's index.
