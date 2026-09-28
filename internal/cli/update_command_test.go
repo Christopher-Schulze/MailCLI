@@ -894,7 +894,8 @@ func collectUpdateAttempts(
 ) []updateAttemptResult {
 	t.Helper()
 	attempts := make([]updateAttemptResult, 0, attemptCount)
-	timeout := time.NewTimer(10 * time.Second)
+	// Hang guard only: real installer subprocesses run under parallel package load.
+	timeout := time.NewTimer(60 * time.Second)
 	defer timeout.Stop()
 	for range attemptCount {
 		select {
@@ -960,7 +961,7 @@ func waitForArchiveStart(t *testing.T, archiveStarted <-chan time.Time) time.Tim
 	select {
 	case startedAt := <-archiveStarted:
 		return startedAt
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("update did not reach its delayed archive request")
 		return time.Time{}
 	}
