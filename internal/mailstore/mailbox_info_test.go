@@ -227,87 +227,67 @@ func TestClientRejectsRenamedIMAPMailboxWithoutGuessing(t *testing.T) {
 	}
 }
 
-func TestClientHydratesMissingSourceThroughBoundedMetadataResolver(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installImapIdentityFixture(t, store, "metadata@gmail.com")
-	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID = 102`)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
-	if err != nil {
-		t.Fatalf("ListMessages() error = %v", err)
-	}
-	messageRef := messageRefWithSubject(t, page.Messages, "Status Update")
-	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := store.messageBasePath(location, 102)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(base + ".emlx"); err != nil {
-		t.Fatalf("remove local source: %v", err)
-	}
-	resolver := &metadataResolverStub{
-		stubImapOperator: stubImapOperator{
-			raw:   []byte("From: Alice <alice@example.com>\r\nSubject: Status Update\r\nMessage-ID: <remote-102@example.com>\r\n\r\nMetadata body\r\n"),
-			boxes: []transport.MailboxInfo{{Name: "INBOX"}},
-		},
-		identity: transport.MessageIdentity{UID: 202, UIDValidity: 12345, MessageID: "<remote-102@example.com>"},
-	}
-	client := &Client{store: store, send: mail.SendTransport{
-		Imap: resolver, Credentials: stubCredentials{"metadata@gmail.com": "secret"},
-	}}
-	message, err := client.GetMessage(context.Background(), messageRef)
-	if err != nil || message.Content != "Metadata body" {
-		t.Fatalf("GetMessage() = %+v, error = %v", message, err)
-	}
-	if resolver.calls != 1 || resolver.searchCalls != 0 {
-		t.Fatalf("metadata resolver calls = %d, Message-ID searches = %d", resolver.calls, resolver.searchCalls)
-	}
-	ref, err := mailref.DecodeMessage(message.Summary.Ref)
-	if err != nil || ref.ExpectedIMAPUID != 0 || ref.ExpectedIMAPUIDValidity != 0 || ref.ExpectedMessageID != "<remote-102@example.com>" {
-		t.Fatalf("resolved summary ref = %+v, error = %v", ref, err)
-	}
-}
-
-func TestClientPropagatesAmbiguousMetadataIdentityError(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
-	closeTestResource(t, store, "test store")
-	installImapIdentityFixture(t, store, "metadata-ambiguous@gmail.com")
-	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID = 102`)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
-	if err != nil {
-		t.Fatalf("ListMessages() error = %v", err)
-	}
-	messageRef := messageRefWithSubject(t, page.Messages, "Status Update")
-	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := store.messageBasePath(location, 102)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(base + ".emlx"); err != nil {
-		t.Fatalf("remove local source: %v", err)
-	}
-	resolver := &metadataResolverStub{
-		stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}}},
-		err: &transport.TransportError{
-			Code:    transport.CodeIMAPAmbiguousMessageID,
-			Message: "metadata matched 2 IMAP messages",
-		},
-	}
-	client := &Client{store: store, send: mail.SendTransport{
-		Imap: resolver, Credentials: stubCredentials{"metadata-ambiguous@gmail.com": "secret"},
-	}}
-	if _, err := client.resolveImapTarget(context.Background(), messageRef); transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID ||
-		strings.Contains(err.Error(), "refusing mutation") {
-		t.Fatalf("resolveImapTarget() error = %v, want propagated read-safe %s error", err, transport.CodeIMAPAmbiguousMessageID)
-	}
-	if resolver.fetchCalls != 0 {
-		t.Fatalf("FetchMessage calls = %d, want 0 for ambiguous metadata", resolver.fetchCalls)
+func TestClientRejectsMetadataOnlyTargetsBeforeRemoteDispatch(t *testing.T) {
+	for _, candidateCount := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d matching server candidates", candidateCount), func(t *testing.T) {
+			store, inboxRef := newSearchFixture(t)
+			closeTestResource(t, store, "identity fixture store")
+			installImapIdentityFixture(t, store, "metadata@gmail.com")
+			updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID = 102`)
+			page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := messageRefWithSubject(t, page.Messages, "Status Update")
+			location := mustMailboxLocation(t, "imap://"+testAccountID+"/INBOX")
+			base, err := store.messageBasePath(location, 102)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(base + ".emlx"); err != nil {
+				t.Fatal(err)
+			}
+			operator := &countingFetchOperator{stubImapOperator: stubImapOperator{
+				raw:           []byte("From: Alice <alice@example.com>\r\nSubject: Status Update\r\nMessage-ID: <other@example.com>\r\n\r\nWrong message"),
+				searchMatches: candidateCount,
+			}}
+			client := &Client{store: store, send: mail.SendTransport{
+				Imap: operator, Credentials: stubCredentials{"metadata@gmail.com": "secret"},
+			}}
+			read := true
+			for _, operation := range []struct {
+				name string
+				call func() error
+			}{
+				{"read", func() error { _, err := client.GetMessage(context.Background(), ref); return err }},
+				{"mark", func() error {
+					_, err := client.MarkMessage(context.Background(), mail.MarkMessageRequest{Ref: ref, Read: &read})
+					return err
+				}},
+				{"move", func() error {
+					_, err := client.TransferMessage(context.Background(), mail.TransferMessageRequest{Ref: ref, DestinationMailbox: inboxRef})
+					return err
+				}},
+				{"copy", func() error {
+					_, err := client.TransferMessage(context.Background(), mail.TransferMessageRequest{Ref: ref, DestinationMailbox: inboxRef, Copy: true})
+					return err
+				}},
+				{"delete", func() error {
+					_, err := client.DeleteMessage(context.Background(), mail.DeleteMessageRequest{Ref: ref})
+					return err
+				}},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(); transport.ErrorCode(err) != transport.CodeIMAPMessageUIDUnknown {
+						t.Fatalf("operation error = %v, want unresolved independent identity", err)
+					}
+					if operator.fetchCalls != 0 || operator.searchCalls != 0 || operator.listCalls != 0 || operator.mutationCalls != 0 {
+						t.Fatalf("remote dispatch: fetch=%d search=%d list=%d mutation=%d",
+							operator.fetchCalls, operator.searchCalls, operator.listCalls, operator.mutationCalls)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -336,22 +316,12 @@ func TestClientRejectsAmbiguousMessageIDDuringReadIdentityResolution(t *testing.
 	}
 }
 
-type metadataResolverStub struct {
+type countingFetchOperator struct {
 	stubImapOperator
-	identity   transport.MessageIdentity
-	err        error
-	calls      int
 	fetchCalls int
 }
 
-func (s *metadataResolverStub) ResolveMessageIdentity(
-	_ context.Context, _ transport.ImapConfig, _ string, _ transport.MessageIdentityHint,
-) (transport.MessageIdentity, error) {
-	s.calls++
-	return s.identity, s.err
-}
-
-func (s *metadataResolverStub) FetchMessage(
+func (s *countingFetchOperator) FetchMessage(
 	ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64,
 ) ([]byte, error) {
 	s.fetchCalls++

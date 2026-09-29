@@ -579,8 +579,8 @@ FETCH parses complete logical responses across literal boundaries, accepts UID a
 Large literals spill to private unlinked temporary files instead of the heap, which can add disk I/O latency.
 
 A missing source is recovered through the reference's catalog-to-server UID mapping when it can be checked against the live row and mailbox-local `Info.plist` UIDVALIDITY.
-Without that evidence, one bounded mailbox-scoped search with exact subject and sender criteria fetches only `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)]`: one exact candidate yields a UID with SELECT-time UIDVALIDITY, ambiguity returns `imap_ambiguous_message_id`, stale evidence `stale_reference`, and insufficient evidence `imap_message_uid_unknown`.
-Discovery is capped at 128 UIDs, never scans the account and never guesses from a similar message; a renamed server mailbox stays `imap_mailbox_not_found`.
+Without that evidence, resolution requires an independent source-derived or reference-bound Message-ID and uses the exact mailbox-scoped search below; subject and sender never establish identity, even for a unique candidate.
+Absent both supported identities, `imap_message_uid_unknown` stops before remote dispatch and asks for Mail.app synchronization and a fresh reference. Ambiguity returns `imap_ambiguous_message_id`, stale evidence `stale_reference`, and a renamed server mailbox stays `imap_mailbox_not_found`.
 Successful hydration updates the returned reference with the verified UID and UIDVALIDITY.
 
 Message-ID resolution treats UID SEARCH as candidate discovery, then fetches each candidate's `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` and counts only exact normalized headers.

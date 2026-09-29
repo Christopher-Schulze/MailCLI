@@ -40,7 +40,6 @@ const (
 	maxFetchNestingDepth     = 128
 	maxUIDSearchResults      = 100000
 	maxMessageIDHeaderBytes  = 1 << 20
-	maxIdentitySearchResults = 128
 )
 
 const (

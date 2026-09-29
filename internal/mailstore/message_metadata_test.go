@@ -45,12 +45,12 @@ func enrichOne(client *Client, ref string, request mail.MessageEnrichmentRequest
 	return summaries[0], nil
 }
 
-// excerptBatchOperator resolves UIDs by subject and serves excerpt sources for
+// excerptBatchOperator resolves exact Message-IDs and serves excerpt sources for
 // the UIDs in sources; every other requested UID is not returned.
 type excerptBatchOperator struct {
-	*metadataResolverStub
+	*countingFetchOperator
 	mu            sync.Mutex
-	uidsBySubject map[string]uint32
+	uidsByID      map[string]uint32
 	sources       map[uint32]string
 	fetchErr      error
 	fetchUIDs     [][]uint32
@@ -59,14 +59,17 @@ type excerptBatchOperator struct {
 	fetchValidity []uint32
 }
 
-func (operator *excerptBatchOperator) ResolveMessageIdentity(
-	_ context.Context, _ transport.ImapConfig, _ string, hint transport.MessageIdentityHint,
-) (transport.MessageIdentity, error) {
+func (operator *excerptBatchOperator) SearchUID(
+	_ context.Context, _ transport.ImapConfig, _ string, messageID string,
+) (uint32, uint32, int, error) {
 	operator.mu.Lock()
 	defer operator.mu.Unlock()
-	operator.calls++
-	uid := operator.uidsBySubject[hint.Subject]
-	return transport.MessageIdentity{UID: uid, UIDValidity: 12345, MessageID: fmt.Sprintf("<%d@example.com>", uid)}, nil
+	operator.searchCalls++
+	uid := operator.uidsByID[messageID]
+	if uid == 0 {
+		return 0, 12345, 0, &transport.TransportError{Code: transport.CodeIMAPMessageNotFound, Message: "no exact Message-ID match"}
+	}
+	return uid, 12345, 1, nil
 }
 
 func (operator *excerptBatchOperator) FetchMessageExcerpts(
@@ -99,6 +102,21 @@ func newExcerptBatchFixture(t *testing.T, operator *excerptBatchOperator) (*Clie
 	closeTestResource(t, store, "excerpt batch fixture store")
 	installImapIdentityFixture(t, store, "metadata@gmail.com")
 	updateFixtureMessage(t, store, `UPDATE messages SET message_id = NULL, remote_id = NULL, remote_mailbox = NULL WHERE ROWID IN (102, 103)`)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteRefs := make([]string, 2)
+	operator.uidsByID = make(map[string]uint32)
+	for index, subject := range []string{"Status Update", "Noise"} {
+		ref := messageRefWithSubject(t, page.Messages, subject)
+		local, err := store.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentHeaders)
+		if err != nil || local.Summary.MessageID == "" {
+			t.Fatalf("read independent local headers: message=%+v error=%v", local, err)
+		}
+		remoteRefs[index] = messageRefWithExpectedID(t, ref, local.Summary.MessageID)
+		operator.uidsByID[local.Summary.MessageID] = uint32(202 + index)
+	}
 	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
 	if err != nil {
 		t.Fatal(err)
@@ -112,10 +130,6 @@ func newExcerptBatchFixture(t *testing.T, operator *excerptBatchOperator) (*Clie
 			t.Fatalf("remove local source %d: %v", rowID, err)
 		}
 	}
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
-	if err != nil {
-		t.Fatal(err)
-	}
 	archiveRef, err := mailref.EncodeMailbox(testAccountID, []string{"All"})
 	if err != nil {
 		t.Fatal(err)
@@ -124,20 +138,19 @@ func newExcerptBatchFixture(t *testing.T, operator *excerptBatchOperator) (*Clie
 	if err != nil || len(archive.Messages) != 1 {
 		t.Fatalf("archive rows=%d err=%v", len(archive.Messages), err)
 	}
-	operator.metadataResolverStub = &metadataResolverStub{stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "[Gmail]/All"}}}}
+	operator.countingFetchOperator = &countingFetchOperator{stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "[Gmail]/All"}}}}
 	client := &Client{store: store, send: mail.SendTransport{Imap: operator, Credentials: stubCredentials{"metadata@gmail.com": "secret"}}}
 	refs := []string{
-		messageRefWithSubject(t, page.Messages, "Status Update"),
+		remoteRefs[0],
 		archive.Messages[0].Ref,
-		messageRefWithSubject(t, page.Messages, "Noise"),
+		remoteRefs[1],
 	}
 	return client, refs
 }
 
 func TestEnrichMessagesFetchesIMAPExcerptsOncePerMailbox(t *testing.T) {
 	operator := &excerptBatchOperator{
-		uidsBySubject: map[string]uint32{"Status Update": 202, "Noise": 203},
-		sources:       map[uint32]string{202: "Content-Type: text/plain\r\n\r\nRemote status text"},
+		sources: map[uint32]string{202: "Content-Type: text/plain\r\n\r\nRemote status text"},
 	}
 	client, refs := newExcerptBatchFixture(t, operator)
 	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
@@ -173,8 +186,8 @@ func TestEnrichMessagesUsesLocalUIDsWithoutServerSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operator.searchCalls != 0 || operator.calls != 0 || operator.listCalls != 1 {
-		t.Fatalf("server searches=%d resolver calls=%d LIST calls=%d, want 0, 0, 1", operator.searchCalls, operator.calls, operator.listCalls)
+	if operator.searchCalls != 0 || operator.listCalls != 1 {
+		t.Fatalf("server searches=%d LIST calls=%d, want 0, 1", operator.searchCalls, operator.listCalls)
 	}
 	if len(operator.fetchUIDs) != 1 || !slices.Equal(operator.fetchUIDs[0], []uint32{202, 203}) || operator.fetchValidity[0] != 0 {
 		t.Fatalf("fetches=%v validity=%v, want one unverified fetch of 202,203", operator.fetchUIDs, operator.fetchValidity)
@@ -476,8 +489,7 @@ func TestCutExcerptMatchesBuildExcerpt(t *testing.T) {
 
 func TestEnrichMessagesReportsAFailedExcerptFetchPerRow(t *testing.T) {
 	operator := &excerptBatchOperator{
-		uidsBySubject: map[string]uint32{"Status Update": 202, "Noise": 203},
-		fetchErr:      &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "timeout"},
+		fetchErr: &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "timeout"},
 	}
 	client, refs := newExcerptBatchFixture(t, operator)
 	summaries, err := client.EnrichMessages(context.Background(), refs, mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})

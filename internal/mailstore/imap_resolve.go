@@ -97,18 +97,10 @@ func (c *Client) resolveImapTargetWithOptions(
 		}
 	}
 	if target.uid == 0 && target.messageID == "" {
-		if imapOp == nil {
-			return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
-				Code:    transport.CodeIMAPMessageUIDUnknown,
-				Message: "IMAP identity discovery is unavailable; refresh the local catalog or provide a fresh Message-ID-backed reference",
-			})
-		}
-		if _, supported := imapOp.(transport.MessageIdentityResolver); !supported {
-			return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
-				Code:    transport.CodeIMAPMessageUIDUnknown,
-				Message: "message has no Message-ID or independent server UID mapping, and this IMAP transport has no bounded metadata resolver; refresh the local catalog",
-			})
-		}
+		return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
+			Code:    transport.CodeIMAPMessageUIDUnknown,
+			Message: "message has no Message-ID or independently verified server UID and UIDVALIDITY; let Mail.app synchronize and resolve a fresh reference",
+		})
 	}
 
 	email, cfg, err := c.imapConfigForAccountID(ctx, resolved.Reference.AccountID)
@@ -151,25 +143,6 @@ func (c *Client) resolveImapTargetWithOptions(
 		}
 	}
 
-	if target.uid == 0 && target.messageID == "" {
-		resolver, supported := imapOp.(transport.MessageIdentityResolver)
-		if supported {
-			identity, err := resolver.ResolveMessageIdentity(ctx, cfg, imapBox, transport.MessageIdentityHint{
-				Subject: resolved.Record.Subject, SenderAddress: resolved.Record.SenderAddress,
-			})
-			if err != nil {
-				return target, identityResolutionError(messageRef, localIdentityErr, err)
-			}
-			if identity.UID == 0 || identity.UIDValidity == 0 {
-				return target, identityResolutionError(messageRef, localIdentityErr, &transport.TransportError{
-					Code:    transport.CodeIMAPMessageUIDUnknown,
-					Message: "server metadata resolver returned an incomplete UID identity",
-				})
-			}
-			target.uid, target.uidvalidity, target.duplicateMatches = identity.UID, identity.UIDValidity, 1
-			target.messageID = identity.MessageID
-		}
-	}
 	if target.messageID != "" && target.uid == 0 {
 		uid, uidval, matchCount, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
 		if err != nil {

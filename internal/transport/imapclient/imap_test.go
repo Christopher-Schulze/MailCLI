@@ -1197,7 +1197,7 @@ func TestSearchUID(t *testing.T) {
 	}
 }
 
-func TestResolveMessageIdentityUsesBoundedHeaderVerification(t *testing.T) {
+func TestSearchUIDUsesIndependentMessageIDWithBoundedHeaders(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK: true, otherMboxes: []string{"INBOX"},
 		uidSearchResponse: []string{"* SEARCH 77", "<tag> OK SEARCH completed"},
@@ -1206,14 +1206,12 @@ func TestResolveMessageIdentityUsesBoundedHeaderVerification(t *testing.T) {
 		},
 	})
 	client, cfg := newFakeClient(t, srv)
-	identity, err := client.ResolveMessageIdentity(context.Background(), cfg, "INBOX", transport.MessageIdentityHint{
-		Subject: "Quarterly Report", SenderAddress: "alice@example.com",
-	})
+	uid, validity, matches, err := client.SearchUID(context.Background(), cfg, "INBOX", "<remote@example.com>")
 	if err != nil {
-		t.Fatalf("ResolveMessageIdentity() error = %v", err)
+		t.Fatalf("SearchUID() error = %v", err)
 	}
-	if identity.UID != 77 || identity.UIDValidity != 12345 || identity.MessageID != "<remote@example.com>" {
-		t.Fatalf("identity = %+v, want UID 77 / UIDVALIDITY 12345", identity)
+	if uid != 77 || validity != 12345 || matches != 1 {
+		t.Fatalf("identity = %d/%d/%d, want UID 77 / UIDVALIDITY 12345 / one exact match", uid, validity, matches)
 	}
 	commands := protocolCommands(srv.Commands())
 	if len(commands) != 3 || commands[0] != "SELECT" || commands[1] != "UID SEARCH" || commands[2] != "UID FETCH" {
@@ -1221,7 +1219,7 @@ func TestResolveMessageIdentityUsesBoundedHeaderVerification(t *testing.T) {
 	}
 }
 
-func TestResolveMessageIdentityRejectsAmbiguousMetadata(t *testing.T) {
+func TestSearchUIDRejectsMetadataCollisionsWithoutMatchingMessageID(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK: true, otherMboxes: []string{"INBOX"},
 		uidSearchResponse: []string{"* SEARCH 41 77", "<tag> OK SEARCH completed"},
@@ -1231,15 +1229,13 @@ func TestResolveMessageIdentityRejectsAmbiguousMetadata(t *testing.T) {
 		},
 	})
 	client, cfg := newFakeClient(t, srv)
-	_, err := client.ResolveMessageIdentity(context.Background(), cfg, "INBOX", transport.MessageIdentityHint{
-		Subject: "Quarterly Report", SenderAddress: "alice@example.com",
-	})
-	if transport.ErrorCode(err) != transport.CodeIMAPAmbiguousMessageID {
-		t.Fatalf("ResolveMessageIdentity() code = %s, want %s: %v", transport.ErrorCode(err), transport.CodeIMAPAmbiguousMessageID, err)
+	uid, _, matches, err := client.SearchUID(context.Background(), cfg, "INBOX", "<requested@example.com>")
+	if transport.ErrorCode(err) != transport.CodeIMAPMessageNotFound || uid != 0 || matches != 0 {
+		t.Fatalf("SearchUID() = %d/%d, error=%v, want no exact identity", uid, matches, err)
 	}
 }
 
-func TestResolveMessageIdentityAllowsMissingMessageIDWhenMetadataIsUnique(t *testing.T) {
+func TestSearchUIDRejectsUniqueMetadataWithoutMessageID(t *testing.T) {
 	srv := newFakeServer(t, fakeServerConfig{
 		authOK: true, otherMboxes: []string{"INBOX"},
 		uidSearchResponse: []string{"* SEARCH 77", "<tag> OK SEARCH completed"},
@@ -1248,19 +1244,14 @@ func TestResolveMessageIdentityAllowsMissingMessageIDWhenMetadataIsUnique(t *tes
 		},
 	})
 	client, cfg := newFakeClient(t, srv)
-	identity, err := client.ResolveMessageIdentity(context.Background(), cfg, "INBOX", transport.MessageIdentityHint{
-		Subject: "Quarterly Report", SenderAddress: "alice@example.com",
-	})
-	if err != nil {
-		t.Fatalf("ResolveMessageIdentity() error = %v", err)
-	}
-	if identity.UID != 77 || identity.UIDValidity != 12345 || identity.MessageID != "" {
-		t.Fatalf("identity = %+v, want UID 77 / UIDVALIDITY 12345 / empty Message-ID", identity)
+	uid, _, matches, err := client.SearchUID(context.Background(), cfg, "INBOX", "<requested@example.com>")
+	if transport.ErrorCode(err) != transport.CodeIMAPMessageNotFound || uid != 0 || matches != 0 {
+		t.Fatalf("SearchUID() = %d/%d, error=%v, want no identity despite unique metadata", uid, matches, err)
 	}
 }
 
-func TestResolveMessageIdentityRejectsSearchCoverageOverflow(t *testing.T) {
-	uids := make([]string, maxIdentitySearchResults+1)
+func TestSearchUIDRejectsSearchCoverageOverflow(t *testing.T) {
+	uids := make([]string, maxUIDSearchResults+1)
 	for index := range uids {
 		uids[index] = strconv.Itoa(index + 1)
 	}
@@ -1269,9 +1260,9 @@ func TestResolveMessageIdentityRejectsSearchCoverageOverflow(t *testing.T) {
 		uidSearchResponse: []string{"* SEARCH " + strings.Join(uids, " "), "<tag> OK SEARCH completed"},
 	})
 	client, cfg := newFakeClient(t, srv)
-	_, err := client.ResolveMessageIdentity(context.Background(), cfg, "INBOX", transport.MessageIdentityHint{Subject: "Quarterly Report"})
-	if transport.ErrorCode(err) != transport.CodeIMAPMessageUIDUnknown || !strings.Contains(err.Error(), "bounded 128-candidate limit") {
-		t.Fatalf("ResolveMessageIdentity() error = %v, want bounded unresolved identity", err)
+	_, _, _, err := client.SearchUID(context.Background(), cfg, "INBOX", "<requested@example.com>")
+	if transport.ErrorCode(err) != transport.CodeIMAPResponseMalformed || !strings.Contains(err.Error(), "result count exceeds") {
+		t.Fatalf("SearchUID() error = %v, want bounded malformed search response", err)
 	}
 }
 

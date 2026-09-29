@@ -306,7 +306,7 @@ func TestDefaultMetadataAndPartialAttachmentJSONPreserveEvidence(t *testing.T) {
 }
 
 type readIntentHeaderFetcher struct {
-	*metadataResolverStub
+	*countingFetchOperator
 	headers          []byte
 	headerFetchCalls int
 	lastHeaderLimit  int64
@@ -341,6 +341,11 @@ func TestMissingSourceHeaderIntentUsesBoundedHeaderFetcher(t *testing.T) {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
 	ref := messageRefWithSubject(t, page.Messages, "Status Update")
+	local, err := store.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentHeaders)
+	if err != nil || local.Summary.MessageID == "" {
+		t.Fatalf("read independent local headers: message=%+v error=%v", local, err)
+	}
+	ref = messageRefWithExpectedID(t, ref, local.Summary.MessageID)
 	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
 	if err != nil {
 		t.Fatal(err)
@@ -353,11 +358,10 @@ func TestMissingSourceHeaderIntentUsesBoundedHeaderFetcher(t *testing.T) {
 		t.Fatalf("remove local source: %v", err)
 	}
 	resolver := &readIntentHeaderFetcher{
-		metadataResolverStub: &metadataResolverStub{
-			stubImapOperator: stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}}},
-			identity:         transport.MessageIdentity{UID: 202, UIDValidity: 12345, MessageID: "<remote-102@example.com>"},
+		countingFetchOperator: &countingFetchOperator{
+			stubImapOperator: stubImapOperator{uid: 202, boxes: []transport.MailboxInfo{{Name: "INBOX"}}},
 		},
-		headers: []byte("From: Alice <alice@example.com>\r\nSubject: Status Update\r\nMessage-ID: <remote-102@example.com>\r\n\r\n"),
+		headers: []byte("From: Alice <alice@example.com>\r\nSubject: Status Update\r\nMessage-ID: <" + local.Summary.MessageID + ">\r\n\r\n"),
 	}
 	client := &Client{store: store, send: mail.SendTransport{
 		Imap: resolver, Credentials: stubCredentials{"metadata@gmail.com": "secret"},
@@ -366,7 +370,7 @@ func TestMissingSourceHeaderIntentUsesBoundedHeaderFetcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMessageWithIntent(headers) error = %v", err)
 	}
-	if message.Summary.MessageID != "remote-102@example.com" || message.ContentSource != "imap_raw" ||
+	if message.Summary.MessageID != local.Summary.MessageID || message.ContentSource != "imap_raw" ||
 		message.Content != "" || resolver.headerFetchCalls != 1 || resolver.lastHeaderLimit != int64(maximumHeaderBytes) ||
 		resolver.fetchCalls != 0 {
 		t.Fatalf("header result=%+v header_fetches=%d bound=%d full_fetches=%d",
