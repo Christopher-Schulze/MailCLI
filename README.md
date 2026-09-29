@@ -6,7 +6,7 @@ Local Apple Mail access for the shell and coding agents.
 [![Platform](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-Install the latest signed release on macOS Apple silicon (requires a trusted OpenSSL 3, for example `brew install openssl@3`):
+Install the latest release on macOS Apple silicon. No Go toolchain or Homebrew is needed:
 
 ```bash
 /bin/bash -o pipefail -c 'curl -fsSL --proto-redir =https https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | bash'
@@ -91,7 +91,7 @@ SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS prod
 
 ## Install
 
-The [one-command installer](scripts/release/install-latest.sh) above resolves GitHub's latest published release and installs its CLI and agent skill. It needs a trusted OpenSSL 3 with Ed25519 (for example Homebrew `openssl@3`, or set `OPENSSL_BIN` to another trusted binary); macOS `/usr/bin/openssl` is LibreSSL and cannot verify. The bootstrap authenticates the signed `SHA256SUMS` with MailCLI's pinned public key before downloading the archive, verifies its digest and layout, then runs the packaged installer. Any failed check stops installation.
+The [one-command installer](scripts/release/install-latest.sh) above resolves GitHub's latest published release and installs its CLI and agent skill. First installation trusts GitHub HTTPS: the script checks the archive against the separately downloaded `SHA256SUMS` and validates its layout and binary version, but does **not** independently verify the release's Ed25519 signature. A checksum from the same host detects mismatched downloads; it does not authenticate the publisher. Any failed check stops installation. Later `mailcli update` runs the signature verification in Go.
 
 The installer puts the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli`, staged, verified, and committed with rollback. Add `~/.local/bin` to your `PATH` if needed. Start a new agent session afterwards so the skill is discovered.
 

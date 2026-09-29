@@ -5,7 +5,7 @@ MAILCLI_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    printf 'Bootstrap verification requires command: %s\n' "$1" >&2
+    printf 'Release signature fixture requires command: %s\n' "$1" >&2
     exit 2
   fi
 }
@@ -23,12 +23,12 @@ if [[ -z "${OPENSSL_BIN}" ]] && command -v brew >/dev/null 2>&1; then
 fi
 OPENSSL_BIN="${OPENSSL_BIN:-$(command -v openssl || true)}"
 if [[ -z "${OPENSSL_BIN}" || ! -x "${OPENSSL_BIN}" ]]; then
-  printf 'Bootstrap verification requires an independently trusted OpenSSL 3 binary\n' >&2
+  printf 'Release signature fixture requires OpenSSL 3\n' >&2
   exit 2
 fi
 OPENSSL_VERSION="$("${OPENSSL_BIN}" version 2>/dev/null || true)"
 if [[ "${OPENSSL_VERSION}" != OpenSSL\ 3.* ]]; then
-  printf 'Bootstrap verification requires OpenSSL 3 with Ed25519 support: %s\n' "${OPENSSL_BIN}" >&2
+  printf 'Release signature fixture requires OpenSSL 3 with Ed25519 support: %s\n' "${OPENSSL_BIN}" >&2
   exit 2
 fi
 BASE64_BIN="$(command -v base64)"
@@ -128,7 +128,7 @@ assert_rejected_before_execution() {
   local archive_path="$4"
   rm -f "${MARKER}"
   if attempt_bootstrap "${public_key_path}" "${manifest_path}" "${signature_path}" "${archive_path}"; then
-    printf 'Bootstrap accepted a tampered fixture\n' >&2
+    printf 'Release signature fixture accepted tampered data\n' >&2
     exit 1
   fi
   [[ ! -e "${MARKER}" ]]
@@ -188,20 +188,23 @@ assert_rejected_before_execution "${PUBLIC_KEY}" "${MALICIOUS_MANIFEST}" "${MALI
 for required_text in \
   'set -euo pipefail' \
   '/releases/latest' \
-  'VjVSufeZlmmMshZYeMB9u1xKoMvRavstpFqByv8Vzqg=' \
-  'pkeyutl -verify' \
+  "--proto-redir '=https'" \
   'shasum -a 256 -c archive.SHA256SUMS' \
   'tar -tvzf' \
   'tar -xzf'; do
-  if ! grep -Fq "${required_text}" "${MAILCLI_ROOT}/scripts/release/install-latest.sh"; then
+  if ! grep -Fq -- "${required_text}" "${MAILCLI_ROOT}/scripts/release/install-latest.sh"; then
     printf 'Latest-release bootstrap is missing: %s\n' "${required_text}" >&2
     exit 1
   fi
 done
+if grep -Eq 'OPENSSL_BIN|openssl|pkeyutl|SHA256SUMS\.sig' "${MAILCLI_ROOT}/scripts/release/install-latest.sh"; then
+  printf 'First-install bootstrap still requires a signature-verification dependency\n' >&2
+  exit 1
+fi
 if ! grep -Fq '/bin/bash -o pipefail -c' "${MAILCLI_ROOT}/README.md" ||
   ! grep -Fq '/main/scripts/release/install-latest.sh' "${MAILCLI_ROOT}/README.md"; then
   printf 'README is missing the copyable latest-release installer command\n' >&2
   exit 1
 fi
 
-printf 'Bootstrap authenticity tests passed\n'
+printf 'Release signature fixtures and bootstrap checks passed\n'

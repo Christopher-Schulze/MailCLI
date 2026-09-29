@@ -61,7 +61,7 @@ The companion skill in `skills/mailcli` routes intents to commands and guides; s
 
 ## Install and update
 
-Install the signed release with the bootstrap in the repository README, or build a verified source checkout with `./scripts/build/install-local.sh`.
+Install the latest release with the HTTPS bootstrap in the repository README, or build a verified source checkout with `./scripts/build/install-local.sh`.
 Both paths install the matching binary and companion skill together; the binary defaults to `~/.local/bin/mailcli` and the skill to `~/.agents/skills/mailcli`.
 An agent host must discover that skill directory or a supported link to it.
 `mailcli update` verifies and installs the latest signed release with rollback and refreshes the canonical skill installation.
@@ -1165,8 +1165,7 @@ The repository has no publication script or release workflow.
 
 ### Installer
 
-The first-install bootstrap in the README needs an independently trusted OpenSSL 3 because macOS `/usr/bin/openssl` is LibreSSL without Ed25519.
-It authenticates the exact `SHA256SUMS` bytes with the pinned public key, downloads the `darwin/arm64` archive only after that, checks the one expected archive entry and safe layout, and extracts or runs `install.sh` only after the archive digest matches.
+The first-install bootstrap in the README needs only macOS system tools. It trusts GitHub HTTPS for the script, manifest and archive, and does not independently verify the Ed25519 signature. The `SHA256SUMS` check detects a mismatched download but cannot authenticate the publisher when both files come from the same host. The bootstrap checks the one expected archive entry, safe layout and embedded binary version before running `install.sh`; subsequent `mailcli update` calls verify the signature in Go.
 
 The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` select other safe absolute paths.
 It rejects unsafe parent or destination symlinks and pre-existing backup paths.
@@ -1302,7 +1301,7 @@ Keychain tests run the real SecItem calls against an isolated temporary keychain
 The documentation contract test pins every shared operational bound (page limits, search caps, byte budgets, timeouts, pool sizes) to one value wherever `README.md`, this document, the skill guides and the implementing scripts or constants state it.
 
 `scripts/tests/test-release.sh` is the repeatable `darwin/arm64` release harness: exact Go pin, required tools, module integrity, native packaging, generated-key signing, checksum verification, archive contents, installation and SIGKILL rollback recovery in a temporary directory and home; `--staging-only` runs the staging regressions alone.
-`scripts/tests/test-install-local.sh` checks the source wrapper against isolated destinations, `scripts/tests/test-skill-drift.sh` checks skill packaging without the user's skill directory, and `scripts/tests/test-bootstrap.sh` proves that tampered manifests, signatures, keys, archives and entries never reach extraction or execution.
+`scripts/tests/test-install-local.sh` checks the source wrapper against isolated destinations, `scripts/tests/test-skill-drift.sh` checks skill packaging without the user's skill directory, and `scripts/tests/test-bootstrap.sh` checks generated release-signature fixtures, archive rejection and the HTTPS bootstrap's required guards.
 `scripts/tests/test-release-authority.sh` rejects publication commands in normal scripts and workflows, `scripts/tests/test-commit-authority.sh` rejects staging and commit commands outside its fixtures, and the full suite snapshots branch, remote-tracking and tag refs around release verification.
 The CI workflow (`.github/workflows/ci.yml`) is optional and starts only through manual `workflow_dispatch`, with no automatic push or pull-request runs.
 Its one ARM64 job on `macos-26` asserts Darwin/arm64, runs `go build ./...`, and invokes the shared full gate `scripts/tests/test.sh --full`.
