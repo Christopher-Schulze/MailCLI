@@ -6,11 +6,31 @@ Local Apple Mail access for the shell and coding agents.
 [![Platform](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-Install the latest release on macOS Apple silicon. No Go toolchain or Homebrew is needed:
+## Install
+
+### Latest release
+
+If you trust GitHub HTTPS, install the latest release on macOS Apple silicon. No Go toolchain or Homebrew is needed:
 
 ```bash
 /bin/bash -o pipefail -c 'curl -fsSL --proto-redir =https https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | bash'
 ```
+
+The [one-command installer](scripts/release/install-latest.sh) resolves GitHub's latest published release and installs its CLI and agent skill. First installation trusts GitHub HTTPS: the script checks the archive against the separately downloaded `SHA256SUMS` and validates its layout and binary version, but does **not** independently verify the release's Ed25519 signature. A checksum from the same host detects mismatched downloads; it does not authenticate the publisher. Any failed check stops installation. Later `mailcli update` runs the signature verification in Go.
+
+### Build from source
+
+Install the exact Go version declared in `go.mod` and the Xcode Command Line Tools, then build and install the CLI and skill yourself:
+
+```bash
+git clone https://github.com/Christopher-Schulze/MailCLI.git
+cd MailCLI
+./scripts/build/install-local.sh
+```
+
+The source installer uses the same rollback-safe transaction; a first argument or `MAILCLI_SKILL_DESTINATION` selects other destinations. Run `./scripts/utils/create-local-signing-identity.sh` once so every source build carries the same local signature and macOS keeps your Keychain approval across rebuilds. The release binary is ad-hoc signed, not notarized; if Gatekeeper blocks the verified binary, remove only its quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`.
+
+## First commands
 
 MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations over IMAP, and sends reviewed drafts over SMTP with credentials stored in the macOS Keychain via `mailcli send setup`; it never asks for passwords or tokens in chat.
 
@@ -89,23 +109,11 @@ See the [architecture chapter](docs/documentation.md#architecture) for package b
 
 SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS product: it relies on the Keychain for credentials, Apple's Envelope Index and `.emlx` files for reads, and AppKit or Apple Events for the optional native integrations. Downloaded mail stays readable while Mail.app is closed; local lists and searches show new mail once Mail.app has updated its store, while `messages new` can inspect the newest 100 server messages immediately. An unsupported store version or schema fails closed instead of guessing, so a new macOS or Mail release may need an adapter update. See [platform and compatibility](docs/documentation.md#platform-and-compatibility) and [Limitations](#limitations).
 
-## Install
+## After installation
 
-The [one-command installer](scripts/release/install-latest.sh) above resolves GitHub's latest published release and installs its CLI and agent skill. First installation trusts GitHub HTTPS: the script checks the archive against the separately downloaded `SHA256SUMS` and validates its layout and binary version, but does **not** independently verify the release's Ed25519 signature. A checksum from the same host detects mismatched downloads; it does not authenticate the publisher. Any failed check stops installation. Later `mailcli update` runs the signature verification in Go.
-
-The installer puts the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli`, staged, verified, and committed with rollback. Add `~/.local/bin` to your `PATH` if needed. Start a new agent session afterwards so the skill is discovered.
+Both installers put the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli` by default, staged, verified, and committed with rollback. Add `~/.local/bin` to your `PATH` if needed. Start a new agent session afterwards so the skill is discovered.
 
 `mailcli update --check` only reports whether a newer release exists and installs nothing. Later updates of both components run through `mailcli update` (`--json` for one envelope). The updater verifies the signed `SHA256SUMS` against the pinned key before it downloads the archive, accepts only exact GitHub release hosts over HTTPS, checks the binary's architecture, signature, and version, and installs through the same rollback-safe transaction; concurrent installers are serialized. When updating from an older binary that expects plain version output, use `MAILCLI_OUTPUT=human mailcli update`.
-
-To build from source, install the exact Go version declared in `go.mod` and the Xcode Command Line Tools:
-
-```bash
-git clone https://github.com/Christopher-Schulze/MailCLI.git
-cd MailCLI
-./scripts/build/install-local.sh
-```
-
-The source installer uses the same rollback-safe transaction; a first argument or `MAILCLI_SKILL_DESTINATION` selects other destinations. Run `./scripts/utils/create-local-signing-identity.sh` once so every source build carries the same local signature and macOS keeps your Keychain approval across rebuilds. The release binary is ad-hoc signed, not notarized; if Gatekeeper blocks the verified binary, remove only its quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`.
 
 ### Grant permissions
 
