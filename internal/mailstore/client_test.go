@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,6 +116,7 @@ func (s *fallbackSpy) DeleteMessage(_ context.Context, request mail.DeleteMessag
 func (*fallbackSpy) Sync(context.Context, string) error { return nil }
 
 type stubImapOperator struct {
+	mu                     sync.Mutex
 	boxes                  []transport.MailboxInfo
 	uid                    uint32
 	uidvalidity            uint32
@@ -177,6 +179,8 @@ func (s *stubImapOperator) AppendToSent(ctx context.Context, cfg transport.ImapC
 }
 
 func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.ImapConfig) ([]transport.MailboxInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.listCalls++
 	if err, ok := s.listErrByUsername[cfg.Username]; ok {
 		return s.boxes, err
@@ -196,6 +200,8 @@ func (s *stubImapOperator) ListMailboxes(ctx context.Context, cfg transport.Imap
 }
 
 func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbox string, messageID string) (uint32, uint32, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.searchCalls++
 	if s.err != nil {
 		return 0, 0, 0, s.err
@@ -228,6 +234,8 @@ func (s *stubImapOperator) SearchUID(ctx context.Context, cfg transport.ImapConf
 }
 
 func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (transport.MutationEvidence, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.nextMutationErr(); err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -267,6 +275,8 @@ func (s *stubImapOperator) SetFlags(ctx context.Context, cfg transport.ImapConfi
 }
 
 func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	evidence := transport.MutationEvidence{
 		OperationID:         transport.MutationOperationID("COPY", cfg.Username, srcMailbox, uid, expectedUIDValidity, dstMailbox),
 		Outcome:             transport.MutationOutcomeAttempted,
@@ -288,6 +298,8 @@ func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapCo
 }
 
 func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.nextMutationErr(); err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -306,6 +318,8 @@ func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapCo
 }
 
 func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.nextMutationErr(); err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -324,6 +338,8 @@ func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.Imap
 }
 
 func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastFetchMax = maxBytes
 	if s.cancelFetch != nil {
 		s.cancelFetch()
@@ -342,6 +358,8 @@ func (s *stubImapOperator) FetchMessage(ctx context.Context, cfg transport.ImapC
 }
 
 func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapConfig, mailbox string) (transport.MailboxStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return transport.MailboxStatus{}, s.err
 	}
@@ -355,6 +373,8 @@ func (s *stubImapOperator) CheckStatus(ctx context.Context, cfg transport.ImapCo
 }
 
 func (s *stubImapOperator) FetchFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32) (transport.FlagState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.fetchFlagsCalls++
 	s.fetchFlagsUID = uid
 	s.fetchFlagsConfig = cfg

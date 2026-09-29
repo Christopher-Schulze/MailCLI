@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -48,6 +49,7 @@ func enrichOne(client *Client, ref string, request mail.MessageEnrichmentRequest
 // the UIDs in sources; every other requested UID is not returned.
 type excerptBatchOperator struct {
 	*metadataResolverStub
+	mu            sync.Mutex
 	uidsBySubject map[string]uint32
 	sources       map[uint32]string
 	fetchErr      error
@@ -60,6 +62,8 @@ type excerptBatchOperator struct {
 func (operator *excerptBatchOperator) ResolveMessageIdentity(
 	_ context.Context, _ transport.ImapConfig, _ string, hint transport.MessageIdentityHint,
 ) (transport.MessageIdentity, error) {
+	operator.mu.Lock()
+	defer operator.mu.Unlock()
 	operator.calls++
 	uid := operator.uidsBySubject[hint.Subject]
 	return transport.MessageIdentity{UID: uid, UIDValidity: 12345, MessageID: fmt.Sprintf("<%d@example.com>", uid)}, nil
@@ -68,6 +72,8 @@ func (operator *excerptBatchOperator) ResolveMessageIdentity(
 func (operator *excerptBatchOperator) FetchMessageExcerpts(
 	_ context.Context, _ transport.ImapConfig, mailbox string, expectedUIDValidity uint32, uids []uint32, maxTextBytes int64,
 ) (map[uint32]transport.MessageExcerptSource, error) {
+	operator.mu.Lock()
+	defer operator.mu.Unlock()
 	operator.fetchValidity = append(operator.fetchValidity, expectedUIDValidity)
 	operator.fetchUIDs = append(operator.fetchUIDs, append([]uint32(nil), uids...))
 	operator.fetchMailbox = append(operator.fetchMailbox, mailbox)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -18,6 +19,7 @@ import (
 
 type projectionGateway struct {
 	testGateway
+	mu        sync.Mutex
 	message   mail.Message
 	raw       string
 	getCalls  int
@@ -27,16 +29,22 @@ type projectionGateway struct {
 }
 
 func (g *projectionGateway) GetMessage(context.Context, string) (mail.Message, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.getCalls++
 	return g.message, g.getErr
 }
 
 func (g *projectionGateway) OpenDraft(context.Context, string) (mail.Message, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.openCalls++
 	return g.message, g.getErr
 }
 
 func (g *projectionGateway) GetRawSource(context.Context, string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.rawCalls++
 	return g.raw, nil
 }
