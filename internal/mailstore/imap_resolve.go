@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,7 +63,10 @@ func (c *Client) resolveImapTargetWithOptions(
 	target.messageID = resolved.Reference.ExpectedMessageID
 	var localIdentityErr error
 	imapOp := c.send.ImapClient()
-	if resolved.Reference.ExpectedIMAPUID != 0 {
+	// A label ref names the selected mailbox, but its local UID belongs to
+	// the physical mailbox (for Gmail, usually All Mail).
+	if resolved.Reference.ExpectedIMAPUID != 0 &&
+		slices.Equal(resolved.PhysicalLocation.VisiblePath, resolved.Reference.MailboxPath) {
 		uid, uidval, usable, directErr := c.directIMAPIdentity(ctx, resolved)
 		if directErr != nil {
 			var stale *Error
@@ -198,7 +202,12 @@ func (c *Client) resolveImapTargetWithOptions(
 	mailboxRef, _ := mailref.EncodeMailbox(resolved.Reference.AccountID, resolved.Reference.MailboxPath)
 	if s, err := mapMessageSummary(resolved.Record, mailboxRef, resolved.Reference.AccountID, resolved.Reference.MailboxPath, c.store.storeUUID); err == nil {
 		s.MessageID = target.messageID
-		s.Ref = updateSummaryIdentity(s.Ref, target.messageID, target.uid, target.uidvalidity)
+		refUID, refValidity := target.uid, target.uidvalidity
+		if !slices.Equal(resolved.PhysicalLocation.VisiblePath, resolved.Reference.MailboxPath) ||
+			resolved.Record.RemoteID != int64(target.uid) {
+			refUID, refValidity = 0, 0
+		}
+		s.Ref = updateSummaryIdentity(s.Ref, target.messageID, refUID, refValidity)
 		target.summary = s
 	}
 
@@ -313,6 +322,9 @@ func updateSummaryIdentity(refValue, messageID string, uid, uidvalidity uint32) 
 	ref.ExpectedMessageID = messageID
 	ref.ExpectedIMAPUID = uid
 	ref.ExpectedIMAPUIDValidity = uidvalidity
+	if uid == 0 {
+		ref.ExpectedIMAPMailboxID = 0
+	}
 	updated, err := mailref.EncodeMessage(ref)
 	if err != nil {
 		return refValue

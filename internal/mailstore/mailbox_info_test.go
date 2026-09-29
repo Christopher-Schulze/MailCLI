@@ -37,7 +37,7 @@ func TestParseMailboxInfoRejectsMissingOrInvalidUIDValidity(t *testing.T) {
 }
 
 func TestClientHydratesMissingSourceFromMappedIMAPIdentity(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
+	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "mapped@gmail.com")
 	updateFixtureMessage(t, store, `UPDATE messages SET remote_id = 101, remote_mailbox = 7001 WHERE ROWID = 101`)
@@ -46,7 +46,11 @@ func TestClientHydratesMissingSourceFromMappedIMAPIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureMailboxInfo(t, store, location, 12345)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	mailboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"All"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: mailboxRef, Limit: 3})
 	if err != nil {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
@@ -69,7 +73,7 @@ func TestClientHydratesMissingSourceFromMappedIMAPIdentity(t *testing.T) {
 	}
 	fakeImap := &stubImapOperator{
 		raw:   []byte("From: Alice <alice@example.com>\r\nSubject: Quarterly Report\r\nMessage-ID: <101@example.com>\r\n\r\nMapped body\r\n"),
-		boxes: []transport.MailboxInfo{{Name: "INBOX"}},
+		boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}},
 	}
 	client := &Client{store: store, send: mail.SendTransport{
 		Imap: fakeImap, Credentials: stubCredentials{"mapped@gmail.com": "secret"},
@@ -88,7 +92,7 @@ func TestClientHydratesMissingSourceFromMappedIMAPIdentity(t *testing.T) {
 }
 
 func TestClientRejectsStaleMappedUIDValidity(t *testing.T) {
-	store, inboxRef := newSearchFixture(t)
+	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, "mapped-stale@gmail.com")
 	updateFixtureMessage(t, store, `UPDATE messages SET remote_id = 101, remote_mailbox = 7001 WHERE ROWID = 101`)
@@ -97,7 +101,11 @@ func TestClientRejectsStaleMappedUIDValidity(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixtureMailboxInfo(t, store, location, 99999)
-	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	mailboxRef, err := mailref.EncodeMailbox(testAccountID, []string{"All"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: mailboxRef, Limit: 3})
 	if err != nil {
 		t.Fatalf("ListMessages() error = %v", err)
 	}
@@ -113,6 +121,52 @@ func TestClientRejectsStaleMappedUIDValidity(t *testing.T) {
 	}
 	if _, err := clientForIdentityTest(store, "mapped-stale@gmail.com").resolveImapTarget(context.Background(), messageRef); errorCodeForTest(err) != "stale_reference" {
 		t.Fatalf("resolveImapTarget() error = %v, want stale_reference", err)
+	}
+}
+
+func TestClientResolvesLabelMailboxUIDByMessageID(t *testing.T) {
+	store, inboxRef := newSearchFixture(t)
+	closeTestResource(t, store, "test store")
+	installImapIdentityFixture(t, store, "label-identity@gmail.com")
+	updateFixtureMessage(t, store, `UPDATE messages SET remote_id = 77960, remote_mailbox = 7001 WHERE ROWID = 101`)
+	location, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureMailboxInfo(t, store, location, 12345)
+	page, err := store.ListMessages(context.Background(), mail.ListMessagesRequest{MailboxRef: inboxRef, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := messageRefWithSubject(t, page.Messages, "Quarterly Report")
+	operator := &stubImapOperator{uid: 41751, uidvalidity: 12345, boxes: []transport.MailboxInfo{{Name: "INBOX"}}}
+	client := &Client{store: store, send: mail.SendTransport{
+		Imap: operator, Credentials: stubCredentials{"label-identity@gmail.com": "secret"},
+	}}
+	target, err := client.resolveImapTargetForMutation(context.Background(), ref)
+	if err != nil || target.imapMailbox != "INBOX" || target.uid != 41751 || operator.searchCalls != 1 {
+		t.Fatalf("label target = %+v, search calls = %d, error = %v", target, operator.searchCalls, err)
+	}
+	resolvedRef, err := mailref.DecodeMessage(target.summary.Ref)
+	if err != nil || resolvedRef.ExpectedIMAPUID != 0 || resolvedRef.ExpectedMessageID != "101@example.com" {
+		t.Fatalf("returned label ref = %+v, error = %v", resolvedRef, err)
+	}
+	reused, err := client.resolveImapTargetForMutation(context.Background(), target.summary.Ref)
+	if err != nil || reused.uid != 41751 || operator.searchCalls != 2 {
+		t.Fatalf("reused label ref target = %+v, search calls = %d, error = %v", reused, operator.searchCalls, err)
+	}
+	base, err := store.messageBasePath(location, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(base + ".emlx"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.resolveImapTargetForMutation(context.Background(), ref); transport.ErrorCode(err) != transport.CodeIMAPMessageUIDUnknown {
+		t.Fatalf("missing label source error = %v, want unresolved identity", err)
+	}
+	if operator.searchCalls != 2 {
+		t.Fatalf("unexpected search after local identity loss: %d", operator.searchCalls)
 	}
 }
 
@@ -196,7 +250,7 @@ func TestClientHydratesMissingSourceThroughBoundedMetadataResolver(t *testing.T)
 		t.Fatalf("metadata resolver calls = %d, Message-ID searches = %d", resolver.calls, resolver.searchCalls)
 	}
 	ref, err := mailref.DecodeMessage(message.Summary.Ref)
-	if err != nil || ref.ExpectedIMAPUID != 202 || ref.ExpectedIMAPUIDValidity != 12345 || ref.ExpectedMessageID != "<remote-102@example.com>" {
+	if err != nil || ref.ExpectedIMAPUID != 0 || ref.ExpectedIMAPUIDValidity != 0 || ref.ExpectedMessageID != "<remote-102@example.com>" {
 		t.Fatalf("resolved summary ref = %+v, error = %v", ref, err)
 	}
 }

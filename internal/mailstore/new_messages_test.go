@@ -3,6 +3,8 @@ package mailstore
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,11 @@ func newMessagesFixture(t *testing.T, address string, recent map[string]transpor
 	installImapIdentityFixture(t, store, address)
 	updateFixtureMessage(t, store, `UPDATE messages SET remote_id = ROWID - 102 + 5001 WHERE ROWID IN (102, 103)`)
 	updateFixtureMessage(t, store, `DELETE FROM labels WHERE mailbox_id = 1`)
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureMailboxInfo(t, store, location, 900)
 	operator := &recentImapOperator{
 		stubImapOperator: &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}}}},
 		recent:           recent,
@@ -74,7 +81,38 @@ func localIdentityHeader(t *testing.T, store *Store, rowID int64) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return []byte(fmt.Sprintf("From: %s\r\nSubject: %s\r\nDate: %s\r\n\r\n", address, subject, time.Unix(sent, 0).UTC().Format(time.RFC1123Z)))
+	return []byte(fmt.Sprintf("From: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: <%d@example.com>\r\n\r\n", address, subject, time.Unix(sent, 0).UTC().Format(time.RFC1123Z), rowID))
+}
+
+func moveFixtureMessagesToAll(t *testing.T, store *Store, rowIDs ...int64) {
+	t.Helper()
+	inbox, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := parseMailboxURL("imap://" + testAccountID + "/%5BGmail%5D/All")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rowID := range rowIDs {
+		source, err := store.messageBasePath(inbox, rowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination, err := store.messageBasePath(all, rowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(destination + ".emlx"); !os.IsNotExist(err) {
+			t.Fatalf("fixture destination exists or cannot be checked: %v", err)
+		}
+		if err := os.Rename(source+".emlx", destination+".emlx"); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func prefixedSubject(header []byte, prefix string) []byte {
@@ -87,6 +125,7 @@ func prefixedSubject(header []byte, prefix string) []byte {
 func TestNewMessagesMatchesLabelBackedMailboxesByHeaderIdentity(t *testing.T) {
 	client, operator := newMessagesFixture(t, "new-labels@gmail.com", nil)
 	updateFixtureMessage(t, client.store, `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103)`)
+	moveFixtureMessagesToAll(t, client.store, 102, 103)
 	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
 	operator.recent = map[string]transport.RecentMailbox{"INBOX": {UIDValidity: 900, Exists: 3, Messages: []transport.RecentMessage{
 		{UID: 41001, Seen: true, Header: localIdentityHeader(t, client.store, 102)},
@@ -105,6 +144,24 @@ func TestNewMessagesMatchesLabelBackedMailboxesByHeaderIdentity(t *testing.T) {
 	server, err := mailref.DecodeServer(mailbox.Messages[0].ServerRef)
 	if err != nil || server.UID != 41003 {
 		t.Fatalf("server ref = %+v, %v", server, err)
+	}
+}
+
+func TestNewMessagesDistinguishesLabelMessagesWithTheSameHeaders(t *testing.T) {
+	client, operator := newMessagesFixture(t, "new-collision@gmail.com", nil)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103)`)
+	moveFixtureMessagesToAll(t, client.store, 102, 103)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET date_sent = 200, subject = 2 WHERE ROWID = 103`)
+	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
+	known := localIdentityHeader(t, client.store, 102)
+	newHeader := []byte(strings.Replace(string(known), "<102@example.com>", "<different@example.com>", 1))
+	operator.recent = map[string]transport.RecentMailbox{"INBOX": {UIDValidity: 900, Exists: 2, Messages: []transport.RecentMessage{
+		{UID: 41001, Header: known}, {UID: 41002, Header: newHeader},
+	}}}
+	result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
+	if err != nil || !result.Complete || result.NewCount != 1 || len(result.Mailboxes) != 1 ||
+		len(result.Mailboxes[0].Messages) != 1 || result.Mailboxes[0].Messages[0].MessageID != "<different@example.com>" {
+		t.Fatalf("colliding header result = %+v, %v", result, err)
 	}
 }
 
@@ -188,6 +245,31 @@ func TestNewMessagesReportsAChangedUIDValidityWithoutRows(t *testing.T) {
 	mailbox := result.Mailboxes[0]
 	if mailbox.State != mail.NewMailboxStateUIDValidityChange || len(mailbox.Messages) != 0 || mailbox.NewCount != 0 || mailbox.Reason == "" {
 		t.Fatalf("mailbox = %+v", mailbox)
+	}
+	if result.Complete {
+		t.Fatalf("changed UIDVALIDITY was reported complete: %+v", result)
+	}
+}
+
+func TestNewMessagesDoesNotCompareUIDsWithoutLocalValidity(t *testing.T) {
+	client, _ := newMessagesFixture(t, "new-unknown-validity@gmail.com", map[string]transport.RecentMailbox{
+		"INBOX": {UIDValidity: 900, Exists: 1, Messages: []transport.RecentMessage{recentMessage(5001, false, "known")}},
+	})
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := mailboxInfoPath(client.store.versionRoot, location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
+	if err != nil || result.Complete || len(result.Mailboxes) != 1 ||
+		result.Mailboxes[0].State != mail.NewMailboxStateUnresolved || result.Mailboxes[0].MatchedBy != "" {
+		t.Fatalf("unknown validity result = %+v, %v", result, err)
 	}
 }
 

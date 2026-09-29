@@ -24,8 +24,8 @@ const (
 	NewMailboxStateUIDValidityChange = "uidvalidity_changed"
 
 	// NewMatchedByUID compares server UIDs with the server UIDs of the local
-	// rows; NewMatchedByHeaders compares sender, subject and sent time, for a
-	// mailbox the local store keeps as labels of other rows (Gmail).
+	// rows; NewMatchedByHeaders narrows by sender, subject and sent time, then
+	// verifies the RFC Message-ID for label-backed rows (Gmail).
 	NewMatchedByUID     = "uid"
 	NewMatchedByHeaders = "headers"
 

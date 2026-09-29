@@ -134,8 +134,11 @@ func TestMarkMessageRetryUsesNewResolvedSummaryIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, err := mailref.DecodeMessage(summary.Ref)
-	if err != nil || ref.ExpectedIMAPUID != 202 || summary.ServerTruth == nil || summary.ServerTruth.UID != 202 || !reflect.DeepEqual(operator.calledUIDs, []uint32{101, 202}) {
-		t.Fatalf("retry retained stale identity: ref %+v, summary %+v, calls %v, error %v", ref, summary, operator.calledUIDs, err)
+	// The observed server UID belongs to INBOX, while the local row lives in
+	// All Mail; only the Message-ID is safe to retain in this local ref.
+	if err != nil || ref.ExpectedIMAPUID != 0 || ref.ExpectedMessageID != "101@example.com" ||
+		summary.ServerTruth == nil || summary.ServerTruth.UID != 202 || !reflect.DeepEqual(operator.calledUIDs, []uint32{101, 202}) {
+		t.Fatalf("retry identity mismatch: ref %+v, summary %+v, calls %v, error %v", ref, summary, operator.calledUIDs, err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -186,13 +187,16 @@ func (c *Client) saveServerAttachment(
 	return evidence, errors.Join(saveErr, source.Close())
 }
 
-// messageRecordByHeaderIdentity finds the local row of a label-backed mailbox
-// (Gmail) with the same sender address, sent time and subject as the server
-// headers, or nil.
-func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID int64, headers []byte) (*messageRecord, error) {
+// messageRecordByHeaderIdentity verifies the RFC Message-ID of a candidate
+// local row before publishing a local ref for a label-backed server message.
+func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID int64, accountID string, mailboxPath []string, headers []byte) (*messageRecord, error) {
 	identity, ok := mail.ParseHeaderIdentity(headers)
 	if !ok {
 		return nil, nil
+	}
+	serverID, err := messageIDFromSource(bytes.NewReader(headers))
+	if err != nil || serverID == "" {
+		return nil, err
 	}
 	rows, err := s.database.QueryContext(ctx, `
 		SELECT m.ROWID, subject.subject FROM messages m
@@ -205,7 +209,7 @@ func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID 
 	if err != nil {
 		return nil, fmt.Errorf("read local header identities: %w", err)
 	}
-	var rowID int64 = -1
+	var candidates []int64
 	for rows.Next() {
 		var candidate int64
 		var subject string
@@ -213,12 +217,25 @@ func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID 
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan local header identity: %w", err)
 		}
-		if rowID < 0 && mail.NormalizeIdentitySubject(subject) == identity.Subject {
-			rowID = candidate
+		if mail.NormalizeIdentitySubject(subject) == identity.Subject {
+			candidates = append(candidates, candidate)
 		}
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
+	}
+	var rowID int64 = -1
+	for _, candidate := range candidates {
+		localID, err := s.localRFCMessageID(ctx, candidate, accountID, mailboxPath)
+		if err != nil {
+			return nil, err
+		}
+		if localID == serverID {
+			if rowID >= 0 {
+				return nil, nil
+			}
+			rowID = candidate
+		}
 	}
 	if rowID < 0 {
 		return nil, nil
@@ -235,6 +252,25 @@ func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID 
 	return &record, nil
 }
 
+func (s *Store) localRFCMessageID(ctx context.Context, rowID int64, accountID string, mailboxPath []string) (string, error) {
+	record, err := scanMessageRecord(s.database.QueryRowContext(ctx, messageRecordSelectSQL+`
+		WHERE m.ROWID = ? AND m.deleted = 0
+	`, rowID))
+	if err != nil {
+		return "", err
+	}
+	ref, err := encodeMessageReference(record, accountID, mailboxPath, s.storeUUID)
+	if err != nil {
+		return "", err
+	}
+	_, source, err := s.openMessageSource(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	messageID, readErr := messageIDFromSource(source.Reader())
+	return messageID, errors.Join(readErr, source.Close())
+}
+
 // localRefForServerMessage finds the local row that holds the server message
 // and returns its ref: same account, mailbox and server UID for a physical
 // mailbox, same sender, sent time and subject for a label-backed one.
@@ -247,16 +283,19 @@ func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Ser
 	if !found {
 		return "", nil
 	}
-	if validity, validityErr := s.mailboxUIDValidity(ctx, mailbox.Location); validityErr == nil && validity != 0 && validity != server.UIDValidity {
-		return "", nil
-	}
 	hasLabels, err := s.mailboxHasLabels(ctx, mailbox.RowID)
 	if err != nil {
 		return "", err
 	}
+	if !hasLabels {
+		validity, validityErr := s.mailboxUIDValidity(ctx, mailbox.Location)
+		if validityErr != nil || validity == 0 || validity != server.UIDValidity {
+			return "", validityErr
+		}
+	}
 	var record *messageRecord
 	if hasLabels {
-		record, err = s.messageRecordByHeaderIdentity(ctx, mailbox.RowID, headers)
+		record, err = s.messageRecordByHeaderIdentity(ctx, mailbox.RowID, server.AccountID, server.MailboxPath, headers)
 	} else {
 		record, err = s.messageRecordByServerUID(ctx, mailbox.RowID, server.UID)
 	}

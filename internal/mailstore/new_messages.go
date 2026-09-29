@@ -1,6 +1,7 @@
 package mailstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,9 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 	result.Complete = len(result.Failures) == 0
 	for _, mailbox := range result.Mailboxes {
 		result.NewCount += mailbox.NewCount
+		if mailbox.State != mail.NewMailboxStateChecked {
+			result.Complete = false
+		}
 	}
 	return result, nil
 }
@@ -164,20 +168,29 @@ func (c *Client) compareMailbox(
 		compared.State, compared.Reason = mail.NewMailboxStateUnresolved, "the server did not report UIDVALIDITY"
 		return compared, nil
 	}
-	localValidity, err := c.store.mailboxUIDValidity(ctx, record.Location)
-	if err == nil && localValidity != 0 && localValidity != recent.UIDValidity {
-		compared.State = mail.NewMailboxStateUIDValidityChange
-		compared.Reason = fmt.Sprintf("local UIDVALIDITY %d differs from the server's %d", localValidity, recent.UIDValidity)
-		return compared, nil
-	}
 	hasLabels, err := c.store.mailboxHasLabels(ctx, record.RowID)
 	if err != nil {
 		return compared, err
 	}
+	if !hasLabels {
+		localValidity, validityErr := c.store.mailboxUIDValidity(ctx, record.Location)
+		if validityErr != nil {
+			return compared, validityErr
+		}
+		if localValidity == 0 {
+			compared.State, compared.Reason = mail.NewMailboxStateUnresolved, "local mailbox UIDVALIDITY is unavailable; let Mail.app sync and retry"
+			return compared, nil
+		}
+		if localValidity != recent.UIDValidity {
+			compared.State = mail.NewMailboxStateUIDValidityChange
+			compared.Reason = fmt.Sprintf("local UIDVALIDITY %d differs from the server's %d", localValidity, recent.UIDValidity)
+			return compared, nil
+		}
+	}
 	var missing []transport.RecentMessage
 	if hasLabels {
 		compared.MatchedBy = mail.NewMatchedByHeaders
-		missing, err = c.store.missingByHeaderIdentity(ctx, record.RowID, recent.Messages)
+		missing, err = c.store.missingByHeaderIdentity(ctx, record.RowID, reference.AccountID, reference.Path, recent.Messages)
 	} else {
 		compared.MatchedBy = mail.NewMatchedByUID
 		missing, err = c.store.missingByServerUID(ctx, record.RowID, recent.Messages)
@@ -237,11 +250,10 @@ func headerIdentityKey(identity mail.HeaderIdentity) string {
 	return fmt.Sprintf("%s\x00%d\x00%s", identity.Address, identity.SentUnix, identity.Subject)
 }
 
-// missingByHeaderIdentity compares by sender address, sent time and subject
-// with the local rows of the mailbox (physical or through labels), for stores
-// whose local server UIDs belong to another mailbox. A server message whose
-// header has no sender or date cannot be matched and counts as missing.
-func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64, messages []transport.RecentMessage) ([]transport.RecentMessage, error) {
+// missingByHeaderIdentity narrows candidates by sender, sent time and subject,
+// then verifies their RFC Message-ID from the local source. A server header
+// without sender or date cannot match; an ambiguous candidate fails closed.
+func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64, accountID string, mailboxPath []string, messages []transport.RecentMessage) ([]transport.RecentMessage, error) {
 	identities := make([]mail.HeaderIdentity, len(messages))
 	known := make([]bool, len(messages))
 	var first, last int64
@@ -260,10 +272,10 @@ func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64,
 		}
 		any = true
 	}
-	local := map[string]bool{}
+	local := map[string][]int64{}
 	if any {
 		rows, err := s.database.QueryContext(ctx, `
-			SELECT LOWER(sender.address), COALESCE(m.date_sent, 0), subject.subject
+			SELECT m.ROWID, LOWER(sender.address), COALESCE(m.date_sent, 0), subject.subject
 			FROM messages m
 			JOIN subjects subject ON subject.ROWID = m.subject
 			JOIN addresses sender ON sender.ROWID = m.sender
@@ -273,22 +285,58 @@ func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64,
 		if err != nil {
 			return nil, fmt.Errorf("read local header identities: %w", err)
 		}
-		defer func() { _ = rows.Close() }()
 		for rows.Next() {
+			var rowID int64
 			var address, subject string
 			var sent int64
-			if err := rows.Scan(&address, &sent, &subject); err != nil {
+			if err := rows.Scan(&rowID, &address, &sent, &subject); err != nil {
+				_ = rows.Close()
 				return nil, fmt.Errorf("scan local header identity: %w", err)
 			}
-			local[headerIdentityKey(mail.HeaderIdentity{Address: address, SentUnix: sent, Subject: mail.NormalizeIdentitySubject(subject)})] = true
+			key := headerIdentityKey(mail.HeaderIdentity{Address: address, SentUnix: sent, Subject: mail.NormalizeIdentitySubject(subject)})
+			local[key] = append(local[key], rowID)
 		}
-		if err := rows.Err(); err != nil {
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			return nil, err
 		}
 	}
 	var missing []transport.RecentMessage
+	localIDs := map[int64]string{}
 	for index, message := range messages {
-		if !known[index] || !local[headerIdentityKey(identities[index])] {
+		if !known[index] {
+			missing = append(missing, message)
+			continue
+		}
+		candidates := local[headerIdentityKey(identities[index])]
+		if len(candidates) == 0 {
+			missing = append(missing, message)
+			continue
+		}
+		serverID, err := messageIDFromSource(bytes.NewReader(message.Header))
+		if err != nil || serverID == "" {
+			return nil, fmt.Errorf("cannot compare label mailbox message without a valid Message-ID: %w", errors.Join(err, operationError("invalid_message_source", "server Message-ID is missing")))
+		}
+		matches := 0
+		for _, rowID := range candidates {
+			localID, cached := localIDs[rowID]
+			if !cached {
+				localID, err = s.localRFCMessageID(ctx, rowID, accountID, mailboxPath)
+				if err != nil {
+					return nil, fmt.Errorf("read local label candidate Message-ID: %w", err)
+				}
+				localIDs[rowID] = localID
+			}
+			if localID == "" {
+				return nil, operationError("invalid_message_source", "local label candidate has no Message-ID; let Mail.app sync and retry")
+			}
+			if localID == serverID {
+				matches++
+			}
+		}
+		if matches > 1 {
+			return nil, operationError("invalid_message_source", "multiple local label candidates share one Message-ID")
+		}
+		if matches == 0 {
 			missing = append(missing, message)
 		}
 	}

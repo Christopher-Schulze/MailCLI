@@ -96,6 +96,7 @@ func TestServerRefReportsTheLocalRefOnceTheStoreHoldsTheMessage(t *testing.T) {
 func TestServerRefFindsTheLocalRefOfALabelBackedMailboxByHeaderIdentity(t *testing.T) {
 	client, _ := serverReadFixture(t, "srv-labels@gmail.com")
 	updateFixtureMessage(t, client.store, `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103)`)
+	moveFixtureMessagesToAll(t, client.store, 102, 103)
 	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
 	// The server UID 41002 is an INBOX UID; the local row carries an All Mail UID.
 	server := mailref.Server{AccountID: testAccountID, MailboxPath: []string{"INBOX"}, UIDValidity: 900, UID: 41002}
@@ -110,6 +111,28 @@ func TestServerRefFindsTheLocalRefOfALabelBackedMailboxByHeaderIdentity(t *testi
 	other := []byte("From: someone@example.com\r\nSubject: Not stored\r\nDate: Tue, 29 Sep 2026 10:15:00 +0200\r\n\r\n")
 	if ref, err := client.store.localRefForServerMessage(context.Background(), server, other); err != nil || ref != "" {
 		t.Fatalf("a header with no local counterpart returned %q, %v", ref, err)
+	}
+}
+
+func TestServerRefDoesNotChooseAHeaderCollisionAsLocalRef(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-collision@gmail.com")
+	updateFixtureMessage(t, client.store, `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103)`)
+	moveFixtureMessagesToAll(t, client.store, 102, 103)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET date_sent = 200, subject = 2 WHERE ROWID = 103`)
+	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
+	server := mailref.Server{AccountID: testAccountID, MailboxPath: []string{"INBOX"}, UIDValidity: 900, UID: 41002}
+	known := localIdentityHeader(t, client.store, 102)
+	ref, err := client.store.localRefForServerMessage(context.Background(), server, known)
+	if err != nil || ref == "" {
+		t.Fatalf("known collision ref = %q, %v", ref, err)
+	}
+	local, err := mailref.DecodeMessage(ref)
+	if err != nil || local.LibraryID != "102" {
+		t.Fatalf("selected local row = %+v, %v; want 102", local, err)
+	}
+	other := []byte(strings.Replace(string(known), "<102@example.com>", "<different@example.com>", 1))
+	if ref, err := client.store.localRefForServerMessage(context.Background(), server, other); err != nil || ref != "" {
+		t.Fatalf("unmatched collision ref = %q, %v", ref, err)
 	}
 }
 
