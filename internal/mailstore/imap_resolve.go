@@ -107,46 +107,9 @@ func (c *Client) resolveImapTargetWithOptions(
 		}
 	}
 
-	// Resolve email address for this AccountID without consulting the
-	// Apple Events gateway. Mutations are IMAP-only.
-	email, credential, binding, err := c.resolveAccountIdentity(ctx, resolved.Reference.AccountID)
-	if err != nil {
-		var typed interface{ ErrorCode() string }
-		if errors.As(err, &typed) {
-			return target, err
-		}
-		return target, &transport.TransportError{
-			Code:    transport.CodeLocalOnlyMailbox,
-			Message: err.Error(),
-		}
-	}
-
-	_, _, imapHost, imapPort, err := mail.ResolveTransportHosts(email, binding)
+	email, cfg, err := c.imapConfigForAccountID(ctx, resolved.Reference.AccountID)
 	if err != nil {
 		return target, err
-	}
-
-	credStore := c.send.Credentials
-	if credStore == nil {
-		return target, &transport.TransportError{
-			Code:    transport.CodeSMTPCredentialsMissing,
-			Message: "credential store is not available",
-		}
-	}
-
-	password, err := credStore.Load(credential)
-	if err != nil || password == "" {
-		return target, &transport.TransportError{
-			Code:    transport.CodeSMTPCredentialsMissing,
-			Message: fmt.Sprintf("no stored credentials for %s (run '%s')", credential, credentialSetupCommand(email, credential)),
-		}
-	}
-
-	cfg := transport.ImapConfig{
-		Host:     imapHost,
-		Port:     imapPort,
-		Username: credential,
-		Password: password,
 	}
 	target.cfg = cfg
 
@@ -285,6 +248,42 @@ func (c *Client) directIMAPIdentity(
 		validity = localValidity
 	}
 	return ref.ExpectedIMAPUID, validity, validity != 0, nil
+}
+
+// imapConfigForAccountID resolves the IMAP endpoint and login of one account
+// without consulting the Apple Events gateway: the provider or bound hosts and
+// the stored password of the account's credential identity.
+func (c *Client) imapConfigForAccountID(ctx context.Context, accountID string) (string, transport.ImapConfig, error) {
+	email, credential, binding, err := c.resolveAccountIdentity(ctx, accountID)
+	if err != nil {
+		var typed interface{ ErrorCode() string }
+		if errors.As(err, &typed) {
+			return "", transport.ImapConfig{}, err
+		}
+		return "", transport.ImapConfig{}, &transport.TransportError{
+			Code:    transport.CodeLocalOnlyMailbox,
+			Message: err.Error(),
+		}
+	}
+	_, _, imapHost, imapPort, err := mail.ResolveTransportHosts(email, binding)
+	if err != nil {
+		return "", transport.ImapConfig{}, err
+	}
+	credStore := c.send.Credentials
+	if credStore == nil {
+		return "", transport.ImapConfig{}, &transport.TransportError{
+			Code:    transport.CodeSMTPCredentialsMissing,
+			Message: "credential store is not available",
+		}
+	}
+	password, err := credStore.Load(credential)
+	if err != nil || password == "" {
+		return "", transport.ImapConfig{}, &transport.TransportError{
+			Code:    transport.CodeSMTPCredentialsMissing,
+			Message: fmt.Sprintf("no stored credentials for %s (run '%s')", credential, credentialSetupCommand(email, credential)),
+		}
+	}
+	return email, transport.ImapConfig{Host: imapHost, Port: imapPort, Username: credential, Password: password}, nil
 }
 
 func identityResolutionError(messageRef string, localErr, remoteErr error) error {

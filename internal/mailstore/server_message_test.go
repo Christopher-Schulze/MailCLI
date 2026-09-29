@@ -1,0 +1,153 @@
+package mailstore
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
+)
+
+const serverMessageRaw = "From: =?UTF-8?Q?J=C3=BCrgen?= <j@example.com>\r\nTo: Me <me@example.com>\r\n" +
+	"Subject: =?UTF-8?B?w5xiZXJyYXNjaHVuZw==?=\r\nDate: Tue, 29 Sep 2026 10:15:00 +0200\r\nMessage-ID: <srv-1@example.com>\r\n" +
+	"Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+	"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nFresh from the server\r\n" +
+	"--b\r\nContent-Disposition: attachment; filename=invoice.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\naW52b2ljZS1ieXRlcw==\r\n--b--\r\n"
+
+func serverRefFor(t *testing.T, uid uint32) string {
+	t.Helper()
+	ref, err := mailref.EncodeServer(mailref.Server{AccountID: testAccountID, MailboxPath: []string{"INBOX"}, UIDValidity: 900, UID: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
+}
+
+func serverReadFixture(t *testing.T, address string) (*Client, *stubImapOperator) {
+	t.Helper()
+	client, _ := newMessagesFixture(t, address, nil)
+	operator := &stubImapOperator{
+		raw:       []byte(serverMessageRaw),
+		boxes:     []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}}},
+		flagState: transport.FlagState{Flags: []string{`\Seen`}, UIDValidity: 900},
+	}
+	client.send.Imap = operator
+	return client, operator
+}
+
+func TestServerRefReadsTheFullMessageOverIMAP(t *testing.T) {
+	client, operator := serverReadFixture(t, "srv-full@gmail.com")
+	ref := serverRefFor(t, 5003)
+	message, err := client.GetMessage(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("GetMessage() error = %v", err)
+	}
+	if message.Content != "Fresh from the server" || !message.ContentComplete || message.ContentSource != "imap_raw" ||
+		len(message.Attachments) != 1 || message.Attachments[0].ID != "2" {
+		t.Fatalf("message = %+v", message)
+	}
+	summary := message.Summary
+	if summary.Ref != ref || summary.Subject != "Überraschung" || summary.Sender != "Jürgen <j@example.com>" ||
+		summary.DateSent != "2026-09-29T08:15:00Z" || summary.MessageID != "srv-1@example.com" || !summary.Read ||
+		summary.LocalRef != "" || summary.StalenessNote == "" {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if operator.fetchFlagsUID != 5003 {
+		t.Fatalf("flags were read for UID %d, want 5003", operator.fetchFlagsUID)
+	}
+}
+
+func TestServerRefMetadataViewReadsHeadersOnly(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-headers@gmail.com")
+	ref := serverRefFor(t, 5003)
+	message, err := client.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentHeaders)
+	if err != nil || message.Summary.Subject != "Überraschung" || message.Summary.Ref != ref || message.Content != "" {
+		t.Fatalf("headers message = %+v, error = %v", message, err)
+	}
+	attachments, err := client.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentAttachments)
+	if err != nil || len(attachments.Attachments) != 1 {
+		t.Fatalf("attachments message = %+v, error = %v", attachments, err)
+	}
+	if _, err := client.GetMessageWithIntent(context.Background(), ref, mail.MessageReadIntentIndex); err == nil ||
+		!strings.Contains(err.Error(), "server ref has no local index row") {
+		t.Fatalf("index intent error = %v", err)
+	}
+}
+
+func TestServerRefReportsTheLocalRefOnceTheStoreHoldsTheMessage(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-local@gmail.com")
+	ref := serverRefFor(t, 5001)
+	message, err := client.GetMessage(context.Background(), ref)
+	if err != nil || message.Summary.LocalRef == "" {
+		t.Fatalf("message = %+v, error = %v", message.Summary, err)
+	}
+	local, err := mailref.DecodeMessage(message.Summary.LocalRef)
+	if err != nil || !local.IsStoreBound() || local.ExpectedIMAPUID != 5001 {
+		t.Fatalf("local ref = %+v, error = %v", local, err)
+	}
+}
+
+func TestServerRefRawSourceAndAttachmentSave(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-raw@gmail.com")
+	ref := serverRefFor(t, 5003)
+	raw, err := client.GetRawSource(context.Background(), ref)
+	if err != nil || raw != serverMessageRaw {
+		t.Fatalf("GetRawSource() = %q, %v", raw, err)
+	}
+	var buffer bytes.Buffer
+	if err := client.WriteRawSource(context.Background(), ref, &buffer); err != nil || buffer.String() != serverMessageRaw {
+		t.Fatalf("WriteRawSource() = %q, %v", buffer.String(), err)
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	evidence, err := client.SaveAttachmentToWithEvidence(context.Background(), ref, "2", output)
+	saved, readErr := os.ReadFile(output)
+	if err != nil || readErr != nil || string(saved) != "invoice-bytes" || evidence.SHA256 == "" {
+		t.Fatalf("save = %+v, %v; file = %q, %v", evidence, err, saved, readErr)
+	}
+}
+
+func TestServerRefIsRejectedByEveryWriteAndLocalOnlyCommand(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-write@gmail.com")
+	ref := serverRefFor(t, 5003)
+	ctx := context.Background()
+	checks := map[string]error{}
+	_, checks["mark"] = client.MarkMessage(ctx, mail.MarkMessageRequest{Ref: ref})
+	_, checks["copy"] = client.TransferMessage(ctx, mail.TransferMessageRequest{Ref: ref, DestinationMailbox: "mbx_x", Copy: true})
+	_, checks["delete"] = client.DeleteMessage(ctx, mail.DeleteMessageRequest{Ref: ref})
+	_, checks["state"] = client.MessageState(ctx, ref)
+	_, checks["thread"] = client.MessageThread(ctx, mail.MessageThreadRequest{Ref: ref, Limit: 5})
+	_, checks["open draft"] = client.OpenDraft(ctx, ref)
+	for name, err := range checks {
+		if err == nil || (!strings.Contains(err.Error(), "server ref") && !strings.Contains(err.Error(), "read-only server evidence")) {
+			t.Errorf("%s accepted or mis-reported a server ref: %v", name, err)
+		}
+		if typed, ok := err.(interface{ ErrorCode() string }); ok && typed.ErrorCode() != "invalid_reference" {
+			t.Errorf("%s error code = %s, want invalid_reference", name, typed.ErrorCode())
+		}
+	}
+}
+
+func TestServerRefFailuresKeepTheirTypedCodes(t *testing.T) {
+	client, operator := serverReadFixture(t, "srv-fail@gmail.com")
+	operator.fetchErr = &transport.TransportError{Code: "mailbox_uidvalidity_changed", Message: "UIDVALIDITY changed"}
+	if _, err := client.GetMessage(context.Background(), serverRefFor(t, 5003)); err == nil ||
+		transport.ErrorCode(err) != "mailbox_uidvalidity_changed" {
+		t.Fatalf("UIDVALIDITY change error = %v", err)
+	}
+	operator.fetchErr = nil
+	operator.raw = nil
+	if _, err := client.GetRawSource(context.Background(), serverRefFor(t, 5003)); err == nil ||
+		transport.ErrorCode(err) != transport.CodeIMAPMessageNotFound {
+		t.Fatalf("empty source error = %v", err)
+	}
+	client.send.Credentials = strictCredentials{}
+	operator.raw = []byte(serverMessageRaw)
+	if _, err := client.GetMessage(context.Background(), serverRefFor(t, 5003)); err == nil {
+		t.Fatal("a server ref was read without stored credentials")
+	}
+}

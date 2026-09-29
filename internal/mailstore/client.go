@@ -263,6 +263,14 @@ func (c *Client) OpenDraft(ctx context.Context, ref string) (mail.Message, error
 }
 
 func (c *Client) readMessage(ctx context.Context, ref string, openDraft bool) (mail.Message, error) {
+	if mailref.IsServerRef(ref) {
+		if openDraft {
+			return mail.Message{}, &mail.ValidationError{
+				Code: "invalid_reference", Message: "a server ref cannot open a draft; use the local ref once Mail.app has synced the message",
+			}
+		}
+		return c.readServerMessage(ctx, ref)
+	}
 	if err := c.unavailableMessageRefError(ref); err != nil {
 		return mail.Message{}, err
 	}
@@ -368,6 +376,9 @@ func messageFromRawReader(ctx context.Context, base mail.Message, summary mail.M
 }
 
 func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
+	if mailref.IsServerRef(ref) {
+		return c.rawServerSource(ctx, ref)
+	}
 	if err := c.unavailableMessageRefError(ref); err != nil {
 		return "", err
 	}
@@ -404,6 +415,9 @@ func (c *Client) GetRawSource(ctx context.Context, ref string) (string, error) {
 }
 
 func (c *Client) WriteRawSource(ctx context.Context, ref string, writer io.Writer) error {
+	if mailref.IsServerRef(ref) {
+		return c.writeServerRawSource(ctx, ref, writer)
+	}
 	if err := c.unavailableMessageRefError(ref); err != nil {
 		return err
 	}
@@ -454,6 +468,9 @@ func (c *Client) SaveAttachmentToWithEvidence(
 	attachmentID string,
 	outputPath string,
 ) (mail.AttachmentEvidence, error) {
+	if mailref.IsServerRef(messageRef) {
+		return c.saveServerAttachment(ctx, messageRef, attachmentID, outputPath)
+	}
 	if err := c.unavailableMessageRefError(messageRef); err != nil {
 		return mail.AttachmentEvidence{}, err
 	}

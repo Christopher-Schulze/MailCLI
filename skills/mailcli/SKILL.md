@@ -48,10 +48,10 @@ Placeholders come from earlier output; quote them:
 | Workflow | Commands | Read next |
 | --- | --- | --- |
 | Triage | `mailcli messages filter --mailbox inbox --read false`, then `mailcli messages get REF --view plain --links host`; several: one `batch` read. | Metadata, body. |
-| New mail | `mailcli messages new`. | `server_ref` rows are evidence; `sync` brings them into the store. |
+| New mail | `mailcli messages new`, then `messages get SERVER_REF --view plain`. | Read-only; `sync` adds a local ref. |
 | Thread | `mailcli messages thread REF`. For older or newer members repeat with `--cursor` `data.thread.prev_cursor` or `data.thread.next_cursor` until absent. | Oldest first. |
 | Search | `mailcli messages search --query QUERY`. Repeat with the same query and filters plus `--cursor NEXT` until NEXT is absent. | `data.page.coverage.complete` on the last page. |
-| Reply | `mailcli messages reply REF --body-file FILE`, then `mailcli drafts preview DRAFT`. Add `--from ADDRESS` only for a sender the user named. | Preview for the user. |
+| Reply | `mailcli messages reply REF --body-file FILE`, then `mailcli drafts preview DRAFT`. Add `--from ADDRESS` only for a sender the user named. | Preview. |
 | Send | `mailcli drafts preview DRAFT`, then, once the user approved it, `mailcli drafts send DRAFT --confirm --expected-revision REV`. | `data.send_result`; reconcile a pending or unknown one with `mailcli drafts reconcile`. |
 | Replies | `mailcli messages search --after DATE --with-threading --with-excerpt`, paging with NEXT. | Sent Message-IDs in `in_reply_to[]` or `references[]`; `threading_complete:false` means unknown, a sender domain is only a candidate. |
 

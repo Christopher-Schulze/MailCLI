@@ -158,6 +158,10 @@ func EncodeMessage(ref Message) (string, error) {
 }
 
 func DecodeMessage(value string) (Message, error) {
+	if IsServerRef(value) {
+		return Message{}, &invalidReferenceError{err: fmt.Errorf(
+			"a server ref is read-only server evidence; use the local ref once Mail.app has synced the message")}
+	}
 	payload, err := DecodeTokenPayload("msg_", value)
 	if err != nil {
 		return Message{}, err

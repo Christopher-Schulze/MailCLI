@@ -623,8 +623,11 @@ func (e *ServerMutationEvidence) OutcomeUnknown() bool {
 }
 
 type MessageSummary struct {
-	Ref             string `json:"ref"`
-	MailboxRef      string `json:"mailbox_ref"`
+	Ref        string `json:"ref"`
+	MailboxRef string `json:"mailbox_ref"`
+	// LocalRef is the store-bound ref of the same message, set only when a
+	// server ref was read and the local index already holds the message.
+	LocalRef        string `json:"local_ref,omitempty"`
 	Account         string `json:"account,omitempty"`
 	MessageID       string `json:"message_id"`
 	Subject         string `json:"subject"`

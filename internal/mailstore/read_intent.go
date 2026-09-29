@@ -148,6 +148,9 @@ func (c *Client) GetMessageWithIntent(
 	ref string,
 	intent mail.MessageReadIntent,
 ) (mail.Message, error) {
+	if mailref.IsServerRef(ref) {
+		return c.getServerMessageWithIntent(ctx, ref, intent)
+	}
 	if intent == mail.MessageReadIntentFull {
 		return c.readMessage(ctx, ref, false)
 	}
@@ -192,7 +195,7 @@ func (c *Client) hydrateMessageHeaders(
 ) (sourceHeaders, mail.MessageSummary, error) {
 	if fetcher, ok := c.send.ImapClient().(transport.MessageHeaderFetcher); ok {
 		resolveCtx, cancelResolve := localReadOrResolveContext(ctx)
-		target, err := c.resolveImapTarget(resolveCtx, messageRef)
+		target, err := c.resolveReadTarget(resolveCtx, messageRef)
 		cancelResolve()
 		if err != nil {
 			return sourceHeaders{}, mail.MessageSummary{}, typedHydrationFailure(err)

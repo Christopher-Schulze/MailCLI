@@ -71,21 +71,9 @@ func (s *Store) openMessageSource(ctx context.Context, ref string) (resolvedMess
 	)
 }
 
-func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessage, error) {
-	ref, err := mailref.DecodeMessage(value)
-	if err != nil {
-		return resolvedMessage{}, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid message ref: %v", err)}
-	}
-	if !ref.IsStoreBound() {
-		return resolvedMessage{}, operationError(
-			"store_bound_reference_required",
-			"message ref is not bound to this Mail store; list or search the message again",
-		)
-	}
-	if ref.ExpectedStoreUUID != s.storeUUID {
-		return resolvedMessage{}, operationError("stale_reference", "message Mail store identity changed")
-	}
-	row := s.database.QueryRowContext(ctx, `
+// messageRecordSelectSQL selects every column scanMessageRecord reads for one
+// message row; callers append the WHERE clause.
+const messageRecordSelectSQL = `
 		SELECT
 			m.ROWID, COALESCE(m.message_id, 0), COALESCE(m.global_message_id, 0),
 			COALESCE(m.remote_id, 0), COALESCE(m.remote_mailbox, 0),
@@ -104,7 +92,40 @@ func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessa
 		JOIN mailboxes mb ON mb.ROWID = m.mailbox
 		JOIN subjects subject ON subject.ROWID = m.subject
 		JOIN addresses sender ON sender.ROWID = m.sender
-		LEFT JOIN summaries summary ON summary.ROWID = m.summary
+		LEFT JOIN summaries summary ON summary.ROWID = m.summary`
+
+// messageRecordByServerUID returns the live local row that holds the given
+// server UID in the local mailbox row, or nil when there is none.
+func (s *Store) messageRecordByServerUID(ctx context.Context, mailboxRowID int64, uid uint32) (*messageRecord, error) {
+	row := s.database.QueryRowContext(ctx, messageRecordSelectSQL+`
+		WHERE m.mailbox = ? AND m.remote_id = ? AND m.deleted = 0
+		ORDER BY m.ROWID DESC LIMIT 1
+	`, mailboxRowID, int64(uid))
+	record, err := scanMessageRecord(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func (s *Store) resolveMessage(ctx context.Context, value string) (resolvedMessage, error) {
+	ref, err := mailref.DecodeMessage(value)
+	if err != nil {
+		return resolvedMessage{}, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid message ref: %v", err)}
+	}
+	if !ref.IsStoreBound() {
+		return resolvedMessage{}, operationError(
+			"store_bound_reference_required",
+			"message ref is not bound to this Mail store; list or search the message again",
+		)
+	}
+	if ref.ExpectedStoreUUID != s.storeUUID {
+		return resolvedMessage{}, operationError("stale_reference", "message Mail store identity changed")
+	}
+	row := s.database.QueryRowContext(ctx, messageRecordSelectSQL+`
 		WHERE m.ROWID = ? AND m.deleted = 0
 	`, ref.LibraryID)
 	record, err := scanMessageRecord(row)

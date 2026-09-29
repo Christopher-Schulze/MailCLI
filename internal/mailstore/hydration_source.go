@@ -26,7 +26,7 @@ func hydrationFetchContext(ctx context.Context, maximum int64) (context.Context,
 
 func (c *Client) hydrateMessageSource(ctx context.Context, messageRef string) (io.ReadSeekCloser, int64, mail.MessageSummary, error) {
 	resolveCtx, cancelResolve := localReadOrResolveContext(ctx)
-	target, err := c.resolveImapTarget(resolveCtx, messageRef)
+	target, err := c.resolveReadTarget(resolveCtx, messageRef)
 	cancelResolve()
 	if err != nil {
 		return nil, 0, mail.MessageSummary{}, typedHydrationFailure(err)

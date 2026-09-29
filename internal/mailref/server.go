@@ -3,6 +3,7 @@ package mailref
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
 
 // Server names one message on the IMAP server by account, mailbox path,
@@ -17,6 +18,11 @@ type Server struct {
 }
 
 const serverPrefix = "srv_"
+
+// IsServerRef reports whether a token is a server ref.
+func IsServerRef(value string) bool {
+	return strings.HasPrefix(value, serverPrefix)
+}
 
 func EncodeServer(ref Server) (string, error) {
 	if ref.AccountID == "" || len(ref.MailboxPath) == 0 || ref.UIDValidity == 0 || ref.UID == 0 {
