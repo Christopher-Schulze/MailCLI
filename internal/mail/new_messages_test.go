@@ -77,15 +77,18 @@ func TestHeaderIdentityNormalizesWhatALocalRowStores(t *testing.T) {
 // both sides of an identity comparison drop them.
 func TestNormalizeIdentitySubjectDropsReplyAndForwardPrefixes(t *testing.T) {
 	for subject, want := range map[string]string{
-		"Status Update":                    "status update",
-		"Re: Status Update":                "status update",
-		"AW:  RE: Status   Update":         "status update",
-		"Fwd: WG: Status Update":           "status update",
-		"RE[2]: Status Update":             "status update",
-		"Antwort: Status Update":           "antwort: status update",
-		"Re: Reinvent: the plan":           "reinvent: the plan",
-		"  SV: VS: TR: ODP: RES: RV: Plan": "plan",
-		"Re:":                              "",
+		"Status Update":                     "status update",
+		"Re: Status Update":                 "status update",
+		"AW:  RE: Status   Update":          "status update",
+		"Fwd: WG: Status Update":            "status update",
+		"RE[2]: Status Update":              "status update",
+		"Antwort: Status Update":            "antwort: status update",
+		"Re: Reinvent: the plan":            "reinvent: the plan",
+		"  SV: VS: TR: ODP: RES: RV: Plan":  "plan",
+		"Re:":                               "",
+		"[Reddit Support] Re: Your request": "[reddit support] your request",
+		"[Reddit Support] Your request":     "[reddit support] your request",
+		"[A] [B] AW: Re: Plan":              "[a] [b] plan",
 	} {
 		if got := NormalizeIdentitySubject(subject); got != want {
 			t.Errorf("NormalizeIdentitySubject(%q) = %q, want %q", subject, got, want)
