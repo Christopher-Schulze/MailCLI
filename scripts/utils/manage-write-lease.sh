@@ -12,6 +12,7 @@ usage() {
     '  manage-write-lease.sh status' \
     '  manage-write-lease.sh review TOKEN [--diff]' \
     '  manage-write-lease.sh gate TOKEN [--fast|--full|--checks REGISTERED_PATH... [--expect-baseline-failure PATH EXACT_FINAL_LINE]]' \
+    '  manage-write-lease.sh precommit' \
     '  manage-write-lease.sh push-check' \
     '  manage-write-lease.sh release TOKEN' \
     '  manage-write-lease.sh abort TOKEN'
@@ -604,6 +605,16 @@ release_lease() {
 }
 
 
+# precommit is run by the local pre-commit hook: while a lease is active, a
+# commit is allowed only for the exact staged patch that passed the gate.
+precommit_check() {
+  [[ -d "${LEASE_DIRECTORY}" ]] || return 0
+  [[ -f "$(lease_file gate_patch_sha256)" ]] ||
+    fail "Commit refused: the active write lease has no passed gate; run gate and check its exit code first"
+  [[ "$(staged_patch_digest)" == "$(<"$(lease_file gate_patch_sha256)")" ]] ||
+    fail "Commit refused: the staged patch differs from the patch that passed the gate"
+}
+
 abort_lease() {
   local TOKEN="$1"
   require_token "${TOKEN}"
@@ -647,6 +658,10 @@ case "${COMMAND}" in
   review)
     [[ "$#" -eq 2 || ( "$#" -eq 3 && "$3" == --diff ) ]] || fail 'review requires a lease token and optional --diff'
     review_lease "$2" "${3:-}"
+    ;;
+  precommit)
+    [[ "$#" -eq 1 ]] || fail 'precommit accepts no additional arguments'
+    precommit_check
     ;;
   release)
     [[ "$#" -eq 2 ]] || fail "${COMMAND} requires exactly one lease token"

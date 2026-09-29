@@ -676,7 +676,30 @@ stage_fixture_path other.txt 100644
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
   "${LEASE_TOOL}" review "${EXTEND_TOKEN}" >"${TEST_ROOT}/extend-review"
 grep -Fq other.txt "${TEST_ROOT}/extend-review"
+
+# precommit (run by the local pre-commit hook) allows a commit only for the exact gated patch.
+expect_precommit_refusal() {
+  local EXPECTED_MESSAGE="$1" OUTPUT
+  if OUTPUT="$(MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" precommit 2>&1)"; then
+    printf 'precommit accepted a commit: %s\n' "${EXPECTED_MESSAGE}" >&2
+    exit 1
+  fi
+  [[ "${OUTPUT}" == *"${EXPECTED_MESSAGE}"* ]] || {
+    printf 'precommit refused for the wrong reason: %s\n' "${OUTPUT}" >&2
+    exit 1
+  }
+}
+expect_precommit_refusal 'the active write lease has no passed gate'
+MAILCLI_TEST_GATE_STATUS=1 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" \
+  "${LEASE_TOOL}" gate "${EXTEND_TOKEN}" >/dev/null 2>&1 || true
+expect_precommit_refusal 'the active write lease has no passed gate'
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" gate "${EXTEND_TOKEN}" >/dev/null
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" precommit
+printf 'changed after the gate\n' >"${TEST_REPOSITORY}/other.txt"
+stage_fixture_path other.txt 100644
+expect_precommit_refusal 'the staged patch differs from the patch that passed the gate'
 git -C "${TEST_REPOSITORY}" read-tree --reset -u "${GROUP_COMMIT}"
 MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" abort "${EXTEND_TOKEN}" >/dev/null
+MAILCLI_WRITE_ROOT="${TEST_REPOSITORY_ALIAS}" "${LEASE_TOOL}" precommit
 
 printf 'Write coordination passed: ownership, path and asset scope, failure-preserving gate, tested commit identity, and exact grouped TASK membership\n'
