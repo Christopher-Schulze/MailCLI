@@ -1,6 +1,6 @@
 ---
 name: mailcli
-description: Read/search, draft/reply/forward/send, save attachments, organize and sync configured macOS Mail accounts through MailCLI. Not for unrelated prose or provider login.
+description: Read/search, draft/reply/forward/send, save attachments, organize and sync configured macOS Mail accounts through MailCLI.
 ---
 
 # MailCLI
@@ -22,7 +22,7 @@ Add `--json` to every call and check `ok` and the exit code. Copy refs, cursors 
 | Intent | IDs | Guide |
 | --- | --- | --- |
 | Discover | `accounts.list`,`mailboxes.list`,`mailboxes.resolve` | [Read](references/reading.md) |
-| Read | `messages.list`,`messages.filter`,`messages.search`,`messages.get`,`messages.raw`,`messages.thread`,`attachments.list`,`attachments.save` | [Read](references/reading.md) |
+| Read | `messages.list`,`messages.filter`,`messages.search`,`messages.get`,`messages.raw`,`messages.thread`,`messages.new`,`attachments.list`,`attachments.save` | [Read](references/reading.md) |
 | Draft | `drafts.create`,`drafts.list`,`drafts.inspect`,`drafts.preview`,`drafts.edit`,`drafts.update`,`drafts.open`,`drafts.adopt`,`drafts.discard`,`drafts.prune`,`messages.reply`,`messages.forward` | [Draft](references/drafts.md) |
 | Send | `drafts.send`,`drafts.reconcile` | [Send](references/sending.md) |
 | Mutate | `messages.state`,`messages.mark`,`messages.move`,`messages.copy`,`messages.delete`,`sync` | [Mutate](references/mutations.md) |
@@ -48,7 +48,8 @@ Placeholders come from earlier output; quote them:
 | Workflow | Commands | Read next |
 | --- | --- | --- |
 | Triage | `mailcli messages filter --mailbox inbox --read false`, then `mailcli messages get REF --view plain --links host`; several: one `batch` read. | Metadata, body. |
-| Thread | `mailcli messages thread REF`. For older or newer members repeat with `--cursor` `data.thread.prev_cursor` or `data.thread.next_cursor` until absent. | Members, oldest first. |
+| New mail | `mailcli messages new`. | `server_ref` rows are evidence; `sync` brings them into the store. |
+| Thread | `mailcli messages thread REF`. For older or newer members repeat with `--cursor` `data.thread.prev_cursor` or `data.thread.next_cursor` until absent. | Oldest first. |
 | Search | `mailcli messages search --query QUERY`. Repeat with the same query and filters plus `--cursor NEXT` until NEXT is absent. | `data.page.coverage.complete` on the last page. |
 | Reply | `mailcli messages reply REF --body-file FILE`, then `mailcli drafts preview DRAFT`. Add `--from ADDRESS` only for a sender the user named. | Preview for the user. |
 | Send | `mailcli drafts preview DRAFT`, then, once the user approved it, `mailcli drafts send DRAFT --confirm --expected-revision REV`. | `data.send_result`; reconcile a pending or unknown one with `mailcli drafts reconcile`. |
@@ -56,7 +57,7 @@ Placeholders come from earlier output; quote them:
 
 Follow NEXT on lists and filters too. Review only complete content. Inspect a completed draft instead of recreating it.
 
-Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged. Save and export only to new absolute paths, then verify size and hash.
+Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged.
 
 ## Error contract
 

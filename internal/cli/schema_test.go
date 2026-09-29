@@ -599,7 +599,7 @@ func TestCapabilitiesScopeKeepsCommandContractMetadata(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("decode family capabilities: %v", err)
 	}
-	if response.Data.Capabilities == nil || response.Data.Capabilities.Scope != "" || len(response.Data.Capabilities.Commands) != 13 {
+	if response.Data.Capabilities == nil || response.Data.Capabilities.Scope != "" || len(response.Data.Capabilities.Commands) != 14 {
 		t.Fatalf("family response = %+v", response.Data.Capabilities)
 	}
 

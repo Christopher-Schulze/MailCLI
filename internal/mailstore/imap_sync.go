@@ -98,6 +98,31 @@ func syncIdentityWithBindings(
 	return "", "", 0, "", lastErr
 }
 
+// imapConfigForAccount resolves the IMAP endpoint and login of one account:
+// the provider or bound host, the stored password and, for a binding, its
+// credential account as the login name.
+func imapConfigForAccount(
+	account mail.Account,
+	credentials transport.CredentialStore,
+	bindings mail.AccountBindingFile,
+) (string, transport.ImapConfig, error) {
+	email, imapHost, imapPort, password, err := syncIdentityWithBindings(account, credentials, bindings)
+	if err != nil {
+		return "", transport.ImapConfig{}, err
+	}
+	cfg := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: email, Password: password}
+	if reference, decodeErr := mailref.DecodeAccount(account.Ref); decodeErr == nil {
+		binding, found, bindingErr := mail.FindAccountBinding(bindings, reference.AccountID)
+		if bindingErr != nil {
+			return "", transport.ImapConfig{}, bindingErr
+		}
+		if found {
+			cfg.Username = binding.CredentialAccount
+		}
+	}
+	return email, cfg, nil
+}
+
 func syncStatusWorkerLimit(op transport.ImapOperator) int {
 	const fallback = 1
 	provider, ok := op.(transport.ImapConcurrencyProvider)
@@ -324,7 +349,7 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			})
 			continue
 		}
-		email, imapHost, imapPort, password, err := syncIdentityWithBindings(acct, credStore, bindings)
+		email, cfg, err := imapConfigForAccount(acct, credStore, bindings)
 		if err != nil {
 			code := failureCode(ctx, err)
 			if code == "" {
@@ -336,22 +361,6 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 				Message: err.Error(),
 			})
 			continue
-		}
-		cfg := transport.ImapConfig{
-			Host:     imapHost,
-			Port:     imapPort,
-			Username: email,
-			Password: password,
-		}
-		if accountRefValue, decodeErr := mailref.DecodeAccount(acct.Ref); decodeErr == nil {
-			if binding, found, bindingErr := mail.FindAccountBinding(bindings, accountRefValue.AccountID); bindingErr != nil {
-				result.Failures = append(result.Failures, mail.SyncCheckFailure{
-					Account: acct.Ref, Code: failureCode(ctx, bindingErr), Message: bindingErr.Error(),
-				})
-				continue
-			} else if found {
-				cfg.Username = binding.CredentialAccount
-			}
 		}
 
 		localBoxes, err := c.store.ListMailboxes(ctx, mail.ListMailboxesRequest{AccountRef: acct.Ref})

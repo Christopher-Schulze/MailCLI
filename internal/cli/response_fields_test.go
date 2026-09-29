@@ -34,7 +34,7 @@ func TestResponseDataFieldOrderPinned(t *testing.T) {
 		"saved_attachment", "draft", "draft_preview", "draft_handoff",
 		"handoff_reconcile", "drafts", "prune", "saved_draft", "send_result",
 		"send_receipt", "send_setup", "partial_effects", "delete_result", "sync_result",
-		"sync_check", "batch_result", "store_profile", "finalization",
+		"sync_check", "new_messages", "batch_result", "store_profile", "finalization",
 		"update_result", "required_bytes", "limit_bytes", "measured",
 	}
 	got := responseDataJSONTags()

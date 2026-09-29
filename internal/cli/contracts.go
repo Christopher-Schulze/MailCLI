@@ -266,6 +266,20 @@ var commandContracts = []commandContract{
 		published:       true,
 	},
 	{
+		ID: "messages.new", handler: runMessagesNew,
+		limitRefs:   []string{"imap_connections_per_account", "maximum_imap_connections_per_account"},
+		effectClass: "read", confirmation: "none",
+		storeDependency: "mail-store",
+		dependencies: []commandDependency{
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
+		},
+		resultStates:   []string{"complete", "partial"},
+		mailService:    mailServiceAlwaysRequired,
+		published:      true,
+		requiresSignal: true,
+	},
+	{
 		ID: "attachments.list", handler: runAttachmentsList, helpDescription: "List and save received attachments",
 		limitRefs:   []string{"maximum_raw_source_bytes"},
 		effectClass: "read", confirmation: "none",

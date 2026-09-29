@@ -751,6 +751,18 @@ func (s *fakeServer) handle(conn net.Conn) {
 			default:
 				s.writeLine(bw, tag+" BAD unsupported UID sub-command")
 			}
+		case "FETCH":
+			if len(s.config.fetchResponse) == 0 {
+				s.writeLine(bw, tag+" BAD unsupported sequence FETCH")
+				continue
+			}
+			response := strings.ReplaceAll(string(s.config.fetchResponse), "<tag>", tag)
+			if _, err := bw.WriteString(response); err != nil {
+				return
+			}
+			if err := bw.Flush(); err != nil {
+				return
+			}
 		case "LOGOUT":
 			s.writeLine(bw, "* BYE")
 			s.writeLine(bw, tag+" OK LOGOUT completed")

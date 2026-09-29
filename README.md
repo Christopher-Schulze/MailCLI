@@ -21,7 +21,7 @@ Apple Mail's scripting interface is slow for large reads and unsafe for composit
 - **Fast local reads.** Lists, filters, searches, message reads, raw source, and downloaded attachments come from Mail's local store without Apple Events. Body search scans the selected `.emlx` sources on demand within explicit message and byte limits; MailCLI builds no second index.
 - **Direct mailbox changes.** Mark, move, copy, and delete run over IMAP without launching Mail.app and return typed server evidence. A lost COPY response fails closed with `imap_copy_outcome_unknown` until the destination is observed, so a retry never duplicates a message.
 - **Reviewed sending.** New drafts, replies, and forwards are local review files. `drafts send` delivers the exact reviewed revision over SMTP and mirrors it into Sent over IMAP; an accepted submission is never sent twice, and `drafts reconcile` finishes an unresolved Sent copy from the retained bytes.
-- **Honest freshness.** IMAP changes apply on the server immediately and reach the local read store after Mail.app's next sync; `sync --check` compares server and local counts, and every search page reports its coverage.
+- **Honest freshness.** IMAP changes apply on the server immediately and reach the local read store after Mail.app's next sync; `sync --check` compares server and local counts, `messages new` lists the newest server messages the local store lacks, and every search page reports its coverage.
 - **Agent contract.** One versioned JSON envelope with typed errors, opaque references, explicit pagination, a single recommended `next` action, and a machine-readable command and error catalog.
 
 Direct reads and mutations add no work to the Mail.app process. The bounded integrations with Mail.app are fallback listing when the store cannot open, `sync` without `--check`, `doctor --live`, and optional visible compose handoff. The [manual](docs/documentation.md) holds every contract.
@@ -236,6 +236,7 @@ mailcli messages get --ref MESSAGE_REF --view plain --json
 mailcli messages get --ref MESSAGE_REF --view full --export /absolute/new/path/message.txt --json
 mailcli messages raw --ref MESSAGE_REF --export /absolute/new/path/message.eml --json
 mailcli messages thread --ref MESSAGE_REF --json
+mailcli messages new --json
 mailcli attachments list --ref MESSAGE_REF --json
 mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /absolute/new/file.pdf --json
 ```

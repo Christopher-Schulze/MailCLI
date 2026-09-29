@@ -368,7 +368,7 @@ func TestPublishedOutputContractsRemainingFixtures(t *testing.T) {
 	validate(captureOutputFixture(t, adoption, "drafts", "adopt", "--ref", "msg_store_draft"))
 	validate(captureOutputFixture(t, adoption, "drafts", "open", "--ref", "msg_store_draft"))
 	boundaryService := mail.NewServiceWithDraftRoot(testGateway{}, t.TempDir())
-	for _, args := range [][]string{{"messages", "state", "--ref", "msg_ref"}, {"messages", "thread", "--ref", "msg_ref"}, {"messages", "mark", "--ref", "msg_ref", "--read=true"}, {"messages", "copy", "--ref", "msg_ref", "--mailbox", "mbx_ref"}, {"messages", "move", "--ref", "msg_ref", "--mailbox", "mbx_ref"}, {"messages", "delete", "--ref", "msg_ref", "--confirm"}, {"sync"}, {"attachments", "save", "--ref", "msg_ref", "--attachment", "a1", "--output", filepath.Join(t.TempDir(), "attachment.txt")}} {
+	for _, args := range [][]string{{"messages", "state", "--ref", "msg_ref"}, {"messages", "thread", "--ref", "msg_ref"}, {"messages", "new"}, {"messages", "mark", "--ref", "msg_ref", "--read=true"}, {"messages", "copy", "--ref", "msg_ref", "--mailbox", "mbx_ref"}, {"messages", "move", "--ref", "msg_ref", "--mailbox", "mbx_ref"}, {"messages", "delete", "--ref", "msg_ref", "--confirm"}, {"sync"}, {"attachments", "save", "--ref", "msg_ref", "--attachment", "a1", "--output", filepath.Join(t.TempDir(), "attachment.txt")}} {
 		validate(captureOutputFixture(t, boundaryService, args...))
 	}
 	batchPath := filepath.Join(t.TempDir(), "batch.json")

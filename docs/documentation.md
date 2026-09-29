@@ -168,6 +168,8 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Example: `mailcli messages state --ref MESSAGE_REF --json`. Output: `state`.
 - `messages.thread`: list a message's conversation members chronologically from the local grouping; main flags `--ref`, `--limit`, `--cursor`, `--max-bytes`.
   Example: `mailcli messages thread --ref MESSAGE_REF --json`. Output: `thread`.
+- `messages.new`: compare the newest server messages of a mailbox with the local store over IMAP and list the ones the store lacks; main flags `--account`, `--mailbox` (default `inbox`), `--limit` (1 to 50, default 20).
+  Example: `mailcli messages new --account ACCOUNT_REF --json`. Output: `new_messages`.
 - `attachments.list`: inspect received attachment metadata; main flags `--ref`, `--limit`, `--cursor`, `--fields`, `--max-bytes`.
   Example: `mailcli attachments list --ref MESSAGE_REF --json`.
   Output: `attachments`, `content_complete`, `content_source`, `missing_parts`, `page`.
@@ -679,6 +681,17 @@ Nothing to compare is not a failure: a local account without an address (`local_
 `sync_check_policy` reports that incomplete checks are successful results with exit `0` by default; automation that requires exhaustive coverage uses `--require-complete` (complete exit `0`, incomplete exit `3` with the same `ok:true` payload, runtime failure exit `1`, invalid flags exit `2`).
 `--require-complete` without `--check` is invalid.
 The check reports counts without downloading content or refreshing Mail's index.
+
+### New mail on the server
+
+`messages new` answers "is there mail the local store does not have yet?" without waiting for Mail.app.
+It is opt-in and read-only: no other read command contacts IMAP for this, and nothing on the server changes (`BODY.PEEK` header fields only, no flag is set).
+For each selected account (all with stored credentials, or `--account`) and mailbox (`--mailbox`, default the inbox), one `SELECT` and one sequence-number `FETCH` read the newest 100 server messages (`UID`, `\Seen` and the `From`, `Subject`, `Date` and `Message-ID` header fields); the local store's server UIDs decide which of them are new.
+Each mailbox result carries `server_messages`, `new_count`, `truncated` (more new messages exist than `--limit` lists, or every message of the 100-message window is missing locally) and `state`: `checked`, `unresolved` (no local rows for the mailbox or no server UIDVALIDITY, with `reason`) or `uidvalidity_changed` (the local and server UIDVALIDITY differ, so no row is returned).
+Rows are newest first and carry `server_ref`, decoded single-line `subject` and `sender`, `date_sent` (UTC), `message_id` and `unseen`.
+They are server evidence, not local messages: a `server_ref` (`srv_` prefix) is opaque, binds account, mailbox path, UIDVALIDITY and UID, and is accepted only by commands that read over IMAP.
+An account without credentials, without network or in a degraded state is listed under `failures` and keeps the call successful with `complete:false`; local accounts are listed under `skipped`.
+When new messages exist `next` is `check_state` without a command; `sync` asks Mail.app to fetch them into the local store.
 
 ### Mailbox resolution
 

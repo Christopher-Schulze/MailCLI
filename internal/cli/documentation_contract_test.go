@@ -49,7 +49,7 @@ func TestCatalogCursorDocumentationMatchesRuntimeContract(t *testing.T) {
 
 func TestHistoricalSaveRecoveryDocumentationMatchesRemovedCommand(t *testing.T) {
 	manifest := mustCapabilities(t)
-	if len(manifest.Commands) != 39 || manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts reconcile --ref <DRAFT_REF> --json" {
+	if len(manifest.Commands) != 40 || manifest.DraftSavePolicy.SafeRecoveryCommand != "mailcli drafts reconcile --ref <DRAFT_REF> --json" {
 		t.Fatalf("published inventory=%d policy=%+v", len(manifest.Commands), manifest.DraftSavePolicy)
 	}
 	for _, command := range manifest.Commands {

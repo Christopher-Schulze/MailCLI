@@ -11,36 +11,36 @@ type errorCodeDefinition struct {
 
 var (
 	errorScopeAll       = []string{"*"}
-	errorScopeStoreRead = []string{"accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward", "batch"}
+	errorScopeStoreRead = []string{"messages.new", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward", "batch"}
 	errorScopeDetail    = []string{"messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.forward", "batch"}
 	errorScopeSearch    = []string{"messages.filter", "messages.search"}
 	errorScopeMutation  = []string{"messages.mark", "messages.move", "messages.copy", "messages.delete", "batch"}
-	errorScopeIMAPRead  = []string{"messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "sync", "batch"}
-	errorScopeIMAP      = []string{"messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
-	errorScopeIdentity  = []string{"messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
-	errorScopeBinding   = []string{"send.setup", "accounts.list", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
+	errorScopeIMAPRead  = []string{"messages.new", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "sync", "batch"}
+	errorScopeIMAP      = []string{"messages.new", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
+	errorScopeIdentity  = []string{"messages.new", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
+	errorScopeBinding   = []string{"messages.new", "send.setup", "accounts.list", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
 	errorScopeDraft     = []string{"drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.update", "drafts.discard", "drafts.prune", "drafts.adopt", "drafts.send", "drafts.reconcile", "drafts.handoff", "drafts.handoff-reconcile", "messages.reply", "messages.forward"}
 	errorScopeSend      = []string{"drafts.send", "drafts.reconcile"}
 	errorScopeHandoff   = []string{"drafts.handoff", "drafts.handoff-reconcile"}
 	errorScopeMailApp   = []string{"doctor", "sync", "accounts.list", "mailboxes.list", "messages.list"}
-	errorScopeKeychain  = []string{"send.setup", "drafts.send", "drafts.reconcile", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "batch"}
+	errorScopeKeychain  = []string{"messages.new", "send.setup", "drafts.send", "drafts.reconcile", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "batch"}
 	errorScopeEditor    = []string{"drafts.edit"}
 	errorScopeUpdate    = []string{"update"}
 	// errorScopeMailStore lists the commands that open Mail's store.
-	errorScopeMailStore = []string{"doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "drafts.reconcile", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
+	errorScopeMailStore = []string{"messages.new", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "drafts.reconcile", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
 	// errorScopeRefs lists the commands that take a message, draft, account,
 	// mailbox or cursor reference.
-	errorScopeRefs = []string{"batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
+	errorScopeRefs = []string{"messages.new", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
 	// errorScopeMailStoreRefs lists the commands whose refs are bound to Mail's store.
-	errorScopeMailStoreRefs = []string{"batch", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
+	errorScopeMailStoreRefs = []string{"messages.new", "batch", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
 	// errorScopeOutputBudget lists the commands with a --max-bytes JSON budget.
 	errorScopeOutputBudget = []string{"batch", "accounts.list", "mailboxes.list", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.thread", "attachments.list", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.update", "drafts.open", "drafts.adopt", "messages.reply", "messages.forward"}
 	// errorScopeSubcommandFamilies lists the commands reached through a family
 	// dispatcher, where a mistyped subcommand returns unknown_command.
-	errorScopeSubcommandFamilies = []string{"accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "drafts.handoff-reconcile"}
+	errorScopeSubcommandFamilies = []string{"messages.new", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "drafts.handoff-reconcile"}
 	// errorScopeStatefulRuntime is every command except the pure capabilities and
 	// version reports, which initialize no state and open no files.
-	errorScopeStatefulRuntime = []string{"update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
+	errorScopeStatefulRuntime = []string{"messages.new", "update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
 )
 
 var errorCodeDefinitions = []errorCodeDefinition{
@@ -62,14 +62,14 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"account_disabled", "The target account is disabled in Mail.app.", errorScopeIdentity},
 	{"account_identity_missing", "The account has no provable sender identity or credential binding.", errorScopeIdentity},
 	{"account_no_email", "The account has no email address to resolve provider endpoints.", []string{"sync"}},
-	{"account_not_found", "The requested account ref does not exist in the local catalog.", []string{"sync", "mailboxes.list", "messages.list"}},
+	{"account_not_found", "The requested account ref does not exist in the local catalog.", []string{"sync", "mailboxes.list", "messages.list", "messages.new"}},
 	{"account_reference_corrupt", "A stored account reference is corrupt.", errorScopeIdentity},
 	{"account_reference_invalid", "An account reference is malformed or mixes incompatible forms.", errorScopeIdentity},
 	{"account_reference_version_unsupported", "An account reference uses a version this build cannot decode.", errorScopeIdentity},
 	{"adopt_source_incomplete", "The store draft is not fully downloaded; open it in Mail.app first.", []string{"drafts.adopt"}},
 	{"ambiguous_attachment", "The attachment identifier matches more than one part.", []string{"attachments.save", "batch"}},
 	{"ambiguous_mail_store_generation", "Several Mail store generations exist without an active-generation marker.", errorScopeMailStore},
-	{"ambiguous_mailbox", "The mailbox selector matches several mailboxes; choose a returned ref.", []string{"messages.list", "messages.filter", "messages.search", "mailboxes.resolve"}},
+	{"ambiguous_mailbox", "The mailbox selector matches several mailboxes; choose a returned ref.", []string{"messages.list", "messages.filter", "messages.search", "mailboxes.resolve", "messages.new"}},
 	{"ambiguous_message_source", "Both full and partial local sources exist for one message.", errorScopeDetail},
 	{"attachment_changed", "An attachment file changed after it was fingerprinted.", append([]string{"attachments.save"}, errorScopeDraft...)},
 	{"attachment_not_downloaded", "Attachment bytes are not downloaded locally and no IMAP source is available.", []string{"attachments.save", "drafts.adopt", "batch"}},

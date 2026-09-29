@@ -98,6 +98,19 @@ func (shortWriter) Write(payload []byte) (int, error) {
 	return max(0, len(payload)-1), nil
 }
 
+func (testGateway) NewMessages(context.Context, mail.NewMessagesRequest) (mail.NewMessagesResult, error) {
+	return mail.NewMessagesResult{
+		Mailboxes: []mail.NewMailbox{{
+			AccountRef: "acct_ref", MailboxRef: "mbx_ref", Name: "INBOX", State: mail.NewMailboxStateChecked,
+			ServerMessages: 4, NewCount: 1, Messages: []mail.NewMessage{{
+				ServerRef: "srv_ref", Subject: "Fresh", Sender: "Sender <s@example.com>", DateSent: "2026-09-29T08:15:00Z",
+				MessageID: "<fresh@example.com>", Unseen: true,
+			}},
+		}},
+		Failures: []mail.NewMessagesFailure{}, Skipped: []mail.SyncCheckSkip{}, Complete: true, NewCount: 1,
+	}, nil
+}
+
 func (testGateway) Probe(context.Context, bool) mail.DiagnosticReport {
 	return mail.DiagnosticReport{Checks: []mail.Check{
 		{Name: "platform", Status: "pass", Detail: "darwin"},
@@ -527,7 +540,7 @@ func TestJSONGroupSubcommandFailuresReturnValidChoices(t *testing.T) {
 		{name: "accounts", validSubcommands: []string{"list"}},
 		{name: "mailboxes", validSubcommands: []string{"list", "resolve"}},
 		{name: "messages", validSubcommands: []string{
-			"list", "filter", "search", "get", "raw", "state", "thread", "reply", "forward", "mark", "move", "copy", "delete",
+			"list", "filter", "search", "get", "raw", "state", "thread", "new", "reply", "forward", "mark", "move", "copy", "delete",
 		}},
 		{name: "attachments", validSubcommands: []string{"list", "save"}},
 		{name: "drafts", validSubcommands: []string{

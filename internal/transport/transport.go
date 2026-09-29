@@ -197,6 +197,34 @@ type MessageExcerptSource struct {
 	Complete bool
 }
 
+// MaximumRecentMessages bounds one recent-message listing.
+const MaximumRecentMessages = 200
+
+// RecentMessage is the server view of one message: its UID, whether it is
+// marked \Seen and the requested header fields (From, Subject, Date,
+// Message-ID) as one bounded header block.
+type RecentMessage struct {
+	UID    uint32
+	Seen   bool
+	Header []byte
+}
+
+// RecentMailbox lists the newest messages of one mailbox in ascending UID
+// order. Exists is the server message count and UIDValidity the value the
+// selected mailbox reported.
+type RecentMailbox struct {
+	Mailbox     string
+	UIDValidity uint32
+	Exists      int
+	Messages    []RecentMessage
+}
+
+// RecentMessageLister reads the newest messages of one mailbox with a single
+// SELECT and one sequence-number FETCH, header fields only and never a body.
+type RecentMessageLister interface {
+	ListRecentMessages(ctx context.Context, cfg ImapConfig, mailbox string, count int) (RecentMailbox, error)
+}
+
 // ImapConcurrencyProvider optionally reports the configured per-account pool
 // capacity so callers can bound independent STATUS work without creating an
 // unbounded number of goroutines. Implementations must return a positive limit

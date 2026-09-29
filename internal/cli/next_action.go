@@ -189,6 +189,14 @@ func pendingNextAction(data responseData) *nextAction {
 	} else if check != nil && !check.CountsMatch {
 		return &nextAction{Do: "check_state", Why: "Local and server counts differ; Mail.app has not synced every mailbox yet. Check again after it synced."}
 	}
+	if result := data.NewMessages; result != nil {
+		switch {
+		case result.NewCount > 0:
+			return &nextAction{Do: "check_state", Why: "The local store lacks these server messages; run sync to have Mail.app fetch them."}
+		case !result.Complete:
+			return &nextAction{Do: "ask_user", Why: "Some accounts could not be compared; see failures for credentials or network problems."}
+		}
+	}
 	if data.Complete != nil && !*data.Complete {
 		return &nextAction{Do: "ask_user", Why: "The account catalog is degraded; repair the reported account configuration before relying on complete coverage."}
 	}

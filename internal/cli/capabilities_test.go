@@ -108,7 +108,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	want := []string{
 		"capabilities", "version", "update", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve",
 		"messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state",
-		"messages.thread",
+		"messages.thread", "messages.new",
 		"attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect",
 		"drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open",
 		"drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "drafts.prune",
@@ -264,6 +264,10 @@ func TestCapabilityDependenciesMatchAuditedInventory(t *testing.T) {
 			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
 		},
 		"messages.thread": {},
+		"messages.new": {
+			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways},
+			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionAlways},
+		},
 		"attachments.list": {
 			{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionIfLocalSourceIncomplete},
 			{Kind: dependencyKindNetwork, Target: dependencyTargetIMAP, Condition: dependencyConditionIfLocalSourceIncomplete},

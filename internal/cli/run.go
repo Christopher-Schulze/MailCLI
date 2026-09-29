@@ -74,6 +74,7 @@ type responseData struct {
 	DeleteResult             *mail.DeleteResult           `json:"delete_result,omitempty"`
 	SyncResult               *mail.SyncResult             `json:"sync_result,omitempty"`
 	SyncCheck                *mail.SyncCheckResult        `json:"sync_check,omitempty"`
+	NewMessages              *mail.NewMessagesResult      `json:"new_messages,omitempty"`
 	BatchResult              *mail.BatchResult            `json:"batch_result,omitempty"`
 	StoreProfile             *mail.StoreProfile           `json:"store_profile,omitempty"`
 	Finalization             *finalizationData            `json:"finalization,omitempty"`

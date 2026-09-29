@@ -41,6 +41,7 @@ var commandDataFields = map[string][]string{
 	"messages.raw":             {"content_export", "raw_source"},
 	"messages.state":           {"state"},
 	"messages.thread":          {"thread"},
+	"messages.new":             {"new_messages"},
 	"attachments.list":         {"attachments", "content_complete", "content_source", "missing_parts", "page"},
 	"attachments.save":         {"saved_attachment"},
 	"drafts.create":            {"draft"},

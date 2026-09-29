@@ -1,6 +1,6 @@
 # Installation, setup, and diagnostics
 
-Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --outputs --json` when it changes. Install or update with `mailcli update` or the signed release the user provides.
+Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --json` when it changes. Install or update with `mailcli update` or the signed release the user provides.
 
 Obey conditional dependencies; an empty list means none. Run `mailcli doctor --json` before store work and again after a store, permission, schema, account or read failure. Never cache `doctor --live`; run it before Apple Events or a read fallback, with Mail running and Automation permission granted. Store reads need Full Disk Access and no Automation; direct send needs neither Mail nor Full Disk Access.
 
@@ -12,7 +12,7 @@ Built-in app passwords, no Google/Apple OAuth; both require two-factor auth. Goo
 
 Keychain success invalidates caches. partial_effects: keychain_store:complete, binding_publish:none/unknown/complete, optional lock_release:failed. Unverified rename sync/identity=unknown; lock failure cannot undo complete. account_binding_changed: unpublished binding, inspect accounts list/decide; no auto-retry/credential rollback. Explicit flags win, implicit fields locked; validation/Keychain failure=no effect.
 
-Never unlink binding locks (legacy then new). Default account-bindings.lock; custom account-bindings-<full lowercase basename SHA256>.lock in pinned parent, independent per basename.
+Never unlink binding locks.
 
 `mailcli update --check --json` is read-only: `update_available` says whether a newer release exists, nothing is installed. User-requested `mailcli update --json` verifies signed binary/skill. Read `mailcli version --json`, refresh identity/contracts after replacement.
 
