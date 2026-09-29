@@ -1,6 +1,10 @@
 package mail
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestShortenLinks(t *testing.T) {
 	t.Parallel()
@@ -23,6 +27,9 @@ func TestShortenLinks(t *testing.T) {
 		{"two urls on one line", LinkModeHost, long + " and " + long + "x", "<click.example.com> and <click.example.com>"},
 		{"internationalized host", LinkModeHost, "https://bücher.example/pfad/mit/einem/sehr/langen/namen/der/nicht/endet", "<bücher.example>"},
 		{"balanced parentheses belong to the url", LinkModeHost, "(see https://en.wikipedia.org/wiki/Go_(programming_language))", "(see <en.wikipedia.org>)"},
+		{"none drops an uppercase scheme", LinkModeNone, "see HTTPS://Example.com/some/path now", "see  now"},
+		{"none drops a mixed case scheme in brackets", LinkModeNone, "mail <Http://example.com/x> ok", "mail  ok"},
+		{"host shortens an uppercase scheme", LinkModeHost, "go HTTPS://Click.Example.com/f/a/upYx533wyWJ-C15_1C36yg~~/AAAmIhA~ now", "go <Click.Example.com> now"},
 		{"other schemes are not links", LinkModeHost, "ftp://files.example.com/a/very/long/path/that/keeps/going/on/and/on and mailto:a@b.c", "ftp://files.example.com/a/very/long/path/that/keeps/going/on/and/on and mailto:a@b.c"},
 		{"blank lines collapse", LinkModeHost, "a\n\n\n\n\nb\n\nc", "a\n\nb\n\nc"},
 		{"none collapses blank lines", LinkModeNone, "a\n\n\n\nb", "a\n\nb"},
@@ -34,6 +41,20 @@ func TestShortenLinks(t *testing.T) {
 				t.Fatalf("ShortenLinks(%q, %s) = %q, want %q", test.in, test.mode, got, test.want)
 			}
 		})
+	}
+}
+
+// Removing wrapped links must not rewrite the text seen so far: 40,000 of them
+// took 1.16 s when every removal copied the whole output again.
+func TestShortenLinksStaysLinearForManyWrappedLinks(t *testing.T) {
+	text := strings.Repeat("Click <https://example.com/a?x=1> now (https://example.com/b?y=2) ok.\n", 40000)
+	start := time.Now()
+	got := ShortenLinks(text, LinkModeNone)
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("ShortenLinks took %v for %d KiB with 80,000 wrapped links", elapsed, len(text)/1024)
+	}
+	if want := strings.Repeat("Click  now ok.\n", 40000); strings.ReplaceAll(got, "\n\n", "\n") != want {
+		t.Fatalf("unexpected result prefix %q", got[:min(len(got), 80)])
 	}
 }
 

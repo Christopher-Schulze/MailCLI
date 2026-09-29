@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -22,7 +23,7 @@ const (
 // shortenedLinkLength is the length from which host mode replaces a URL.
 const shortenedLinkLength = 40
 
-var linkPattern = regexp.MustCompile(`https?://[^\s<>"]+`)
+var linkPattern = regexp.MustCompile(`(?i)https?://[^\s<>"]+`)
 
 var blankLineRun = regexp.MustCompile(`\n{3,}`)
 
@@ -46,8 +47,9 @@ func ShortenLinks(text string, mode LinkMode) string {
 	if mode != LinkModeHost && mode != LinkModeNone {
 		return text
 	}
-	var output strings.Builder
-	output.Grow(len(text))
+	// One forward pass over a byte buffer: removing a wrapper only shortens the
+	// buffer, so the text already produced is never copied again.
+	output := make([]byte, 0, len(text))
 	last := 0
 	for _, match := range linkPattern.FindAllStringIndex(text, -1) {
 		address, tail := splitLinkTail(text[match[0]:match[1]])
@@ -58,31 +60,26 @@ func ShortenLinks(text string, mode LinkMode) string {
 		if mode == LinkModeHost && len(address) < shortenedLinkLength {
 			continue
 		}
-		output.WriteString(text[last:match[0]])
+		output = append(output, text[last:match[0]]...)
 		last = match[1]
-		before := output.String()
-		wrappedInBrackets := strings.HasSuffix(before, "<") && strings.HasPrefix(text[match[1]:], ">")
-		wrappedInParentheses := strings.HasSuffix(before, " (") && strings.HasPrefix(tail, ")")
+		wrappedInBrackets := bytes.HasSuffix(output, []byte("<")) && strings.HasPrefix(text[match[1]:], ">")
+		wrappedInParentheses := bytes.HasSuffix(output, []byte(" (")) && strings.HasPrefix(tail, ")")
 		switch {
 		case mode == LinkModeHost && wrappedInBrackets:
-			output.WriteString(parsed.Hostname())
+			output = append(output, parsed.Hostname()...)
 		case mode == LinkModeHost:
-			output.WriteString("<" + parsed.Hostname() + ">")
+			output = append(output, "<"+parsed.Hostname()+">"...)
 		case wrappedInBrackets:
-			trimmed := strings.TrimSuffix(before, "<")
-			output.Reset()
-			output.WriteString(trimmed)
+			output = output[:len(output)-len("<")]
 			last++
 		case wrappedInParentheses:
-			trimmed := strings.TrimSuffix(before, " (")
-			output.Reset()
-			output.WriteString(trimmed)
+			output = output[:len(output)-len(" (")]
 			tail = strings.TrimPrefix(tail, ")")
 		}
-		output.WriteString(tail)
+		output = append(output, tail...)
 	}
-	output.WriteString(text[last:])
-	return blankLineRun.ReplaceAllString(output.String(), "\n\n")
+	output = append(output, text[last:]...)
+	return blankLineRun.ReplaceAllString(string(output), "\n\n")
 }
 
 // splitLinkTail separates trailing punctuation and unbalanced closing
