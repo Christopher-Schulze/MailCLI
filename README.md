@@ -45,7 +45,7 @@ mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /
 Apple Mail's scripting interface is slow for large reads and unsafe for composition on Mail 16. MailCLI splits those workloads and fails closed where Mail cannot preserve reviewed content.
 
 - **Fast local reads.** Lists, filters, searches, message reads, raw source, and downloaded attachments come from Mail's local store without Apple Events. Body search scans the selected `.emlx` sources on demand within explicit message and byte limits; MailCLI builds no second index.
-- **Direct mailbox changes.** Mark, move, copy, and delete run over IMAP without launching Mail.app and return typed server evidence. A lost COPY response fails closed with `imap_copy_outcome_unknown` until the destination is observed, so a retry never duplicates a message.
+- **Direct mailbox changes.** Mark, move, copy, and delete run over IMAP without launching Mail.app and return typed server evidence. Uncertain COPY results return `imap_copy_outcome_unknown` and require destination observation instead of replay.
 - **Reviewed sending.** New drafts, replies, and forwards are local review files. `drafts send` delivers the exact reviewed revision over SMTP and mirrors it into Sent over IMAP; an accepted submission is never sent twice, and `drafts reconcile` finishes an unresolved Sent copy from the retained bytes.
 - **Honest freshness.** IMAP changes apply on the server immediately and reach the local read store after Mail.app's next sync; `sync --check` compares server and local counts, `messages new` lists the newest server messages the local store lacks (readable at once by their `server_ref`), and every search page reports its coverage.
 - **Agent contract.** One versioned JSON envelope with typed errors, opaque references, explicit pagination, a single recommended `next` action, and a machine-readable command and error catalog.
@@ -343,7 +343,8 @@ The link follows `mailcli update` automatically. `scripts/tests/report-skill-dri
 | No writes to Mail's database | The Envelope Index is opened read-only; unsupported store layouts fail closed |
 | No owned mail index | Searches scan current local sources on demand and persist no corpus |
 | No send of unreviewed content | `drafts send` needs the reviewed `revision` and `--confirm`; any change to recipients, subject, body or attachments invalidates the revision. Authorization by the user is a rule of the agent skill, not enforced by the CLI |
-| No duplicate send or copy | Claims and operation identities block replay until the real outcome is observed; a COPY checks its destination under the per-account lock, so concurrent processes cannot both copy |
+| Send replay blocked | Durable send claims block replay until the real outcome is observed |
+| COPY destination guard | Exact Message-ID checks under the per-account lock prevent another COPY for an observed matching destination; uncertain effects require observation |
 | No Mail.app lifecycle control | MailCLI binds to the exact running Mail process and never launches, quits, or restarts it |
 | No phantom compose objects | Scripted compose is disabled; visible handoff opens a window and never sends |
 | No overwrite or path substitution | Exports and attachment saves need a new absolute path; store files reject symlinks and replaced identities |

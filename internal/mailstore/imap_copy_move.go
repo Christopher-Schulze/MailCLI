@@ -215,8 +215,9 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 
 // dispatchCopy sends the COPY of one target. An operator that can check the
 // destination under the cross-process mutation lock (transport.GuardedCopier)
-// makes check and COPY one critical section, so two processes cannot both see
-// an empty destination; any other operator, and a source without a Message-ID
+// orders destination checks and COPY dispatch, refusing an observed match;
+// it cannot establish a lost prior COPY's absence in a later process.
+// Any other operator, and a source without a Message-ID
 // (which the check must refuse), checks first and copies afterwards. stopped
 // reports that no COPY was sent because the destination holds the message or
 // could not be checked; err then explains it.

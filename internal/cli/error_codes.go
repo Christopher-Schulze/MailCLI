@@ -130,7 +130,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"imap_canceled", "The IMAP command was canceled.", errorScopeIMAP},
 	{"imap_command_rejected", "The server rejected an IMAP command; see error.imap_rejection.", errorScopeIMAP},
 	{"imap_connect_failed", "The IMAP connection or TLS verification failed.", errorScopeIMAP},
-	{"imap_copy_outcome_unknown", "A COPY response was lost; observe the destination before any retry.", []string{"messages.copy", "messages.move", "messages.delete", "batch"}},
+	{"imap_copy_outcome_unknown", "A COPY cannot be safely started or its effects are unverified; observe the destination before any retry.", []string{"messages.copy", "messages.move", "messages.delete", "batch"}},
 	{"imap_credentials_missing", "No IMAP credential or account identity is configured.", errorScopeIMAP},
 	{"imap_disconnected", "The IMAP connection dropped.", errorScopeIMAP},
 	{"imap_fetch_failed", "An IMAP FETCH failed.", errorScopeIMAPRead},
