@@ -975,6 +975,8 @@ A successful observation describes the state at completion, not a guarantee agai
 ### Copy, move and delete
 
 COPY records a deterministic operation identity before dispatch with the source account, source and destination UIDVALIDITY and UID, and any strict single-UID `COPYUID` mapping.
+The destination is searched by exact Message-ID on the mutation session while the account's cross-process mutation lock is held, so two processes cannot both see an empty destination and both copy; when the destination already holds the message no COPY is sent and the result is `imap_copy_outcome_unknown` with the destination UID, and a failed destination check stops the COPY the same way.
+A source without a Message-ID cannot be checked and is refused; with `MAILCLI_IMAP_MUTATION_LOCK=off` only process-local ordering remains.
 A lost or incomplete final response returns `imap_copy_outcome_unknown` with the evidence so far; the destination is observed by exact Message-ID before any replay, and replay is refused when the destination is present, duplicated or has changed UIDVALIDITY.
 Before a COPY or MOVE is written, validation, cancellation or deadline failures keep `not_started` evidence with the source UIDVALIDITY and stop without destination reconciliation.
 Proven no-effect cancellation and transient failures permit safe replay (`retryability:safe`, `replay_allowed:true`, `recovery.action:retry`); validation and configuration failures require correction (`user_input_required`, `recovery.action:correct`), including a MOVE fallback whose COPY never started after a definitive native MOVE rejection.

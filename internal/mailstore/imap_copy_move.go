@@ -98,12 +98,6 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 				nil,
 			)
 		}
-		if _, err := verifyCopyDestinationBeforeDispatch(
-			ctx, imapOp, target.cfg, dstImapBox, target.messageID, copyAttemptEvidence(target, dstImapBox),
-		); err != nil {
-			return mail.MessageSummary{}, err
-		}
-		c.rememberCopyAttempt(copyKey, copyAttemptEvidence(target, dstImapBox))
 	}
 
 	if !request.Copy {
@@ -116,7 +110,11 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 
 	var ev transport.MutationEvidence
 	if request.Copy {
-		ev, err = imapOp.CopyMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
+		var stopped bool
+		ev, stopped, err = c.dispatchCopy(ctx, imapOp, target, dstImapBox, copyKey)
+		if stopped {
+			return mail.MessageSummary{}, err
+		}
 	} else {
 		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
 	}
@@ -130,13 +128,11 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		}
 		if request.Copy {
 			copyKey = copyAttemptKey(retried, dstImapBox)
-			if _, err := verifyCopyDestinationBeforeDispatch(
-				ctx, imapOp, retried.cfg, dstImapBox, retried.messageID, copyAttemptEvidence(retried, dstImapBox),
-			); err != nil {
+			var stopped bool
+			ev, stopped, err = c.dispatchCopy(ctx, imapOp, retried, dstImapBox, copyKey)
+			if stopped {
 				return mail.MessageSummary{}, err
 			}
-			c.rememberCopyAttempt(copyKey, copyAttemptEvidence(retried, dstImapBox))
-			ev, err = imapOp.CopyMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
 		} else {
 			ev, err = imapOp.MoveMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
 		}
@@ -230,6 +226,62 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		summary.StalenessNote = "MOVE is incomplete; retained source flags and COPY effects are in server_truth; summary booleans retain local cached values"
 	}
 	return summary, err
+}
+
+// dispatchCopy sends the COPY of one target. An operator that can check the
+// destination under the cross-process mutation lock (transport.GuardedCopier)
+// makes check and COPY one critical section, so two processes cannot both see
+// an empty destination; any other operator, and a source without a Message-ID
+// (which the check must refuse), checks first and copies afterwards. stopped
+// reports that no COPY was sent because the destination holds the message or
+// could not be checked; err then explains it.
+func (c *Client) dispatchCopy(
+	ctx context.Context,
+	imapOp transport.ImapOperator,
+	target imapTarget,
+	dstImapBox string,
+	copyKey string,
+) (transport.MutationEvidence, bool, error) {
+	baseEvidence := copyAttemptEvidence(target, dstImapBox)
+	guarded, isGuarded := imapOp.(transport.GuardedCopier)
+	if !isGuarded || target.messageID == "" {
+		if _, err := verifyCopyDestinationBeforeDispatch(
+			ctx, imapOp, target.cfg, dstImapBox, target.messageID, baseEvidence,
+		); err != nil {
+			return transport.MutationEvidence{}, true, err
+		}
+		c.rememberCopyAttempt(copyKey, baseEvidence)
+		ev, err := imapOp.CopyMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
+		return ev, false, err
+	}
+	c.rememberCopyAttempt(copyKey, baseEvidence)
+	ev, match, err := guarded.CopyMessageIfAbsent(
+		ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox, target.messageID,
+	)
+	var guardErr *transport.CopyGuardError
+	switch {
+	case errors.As(err, &guardErr):
+		c.forgetCopyAttempt(copyKey)
+		return ev, true, copyOutcomeUnknownError(
+			baseEvidence,
+			fmt.Sprintf("cannot safely start COPY for message ID %s to mailbox %s; destination observation failed", target.messageID, dstImapBox),
+			nil,
+			guardErr.Err,
+		)
+	case err == nil && match.Count > 0:
+		c.forgetCopyAttempt(copyKey)
+		observation := copyDestinationObservation{uid: match.UID, uidvalidity: match.UIDValidity, matchCount: match.Count}
+		return ev, true, copyOutcomeUnknownError(
+			evidenceWithCopyDestination(baseEvidence, observation),
+			fmt.Sprintf(
+				"cannot safely start or replay COPY for message ID %s to mailbox %s; destination contains %d matching message(s)",
+				target.messageID, dstImapBox, match.Count,
+			),
+			nil,
+			nil,
+		)
+	}
+	return ev, false, err
 }
 
 func duplicateMatchEvidence(matchCount int) int {

@@ -394,7 +394,7 @@ The link follows `mailcli update` automatically. `scripts/tests/report-skill-dri
 | No writes to Mail's database | The Envelope Index is opened read-only; unsupported store layouts fail closed |
 | No owned mail index | Searches scan current local sources on demand and persist no corpus |
 | No send of unreviewed content | `drafts send` needs the reviewed `revision` and `--confirm`; any change to recipients, subject, body or attachments invalidates the revision. Authorization by the user is a rule of the agent skill, not enforced by the CLI |
-| No duplicate send or copy | Claims and operation identities block replay until the real outcome is observed |
+| No duplicate send or copy | Claims and operation identities block replay until the real outcome is observed; a COPY checks its destination under the per-account lock, so concurrent processes cannot both copy |
 | No Mail.app lifecycle control | MailCLI binds to the exact running Mail process and never launches, quits, or restarts it |
 | No phantom compose objects | Scripted compose is disabled; visible handoff opens a window and never sends |
 | No overwrite or path substitution | Exports and attachment saves need a new absolute path; store files reject symlinks and replaced identities |

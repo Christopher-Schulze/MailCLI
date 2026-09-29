@@ -197,6 +197,34 @@ type MessageExcerptSource struct {
 	Complete bool
 }
 
+// DestinationMatch reports the messages a destination mailbox already holds
+// for a Message-ID: the UID and UIDVALIDITY of the exact match and how many
+// exact matches exist. Count 0 means the destination lacks the message.
+type DestinationMatch struct {
+	UID         uint32
+	UIDValidity uint32
+	Count       int
+}
+
+// CopyGuardError marks a COPY that did not start because the destination
+// could not be checked; the wrapped error is the observation failure.
+type CopyGuardError struct {
+	Err error
+}
+
+func (e *CopyGuardError) Error() string { return "COPY destination check failed: " + e.Err.Error() }
+func (e *CopyGuardError) Unwrap() error { return e.Err }
+
+// GuardedCopier copies like CopyMessage, but first searches the destination
+// for messageID on the mutation session while the account's cross-process
+// mutation lock is held, so two processes cannot both observe an empty
+// destination and both copy. When the destination already holds a match, no
+// COPY is sent, the evidence is not_started and the match is returned. A
+// failed check returns a *CopyGuardError before any COPY.
+type GuardedCopier interface {
+	CopyMessageIfAbsent(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string, messageID string) (MutationEvidence, DestinationMatch, error)
+}
+
 // MaximumRecentMessages bounds one recent-message listing.
 const MaximumRecentMessages = 200
 

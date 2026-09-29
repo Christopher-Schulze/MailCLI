@@ -58,7 +58,19 @@ func (c *Client) SearchUID(ctx context.Context, cfg transport.ImapConfig, mailbo
 		return 0, 0, 0, err
 	}
 	defer release()
+	return c.searchUIDOnSession(ctx, ps, mailbox, messageID, normalizedMessageID)
+}
 
+// searchUIDOnSession selects the mailbox on a borrowed session and returns the
+// exact match of a normalized Message-ID; it is shared by SearchUID and the
+// destination check of a guarded COPY, which runs on its mutation session.
+func (c *Client) searchUIDOnSession(
+	ctx context.Context,
+	ps *pooledSession,
+	mailbox string,
+	messageID string,
+	normalizedMessageID string,
+) (uint32, uint32, int, error) {
 	info, err := c.ensureSelected(ctx, ps, mailbox)
 	if err != nil {
 		return 0, 0, 0, err

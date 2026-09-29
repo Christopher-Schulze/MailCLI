@@ -106,6 +106,33 @@ func (c *Client) doCommandResponse(ctx context.Context, sess *session, cmd strin
 }
 
 func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+	ev, _, err := c.copyMessage(ctx, cfg, srcMailbox, uid, expectedUIDValidity, dstMailbox, "")
+	return ev, err
+}
+
+// CopyMessageIfAbsent implements transport.GuardedCopier.
+func (c *Client) CopyMessageIfAbsent(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string, messageID string) (transport.MutationEvidence, transport.DestinationMatch, error) {
+	return c.copyMessage(ctx, cfg, srcMailbox, uid, expectedUIDValidity, dstMailbox, messageID)
+}
+
+// destinationMatch looks for messageID in the destination on the mutation
+// session; a message that is not there is not an error.
+func (c *Client) destinationMatch(ctx context.Context, ps *pooledSession, dstMailbox, messageID string) (transport.DestinationMatch, error) {
+	normalized, err := normalizeMessageID(messageID)
+	if err != nil {
+		return transport.DestinationMatch{}, err
+	}
+	uid, validity, count, err := c.searchUIDOnSession(ctx, ps, dstMailbox, messageID, normalized)
+	if err != nil {
+		if transport.ErrorCode(err) == transport.CodeIMAPMessageNotFound {
+			return transport.DestinationMatch{}, nil
+		}
+		return transport.DestinationMatch{}, err
+	}
+	return transport.DestinationMatch{UID: uid, UIDValidity: validity, Count: count}, nil
+}
+
+func (c *Client) copyMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string, guardMessageID string) (transport.MutationEvidence, transport.DestinationMatch, error) {
 	ev := transport.MutationEvidence{
 		OperationID:         transport.MutationOperationID("COPY", cfg.Username, srcMailbox, uid, expectedUIDValidity, dstMailbox),
 		Outcome:             transport.MutationOutcomeNotStarted,
@@ -116,39 +143,50 @@ func (c *Client) CopyMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 		UID:                 uid,
 		ExpectedUIDValidity: expectedUIDValidity,
 	}
+	var match transport.DestinationMatch
 	if err := validateMessageUID(uid); err != nil {
-		return ev, err
+		return ev, match, err
 	}
 	ps, release, err := c.acquireMutation(ctx, cfg)
 	if err != nil {
-		return ev, err
+		return ev, match, err
 	}
 	defer release()
+	if guardMessageID != "" {
+		match, err = c.destinationMatch(ctx, ps, dstMailbox, guardMessageID)
+		if err != nil {
+			return ev, transport.DestinationMatch{}, &transport.CopyGuardError{Err: err}
+		}
+		if match.Count > 0 {
+			return ev, match, nil
+		}
+	}
 	info, err := c.ensureSelectedFresh(ctx, ps, srcMailbox)
 	if err != nil {
-		return ev, err
+		return ev, match, err
 	}
 	if err := checkUIDValidity(expectedUIDValidity, info.uidvalidity); err != nil {
-		return ev, err
+		return ev, match, err
 	}
 	ev.UIDValidity = info.uidvalidity
 
 	quotedDestination, err := safeQuoteIMAP(dstMailbox)
 	if err != nil {
-		return ev, err
+		return ev, match, err
 	}
 	cmd := fmt.Sprintf("%s UID COPY %d %s", ps.sess.nextTag(), uid, quotedDestination)
 	status, text, responseCodes, dispatched, err := c.doTransferCommandResponse(ctx, ps.sess, cmd, "COPY")
 	if err != nil {
-		return transferCommandError(ev, status, text, dispatched, err)
+		failed, failure := transferCommandError(ev, status, text, dispatched, err)
+		return failed, match, failure
 	}
 	ev.ServerResponse = joinIMAPResponse(status, text)
 	if err := applyCopyUIDEvidence(&ev, responseCodes, uid); err != nil {
 		ev.Outcome = transport.MutationOutcomeUnknown
-		return ev, copyOutcomeUnknown(ev, err)
+		return ev, match, copyOutcomeUnknown(ev, err)
 	}
 	ev.Outcome = transport.MutationOutcomeCompleted
-	return ev, nil
+	return ev, match, nil
 }
 
 func (c *Client) doTransferCommandResponse(ctx context.Context, sess *session, cmd, operation string) (string, string, []string, bool, error) {
