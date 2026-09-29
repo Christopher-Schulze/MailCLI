@@ -3,6 +3,7 @@ package mailstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,44 @@ func TestServerRefIsRejectedByEveryWriteAndLocalOnlyCommand(t *testing.T) {
 		}
 		if typed, ok := err.(interface{ ErrorCode() string }); ok && typed.ErrorCode() != "invalid_reference" {
 			t.Errorf("%s error code = %s, want invalid_reference", name, typed.ErrorCode())
+		}
+	}
+}
+
+func TestServerRefWorksInBatchReadAndAttachmentSaveButNotInBatchMutations(t *testing.T) {
+	client, _ := serverReadFixture(t, "srv-batch@gmail.com")
+	service := mail.NewService(client)
+	ref := serverRefFor(t, 5003)
+	ctx := context.Background()
+	read, err := service.ExecuteBatch(ctx, mail.BatchRequest{Operation: mail.BatchOperationRead, Items: []mail.BatchItem{
+		{ID: "full", Ref: ref}, {ID: "meta", Ref: ref, ReadIntent: mail.MessageReadIntentHeaders},
+	}})
+	if err != nil || len(read.Items) != 2 {
+		t.Fatalf("batch read = %+v, %v", read, err)
+	}
+	for _, item := range read.Items {
+		if item.State != mail.BatchItemCompleted || item.Message == nil || item.Message.Summary.Subject != "Überraschung" {
+			t.Fatalf("batch read item %s = %+v", item.ID, item)
+		}
+	}
+	output := filepath.Join(t.TempDir(), "invoice.pdf")
+	save, err := service.ExecuteBatch(ctx, mail.BatchRequest{Operation: mail.BatchOperationAttachmentSave, Items: []mail.BatchItem{
+		{ID: "save", Ref: ref, AttachmentID: "2", OutputPath: output},
+	}})
+	saved, readErr := os.ReadFile(output)
+	if err != nil || len(save.Items) != 1 || save.Items[0].State != mail.BatchItemCompleted || readErr != nil || string(saved) != "invoice-bytes" {
+		t.Fatalf("batch attachment save = %+v, %v; file = %q, %v", save, err, saved, readErr)
+	}
+	for _, operation := range []mail.BatchOperation{mail.BatchOperationMark, mail.BatchOperationDelete} {
+		item := mail.BatchItem{ID: "write", Ref: ref}
+		if operation == mail.BatchOperationMark {
+			read := true
+			item.Read = &read
+		}
+		_, err := service.ExecuteBatch(ctx, mail.BatchRequest{Operation: operation, Items: []mail.BatchItem{item}})
+		var validation *mail.ValidationError
+		if err == nil || !errors.As(err, &validation) || validation.Code != "invalid_reference" {
+			t.Errorf("batch %s with a server ref: error = %v, want invalid_reference", operation, err)
 		}
 	}
 }

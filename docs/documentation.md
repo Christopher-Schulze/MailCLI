@@ -693,7 +693,7 @@ Rows are newest first and carry `server_ref`, decoded single-line `subject` and 
 They are server evidence, not local messages: a `server_ref` (`srv_` prefix) is opaque and binds account, mailbox path, UIDVALIDITY and UID.
 `messages get` (`metadata`, `plain` and `full` views, `--links`, `--fields` and `--export` as for local refs), `messages raw`, `attachments list` and `attachments save` accept it and read the message over IMAP with `BODY.PEEK`, so nothing is marked as read; the same size limits, `content_complete`, `missing_parts` and typed IMAP failures (UIDVALIDITY changed, message not found, credentials, timeout) apply.
 The result carries the server's read state in `summary.read`, `summary.flagged` and `summary.deleted` (with a `staleness_note`), and `summary.local_ref` as soon as the local index holds the same message; from then on the local ref gives the full command set.
-Every other command (`mark`, `move`, `copy`, `delete`, `reply`, `forward`, `state`, `thread`, drafts and batch items) rejects a server ref with `invalid_reference`; nothing converts a server ref into a local one.
+Batch `read` and `attachment_save` items accept a server ref like the commands they mirror; every other command (`mark`, `move`, `copy`, `delete`, `reply`, `forward`, `state`, `thread`, drafts and batch mutation items) rejects a server ref with `invalid_reference`, and nothing converts a server ref into a local one.
 An account without credentials, without network or in a degraded state is listed under `failures` and keeps the call successful with `complete:false`; local accounts are listed under `skipped`.
 When new messages exist `next` is `check_state` without a command; `sync` asks Mail.app to fetch them into the local store.
 

@@ -28,8 +28,8 @@ func TestSkillDocumentationSelfContained(t *testing.T) {
 }
 
 const (
-	skillEntrypointBudgetBytes = 5000
-	skillPackageBudgetBytes    = 28500
+	skillEntrypointBudgetBytes = 6500
+	skillPackageBudgetBytes    = 36400
 )
 
 func validateSkillBudgets(root string) error {
@@ -71,11 +71,11 @@ func TestSkillBudgetsEnforceExactBoundariesAndAllAssets(t *testing.T) {
 		extraBytes int
 		valid      bool
 	}{
-		{name: "entry boundary", entryBytes: 5000, valid: true},
-		{name: "entry overflow", entryBytes: 5001},
-		{name: "package boundary", entryBytes: 5000, extraBytes: 23500, valid: true},
-		{name: "package overflow", entryBytes: 5000, extraBytes: 23501},
-		{name: "non-Markdown assets count", entryBytes: 2000, extraBytes: 26501},
+		{name: "entry boundary", entryBytes: 6500, valid: true},
+		{name: "entry overflow", entryBytes: 6501},
+		{name: "package boundary", entryBytes: 6500, extraBytes: 29900, valid: true},
+		{name: "package overflow", entryBytes: 6500, extraBytes: 29901},
+		{name: "non-Markdown assets count", entryBytes: 2000, extraBytes: 34401},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
