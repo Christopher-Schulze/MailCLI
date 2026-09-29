@@ -1109,7 +1109,8 @@ The Keychain requires Darwin with CGO; other builds return `keychain_unsupported
 | Operation | Mail.app process required | Remaining platform/data dependency |
 | --- | --- | --- |
 | List/search and complete local message or attachment reads | No | Supported Apple Mail Envelope Index, .emlx sources and Full Disk Access; results reflect the local store |
-| New-message discovery in list/search | Mail.app must update its local store | No remote-only inbox/search command; complete local coverage does not certify server freshness |
+| New-message discovery in local list/search | No | Mail.app must update its local store; complete local coverage does not certify server freshness |
+| `messages new` server view | No | Keychain credentials and IMAP; compares the newest 100 server headers without updating the local store |
 | Local drafts and direct SMTP send/Sent reconciliation | No | Local draft state plus macOS Keychain for direct SMTP/IMAP credentials; no Mail-store startup for the direct path |
 | IMAP mark/move/copy/delete and sync --check | No | Keychain credentials and store-bound account/message identity or local counts; server writes do not update the local read index |
 | Targeted IMAP hydration | No | A locally resolved message reference and Keychain credentials; fetches missing content rather than discovering an unindexed inbox |

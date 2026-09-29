@@ -81,7 +81,7 @@ See the [architecture chapter](docs/documentation.md#architecture) for package b
 | Envelope Index | Store version `4`, minor version `74003` |
 | Go toolchain | Exact Go version declared in `go.mod` for source builds |
 
-SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS product: it relies on the Keychain for credentials, Apple's Envelope Index and `.emlx` files for reads, and AppKit or Apple Events for the optional native integrations. Downloaded mail stays readable while Mail.app is closed; new mail appears once Mail.app has updated its store. An unsupported store version or schema fails closed instead of guessing, so a new macOS or Mail release may need an adapter update. See [platform and compatibility](docs/documentation.md#platform-and-compatibility) and [Limitations](#limitations).
+SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS product: it relies on the Keychain for credentials, Apple's Envelope Index and `.emlx` files for reads, and AppKit or Apple Events for the optional native integrations. Downloaded mail stays readable while Mail.app is closed; local lists and searches show new mail once Mail.app has updated its store, while `messages new` can inspect the newest 100 server messages immediately. An unsupported store version or schema fails closed instead of guessing, so a new macOS or Mail release may need an adapter update. See [platform and compatibility](docs/documentation.md#platform-and-compatibility) and [Limitations](#limitations).
 
 ## Install
 
@@ -324,7 +324,7 @@ printf '%s' '{"operation":"read","items":[{"id":"a","ref":"MESSAGE_REF"},{"id":"
 - Direct sending and IMAP mutations support Gmail and iCloud by default; other providers need an account binding with explicit SMTP and IMAP hosts. Authentication uses app-specific passwords; OAuth is not implemented.
 - IMAP for direct mutations and Sent copies requires implicit TLS (port 993 by default); IMAP servers that offer only STARTTLS are unsupported, while SMTP submission uses STARTTLS.
 - Scripted Mail compose stays disabled because Mail 16 loses reviewed content; visible handoff supports new drafts with To recipients only and needs Mail.app as the default email application.
-- New mail appears after Mail.app updates its local store; there is no remote-only inbox search.
+- Local lists and searches show new mail after Mail.app updates its store; `messages new` is an opt-in view of the newest 100 server messages, not a full remote inbox search.
 - Body search is bounded work over local sources, not an instant index; narrow account, mailbox, sender, date, or subject for large stores.
 - A successful SMTP submission proves acceptance, not recipient delivery or conversation grouping.
 

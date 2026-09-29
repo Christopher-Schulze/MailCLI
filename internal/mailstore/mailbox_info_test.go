@@ -24,15 +24,31 @@ func TestParseMailboxInfoXML(t *testing.T) {
 	}
 }
 
+func TestParseMailboxInfoAcceptsDecimalStringUIDValidity(t *testing.T) {
+	t.Parallel()
+	source := `<plist><dict><key>UIDVALIDITY</key><string> 1469693657 </string></dict></plist>`
+	validity, err := parseMailboxInfoXML(strings.NewReader(source))
+	if err != nil || validity != 1469693657 {
+		t.Fatalf("parseMailboxInfoXML() = %d, error = %v", validity, err)
+	}
+}
+
 func TestParseMailboxInfoRejectsMissingOrInvalidUIDValidity(t *testing.T) {
 	t.Parallel()
 	for _, source := range []string{
 		`<plist><dict><key>UIDNEXT</key><integer>4</integer></dict></plist>`,
 		`<plist><dict><key>UIDVALIDITY</key><integer>0</integer></dict></plist>`,
+		`<plist><dict><key>UIDVALIDITY</key><string>0</string></dict></plist>`,
+		`<plist><dict><key>UIDVALIDITY</key><string>not-a-number</string></dict></plist>`,
+		`<plist><dict><key>UIDVALIDITY</key><string>4294967296</string></dict></plist>`,
 	} {
 		if _, err := parseMailboxInfoXML(strings.NewReader(source)); err == nil {
 			t.Fatalf("parseMailboxInfoXML(%q) error = nil", source)
 		}
+	}
+	_, err := parseMailboxInfoXML(strings.NewReader(`<plist><dict><key>UIDVALIDITY</key><dict></dict></dict></plist>`))
+	if err == nil || !strings.Contains(err.Error(), "expected plist integer or string, got dict") {
+		t.Fatalf("malformed UIDVALIDITY error = %v, want the parse cause", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -103,12 +104,21 @@ func parseMailboxInfoXML(reader io.Reader) (uint32, error) {
 		if seen {
 			return 0, mailboxInfoMalformedError("mailbox Info.plist contains duplicate UIDVALIDITY", nil)
 		}
-		integer, err := decodePlistInteger(decoder, value)
-		if err != nil || integer < 1 || uint64(integer) > uint64(^uint32(0)) {
+		if value.Name.Local != "integer" && value.Name.Local != "string" {
+			return 0, mailboxInfoMalformedError(
+				"parse mailbox Info.plist UIDVALIDITY: expected plist integer or string, got "+value.Name.Local, nil,
+			)
+		}
+		var raw string
+		if err := decoder.DecodeElement(&raw, &value); err != nil {
+			return 0, mailboxInfoMalformedError("parse mailbox Info.plist UIDVALIDITY: "+err.Error(), err)
+		}
+		integer, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || integer < 1 || integer > int64(^uint32(0)) {
 			if err == nil {
-				err = errors.New("UIDVALIDITY must be a positive 32-bit integer")
+				err = errors.New("UIDVALIDITY must be a positive 32-bit decimal integer")
 			}
-			return 0, mailboxInfoMalformedError("parse mailbox Info.plist UIDVALIDITY", err)
+			return 0, mailboxInfoMalformedError("parse mailbox Info.plist UIDVALIDITY: must be a positive 32-bit decimal integer", err)
 		}
 		validity = uint32(integer)
 		seen = true
