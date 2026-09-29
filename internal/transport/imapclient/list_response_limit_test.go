@@ -170,7 +170,7 @@ func TestListOverflowGuidanceAtReadAndMutationResolution(t *testing.T) {
 			} else {
 				phase = mail.OperationPhaseMutation
 				var evidence transport.MutationEvidence
-				evidence, err = client.DeleteMessage(ctx, config, "INBOX", 42, 12345)
+				evidence, err = client.DeleteMessage(ctx, config, "INBOX", 42, 12345, "<transfer@example.com>")
 				if !reflect.DeepEqual(evidence, transport.MutationEvidence{}) {
 					t.Fatalf("overflow started a mutation: %+v", evidence)
 				}

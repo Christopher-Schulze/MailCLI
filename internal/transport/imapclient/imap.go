@@ -122,7 +122,7 @@ func (c *Client) readGreeting(ctx context.Context, sess *session) error {
 }
 
 func (c *Client) enableUTF8(ctx context.Context, sess *session) error {
-	if !sess.utf8Accept {
+	if !sess.utf8Accept && !sess.capabilitiesKnown {
 		if err := c.refreshCapabilities(ctx, sess); err != nil {
 			return err
 		}
@@ -176,20 +176,40 @@ func (c *Client) refreshCapabilities(ctx context.Context, sess *session) error {
 	if err := c.writeLine(sess, tag+" CAPABILITY"); err != nil {
 		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP CAPABILITY write")
 	}
-	for {
+	seen := false
+	var capabilities []string
+	remaining := maxFlagResponseBytes
+	for range maxFlagResponseCount {
 		line, err := c.readLine(sess)
 		if err != nil {
 			return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP CAPABILITY read")
 		}
-		if capabilityLineAdvertisesUTF8(line) {
-			sess.utf8Accept = true
-			sess.utf8Only = capabilityLineRequiresUTF8(line)
+		remaining -= len(line) + 2
+		if remaining < 0 {
+			break
+		}
+		if strings.HasPrefix(strings.ToUpper(line), "* CAPABILITY ") {
+			if seen || strings.ContainsAny(line, "\t]") {
+				return malformedTaggedCommandResponse(sess, "CAPABILITY", fmt.Errorf("duplicate or malformed capability response"))
+			}
+			seen, capabilities = true, capabilityLineTokens(line)
 		}
 		if !strings.HasPrefix(line, tag+" ") {
 			continue
 		}
+		status, err := parseTaggedCompletionStatus(line, tag)
+		if err != nil {
+			return malformedTaggedCommandResponse(sess, "CAPABILITY", err)
+		}
+		if status != "OK" {
+			return taggedCommandRejection("CAPABILITY", status, strings.TrimPrefix(line, tag+" "+status+" "))
+		}
+		if !seen || !sess.observeCapabilities(capabilities) {
+			return malformedTaggedCommandResponse(sess, "CAPABILITY", fmt.Errorf("missing or invalid capability response"))
+		}
 		return nil
 	}
+	return malformedTaggedCommandResponse(sess, "CAPABILITY", fmt.Errorf("capability response exceeded its budget"))
 }
 
 func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg transport.ImapConfig) error {
@@ -228,23 +248,59 @@ func (c *Client) doLogin(ctx context.Context, sess *session, tag string, cfg tra
 		return malformedTaggedCommandResponse(sess, "LOGIN", statusErr)
 	}
 	if status == "OK" {
+		code, codeErr := flagResponseCode(statusLine, tag)
+		if codeErr != nil {
+			return malformedTaggedCommandResponse(sess, "LOGIN", codeErr)
+		}
+		if strings.HasPrefix(strings.ToUpper(code), "CAPABILITY ") && !sess.observeCapabilities(capabilityLineTokens(statusLine)) {
+			return malformedTaggedCommandResponse(sess, "LOGIN", fmt.Errorf("invalid authenticated capability response"))
+		}
 		return nil
 	}
 	return taggedCommandRejection("LOGIN", status, responseText)
 }
 
 type session struct {
-	conn            net.Conn
-	br              *bufio.Reader
-	bw              *bufio.Writer
-	nextTag         func() string
-	mailboxEncoding transport.MailboxEncoding
-	utf8Accept      bool
-	utf8Only        bool
+	conn              net.Conn
+	br                *bufio.Reader
+	bw                *bufio.Writer
+	nextTag           func() string
+	mailboxEncoding   transport.MailboxEncoding
+	utf8Accept        bool
+	utf8Only          bool
+	capabilitiesKnown bool
+	moveSupported     bool
 	// dirty marks an IO-level failure (read, write, deadline, cancel): the
 	// connection state is no longer trustworthy and the pooled session must
 	// be discarded. Protocol rejections (NO/BAD) do not set it.
 	dirty bool
+}
+
+func (sess *session) observeCapabilities(tokens []string) bool {
+	protocol, move, utf8Accept, utf8Only := false, false, false, false
+	for _, token := range tokens {
+		if !validFlagAtom(token) {
+			return false
+		}
+		switch token {
+		case "IMAP4REV1":
+			protocol = true
+		case "IMAP4REV2":
+			protocol, move = true, true
+		case "MOVE":
+			move = true
+		case "UTF8=ACCEPT":
+			utf8Accept = true
+		case "UTF8=ONLY":
+			utf8Accept, utf8Only = true, true
+		}
+	}
+	if !protocol {
+		return false
+	}
+	sess.capabilitiesKnown, sess.moveSupported = true, move
+	sess.utf8Accept, sess.utf8Only = utf8Accept, utf8Only
+	return true
 }
 
 // connect dials and logs in, returning a ready session. The session outlives

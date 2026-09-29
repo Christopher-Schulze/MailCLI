@@ -47,6 +47,17 @@ type fakeServerConfig struct {
 	statusContinue           chan struct{}
 	deliverAfterFirstSearch  bool
 	moveSupported            bool
+	capabilityResponse       string
+	loginResponse            string
+	moveResponse             string
+	dropMoveResponse         bool
+	copyResponse             string
+	omitCopyUID              bool
+	leaveMovedSource         bool
+	missingUIDs              []uint32
+	removeSourceOnTransfer   bool
+	fetchAfterStore          bool
+	dropAfterStore           bool
 	uidExpungeSupported      bool
 	dropCopyResponse         bool
 	rejectStore              bool
@@ -86,6 +97,7 @@ type fakeServer struct {
 
 	mu                   sync.Mutex
 	selectCalls          int
+	capabilityCalls      int
 	appendCalled         bool
 	appendMbox           string
 	appendFlags          []string
@@ -99,6 +111,8 @@ type fakeServer struct {
 	storeFlags           string
 	storeCalls           int
 	messageFlags         map[uint32][]string
+	removedUIDs          map[string]map[uint32]bool
+	copiedMessageIDs     map[string]map[uint32]string
 	copyCalled           bool
 	copyUID              uint32
 	copyDst              string
@@ -132,8 +146,10 @@ func newFakeServer(t testReporter, cfg fakeServerConfig) *fakeServer {
 	tl := tls.NewListener(l, &tls.Config{Certificates: []tls.Certificate{cert}})
 	s := &fakeServer{
 		listener: tl, cert: cert, config: cfg,
-		deletedUIDs:  make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
-		messageFlags: make(map[uint32][]string),
+		deletedUIDs:      make(map[uint32]struct{}, len(cfg.initialDeletedUIDs)),
+		messageFlags:     make(map[uint32][]string),
+		removedUIDs:      make(map[string]map[uint32]bool),
+		copiedMessageIDs: make(map[string]map[uint32]string),
 	}
 	for _, uid := range cfg.initialDeletedUIDs {
 		s.deletedUIDs[uid] = struct{}{}
@@ -260,6 +276,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
 	capabilities := append([]string(nil), s.config.capabilities...)
+	if len(capabilities) == 0 {
+		capabilities = []string{"IMAP4rev1"}
+	}
+	if s.config.moveSupported {
+		capabilities = append(capabilities, "MOVE")
+	}
 	greeting := "* OK fake ready"
 	if !s.config.omitGreetingCapabilities {
 		if len(capabilities) == 0 {
@@ -269,6 +291,7 @@ func (s *fakeServer) handle(conn net.Conn) {
 	}
 	s.writeLine(bw, greeting)
 	commands := 0
+	selectedMailbox := ""
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
@@ -296,9 +319,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 
 		switch strings.ToUpper(cmd) {
 		case "CAPABILITY":
-			capabilities := append([]string(nil), s.config.capabilities...)
-			if len(capabilities) == 0 {
-				capabilities = []string{"IMAP4rev1"}
+			s.mu.Lock()
+			s.capabilityCalls++
+			s.mu.Unlock()
+			if s.config.capabilityResponse != "" {
+				s.writeLine(bw, strings.ReplaceAll(s.config.capabilityResponse, "<tag>", tag))
+				continue
 			}
 			s.writeLine(bw, "* CAPABILITY "+strings.Join(capabilities, " "))
 			s.writeLine(bw, tag+" OK CAPABILITY completed")
@@ -310,7 +336,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 			authOK, authPassword := s.config.authOK, s.config.authPassword
 			s.mu.Unlock()
 			if authOK && (authPassword == "" || (len(args) >= 2 && args[1] == authPassword)) {
-				s.writeLine(bw, tag+" OK LOGIN completed")
+				if s.config.loginResponse != "" {
+					s.writeLine(bw, strings.ReplaceAll(s.config.loginResponse, "<tag>", tag))
+				} else {
+					s.writeLine(bw, tag+" OK LOGIN completed")
+				}
 			} else {
 				s.writeLine(bw, tag+" NO Authentication failed")
 			}
@@ -336,6 +366,9 @@ func (s *fakeServer) handle(conn net.Conn) {
 			}
 			s.writeLine(bw, tag+" OK LIST completed")
 		case "SELECT", "EXAMINE":
+			if len(args) > 0 {
+				selectedMailbox = args[0]
+			}
 			if s.config.selectResponse != "" {
 				if _, err := bw.WriteString(strings.ReplaceAll(s.config.selectResponse, "<tag>", tag)); err != nil {
 					return
@@ -594,7 +627,16 @@ func (s *fakeServer) handle(conn net.Conn) {
 					}
 					s.writeLine(bw, "* SEARCH "+strings.Join(values, " "))
 				} else {
-					s.writeLine(bw, "* SEARCH")
+					var matches []string
+					s.mu.Lock()
+					for uid, id := range s.copiedMessageIDs[selectedMailbox] {
+						if len(args) >= 4 && args[3] == id {
+							matches = append(matches, strconv.FormatUint(uint64(uid), 10))
+						}
+					}
+					s.mu.Unlock()
+					sort.Slice(matches, func(i, j int) bool { return matches[i] < matches[j] })
+					s.writeLine(bw, "* SEARCH "+strings.Join(matches, " "))
 				}
 				s.writeLine(bw, tag+" OK SEARCH completed")
 			case "STORE":
@@ -644,6 +686,10 @@ func (s *fakeServer) handle(conn net.Conn) {
 				}
 				s.mu.Lock()
 				delete(s.deletedUIDs, uint32(uid))
+				if s.removedUIDs[selectedMailbox] == nil {
+					s.removedUIDs[selectedMailbox] = make(map[uint32]bool)
+				}
+				s.removedUIDs[selectedMailbox][uint32(uid)] = true
 				s.uidExpungeCalled = true
 				s.uidExpungeUID = uint32(uid)
 				s.mu.Unlock()
@@ -663,12 +709,31 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.copyUID = uint32(uid)
 				s.copyDst = dst
 				s.mu.Unlock()
+				if s.config.removeSourceOnTransfer {
+					s.mu.Lock()
+					if s.removedUIDs[selectedMailbox] == nil {
+						s.removedUIDs[selectedMailbox] = make(map[uint32]bool)
+					}
+					s.removedUIDs[selectedMailbox][uint32(uid)] = true
+					s.mu.Unlock()
+				}
+				if s.config.removeSourceOnTransfer || s.messageMissing(selectedMailbox, uint32(uid)) {
+					s.writeLine(bw, tag+" OK COPY completed")
+					continue
+				}
+				s.recordTransferredMessage(selectedMailbox, dst, uint32(uid), false)
 				if s.config.dropCopyResponse {
 					s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] COPY completed", uid))
 					return
 				}
-				s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] COPY completed", uid))
-				s.writeLine(bw, tag+" OK COPY completed")
+				if !s.config.omitCopyUID {
+					s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] COPY completed", uid))
+				}
+				if s.config.copyResponse != "" {
+					s.writeLine(bw, strings.ReplaceAll(s.config.copyResponse, "<tag>", tag))
+				} else {
+					s.writeLine(bw, tag+" OK COPY completed")
+				}
 			case "MOVE":
 				if !s.config.moveSupported {
 					s.writeLine(bw, tag+" BAD unrecognized command")
@@ -687,15 +752,46 @@ func (s *fakeServer) handle(conn net.Conn) {
 				s.moveUID = uint32(uid)
 				s.moveDst = dst
 				s.mu.Unlock()
-				s.writeLine(bw, tag+" OK MOVE completed")
+				if s.config.removeSourceOnTransfer {
+					s.mu.Lock()
+					if s.removedUIDs[selectedMailbox] == nil {
+						s.removedUIDs[selectedMailbox] = make(map[uint32]bool)
+					}
+					s.removedUIDs[selectedMailbox][uint32(uid)] = true
+					s.mu.Unlock()
+				}
+				if s.config.removeSourceOnTransfer || s.messageMissing(selectedMailbox, uint32(uid)) {
+					s.writeLine(bw, tag+" OK MOVE completed")
+					continue
+				}
+				s.recordTransferredMessage(selectedMailbox, dst, uint32(uid), !s.config.leaveMovedSource)
+				if s.config.dropMoveResponse {
+					s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] MOVE completed", uid))
+					return
+				}
+				if s.config.moveResponse != "" {
+					s.writeLine(bw, strings.ReplaceAll(s.config.moveResponse, "<tag>", tag))
+				} else {
+					if !s.config.omitCopyUID {
+						s.writeLine(bw, fmt.Sprintf("* OK [COPYUID 12345 %d 100] MOVE completed", uid))
+					}
+					s.writeLine(bw, tag+" OK MOVE completed")
+				}
 			case "FETCH":
-				if s.config.fetchStartedEvents != nil {
+				s.mu.Lock()
+				postStore := s.storeCalls > 0
+				s.mu.Unlock()
+				inject := !s.config.fetchAfterStore || postStore
+				if postStore && s.config.dropAfterStore {
+					return
+				}
+				if inject && s.config.fetchStartedEvents != nil {
 					s.config.fetchStartedEvents <- struct{}{}
 				}
-				if s.config.fetchDelay > 0 {
+				if inject && s.config.fetchDelay > 0 {
 					time.Sleep(s.config.fetchDelay)
 				}
-				if len(s.config.fetchResponse) > 0 {
+				if inject && len(s.config.fetchResponse) > 0 {
 					response := strings.ReplaceAll(string(s.config.fetchResponse), "<tag>", tag)
 					if _, err := bw.WriteString(response); err != nil {
 						return
@@ -708,6 +804,10 @@ func (s *fakeServer) handle(conn net.Conn) {
 				uid := 0
 				if len(args) > 1 {
 					uid, _ = strconv.Atoi(args[1])
+				}
+				if s.messageMissing(selectedMailbox, uint32(uid)) {
+					s.writeLine(bw, tag+" OK FETCH completed")
+					continue
 				}
 				if len(args) == 3 && strings.EqualFold(args[2], "(UID FLAGS)") {
 					s.mu.Lock()
@@ -727,6 +827,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 				}
 				if len(payload) == 0 {
 					messageID := s.config.searchMatchID
+					s.mu.Lock()
+					if copied := s.copiedMessageIDs[selectedMailbox][uint32(uid)]; copied != "" {
+						messageID = copied
+					}
+					s.mu.Unlock()
 					if messageID == "" {
 						s.mu.Lock()
 						messageID = s.appendedMessageID
@@ -770,6 +875,39 @@ func (s *fakeServer) handle(conn net.Conn) {
 		default:
 			s.writeLine(bw, tag+" BAD unknown command")
 		}
+	}
+}
+
+func (s *fakeServer) messageMissing(mailbox string, uid uint32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, missing := range s.config.missingUIDs {
+		if uid == missing {
+			return true
+		}
+	}
+	return s.removedUIDs[mailbox][uid]
+}
+
+func (s *fakeServer) recordTransferredMessage(source, destination string, uid uint32, remove bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.copiedMessageIDs[destination] == nil {
+		s.copiedMessageIDs[destination] = make(map[uint32]string)
+	}
+	messageID := messageIDFromMessage(s.config.fetchPayloadByUID[uid])
+	if messageID == "" {
+		messageID = messageIDFromMessage(s.config.fetchPayload)
+	}
+	if messageID == "" {
+		messageID = s.config.searchMatchID
+	}
+	s.copiedMessageIDs[destination][100] = messageID
+	if remove {
+		if s.removedUIDs[source] == nil {
+			s.removedUIDs[source] = make(map[uint32]bool)
+		}
+		s.removedUIDs[source][uid] = true
 	}
 }
 

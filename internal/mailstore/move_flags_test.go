@@ -19,7 +19,7 @@ type moveFlagResultOperator struct {
 	calls    int
 }
 
-func (operator *moveFlagResultOperator) MoveMessage(_ context.Context, cfg transport.ImapConfig, mailbox string, uid, validity uint32, destination string) (transport.MutationEvidence, error) {
+func (operator *moveFlagResultOperator) MoveMessage(_ context.Context, cfg transport.ImapConfig, mailbox string, uid, validity uint32, destination, messageID string) (transport.MutationEvidence, error) {
 	operator.calls++
 	evidence := operator.evidence
 	evidence.OperationID = transport.MutationOperationID("MOVE", cfg.Username, mailbox, uid, validity, destination)
@@ -34,8 +34,8 @@ func (operator *moveFlagResultOperator) MoveMessage(_ context.Context, cfg trans
 	return evidence, &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Message: "COPY completed; source flag verification failed", Evidence: evidence, Err: operator.cause}
 }
 
-func (operator *moveFlagResultOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid, validity uint32) (transport.MutationEvidence, error) {
-	return operator.MoveMessage(ctx, cfg, mailbox, uid, validity, "Trash")
+func (operator *moveFlagResultOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid, validity uint32, messageID string) (transport.MutationEvidence, error) {
+	return operator.MoveMessage(ctx, cfg, mailbox, uid, validity, "Trash", messageID)
 }
 
 func TestMoveFlagEvidenceSurvivesStoreResults(t *testing.T) {

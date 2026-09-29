@@ -144,7 +144,7 @@ func TestSessionReuseDeleteSingleConnection(t *testing.T) {
 	client := Client{TLSConfig: &tls.Config{InsecureSkipVerify: true}}
 	ctx := context.Background()
 
-	if _, err := client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345); err != nil {
+	if _, err := client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345, "<transfer@example.com>"); err != nil {
 		t.Fatalf("DeleteMessage: %v", err)
 	}
 	if got := srv.ConnectionCount(); got != 1 {

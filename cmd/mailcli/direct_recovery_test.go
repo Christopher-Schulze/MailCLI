@@ -84,13 +84,13 @@ func (i *directRecoveryIMAP) CopyMessage(
 }
 
 func (i *directRecoveryIMAP) MoveMessage(
-	context.Context, transport.ImapConfig, string, uint32, uint32, string,
+	context.Context, transport.ImapConfig, string, uint32, uint32, string, string,
 ) (transport.MutationEvidence, error) {
 	return transport.MutationEvidence{}, errors.New("unexpected MOVE during direct recovery")
 }
 
 func (i *directRecoveryIMAP) DeleteMessage(
-	context.Context, transport.ImapConfig, string, uint32, uint32,
+	context.Context, transport.ImapConfig, string, uint32, uint32, string,
 ) (transport.MutationEvidence, error) {
 	return transport.MutationEvidence{}, errors.New("unexpected DELETE during direct recovery")
 }

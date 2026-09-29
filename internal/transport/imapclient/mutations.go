@@ -2,6 +2,7 @@ package imapclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -125,7 +126,7 @@ func (c *Client) destinationMatch(ctx context.Context, ps *pooledSession, dstMai
 	uid, validity, count, err := c.searchUIDOnSession(ctx, ps, dstMailbox, messageID, normalized)
 	if err != nil {
 		if transport.ErrorCode(err) == transport.CodeIMAPMessageNotFound {
-			return transport.DestinationMatch{}, nil
+			return transport.DestinationMatch{UIDValidity: validity}, nil
 		}
 		return transport.DestinationMatch{}, err
 	}
@@ -358,8 +359,8 @@ func appendMutationEffect(evidence *transport.MutationEvidence, effect string) {
 	evidence.CompletedEffects = append(evidence.CompletedEffects, effect)
 }
 
-// MoveMessage moves a message by UID to dstMailbox using native UID MOVE with COPY+EXPUNGE fallback.
-func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+// MoveMessage holds the mutation lock through identity, dispatch and effect verification.
+func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox, messageID string) (transport.MutationEvidence, error) {
 	evidence := transport.MutationEvidence{
 		OperationID:         transport.MutationOperationID("MOVE", cfg.Username, srcMailbox, uid, expectedUIDValidity, dstMailbox),
 		Outcome:             transport.MutationOutcomeNotStarted,
@@ -378,10 +379,10 @@ func (c *Client) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcM
 		return evidence, err
 	}
 	defer release()
-	return c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, dstMailbox)
+	return c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, dstMailbox, messageID)
 }
 
-func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox, messageID string) (transport.MutationEvidence, error) {
 	ev := transport.MutationEvidence{
 		OperationID:         transport.MutationOperationID("MOVE", ps.key.username, srcMailbox, uid, expectedUIDValidity, dstMailbox),
 		Outcome:             transport.MutationOutcomeNotStarted,
@@ -395,6 +396,42 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	if err := validateMessageUID(uid); err != nil {
 		return ev, err
 	}
+	quotedDestination, err := safeQuoteIMAP(dstMailbox)
+	if err != nil {
+		return ev, err
+	}
+	if messageID != "" {
+		if _, err := normalizeMessageID(messageID); err != nil {
+			return ev, err
+		}
+	}
+	sess := ps.sess
+	if !sess.capabilitiesKnown {
+		if err := c.refreshCapabilities(ctx, sess); err != nil {
+			return ev, err
+		}
+	}
+	if !sess.moveSupported && messageID == "" {
+		return ev, &transport.TransportError{Code: transport.CodeIMAPMessageUIDUnknown, Message: "COPY fallback requires an independent source Message-ID; no transfer was dispatched"}
+	}
+	var destinationValidity uint32
+	if messageID != "" {
+		if _, err := c.ensureSelectedFresh(ctx, ps, dstMailbox); err != nil {
+			return ev, moveOutcomeUnknown(ev, err)
+		}
+		match, err := c.destinationMatch(ctx, ps, dstMailbox, messageID)
+		if err != nil {
+			return ev, moveOutcomeUnknown(ev, err)
+		}
+		if match.Count > 0 {
+			ev.DestinationUID, ev.DestinationUIDValidity = match.UID, match.UIDValidity
+			return ev, moveOutcomeUnknown(ev, fmt.Errorf("destination already contains %d matching messages; no transfer was dispatched", match.Count))
+		}
+		destinationValidity = match.UIDValidity
+		if destinationValidity == 0 {
+			return ev, checkUIDValidity(destinationValidity, destinationValidity)
+		}
+	}
 	info, err := c.ensureSelectedFresh(ctx, ps, srcMailbox)
 	if err != nil {
 		return ev, err
@@ -403,48 +440,95 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 		return ev, err
 	}
 	ev.UIDValidity = info.uidvalidity
-	sess := ps.sess
-	quotedDestination, err := safeQuoteIMAP(dstMailbox)
+	preflight, err := c.fetchFlagResult(ctx, sess, uid, info.uidvalidity, &info.permissions)
 	if err != nil {
 		return ev, err
 	}
-
-	tag := sess.nextTag()
-	cmd := fmt.Sprintf("%s UID MOVE %d %s", tag, uid, quotedDestination)
-	ev.Outcome = transport.MutationOutcomeAttempted
-	status, text, _, dispatched, err := c.doTransferCommandResponse(ctx, sess, cmd, "MOVE")
-	if err != nil {
-		if !strings.EqualFold(status, "NO") && !strings.EqualFold(status, "BAD") {
-			return transferCommandError(ev, status, text, dispatched, err)
+	ev = withFlagObservation(ev, preflight.observation)
+	ev.FlagsSource = "FETCH"
+	if ev.FlagsState != transport.FlagObservationObserved {
+		code := transport.CodeIMAPResponseMalformed
+		if ev.FlagsState == transport.FlagObservationMissing {
+			code = transport.CodeIMAPMessageNotFound
 		}
+		return ev, &transport.TransportError{Code: code, Message: "source UID has no complete existence and flag proof; no transfer was dispatched"}
 	}
-	if strings.EqualFold(status, "OK") {
-		ev.ServerResponse = joinIMAPResponse(status, text)
-		ev.Outcome = transport.MutationOutcomeCompleted
-		ev.CompletedEffects = []string{"move"}
-		return ev, nil
-	}
-	if status != "NO" && status != "BAD" {
-		ev.ServerResponse = joinIMAPResponse(status, text)
-		ev.Outcome = transport.MutationOutcomeRejected
-		return ev, &transport.TransportError{
-			Code:    transport.CodeIMAPMutationFailed,
-			Message: "IMAP MOVE failed without fallback permission: " + status + " " + text,
+	if sess.moveSupported {
+		cmd := fmt.Sprintf("%s UID MOVE %d %s", sess.nextTag(), uid, quotedDestination)
+		ev.FlagsState, ev.ActualFlags = transport.FlagObservationUnverified, nil
+		status, text, codes, dispatched, commandErr := c.doTransferCommandResponse(ctx, sess, cmd, "MOVE")
+		if !dispatched {
+			return transferCommandError(ev, status, text, false, commandErr)
 		}
+		ev.ServerResponse, ev.Outcome = joinIMAPResponse(status, text), transport.MutationOutcomeUnknown
+		if err := applyCopyUIDEvidence(&ev, codes, uid); err != nil {
+			return ev, moveOutcomeUnknown(ev, err)
+		}
+		if sess.dirty {
+			return ev, moveOutcomeUnknown(ev, commandErr)
+		}
+		removed, sourceErr := c.transferSourceAbsent(ctx, ps, ev)
+		if sess.dirty {
+			return ev, moveOutcomeUnknown(ev, errors.Join(commandErr, sourceErr))
+		}
+		destinationErr := c.verifyTransferDestination(ctx, ps, &ev, messageID, destinationValidity)
+		if destinationErr == nil {
+			appendMutationEffect(&ev, "copy")
+			if removed && sourceErr == nil {
+				appendMutationEffect(&ev, "move")
+				if commandErr == nil {
+					ev.Outcome = transport.MutationOutcomeCompleted
+					ev.CompletedEffects = []string{"move"}
+					return ev, nil
+				}
+			}
+			ev.Outcome = transport.MutationOutcomePartial
+		}
+		return ev, moveOutcomeUnknown(ev, errors.Join(commandErr, sourceErr, destinationErr))
 	}
 
-	// Fallback for servers without UID MOVE: COPY + STORE \\Deleted, then
+	// Only authenticated capability absence permits COPY + STORE \\Deleted.
 	// prefer UID EXPUNGE. If it is unavailable, leave cleanup deferred so an
 	// unscoped EXPUNGE cannot remove another client's deleted message.
+	ev, _, err = c.prepareFlagChanges(ctx, sess, ev, flagChanges{add: []string{"\\Deleted"}}, &info.permissions)
+	if err != nil {
+		return ev, err
+	}
 	copyCmd := fmt.Sprintf("%s UID COPY %d %s", sess.nextTag(), uid, quotedDestination)
 	copyStatus, copyText, responseCodes, copyDispatched, err := c.doTransferCommandResponse(ctx, sess, copyCmd, "COPY")
+	ev.ServerResponse = joinIMAPResponse(copyStatus, copyText)
+	if copyDispatched {
+		if proofErr := applyCopyUIDEvidence(&ev, responseCodes, uid); proofErr != nil {
+			ev.Outcome = transport.MutationOutcomeUnknown
+			return ev, moveOutcomeUnknown(ev, errors.Join(err, proofErr))
+		}
+		if ev.CopyUIDValidity != 0 && ev.CopyUIDValidity == destinationValidity {
+			appendMutationEffect(&ev, "copy")
+		}
+	}
 	if err != nil {
+		if len(ev.CompletedEffects) > 0 {
+			ev.Outcome = transport.MutationOutcomePartial
+			return ev, moveOutcomeUnknown(ev, err)
+		}
 		return transferCommandError(ev, copyStatus, copyText, copyDispatched, err)
 	}
-	ev.ServerResponse = joinIMAPResponse(copyStatus, copyText)
-	appendMutationEffect(&ev, "copy")
-	if err := applyCopyUIDEvidence(&ev, responseCodes, uid); err != nil {
+	if ev.CopyUIDValidity != 0 {
+		err = checkUIDValidity(destinationValidity, ev.CopyUIDValidity)
+	} else {
+		err = c.verifyTransferDestination(ctx, ps, &ev, messageID, destinationValidity)
+	}
+	if err != nil {
 		ev.Outcome = transport.MutationOutcomeUnknown
+		return ev, moveOutcomeUnknown(ev, err)
+	}
+	appendMutationEffect(&ev, "copy")
+	info, err = c.ensureSelectedFresh(ctx, ps, srcMailbox)
+	if err == nil {
+		err = checkUIDValidity(ev.UIDValidity, info.uidvalidity)
+	}
+	if err != nil {
+		ev.Outcome = transport.MutationOutcomePartial
 		return ev, moveOutcomeUnknown(ev, err)
 	}
 
@@ -465,6 +549,11 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	uidExpungeCmd := fmt.Sprintf("%s UID EXPUNGE %d", sess.nextTag(), uid)
 	uidExpungeStatus, _, uidExpungeErr := c.doCommandResponse(ctx, sess, uidExpungeCmd)
 	if uidExpungeErr == nil {
+		absent, err := c.transferSourceAbsent(ctx, ps, ev)
+		if err != nil || !absent {
+			ev.Outcome = transport.MutationOutcomePartial
+			return ev, moveOutcomeUnknown(ev, errors.Join(err, fmt.Errorf("source removal after UID EXPUNGE was not proved")))
+		}
 		ev.ServerResponse += " (fallback UID EXPUNGE)"
 		ev.Outcome = transport.MutationOutcomeCompleted
 		ev.ExpungeBranch = "uid_expunge"
@@ -498,8 +587,80 @@ func (c *Client) moveMessage(ctx context.Context, ps *pooledSession, srcMailbox 
 	return ev, nil
 }
 
-// DeleteMessage moves a message by UID to the Trash mailbox discovered via special-use flags.
-func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
+// transferSourceAbsent observes the source generation and UID without another write.
+func (c *Client) transferSourceAbsent(ctx context.Context, ps *pooledSession, ev transport.MutationEvidence) (bool, error) {
+	info, err := c.ensureSelectedFresh(ctx, ps, ev.Mailbox)
+	if err != nil {
+		return false, err
+	}
+	if err := checkUIDValidity(ev.UIDValidity, info.uidvalidity); err != nil {
+		return false, err
+	}
+	result, err := c.fetchFlagResult(ctx, ps.sess, ev.UID, ev.UIDValidity, &info.permissions)
+	if err != nil {
+		return false, err
+	}
+	absent := result.observation.missing || !result.observation.seenUID
+	if !absent {
+		return false, fmt.Errorf("source UID is still present after transfer")
+	}
+	return true, nil
+}
+
+func (c *Client) verifyTransferDestination(ctx context.Context, ps *pooledSession, ev *transport.MutationEvidence, messageID string, expectedValidity uint32) error {
+	info, err := c.ensureSelectedFresh(ctx, ps, ev.TargetMailbox)
+	if err != nil {
+		return err
+	}
+	if ev.CopyUIDValidity != 0 {
+		if expectedValidity != 0 && ev.CopyUIDValidity != expectedValidity {
+			return fmt.Errorf("COPYUID does not match the guarded destination generation")
+		}
+		if err := checkUIDValidity(ev.CopyUIDValidity, info.uidvalidity); err != nil {
+			return err
+		}
+		result, err := c.fetchFlagResult(ctx, ps.sess, ev.CopyDestinationUID, info.uidvalidity, &info.permissions)
+		if err != nil {
+			return err
+		}
+		if !result.observation.seenUID || result.observation.missing {
+			return fmt.Errorf("COPYUID destination UID is absent")
+		}
+		return nil
+	}
+	if messageID == "" {
+		return fmt.Errorf("no COPYUID or independent Message-ID can verify the destination")
+	}
+	if err := checkUIDValidity(expectedValidity, info.uidvalidity); err != nil {
+		return err
+	}
+	match, err := c.destinationMatch(ctx, ps, ev.TargetMailbox, messageID)
+	if err != nil {
+		return err
+	}
+	if match.Count != 1 || match.UID == 0 || match.UIDValidity != info.uidvalidity {
+		return fmt.Errorf("destination has no unique verified message identity")
+	}
+	info, err = c.ensureSelectedFresh(ctx, ps, ev.TargetMailbox)
+	if err != nil {
+		return err
+	}
+	if err := checkUIDValidity(match.UIDValidity, info.uidvalidity); err != nil {
+		return err
+	}
+	result, err := c.fetchFlagResult(ctx, ps.sess, match.UID, info.uidvalidity, &info.permissions)
+	if err != nil {
+		return err
+	}
+	if !result.observation.seenUID || result.observation.missing {
+		return fmt.Errorf("matched destination UID is absent")
+	}
+	ev.DestinationUID, ev.DestinationUIDValidity = match.UID, match.UIDValidity
+	return nil
+}
+
+// DeleteMessage discovers Trash and holds the same lock through the whole transfer.
+func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, messageID string) (transport.MutationEvidence, error) {
 	if err := validateMessageUID(uid); err != nil {
 		return transport.MutationEvidence{}, err
 	}
@@ -525,7 +686,7 @@ func (c *Client) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, sr
 		}
 	}
 
-	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, trashBox)
+	ev, err := c.moveMessage(ctx, ps, srcMailbox, uid, expectedUIDValidity, trashBox, messageID)
 	if err != nil {
 		return ev, err
 	}

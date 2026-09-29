@@ -126,3 +126,76 @@ func TestCopyMessageIfAbsentSearchesUnderTheCrossProcessLock(t *testing.T) {
 		t.Fatal("the second destination search never ran after the first process released the lock")
 	}
 }
+
+func TestMoveAndDeleteGuardDestinationUnderTheCrossProcessLock(t *testing.T) {
+	for _, operation := range []string{"move", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			started := make(chan struct{}, 4)
+			proceed := make(chan struct{})
+			server := newFakeServer(t, fakeServerConfig{
+				authOK: true, trashMboxes: []string{"Trash"}, otherMboxes: []string{"INBOX", "Archive"},
+				searchStartedEvents: started, searchContinue: proceed,
+				fetchPayload: []byte("Message-ID: <transfer@example.com>\r\n\r\nOriginal source"),
+			})
+			lockDir := t.TempDir()
+			first, cfg := guardedCopyClient(t, server, lockDir)
+			second, _ := guardedCopyClient(t, server, lockDir)
+			t.Cleanup(func() {
+				if err := first.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := second.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			type result struct {
+				evidence transport.MutationEvidence
+				err      error
+			}
+			invoke := func(client *Client, done chan<- result) {
+				var ev transport.MutationEvidence
+				var err error
+				if operation == "delete" {
+					ev, err = client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345, "<transfer@example.com>")
+				} else {
+					ev, err = client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
+				}
+				done <- result{ev, err}
+			}
+			firstResult, secondResult := make(chan result, 1), make(chan result, 1)
+			go invoke(first, firstResult)
+			select {
+			case <-started:
+			case <-ctx.Done():
+				close(proceed)
+				<-firstResult
+				t.Fatal("first locked destination guard did not start")
+			}
+			go invoke(second, secondResult)
+			select {
+			case <-started:
+				t.Error("second destination guard ran before the first transfer released its account lock")
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(proceed)
+			one, two := <-firstResult, <-secondResult
+			if one.err != nil || one.evidence.Outcome != transport.MutationOutcomeCompleted || transport.ErrorCode(two.err) != transport.CodeIMAPMoveOutcomeUnknown || two.evidence.Outcome != transport.MutationOutcomeNotStarted || two.evidence.DestinationUID != 100 {
+				t.Fatalf("first=%+v/%v second=%+v/%v", one.evidence, one.err, two.evidence, two.err)
+			}
+			copies := 0
+			for _, command := range server.Commands() {
+				if command == "UID COPY" {
+					copies++
+				}
+				if command == "UID MOVE" || command == "EXPUNGE" {
+					t.Errorf("unexpected mutation: %v", server.Commands())
+				}
+			}
+			if copies != 1 {
+				t.Fatalf("concurrent transfers dispatched %d COPY commands: %v", copies, server.Commands())
+			}
+		})
+	}
+}

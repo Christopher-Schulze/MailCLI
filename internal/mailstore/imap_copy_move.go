@@ -100,14 +100,6 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		}
 	}
 
-	if !request.Copy {
-		if err := verifyMoveDestination(
-			ctx, imapOp, target.cfg, dstImapBox, target.messageID, nil,
-		); err != nil {
-			return mail.MessageSummary{}, err
-		}
-	}
-
 	var ev transport.MutationEvidence
 	if request.Copy {
 		var stopped bool
@@ -116,7 +108,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 			return mail.MessageSummary{}, err
 		}
 	} else {
-		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox)
+		ev, err = imapOp.MoveMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, dstImapBox, target.messageID)
 	}
 	if isUIDValidityChangedError(err) {
 		if request.Copy {
@@ -134,7 +126,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 				return mail.MessageSummary{}, err
 			}
 		} else {
-			ev, err = imapOp.MoveMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox)
+			ev, err = imapOp.MoveMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, dstImapBox, retried.messageID)
 		}
 		target = retried
 	}
@@ -166,13 +158,6 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 				err,
 				nil,
 			)
-		}
-		if !request.Copy {
-			if outcomeErr := verifyMoveDestination(
-				ctx, imapOp, target.cfg, dstImapBox, target.messageID, err,
-			); outcomeErr != nil {
-				err = outcomeErr
-			}
 		}
 		if ev.Command == "" {
 			return mail.MessageSummary{}, err
@@ -548,64 +533,5 @@ func validateResolvedUID(uid uint32, messageID, mailbox string) error {
 			"IMAP Message-ID search for %s in %s returned UID zero; refusing the operation",
 			messageID, mailbox,
 		),
-	}
-}
-
-func verifyMoveDestination(
-	ctx context.Context,
-	imapOp transport.ImapOperator,
-	cfg transport.ImapConfig,
-	dstMailbox string,
-	messageID string,
-	previousErr error,
-) error {
-	if messageID == "" {
-		return &transport.TransportError{
-			Code:    transport.CodeIMAPMoveOutcomeUnknown,
-			Message: "cannot safely execute or replay MOVE because the message identity is unavailable",
-			Err:     previousErr,
-		}
-	}
-	uid, uidvalidity, matchCount, err := imapOp.SearchUID(ctx, cfg, dstMailbox, messageID)
-	if err != nil {
-		if transport.ErrorCode(err) == transport.CodeIMAPMessageNotFound {
-			if previousErr != nil {
-				return moveOutcomeUnknownError(dstMailbox, messageID, 0, 0, 0, previousErr, nil)
-			}
-			return nil
-		}
-		return moveOutcomeUnknownError(dstMailbox, messageID, 0, 0, 0, previousErr, err)
-	}
-	return moveOutcomeUnknownError(
-		dstMailbox, messageID, uid, uidvalidity, matchCount, previousErr, nil,
-	)
-}
-
-func moveOutcomeUnknownError(
-	dstMailbox string,
-	messageID string,
-	uid uint32,
-	uidvalidity uint32,
-	matchCount int,
-	previousErr error,
-	probeErr error,
-) error {
-	message := fmt.Sprintf(
-		"cannot safely replay MOVE for message ID %s to mailbox %s",
-		messageID, dstMailbox,
-	)
-	if matchCount > 0 {
-		message = fmt.Sprintf(
-			"%s; destination contains %d matching message(s) at UID %d with UIDVALIDITY %d",
-			message, matchCount, uid, uidvalidity,
-		)
-	} else if probeErr != nil {
-		message += "; destination verification failed"
-	}
-	message += "; reconcile the source and destination before retrying"
-	return &transport.TransportError{
-		Code:    transport.CodeIMAPMoveOutcomeUnknown,
-		Message: message,
-		Err:     errors.Join(previousErr, probeErr),
 	}
 }

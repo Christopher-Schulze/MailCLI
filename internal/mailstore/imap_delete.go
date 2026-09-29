@@ -41,7 +41,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		}
 	}
 
-	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity)
+	ev, err := imapOp.DeleteMessage(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, target.messageID)
 	if isUIDValidityChangedError(err) {
 		retried, retryErr := c.resolveImapTargetForDelete(ctx, request.Ref)
 		if retryErr != nil {
@@ -50,7 +50,7 @@ func (c *Client) DeleteMessage(ctx context.Context, request mail.DeleteMessageRe
 		if retryErr := rejectAlreadyTrashed(retried); retryErr != nil {
 			return mail.DeleteResult{}, retryErr
 		}
-		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity)
+		ev, err = imapOp.DeleteMessage(ctx, retried.cfg, retried.imapMailbox, retried.uid, retried.uidvalidity, retried.messageID)
 		target.duplicateMatches = retried.duplicateMatches
 	}
 	if err != nil && ev.Command == "" {

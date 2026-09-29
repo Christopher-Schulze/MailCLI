@@ -297,11 +297,20 @@ func (s *stubImapOperator) CopyMessage(ctx context.Context, cfg transport.ImapCo
 	return evidence, nil
 }
 
-func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (transport.MutationEvidence, error) {
+func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox, messageID string) (transport.MutationEvidence, error) {
+	if messageID != "" {
+		_, _, count, err := s.SearchUID(ctx, cfg, dstMailbox, messageID)
+		if count > 0 || (err != nil && transport.ErrorCode(err) != transport.CodeIMAPMessageNotFound) {
+			return transport.MutationEvidence{}, &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Message: "destination guard refused MOVE", Err: err}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.nextMutationErr(); err != nil {
-		return transport.MutationEvidence{}, err
+		if transport.ErrorCode(err) == "mailbox_uidvalidity_changed" {
+			return transport.MutationEvidence{}, err
+		}
+		return transport.MutationEvidence{}, &transport.MutationOutcomeError{Code: transport.CodeIMAPMoveOutcomeUnknown, Message: "MOVE response lost", Err: err}
 	}
 	s.lastCommand = "MOVE"
 	s.lastUsername = cfg.Username
@@ -317,7 +326,7 @@ func (s *stubImapOperator) MoveMessage(ctx context.Context, cfg transport.ImapCo
 	}, nil
 }
 
-func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (transport.MutationEvidence, error) {
+func (s *stubImapOperator) DeleteMessage(ctx context.Context, cfg transport.ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, messageID string) (transport.MutationEvidence, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.nextMutationErr(); err != nil {
@@ -1472,20 +1481,20 @@ func TestTransferCopyRejectsAmbiguousDestinationBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestVerifyMoveDestinationFailsClosedAfterMutationError(t *testing.T) {
-	fakeImap := &stubImapOperator{
-		searchMatchesByMailbox: map[string][]int{"Archive": []int{0}},
+func TestTransferMovePreservesTransportFailureWithoutUnlockedObservation(t *testing.T) {
+	cause := errors.New("MOVE response lost")
+	operator := &moveFlagResultOperator{
+		stubImapOperator: &stubImapOperator{}, cause: cause,
+		evidence: transport.MutationEvidence{Outcome: transport.MutationOutcomeUnknown},
 	}
-	err := verifyMoveDestination(
-		context.Background(),
-		fakeImap,
-		transport.ImapConfig{},
-		"Archive",
-		"<message@example.com>",
-		errors.New("move response lost"),
-	)
-	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
-		t.Fatalf("verifyMoveDestination() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
+	client, original := flagResultFixture(t, operator)
+	destination, err := mailref.EncodeMailbox(testAccountID, []string{"Archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.TransferMessage(context.Background(), mail.TransferMessageRequest{Ref: original.Ref, DestinationMailbox: destination, AllowDraftMutation: true})
+	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown || !errors.Is(err, cause) || state.ServerTruth == nil || state.ServerTruth.Outcome != mail.ServerMutationOutcome(transport.MutationOutcomeUnknown) || operator.calls != 1 || operator.searchCalls != 1 {
+		t.Fatalf("lost transport evidence or unlocked destination observation: state=%+v error=%v calls=%d searches=%d", state, err, operator.calls, operator.searchCalls)
 	}
 }
 

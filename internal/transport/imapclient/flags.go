@@ -128,7 +128,7 @@ func (c *Client) setFlagsAndVerify(ctx context.Context, sess *session, ev transp
 
 func (c *Client) prepareFlagChanges(ctx context.Context, sess *session, ev transport.MutationEvidence, requested flagChanges, permissions *flagPermissions) (transport.MutationEvidence, flagChanges, error) {
 	needed := requested
-	if requested.touchesJunk() || permissions.unsupported(requested) != "" {
+	if ev.FlagsState != transport.FlagObservationObserved && (requested.touchesJunk() || permissions.unsupported(requested) != "") {
 		ev.FlagsSource = "FETCH"
 		result, err := c.fetchFlagResult(ctx, sess, ev.UID, ev.UIDValidity, permissions)
 		ev.ServerResponse = result.response
@@ -145,6 +145,8 @@ func (c *Client) prepareFlagChanges(ctx context.Context, sess *session, ev trans
 			ev, err = flagPreflightFailure(ev, &transport.TransportError{Code: code, Message: "target flags unavailable before STORE"})
 			return ev, needed, err
 		}
+	}
+	if ev.FlagsState == transport.FlagObservationObserved {
 		needed = requested.pending(ev.ActualFlags)
 	}
 	if unsupported := permissions.unsupported(needed); unsupported != "" {

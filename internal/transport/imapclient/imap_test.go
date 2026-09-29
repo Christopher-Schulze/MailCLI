@@ -444,14 +444,14 @@ func TestMessageOperationsRejectZeroUIDBeforeConnection(t *testing.T) {
 		{
 			name: "move",
 			call: func() error {
-				_, err := client.MoveMessage(context.Background(), cfg, "INBOX", 0, 12345, "Archive")
+				_, err := client.MoveMessage(context.Background(), cfg, "INBOX", 0, 12345, "Archive", "<transfer@example.com>")
 				return err
 			},
 		},
 		{
 			name: "delete",
 			call: func() error {
-				_, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 0, 12345)
+				_, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 0, 12345, "<transfer@example.com>")
 				return err
 			},
 		},
@@ -911,7 +911,7 @@ func TestDeleteCanonicalTrashRefusesBeforeDispatch(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			evidence, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345)
+			evidence, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345, "<transfer@example.com>")
 			if !transport.IsAmbiguousMailbox(err) || evidence.Command != "" || evidence.Outcome != "" || len(evidence.CompletedEffects) != 0 {
 				t.Fatalf("DELETE = %+v, %v; want no dispatch evidence", evidence, err)
 			}
@@ -1101,7 +1101,7 @@ func TestListLiteralMailboxesAndMutations(t *testing.T) {
 	if _, err := client.SetFlags(context.Background(), cfg, sentName, 42, 12345, []string{"\\Seen"}, nil); err != nil {
 		t.Fatalf("SetFlags(%q): %v", sentName, err)
 	}
-	deletion, err := client.DeleteMessage(context.Background(), cfg, sentName, 42, 12345)
+	deletion, err := client.DeleteMessage(context.Background(), cfg, sentName, 42, 12345, "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("DeleteMessage(%q): %v", sentName, err)
 	}
@@ -1565,7 +1565,7 @@ func TestMoveMessageNative(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("MoveMessage native: %v", err)
 	}
@@ -1594,7 +1594,7 @@ func TestMoveMessageFallback(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("MoveMessage fallback: %v", err)
 	}
@@ -1623,7 +1623,7 @@ func TestMoveMessageFallbackReportsCopyWhenStoreRejected(t *testing.T) {
 	})
 	client, cfg := newFakeClient(t, srv)
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 	if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown {
 		t.Fatalf("MoveMessage() error = %v, want %s", err, transport.CodeIMAPMoveOutcomeUnknown)
 	}
@@ -1647,7 +1647,7 @@ func TestMoveMessageFallbackUsesUIDExpunge(t *testing.T) {
 	})
 	client, cfg := newFakeClient(t, srv)
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("MoveMessage UID EXPUNGE fallback: %v", err)
 	}
@@ -1674,7 +1674,7 @@ func TestMoveMessageFallbackDefersWithForeignDeleted(t *testing.T) {
 	})
 	client, cfg := newFakeClient(t, srv)
 
-	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive")
+	ev, err := client.MoveMessage(context.Background(), cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("MoveMessage deferred fallback: %v", err)
 	}
@@ -1724,7 +1724,7 @@ func TestDeleteMessage(t *testing.T) {
 	client.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := transport.ImapConfig{Host: host, Port: port, Username: "user", Password: "pass"}
 
-	ev, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345)
+	ev, err := client.DeleteMessage(context.Background(), cfg, "INBOX", 42, 12345, "<transfer@example.com>")
 	if err != nil {
 		t.Fatalf("DeleteMessage: %v", err)
 	}

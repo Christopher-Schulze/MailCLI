@@ -159,8 +159,8 @@ type ImapOperator interface {
 	SearchUID(ctx context.Context, cfg ImapConfig, mailbox string, messageID string) (uid uint32, uidvalidity uint32, matchCount int, err error)
 	SetFlags(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, addFlags, removeFlags []string) (MutationEvidence, error)
 	CopyMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
-	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox string) (MutationEvidence, error)
-	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32) (MutationEvidence, error)
+	MoveMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, dstMailbox, messageID string) (MutationEvidence, error)
+	DeleteMessage(ctx context.Context, cfg ImapConfig, srcMailbox string, uid uint32, expectedUIDValidity uint32, messageID string) (MutationEvidence, error)
 	FetchMessage(ctx context.Context, cfg ImapConfig, mailbox string, uid uint32, expectedUIDValidity uint32, maxBytes int64) ([]byte, error)
 	CheckStatus(ctx context.Context, cfg ImapConfig, mailbox string) (MailboxStatus, error)
 }

@@ -28,6 +28,7 @@ func TestMoveFallbackFlagProtocol(t *testing.T) {
 		initial   []string
 		stores    int
 		fetches   int
+		refused   bool
 	}{
 		{name: "observed STORE", complete: true, state: transport.FlagObservationObserved, flags: []string{"\\Deleted"}, source: "STORE", stores: 1},
 		{name: "bounded FETCH after silent STORE", store: "<tag> OK STORE done\r\n", complete: true, state: transport.FlagObservationObserved, flags: []string{"\\Deleted"}, source: "FETCH", stores: 1, fetches: 1},
@@ -41,23 +42,26 @@ func TestMoveFallbackFlagProtocol(t *testing.T) {
 		{name: "tagged STORE rollover", store: "* 7 FETCH (UID 42 FLAGS (\\Deleted))\r\n<tag> OK [UIDVALIDITY 54321] changed\r\n", state: transport.FlagObservationUnverified, source: "STORE", stores: 1},
 		{name: "FETCH rollover", store: "<tag> OK STORE done\r\n", fetch: "* 7 FETCH (UID 42 FLAGS (\\Deleted))\r\n<tag> OK [UIDVALIDITY 54321] changed\r\n", state: transport.FlagObservationUnverified, source: "FETCH", stores: 1, fetches: 1},
 		{name: "rejected STORE preserves actual flags", reject: true, initial: []string{"\\Seen"}, state: transport.FlagObservationObserved, flags: []string{"\\Seen"}, source: "FETCH", stores: 1, fetches: 1},
-		{name: "unsupported permanent Deleted", permanent: []string{"\\Seen"}, initial: []string{"\\Seen"}, state: transport.FlagObservationObserved, flags: []string{"\\Seen"}, source: "FETCH", fetches: 1},
+		{name: "unsupported permanent Deleted", permanent: []string{"\\Seen"}, initial: []string{"\\Seen"}, state: transport.FlagObservationObserved, flags: []string{"\\Seen"}, source: "FETCH", refused: true},
 		{name: "already Deleted needs no unsupported STORE", permanent: []string{"\\Seen"}, initial: []string{"\\Deleted"}, complete: true, state: transport.FlagObservationObserved, flags: []string{"\\Deleted"}, source: "FETCH", fetches: 1},
-		{name: "connection lost after COPY", store: "<tag> OK STORE done\r\n", drop: true, state: transport.FlagObservationUnverified, source: "FETCH", stores: 1},
+		{name: "connection lost after COPY", store: "<tag> OK STORE done\r\n", drop: true, state: transport.FlagObservationUnverified, source: "FETCH", stores: 1, fetches: 1},
 		{name: "response count bounded", store: strings.Repeat("* OK still working\r\n", maxFlagResponseCount) + "<tag> OK STORE done\r\n", state: transport.FlagObservationUnverified, source: "STORE", stores: 1},
 		{name: "unsupported UID EXPUNGE", complete: true, deferred: true, state: transport.FlagObservationObserved, flags: []string{"\\Deleted"}, source: "STORE", stores: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configuration := fakeServerConfig{authOK: true, uidExpungeSupported: !test.deferred, initialDeletedUIDs: []uint32{99}, storeResponses: [][]byte{[]byte(test.store)}, fetchResponse: []byte(test.fetch), rejectStore: test.reject, permanentFlags: test.permanent, initialFlags: map[uint32][]string{42: test.initial}}
+			configuration := fakeServerConfig{authOK: true, uidExpungeSupported: !test.deferred, initialDeletedUIDs: []uint32{99}, storeResponses: [][]byte{[]byte(test.store)}, fetchResponse: []byte(test.fetch), fetchAfterStore: true, rejectStore: test.reject, permanentFlags: test.permanent, initialFlags: map[uint32][]string{42: test.initial}}
 			if test.drop {
-				configuration.dropAfterCommands = 6
+				configuration.dropAfterStore = true
 			}
 			server := newFakeServer(t, configuration)
 			client, cfg := flagTestClient(t, server)
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			evidence, err := client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, "Archive")
+			evidence, err := client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 			effects := []string{"copy"}
+			if test.refused {
+				effects = nil
+			}
 			if test.complete {
 				effects = append(effects, "source_flag")
 				if test.deferred {
@@ -69,10 +73,14 @@ func TestMoveFallbackFlagProtocol(t *testing.T) {
 			if (err == nil) != test.complete || evidence.FlagsState != test.state || evidence.FlagsSource != test.source || !reflect.DeepEqual(evidence.ActualFlags, test.flags) || !reflect.DeepEqual(evidence.CompletedEffects, effects) {
 				t.Errorf("flag phase = %+v, %v", evidence, err)
 			}
-			if evidence.OperationID != transport.MutationOperationID("MOVE", cfg.Username, "INBOX", 42, 12345, "Archive") || evidence.Mailbox != "INBOX" || evidence.UID != 42 || evidence.UIDValidity != 12345 || evidence.CopyDestinationUID != 100 || !strings.Contains(evidence.ServerResponse, "COPY completed") {
+			if evidence.OperationID != transport.MutationOperationID("MOVE", cfg.Username, "INBOX", 42, 12345, "Archive") || evidence.Mailbox != "INBOX" || evidence.UID != 42 || evidence.UIDValidity != 12345 || (!test.refused && (evidence.CopyDestinationUID != 100 || !strings.Contains(evidence.ServerResponse, "COPY completed"))) || (test.refused && evidence.CopyDestinationUID != 0) {
 				t.Errorf("lost COPY/source identity: %+v", evidence)
 			}
-			if !test.complete {
+			if test.refused {
+				if transport.ErrorCode(err) != transport.CodeIMAPFlagsUnsupported || evidence.Outcome != transport.MutationOutcomeNotStarted {
+					t.Errorf("unsupported preflight did not refuse before COPY: %+v, %v", evidence, err)
+				}
+			} else if !test.complete {
 				var outcome *transport.MutationOutcomeError
 				if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown || evidence.Outcome != transport.MutationOutcomePartial || !errors.As(err, &outcome) || !reflect.DeepEqual(outcome.Evidence, evidence) {
 					t.Errorf("lost partial outcome: %+v, %v", evidence, err)
@@ -84,7 +92,14 @@ func TestMoveFallbackFlagProtocol(t *testing.T) {
 			for _, command := range server.Commands() {
 				counts[command]++
 			}
-			if counts["UID COPY"] != 1 || counts["UID STORE"] != test.stores || counts["UID FETCH"] != test.fetches || counts["EXPUNGE"] != 0 || (counts["UID EXPUNGE"] == 1) != test.complete {
+			copies, fetches := 1, test.fetches+1
+			if test.refused {
+				copies = 0
+			}
+			if test.complete && !test.deferred {
+				fetches++
+			}
+			if counts["UID COPY"] != copies || counts["UID MOVE"] != 0 || counts["UID STORE"] != test.stores || counts["UID FETCH"] != fetches || counts["EXPUNGE"] != 0 || (counts["UID EXPUNGE"] == 1) != test.complete {
 				t.Errorf("unsafe or repeated commands: %v", server.Commands())
 			}
 			if !slices.Contains(server.DeletedUIDs(), uint32(99)) || (test.deferred && (evidence.ExpungeBranch != "deferred" || evidence.ForeignDeletedCount != 1)) {
@@ -102,7 +117,7 @@ func TestMoveFallbackCancellationRetainsCopy(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			started := make(chan struct{}, 1)
-			server := newFakeServer(t, fakeServerConfig{authOK: true, uidExpungeSupported: true, initialDeletedUIDs: []uint32{99}, storeResponses: [][]byte{[]byte("<tag> OK STORE done\r\n")}, fetchStartedEvents: started, fetchDelay: 500 * time.Millisecond})
+			server := newFakeServer(t, fakeServerConfig{authOK: true, uidExpungeSupported: true, initialDeletedUIDs: []uint32{99}, storeResponses: [][]byte{[]byte("<tag> OK STORE done\r\n")}, fetchStartedEvents: started, fetchDelay: 500 * time.Millisecond, fetchAfterStore: true})
 			client, cfg := flagTestClient(t, server)
 			timeout := 3 * time.Second
 			if deadline {
@@ -116,7 +131,7 @@ func TestMoveFallbackCancellationRetainsCopy(t *testing.T) {
 			}
 			finished := make(chan result, 1)
 			go func() {
-				evidence, err := client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, "Archive")
+				evidence, err := client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, "Archive", "<transfer@example.com>")
 				finished <- result{evidence, err}
 			}()
 			select {
@@ -137,7 +152,7 @@ func TestMoveFallbackCancellationRetainsCopy(t *testing.T) {
 			for _, command := range server.Commands() {
 				counts[command]++
 			}
-			if counts["UID COPY"] != 1 || counts["UID STORE"] != 1 || counts["UID FETCH"] != 1 || counts["UID EXPUNGE"] != 0 || counts["EXPUNGE"] != 0 || !reflect.DeepEqual(server.DeletedUIDs(), []uint32{42, 99}) {
+			if counts["UID COPY"] != 1 || counts["UID STORE"] != 1 || counts["UID FETCH"] != 2 || counts["UID EXPUNGE"] != 0 || counts["EXPUNGE"] != 0 || !reflect.DeepEqual(server.DeletedUIDs(), []uint32{42, 99}) {
 				t.Errorf("aborted verification replayed or expunged: %v, deleted %v", server.Commands(), server.DeletedUIDs())
 			}
 		})
@@ -164,9 +179,9 @@ func TestMoveFallbackRequiresObservedDeleted(t *testing.T) {
 			destination := "Archive"
 			if deleteMessage {
 				destination = "Trash"
-				evidence, err = client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345)
+				evidence, err = client.DeleteMessage(ctx, cfg, "INBOX", 42, 12345, "<transfer@example.com>")
 			} else {
-				evidence, err = client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, destination)
+				evidence, err = client.MoveMessage(ctx, cfg, "INBOX", 42, 12345, destination, "<transfer@example.com>")
 			}
 			if transport.ErrorCode(err) != transport.CodeIMAPMoveOutcomeUnknown || evidence.Outcome != transport.MutationOutcomePartial || evidence.FlagsState != transport.FlagObservationObserved || !reflect.DeepEqual(evidence.ActualFlags, []string{"\\Seen"}) || !reflect.DeepEqual(evidence.CompletedEffects, []string{"copy"}) {
 				t.Errorf("contradictory Deleted result = %+v, %v", evidence, err)
