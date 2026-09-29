@@ -274,15 +274,19 @@ func TestNewMessagesDoesNotCompareUIDsWithoutLocalValidity(t *testing.T) {
 }
 
 func TestNewMessagesKeepsGoingAfterAFailureAndReportsIt(t *testing.T) {
-	client, operator := newMessagesFixture(t, "new-failure@gmail.com", nil)
-	operator.err = &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "IMAP FETCH deadline"}
-	result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
-	if err != nil {
-		t.Fatalf("NewMessages() error = %v", err)
-	}
-	if result.Complete || len(result.Failures) != 1 || result.Failures[0].Code != transport.CodeIMAPTimeout ||
-		result.Failures[0].Mailbox != "INBOX" || len(result.Mailboxes) != 0 {
-		t.Fatalf("result = %+v", result)
+	for _, code := range []string{transport.CodeIMAPTimeout, transport.CodeIMAPResponseMalformed, "mailbox_uidvalidity_changed"} {
+		t.Run(code, func(t *testing.T) {
+			client, operator := newMessagesFixture(t, "new-failure@gmail.com", nil)
+			operator.err = &transport.TransportError{Code: code, Message: "recent FETCH proof failed"}
+			result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
+			if err != nil {
+				t.Fatalf("NewMessages() error = %v", err)
+			}
+			if result.Complete || len(result.Failures) != 1 || result.Failures[0].Code != code ||
+				result.Failures[0].Mailbox != "INBOX" || len(result.Mailboxes) != 0 || result.NewCount != 0 {
+				t.Fatalf("failed coverage became a trustworthy empty result: %+v", result)
+			}
+		})
 	}
 }
 

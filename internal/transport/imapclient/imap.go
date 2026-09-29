@@ -346,6 +346,7 @@ func (c *Client) connect(ctx context.Context, cfg transport.ImapConfig) (*sessio
 type selectInfo struct {
 	uidvalidity uint32
 	exists      int
+	existsKnown bool
 	permissions flagPermissions
 }
 
@@ -396,13 +397,18 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 			return info, nil
 		}
 		if strings.HasPrefix(line, "* ") {
-			if strings.HasSuffix(line, " EXISTS") {
-				fields := strings.Fields(line)
-				if len(fields) >= 3 {
-					if n, err := strconv.Atoi(fields[1]); err == nil {
-						info.exists = n
-					}
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && strings.EqualFold(fields[2], "EXISTS") {
+				switch strings.ToUpper(fields[1]) {
+				case "OK", "NO", "BAD", "BYE", "PREAUTH":
+					continue
 				}
+				count, err := strconv.ParseUint(fields[1], 10, 32)
+				if len(fields) != 3 || err != nil || fields[1][0] < '0' || fields[1][0] > '9' {
+					sess.dirty = true
+					return info, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: fmt.Sprintf("IMAP SELECT EXISTS response has invalid count or shape (%q)", fields[1]), Err: err}
+				}
+				info.exists, info.existsKnown = int(count), true
 			}
 		}
 	}
