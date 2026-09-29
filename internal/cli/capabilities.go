@@ -340,9 +340,13 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	limitsOnly := flags.Bool("limits", false, "print the full limit set without command contracts")
 	includeSchemas := flags.Bool("schemas", false, "include complete parameter schemas with --for")
 	includeOutputs := flags.Bool("outputs", false, "include schema.output trees and shared $defs; implies inline schemas")
+	errorLookup := flags.String("errors", "", "look up these error codes (comma list) in the error catalog without the other contracts; --for restricts the commands")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	if *errorLookup != "" {
+		return runCapabilityErrors(*errorLookup, selectors, *limitsOnly || *includeSchemas || *includeOutputs, *jsonOutput, stdout, stderr)
 	}
 	if *includeSchemas && len(selectors) == 0 {
 		return failCommand("capabilities", *jsonOutput, &commandError{
@@ -381,6 +385,82 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		manifest.Commands = []commandCapability{}
 	}
 	return writeCapabilitiesWithOutputs(stdout, stderr, *jsonOutput, manifest, *includeOutputs)
+}
+
+// runCapabilityErrors answers `capabilities --errors CODE[,CODE...]` with the
+// catalog entries of those codes only: no command contracts, limits or shared
+// output definitions, so a lookup costs about a kilobyte instead of the 64 KB
+// of --outputs. --for restricts the commands inside each entry.
+func runCapabilityErrors(spec string, selectors repeatableStringFlag, otherView bool, jsonOutput bool, stdout, stderr io.Writer) int {
+	invalid := func(message string) int {
+		return failCommand("capabilities", jsonOutput, &commandError{code: "invalid_argument", message: message}, stdout, stderr)
+	}
+	if otherView || len(selectors) > 1 {
+		return invalid("--errors cannot be combined with --limits, --schemas or --outputs, and --for may be supplied once")
+	}
+	var codes []string
+	for _, code := range strings.Split(spec, ",") {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			return invalid("--errors takes a comma-separated list of error codes without empty entries")
+		}
+		if !slices.Contains(codes, code) {
+			codes = append(codes, code)
+		}
+	}
+	catalog := errorCatalog()
+	scoped := len(selectors) == 1
+	if scoped {
+		selected, err := resolveCapabilityCommands(selectors[0])
+		if err != nil {
+			return failCommand("capabilities", jsonOutput, err, stdout, stderr)
+		}
+		manifest, err := capabilitiesForCommands(selected)
+		if err != nil {
+			return failCommand("capabilities", jsonOutput, err, stdout, stderr)
+		}
+		catalog = errorCatalogFor(manifest.Commands)
+	}
+	entries := make([]errorCatalogEntry, 0, len(codes))
+	for _, code := range codes {
+		index := slices.IndexFunc(catalog, func(entry errorCatalogEntry) bool { return entry.Code == code })
+		if index < 0 {
+			if scoped {
+				return invalid(fmt.Sprintf("error code %q is unknown or cannot be emitted by the selected commands", code))
+			}
+			return invalid(fmt.Sprintf("unknown error code %q", code))
+		}
+		entries = append(entries, catalog[index])
+	}
+	if !jsonOutput {
+		for _, entry := range entries {
+			writeFormat(stdout, "%s\t%s\n", entry.Code, entry.Meaning)
+			for _, group := range entry.Guidance {
+				recovery := ""
+				if group.Recovery != nil {
+					recovery = fmt.Sprintf("\trecovery=%s %s", group.Recovery.Command, strings.Join(group.Recovery.Args, " "))
+				}
+				writeFormat(stdout, "  commands=%s\tphase=%s\teffect=%s\tretryability=%s\treplay_allowed=%t\tnext=%s%s\n",
+					strings.Join(group.Commands, ","), group.Phase, group.EffectCertainty, group.Retryability, group.ReplayAllowed, group.Next, recovery)
+			}
+		}
+		return 0
+	}
+	manifest, err := capabilities()
+	if err != nil {
+		return failCommand("capabilities", true, err, stdout, stderr)
+	}
+	manifest.Commands = []commandCapability{}
+	manifest.Limits.selectedRefs = []string{}
+	manifest.SyncCheckPolicy, manifest.DraftSavePolicy = nil, nil
+	digest, err := contractDigest()
+	if err != nil {
+		return failCommand("capabilities", true, err, stdout, stderr)
+	}
+	manifest.ContractSHA256, manifest.ErrorCodes = digest, entries
+	return writeJSON(stdout, envelope{
+		SchemaVersion: schemaVersion, OK: true, Command: "capabilities", Data: responseData{Capabilities: &manifest},
+	})
 }
 
 func writeCapabilitiesWithOutputs(stdout, stderr io.Writer, jsonOutput bool, manifest capabilityManifest, outputs bool) int {

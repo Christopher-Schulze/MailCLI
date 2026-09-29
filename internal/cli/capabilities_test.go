@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"mailcli/internal/mail"
@@ -501,6 +502,77 @@ func TestNonReadCapabilitiesUseEffectfulFailureGuidance(t *testing.T) {
 				t.Fatalf("%s failure guidance = %+v", contract.ID, guidance)
 			}
 		})
+	}
+}
+
+func TestCapabilitiesErrorsLooksUpOnlyTheRequestedCodes(t *testing.T) {
+	code, output, response := captureCapabilitiesJSON(t, "--errors", "draft_busy", "--json")
+	manifest := response.Data.Capabilities
+	if code != 0 || !response.OK || manifest == nil || len(manifest.ErrorCodes) != 1 || manifest.ErrorCodes[0].Code != "draft_busy" {
+		t.Fatalf("exit=%d response=%+v", code, response)
+	}
+	entry := manifest.ErrorCodes[0]
+	if entry.Meaning == "" || len(entry.Guidance) == 0 || len(entry.Commands) == 0 {
+		t.Fatalf("entry lacks meaning, commands or guidance: %+v", entry)
+	}
+	if len(manifest.Commands) != 0 || manifest.OutputDefinitions != nil {
+		t.Fatalf("a code lookup carries %d command contracts and %d shared definitions", len(manifest.Commands), len(manifest.OutputDefinitions))
+	}
+	if len(output) > 2048 {
+		t.Fatalf("a single code lookup is %d bytes, want at most 2048", len(output))
+	}
+	_, twoOutput, two := captureCapabilitiesJSON(t, "--errors", "imap_quota_exceeded, draft_busy", "--json")
+	entries := two.Data.Capabilities.ErrorCodes
+	if len(entries) != 2 || entries[0].Code != "imap_quota_exceeded" || entries[1].Code != "draft_busy" || len(twoOutput) > 4096 {
+		t.Fatalf("two-code lookup = %+v (%d bytes)", entries, len(twoOutput))
+	}
+}
+
+func TestCapabilitiesErrorsRestrictsCommandsWithFor(t *testing.T) {
+	code, _, response := captureCapabilitiesJSON(t, "--for", "messages.get", "--errors", "imap_quota_exceeded", "--json")
+	entries := response.Data.Capabilities.ErrorCodes
+	if code != 0 || len(entries) != 1 || !slices.Equal(entries[0].Commands, []string{"messages.get"}) {
+		t.Fatalf("exit=%d entries=%+v", code, entries)
+	}
+	for _, group := range entries[0].Guidance {
+		if !slices.Equal(group.Commands, []string{"messages.get"}) {
+			t.Fatalf("guidance group covers %v, want only messages.get", group.Commands)
+		}
+	}
+	if code, _, response := captureCapabilitiesJSON(t, "--for", "version", "--errors", "draft_busy", "--json"); code != 2 || response.Error == nil ||
+		response.Error.Code != "invalid_argument" || !strings.Contains(response.Error.Message, "draft_busy") {
+		t.Fatalf("a code the selected command cannot emit: exit=%d response=%+v", code, response)
+	}
+}
+
+func TestCapabilitiesErrorsRejectsUnknownCodesAndConflictingFlags(t *testing.T) {
+	for name, args := range map[string][]string{
+		"unknown code":      {"--errors", "no_such_code", "--json"},
+		"one unknown among": {"--errors", "draft_busy,no_such_code", "--json"},
+		"empty entry":       {"--errors", "draft_busy,,operation_failed", "--json"},
+		"with outputs":      {"--errors", "draft_busy", "--outputs", "--json"},
+		"with limits":       {"--errors", "draft_busy", "--limits", "--json"},
+		"with schemas":      {"--for", "messages.get", "--errors", "draft_busy", "--schemas", "--json"},
+	} {
+		code, _, response := captureCapabilitiesJSON(t, args...)
+		if code != 2 || response.OK || response.Error == nil || response.Error.Code != "invalid_argument" {
+			t.Errorf("%s: exit=%d response=%+v", name, code, response)
+		}
+	}
+	if _, _, response := captureCapabilitiesJSON(t, "--errors", "no_such_code", "--json"); response.Error == nil || !strings.Contains(response.Error.Message, "no_such_code") {
+		t.Errorf("the message does not name the unknown code: %+v", response.Error)
+	}
+}
+
+func TestCapabilitiesErrorsHumanOutputNamesCodeMeaningAndNext(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), nil, []string{"capabilities", "--errors", "draft_busy"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"draft_busy", "Another operation holds the draft lock", "next=check_state"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("human output lacks %q: %q", want, stdout.String())
+		}
 	}
 }
 

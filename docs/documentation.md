@@ -106,8 +106,9 @@ All commands share the [Output contract](#output-contract); the selected capabil
 
 ### Discovery and maintenance
 
-- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--outputs`, `--limits`.
+- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--outputs`, `--errors`, `--limits`.
   `--outputs` adds every selected command's `schema.output` tree, shared `$defs` and the error catalog.
+  `--errors CODE[,CODE]` returns only the catalog entries of those codes (about 1 KB per code instead of the roughly 60 KB of `--outputs` for one command); `--for` restricts the commands inside each entry, and an unknown code, or one the selected commands cannot emit, is an `invalid_argument` error naming it.
   Example: `mailcli capabilities --for messages.get --json`.
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.

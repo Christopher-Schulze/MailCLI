@@ -28,6 +28,13 @@
       "description": "include schema.output trees and shared $defs; implies inline schemas"
     },
     {
+      "name": "--errors",
+      "value_type": "string",
+      "takes_value": true,
+      "value_required": true,
+      "description": "look up these error codes (comma list) in the error catalog without the other contracts; --for restricts the commands"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,
