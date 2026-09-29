@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -105,7 +106,7 @@ func (c *Client) finishServerMessage(ctx context.Context, ref string, message ma
 	row := mail.NewMessageFromHeader(ref, []byte(message.Headers), true)
 	message.Summary.Ref = ref
 	message.Summary.Subject, message.Summary.Sender, message.Summary.DateSent = row.Subject, row.Sender, row.DateSent
-	message.Summary.LocalRef = c.localRefForServerRef(ctx, ref)
+	message.Summary.LocalRef = c.localRefForServerRef(ctx, ref, []byte(message.Headers))
 	if target, err := c.resolveServerTarget(ctx, ref); err == nil {
 		if reader, supported := c.send.ImapClient().(transport.FlagStateReader); supported {
 			state, flagErr := reader.FetchFlags(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity)
@@ -131,7 +132,7 @@ func (c *Client) finishServerMessage(ctx context.Context, ref string, message ma
 
 // localRefForServerRef returns the store-bound ref of the same message when
 // the local index already has it, otherwise an empty string.
-func (c *Client) localRefForServerRef(ctx context.Context, value string) string {
+func (c *Client) localRefForServerRef(ctx context.Context, value string, headers []byte) string {
 	if c.store == nil {
 		return ""
 	}
@@ -141,7 +142,7 @@ func (c *Client) localRefForServerRef(ctx context.Context, value string) string 
 	}
 	localCtx, cancel := localReadOrResolveContext(ctx)
 	defer cancel()
-	ref, err := c.store.localRefForServerMessage(localCtx, server)
+	ref, err := c.store.localRefForServerMessage(localCtx, server, headers)
 	if err != nil {
 		return ""
 	}
@@ -185,9 +186,59 @@ func (c *Client) saveServerAttachment(
 	return evidence, errors.Join(saveErr, source.Close())
 }
 
+// messageRecordByHeaderIdentity finds the local row of a label-backed mailbox
+// (Gmail) with the same sender address, sent time and subject as the server
+// headers, or nil.
+func (s *Store) messageRecordByHeaderIdentity(ctx context.Context, mailboxRowID int64, headers []byte) (*messageRecord, error) {
+	identity, ok := mail.ParseHeaderIdentity(headers)
+	if !ok {
+		return nil, nil
+	}
+	rows, err := s.database.QueryContext(ctx, `
+		SELECT m.ROWID, subject.subject FROM messages m
+		JOIN subjects subject ON subject.ROWID = m.subject
+		JOIN addresses sender ON sender.ROWID = m.sender
+		WHERE m.deleted = 0 AND m.date_sent = ? AND LOWER(sender.address) = ?
+		  AND (m.mailbox = ? OR m.ROWID IN (SELECT message_id FROM labels WHERE mailbox_id = ?))
+		ORDER BY m.ROWID DESC
+	`, identity.SentUnix, identity.Address, mailboxRowID, mailboxRowID)
+	if err != nil {
+		return nil, fmt.Errorf("read local header identities: %w", err)
+	}
+	var rowID int64 = -1
+	for rows.Next() {
+		var candidate int64
+		var subject string
+		if err := rows.Scan(&candidate, &subject); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan local header identity: %w", err)
+		}
+		if rowID < 0 && mail.NormalizeIdentitySubject(subject) == identity.Subject {
+			rowID = candidate
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	if rowID < 0 {
+		return nil, nil
+	}
+	record, err := scanMessageRecord(s.database.QueryRowContext(ctx, messageRecordSelectSQL+`
+		WHERE m.ROWID = ? AND m.deleted = 0
+	`, rowID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
 // localRefForServerMessage finds the local row that holds the server message
-// (same account, mailbox and server UID, not deleted) and returns its ref.
-func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Server) (string, error) {
+// and returns its ref: same account, mailbox and server UID for a physical
+// mailbox, same sender, sent time and subject for a label-backed one.
+func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Server, headers []byte) (string, error) {
 	records, err := s.mailboxRecords(ctx)
 	if err != nil {
 		return "", err
@@ -199,7 +250,16 @@ func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Ser
 	if validity, validityErr := s.mailboxUIDValidity(ctx, mailbox.Location); validityErr == nil && validity != 0 && validity != server.UIDValidity {
 		return "", nil
 	}
-	record, err := s.messageRecordByServerUID(ctx, mailbox.RowID, server.UID)
+	hasLabels, err := s.mailboxHasLabels(ctx, mailbox.RowID)
+	if err != nil {
+		return "", err
+	}
+	var record *messageRecord
+	if hasLabels {
+		record, err = s.messageRecordByHeaderIdentity(ctx, mailbox.RowID, headers)
+	} else {
+		record, err = s.messageRecordByServerUID(ctx, mailbox.RowID, server.UID)
+	}
 	if err != nil || record == nil {
 		return "", err
 	}

@@ -2,8 +2,10 @@ package mailstore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -39,13 +41,15 @@ func recentMessage(uid uint32, seen bool, subject string) transport.RecentMessag
 	}
 }
 
-// newMessagesFixture has two local INBOX rows, holding server UIDs 5001 and 5002.
+// newMessagesFixture has two physical local INBOX rows (no label rows, like an
+// iCloud or plain IMAP account), holding server UIDs 5001 and 5002.
 func newMessagesFixture(t *testing.T, address string, recent map[string]transport.RecentMailbox) (*Client, *recentImapOperator) {
 	t.Helper()
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
 	installImapIdentityFixture(t, store, address)
 	updateFixtureMessage(t, store, `UPDATE messages SET remote_id = ROWID - 102 + 5001 WHERE ROWID IN (102, 103)`)
+	updateFixtureMessage(t, store, `DELETE FROM labels WHERE mailbox_id = 1`)
 	operator := &recentImapOperator{
 		stubImapOperator: &stubImapOperator{boxes: []transport.MailboxInfo{{Name: "INBOX"}, {Name: "All"}, {Name: "Sent", Flags: []string{"\\Sent"}}}},
 		recent:           recent,
@@ -55,6 +59,48 @@ func newMessagesFixture(t *testing.T, address string, recent map[string]transpor
 		send:  mail.SendTransport{Imap: operator, Credentials: stubCredentials{address: "secret"}},
 	}
 	return client, operator
+}
+
+// localIdentityHeader builds the header block a server would send for the
+// message a local row stores: same sender address, subject and sent date.
+func localIdentityHeader(t *testing.T, store *Store, rowID int64) []byte {
+	t.Helper()
+	var subject, address string
+	var sent int64
+	err := store.database.QueryRow(`
+		SELECT subject.subject, sender.address, m.date_sent FROM messages m
+		JOIN subjects subject ON subject.ROWID = m.subject JOIN addresses sender ON sender.ROWID = m.sender
+		WHERE m.ROWID = ?`, rowID).Scan(&subject, &address, &sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(fmt.Sprintf("From: %s\r\nSubject: %s\r\nDate: %s\r\n\r\n", address, subject, time.Unix(sent, 0).UTC().Format(time.RFC1123Z)))
+}
+
+// Gmail keeps every message once, in All Mail, and shows a label such as INBOX
+// through the labels table: the local rows carry All Mail UIDs, which are not
+// comparable with INBOX UIDs, so the comparison uses sender, subject and date.
+func TestNewMessagesMatchesLabelBackedMailboxesByHeaderIdentity(t *testing.T) {
+	client, operator := newMessagesFixture(t, "new-labels@gmail.com", nil)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103)`)
+	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
+	operator.recent = map[string]transport.RecentMailbox{"INBOX": {UIDValidity: 900, Exists: 3, Messages: []transport.RecentMessage{
+		{UID: 41001, Seen: true, Header: localIdentityHeader(t, client.store, 102)},
+		{UID: 41002, Seen: true, Header: localIdentityHeader(t, client.store, 103)},
+		{UID: 41003, Header: []byte("From: New Sender <new@example.com>\r\nSubject: Really new\r\nDate: Tue, 29 Sep 2026 10:15:00 +0200\r\nMessage-ID: <new@example.com>\r\n\r\n")},
+	}}}
+	result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
+	if err != nil || len(result.Mailboxes) != 1 {
+		t.Fatalf("result = %+v, %v", result, err)
+	}
+	mailbox := result.Mailboxes[0]
+	if mailbox.MatchedBy != mail.NewMatchedByHeaders || mailbox.NewCount != 1 || mailbox.Truncated || len(mailbox.Messages) != 1 || mailbox.Messages[0].Subject != "Really new" {
+		t.Fatalf("label-backed mailbox = %+v", mailbox)
+	}
+	server, err := mailref.DecodeServer(mailbox.Messages[0].ServerRef)
+	if err != nil || server.UID != 41003 {
+		t.Fatalf("server ref = %+v, %v", server, err)
+	}
 }
 
 func TestNewMessagesReturnsOnlyServerMessagesTheStoreLacks(t *testing.T) {
@@ -72,7 +118,7 @@ func TestNewMessagesReturnsOnlyServerMessagesTheStoreLacks(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 	mailbox := result.Mailboxes[0]
-	if mailbox.State != mail.NewMailboxStateChecked || mailbox.Name != "INBOX" || mailbox.ServerMessages != 4 ||
+	if mailbox.State != mail.NewMailboxStateChecked || mailbox.MatchedBy != mail.NewMatchedByUID || mailbox.Name != "INBOX" || mailbox.ServerMessages != 4 ||
 		mailbox.NewCount != 2 || mailbox.Truncated || len(mailbox.Messages) != 2 {
 		t.Fatalf("mailbox = %+v", mailbox)
 	}

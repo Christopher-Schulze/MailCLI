@@ -8,7 +8,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/emersion/go-message/charset"
 	messageMail "github.com/emersion/go-message/mail"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Limits and states of `messages new`.
@@ -19,6 +21,12 @@ const (
 	NewMailboxStateChecked           = "checked"
 	NewMailboxStateUnresolved        = "unresolved"
 	NewMailboxStateUIDValidityChange = "uidvalidity_changed"
+
+	// NewMatchedByUID compares server UIDs with the server UIDs of the local
+	// rows; NewMatchedByHeaders compares sender, subject and sent time, for a
+	// mailbox the local store keeps as labels of other rows (Gmail).
+	NewMatchedByUID     = "uid"
+	NewMatchedByHeaders = "headers"
 
 	newMessageTextRunes = 200
 )
@@ -50,6 +58,7 @@ type NewMailbox struct {
 	MailboxRef     string       `json:"mailbox_ref"`
 	Name           string       `json:"name"`
 	State          string       `json:"state"`
+	MatchedBy      string       `json:"matched_by"`
 	Reason         string       `json:"reason,omitempty"`
 	ServerMessages int          `json:"server_messages"`
 	NewCount       int          `json:"new_count"`
@@ -137,12 +146,56 @@ func senderText(value string) string {
 	return cleanHeaderText(address.Name + " <" + address.Address + ">")
 }
 
+// headerWordDecoder reads RFC 2047 words in every charset MailCLI can read,
+// not only UTF-8, ISO-8859-1 and US-ASCII.
+var headerWordDecoder = &mime.WordDecoder{CharsetReader: charset.Reader}
+
 func decodeHeaderWords(value string) string {
-	decoded, err := (&mime.WordDecoder{}).DecodeHeader(value)
+	decoded, err := headerWordDecoder.DecodeHeader(value)
 	if err != nil {
 		return value
 	}
 	return decoded
+}
+
+// HeaderIdentity is what a local Envelope Index row and a server header both
+// state about a message: lower-case sender address, sent time and a
+// whitespace-normalized lower-case subject.
+type HeaderIdentity struct {
+	Address  string
+	SentUnix int64
+	Subject  string
+}
+
+// ParseHeaderIdentity derives the identity from a header block; a header
+// without a parseable sender address or Date has none.
+func ParseHeaderIdentity(header []byte) (HeaderIdentity, bool) {
+	var identity HeaderIdentity
+	haveAddress, haveDate := false, false
+	fields, _ := ParseHeaderFields(string(header))
+	for _, field := range fields {
+		switch strings.ToLower(field.Name) {
+		case "from":
+			if addresses, err := messageMail.ParseAddressList(field.Value); err == nil && len(addresses) > 0 && !haveAddress {
+				identity.Address, haveAddress = strings.ToLower(strings.TrimSpace(addresses[0].Address)), true
+			}
+		case "date":
+			if parsed, err := stdmail.ParseDate(strings.TrimSpace(field.Value)); err == nil && !haveDate {
+				identity.SentUnix, haveDate = parsed.Unix(), true
+			}
+		case "subject":
+			if identity.Subject == "" {
+				identity.Subject = NormalizeIdentitySubject(decodeHeaderWords(field.Value))
+			}
+		}
+	}
+	return identity, haveAddress && haveDate
+}
+
+// NormalizeIdentitySubject folds a subject for identity comparison: NFC,
+// lower case, single spaces.
+func NormalizeIdentitySubject(subject string) string {
+	return strings.ToLower(strings.Join(strings.Fields(norm.NFC.String(subject)), " "))
 }
 
 // cleanHeaderText collapses whitespace and control characters to single

@@ -52,6 +52,27 @@ func TestNewMessageFromHeaderDecodesAndBoundsText(t *testing.T) {
 	}
 }
 
+func TestNewMessageFromHeaderDecodesLegacyCharsets(t *testing.T) {
+	header := "From: =?ISO-8859-15?Q?J=FCrgen?= <j@example.com>\r\n" +
+		"Subject: =?Windows-1252?Q?AW:_Bewerbung_als_Senior_Fr=FChe_=80?=\r\n\r\n"
+	got := NewMessageFromHeader("srv_x", []byte(header), true)
+	if got.Subject != "AW: Bewerbung als Senior Frühe €" || got.Sender != "Jürgen <j@example.com>" {
+		t.Fatalf("subject = %q, sender = %q", got.Subject, got.Sender)
+	}
+}
+
+func TestHeaderIdentityNormalizesWhatALocalRowStores(t *testing.T) {
+	header := "From: =?UTF-8?Q?J=C3=BCrgen?= <J.Mueller@Example.COM>\r\nSubject: =?UTF-8?B?QVc6ICBHcsO8w59lICAgYXVzIE3DvG5jaGVu?=\r\n" +
+		"Date: Tue, 29 Sep 2026 10:15:00 +0200\r\n\r\n"
+	identity, ok := ParseHeaderIdentity([]byte(header))
+	if !ok || identity.Address != "j.mueller@example.com" || identity.SentUnix != 1790669700 || identity.Subject != "aw: grüße aus münchen" {
+		t.Fatalf("identity = %+v, ok = %t", identity, ok)
+	}
+	if _, ok := ParseHeaderIdentity([]byte("Subject: no sender and no date\r\n\r\n")); ok {
+		t.Fatal("a header without sender and date produced an identity")
+	}
+}
+
 type newMessagesGateway struct {
 	Gateway
 	got NewMessagesRequest

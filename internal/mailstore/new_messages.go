@@ -170,19 +170,20 @@ func (c *Client) compareMailbox(
 		compared.Reason = fmt.Sprintf("local UIDVALIDITY %d differs from the server's %d", localValidity, recent.UIDValidity)
 		return compared, nil
 	}
-	uids := make([]uint32, len(recent.Messages))
-	for index, message := range recent.Messages {
-		uids[index] = message.UID
-	}
-	local, err := c.store.localServerUIDs(ctx, record.RowID, uids)
+	hasLabels, err := c.store.mailboxHasLabels(ctx, record.RowID)
 	if err != nil {
 		return compared, err
 	}
 	var missing []transport.RecentMessage
-	for _, message := range recent.Messages {
-		if !local[message.UID] {
-			missing = append(missing, message)
-		}
+	if hasLabels {
+		compared.MatchedBy = mail.NewMatchedByHeaders
+		missing, err = c.store.missingByHeaderIdentity(ctx, record.RowID, recent.Messages)
+	} else {
+		compared.MatchedBy = mail.NewMatchedByUID
+		missing, err = c.store.missingByServerUID(ctx, record.RowID, recent.Messages)
+	}
+	if err != nil {
+		return compared, err
 	}
 	sort.Slice(missing, func(i, j int) bool { return missing[i].UID > missing[j].UID })
 	compared.NewCount = len(missing)
@@ -198,6 +199,100 @@ func (c *Client) compareMailbox(
 		compared.Messages = append(compared.Messages, mail.NewMessageFromHeader(serverRef, message.Header, message.Seen))
 	}
 	return compared, nil
+}
+
+// mailboxHasLabels reports whether the local store keeps this mailbox as
+// labels of other rows (Gmail) instead of as physical rows.
+func (s *Store) mailboxHasLabels(ctx context.Context, mailboxRowID int64) (bool, error) {
+	var hasLabels bool
+	if err := s.database.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM labels WHERE mailbox_id = ?)", mailboxRowID,
+	).Scan(&hasLabels); err != nil {
+		return false, fmt.Errorf("check Envelope Index mailbox labels: %w", err)
+	}
+	return hasLabels, nil
+}
+
+// missingByServerUID returns the server messages whose UID the local mailbox
+// row does not hold.
+func (s *Store) missingByServerUID(ctx context.Context, mailboxRowID int64, messages []transport.RecentMessage) ([]transport.RecentMessage, error) {
+	uids := make([]uint32, len(messages))
+	for index, message := range messages {
+		uids[index] = message.UID
+	}
+	local, err := s.localServerUIDs(ctx, mailboxRowID, uids)
+	if err != nil {
+		return nil, err
+	}
+	var missing []transport.RecentMessage
+	for _, message := range messages {
+		if !local[message.UID] {
+			missing = append(missing, message)
+		}
+	}
+	return missing, nil
+}
+
+func headerIdentityKey(identity mail.HeaderIdentity) string {
+	return fmt.Sprintf("%s\x00%d\x00%s", identity.Address, identity.SentUnix, identity.Subject)
+}
+
+// missingByHeaderIdentity compares by sender address, sent time and subject
+// with the local rows of the mailbox (physical or through labels), for stores
+// whose local server UIDs belong to another mailbox. A server message whose
+// header has no sender or date cannot be matched and counts as missing.
+func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64, messages []transport.RecentMessage) ([]transport.RecentMessage, error) {
+	identities := make([]mail.HeaderIdentity, len(messages))
+	known := make([]bool, len(messages))
+	var first, last int64
+	any := false
+	for index, message := range messages {
+		identity, ok := mail.ParseHeaderIdentity(message.Header)
+		identities[index], known[index] = identity, ok
+		if !ok {
+			continue
+		}
+		if !any || identity.SentUnix < first {
+			first = identity.SentUnix
+		}
+		if !any || identity.SentUnix > last {
+			last = identity.SentUnix
+		}
+		any = true
+	}
+	local := map[string]bool{}
+	if any {
+		rows, err := s.database.QueryContext(ctx, `
+			SELECT LOWER(sender.address), COALESCE(m.date_sent, 0), subject.subject
+			FROM messages m
+			JOIN subjects subject ON subject.ROWID = m.subject
+			JOIN addresses sender ON sender.ROWID = m.sender
+			WHERE m.deleted = 0 AND m.date_sent BETWEEN ? AND ?
+			  AND (m.mailbox = ? OR m.ROWID IN (SELECT message_id FROM labels WHERE mailbox_id = ?))
+		`, first, last, mailboxRowID, mailboxRowID)
+		if err != nil {
+			return nil, fmt.Errorf("read local header identities: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var address, subject string
+			var sent int64
+			if err := rows.Scan(&address, &sent, &subject); err != nil {
+				return nil, fmt.Errorf("scan local header identity: %w", err)
+			}
+			local[headerIdentityKey(mail.HeaderIdentity{Address: address, SentUnix: sent, Subject: mail.NormalizeIdentitySubject(subject)})] = true
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	var missing []transport.RecentMessage
+	for index, message := range messages {
+		if !known[index] || !local[headerIdentityKey(identities[index])] {
+			missing = append(missing, message)
+		}
+	}
+	return missing, nil
 }
 
 // localServerUIDs returns which of the server UIDs the local mailbox row
