@@ -187,15 +187,21 @@ assert_rejected_before_execution "${PUBLIC_KEY}" "${MALICIOUS_MANIFEST}" "${MALI
 
 for required_text in \
   'set -euo pipefail' \
+  '/releases/latest' \
   'VjVSufeZlmmMshZYeMB9u1xKoMvRavstpFqByv8Vzqg=' \
   'pkeyutl -verify' \
   'shasum -a 256 -c archive.SHA256SUMS' \
   'tar -tvzf' \
   'tar -xzf'; do
-  if ! grep -Fq "${required_text}" "${MAILCLI_ROOT}/README.md"; then
-    printf 'README bootstrap instructions are missing: %s\n' "${required_text}" >&2
+  if ! grep -Fq "${required_text}" "${MAILCLI_ROOT}/scripts/release/install-latest.sh"; then
+    printf 'Latest-release bootstrap is missing: %s\n' "${required_text}" >&2
     exit 1
   fi
 done
+if ! grep -Fq '/bin/bash -o pipefail -c' "${MAILCLI_ROOT}/README.md" ||
+  ! grep -Fq '/main/scripts/release/install-latest.sh' "${MAILCLI_ROOT}/README.md"; then
+  printf 'README is missing the copyable latest-release installer command\n' >&2
+  exit 1
+fi
 
 printf 'Bootstrap authenticity tests passed\n'

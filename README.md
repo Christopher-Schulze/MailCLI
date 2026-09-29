@@ -6,6 +6,12 @@ Local Apple Mail access for the shell and coding agents.
 [![Platform](https://img.shields.io/badge/macOS-Apple%20silicon-000000?logo=apple)](#compatibility)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
+Install the latest signed release on macOS Apple silicon (requires a trusted OpenSSL 3, for example `brew install openssl@3`):
+
+```bash
+/bin/bash -o pipefail -c '/usr/bin/curl --fail --silent --show-error --location --proto =https --proto-redir =https --tlsv1.2 https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | /bin/bash'
+```
+
 MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations over IMAP, and sends reviewed drafts over SMTP with credentials stored in the macOS Keychain via `mailcli send setup`; it never asks for passwords or tokens in chat.
 
 ```bash
@@ -85,74 +91,9 @@ SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS prod
 
 ## Install
 
-The `v1.5.0` release archive installs the CLI and its agent skill. The script needs a trusted OpenSSL 3 with Ed25519 (for example Homebrew `openssl@3` as `OPENSSL_BIN`; macOS `/usr/bin/openssl` is LibreSSL and cannot verify). It authenticates the signed `SHA256SUMS` before downloading the archive and checks its digest before extraction.
+The [one-command installer](scripts/release/install-latest.sh) above resolves GitHub's latest published release and installs its CLI and agent skill. It needs a trusted OpenSSL 3 with Ed25519 (for example Homebrew `openssl@3`, or set `OPENSSL_BIN` to another trusted binary); macOS `/usr/bin/openssl` is LibreSSL and cannot verify. The bootstrap authenticates the signed `SHA256SUMS` with MailCLI's pinned public key before downloading the archive, verifies its digest and layout, then runs the packaged installer. Any failed check stops installation.
 
-```bash
-set -euo pipefail
-VERSION=1.5.0
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  printf 'Release version must use MAJOR.MINOR.PATCH: %s\n' "${VERSION}" >&2
-  exit 1
-fi
-OPENSSL_BIN="${OPENSSL_BIN:-}"
-if [[ -z "${OPENSSL_BIN}" ]] && command -v brew >/dev/null 2>&1; then
-  BREW_OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
-  if [[ -n "${BREW_OPENSSL_PREFIX}" ]]; then
-    OPENSSL_BIN="${BREW_OPENSSL_PREFIX}/bin/openssl"
-  fi
-fi
-if [[ -z "${OPENSSL_BIN}" || ! -x "${OPENSSL_BIN}" ]]; then
-  printf 'A trusted OpenSSL 3 binary is required; set OPENSSL_BIN before continuing\n' >&2
-  exit 1
-fi
-OPENSSL_VERSION="$("${OPENSSL_BIN}" version 2>/dev/null || true)"
-if [[ "${OPENSSL_VERSION}" != OpenSSL\ 3.* ]]; then
-  printf 'OPENSSL_BIN must provide OpenSSL 3 with Ed25519 support: %s\n' "${OPENSSL_BIN}" >&2
-  exit 1
-fi
-BASE64_BIN="/usr/bin/base64"
-if [[ ! -x "${BASE64_BIN}" ]]; then
-  printf 'Required macOS base64 utility is missing: %s\n' "${BASE64_BIN}" >&2
-  exit 1
-fi
-ARCHIVE_NAME="mailcli_${VERSION}_darwin_arm64.tar.gz"
-ARCHIVE_ROOT="mailcli_${VERSION}_darwin_arm64"
-RELEASE_BASE="https://github.com/Christopher-Schulze/MailCLI/releases/download/v${VERSION}"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-bootstrap.XXXXXX")"
-trap 'rm -rf -- "${WORK_DIR}"' EXIT
-curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/SHA256SUMS" "${RELEASE_BASE}/SHA256SUMS"
-curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/SHA256SUMS.sig" "${RELEASE_BASE}/SHA256SUMS.sig"
-RELEASE_PUBLIC_KEY_DER_B64='MCowBQYDK2VwAyEAVjVSufeZlmmMshZYeMB9u1xKoMvRavstpFqByv8Vzqg='
-printf '%s' "${RELEASE_PUBLIC_KEY_DER_B64}" | "${BASE64_BIN}" -D -o "${WORK_DIR}/release-public-key.der"
-"${OPENSSL_BIN}" pkey -pubin -inform DER -in "${WORK_DIR}/release-public-key.der" -out "${WORK_DIR}/release-public-key.pem" >/dev/null
-"${BASE64_BIN}" -D -i "${WORK_DIR}/SHA256SUMS.sig" -o "${WORK_DIR}/SHA256SUMS.sig.raw"
-if [[ "$(wc -c <"${WORK_DIR}/SHA256SUMS.sig.raw" | tr -d '[:space:]')" != 64 ]]; then
-  printf 'Release signature must decode to exactly 64 bytes\n' >&2
-  exit 1
-fi
-"${OPENSSL_BIN}" pkeyutl -verify -pubin -inkey "${WORK_DIR}/release-public-key.pem" -sigfile "${WORK_DIR}/SHA256SUMS.sig.raw" -in "${WORK_DIR}/SHA256SUMS" >/dev/null
-curl --fail --location --proto '=https' --tlsv1.2 -o "${WORK_DIR}/${ARCHIVE_NAME}" "${RELEASE_BASE}/${ARCHIVE_NAME}"
-ARCHIVE_DIGEST="$(awk -v archive="${ARCHIVE_NAME}" '{ file_name = $2; sub(/^\*/, "", file_name); if (NF == 2 && file_name == archive) { count++; digest = $1 } } END { if (count != 1 || digest !~ /^[[:xdigit:]]{64}$/) exit 1; print digest }' "${WORK_DIR}/SHA256SUMS")" || {
-  printf 'SHA256SUMS must contain exactly one valid entry for %s\n' "${ARCHIVE_NAME}" >&2
-  exit 1
-}
-printf '%s  %s\n' "${ARCHIVE_DIGEST}" "${ARCHIVE_NAME}" >"${WORK_DIR}/archive.SHA256SUMS"
-(cd "${WORK_DIR}" && shasum -a 256 -c archive.SHA256SUMS)
-if ! tar -tvzf "${WORK_DIR}/${ARCHIVE_NAME}" | awk -v root="${ARCHIVE_ROOT}" 'BEGIN { valid = 1; count = 0 } { name = $NF; sub(/\/$/, "", name); if ($1 !~ /^[-d]/ || (name != root && index(name, root "/") != 1) || name ~ /(^|\/)\.\.?($|\/)/ || name ~ /^\//) valid = 0; count++ } END { exit !(valid && count > 0) }'; then
-  printf 'Verified archive contains an unsafe path or unsupported entry type\n' >&2
-  exit 1
-fi
-tar -xzf "${WORK_DIR}/${ARCHIVE_NAME}" -C "${WORK_DIR}"
-if [[ ! -x "${WORK_DIR}/${ARCHIVE_ROOT}/install.sh" ]]; then
-  printf 'Verified archive has no executable installer: %s\n' "${ARCHIVE_ROOT}/install.sh" >&2
-  exit 1
-fi
-"${WORK_DIR}/${ARCHIVE_ROOT}/install.sh"
-command -v mailcli
-mailcli version --json
-```
-
-Any failed check stops the script before `tar` or `install.sh`. Never replace the pinned key, OpenSSL path, release host, or archive name with values from the download. The installer puts the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli`, staged, verified, and committed with rollback. Start a new agent session afterwards so the skill is discovered.
+The installer puts the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli`, staged, verified, and committed with rollback. Add `~/.local/bin` to your `PATH` if needed. Start a new agent session afterwards so the skill is discovered.
 
 `mailcli update --check` only reports whether a newer release exists and installs nothing. Later updates of both components run through `mailcli update` (`--json` for one envelope). The updater verifies the signed `SHA256SUMS` against the pinned key before it downloads the archive, accepts only exact GitHub release hosts over HTTPS, checks the binary's architecture, signature, and version, and installs through the same rollback-safe transaction; concurrent installers are serialized. When updating from an older binary that expects plain version output, use `MAILCLI_OUTPUT=human mailcli update`.
 
