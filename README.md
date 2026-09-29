@@ -9,7 +9,7 @@ Local Apple Mail access for the shell and coding agents.
 Install the latest signed release on macOS Apple silicon (requires a trusted OpenSSL 3, for example `brew install openssl@3`):
 
 ```bash
-/bin/bash -o pipefail -c '/usr/bin/curl --fail --silent --show-error --location --proto =https --proto-redir =https --tlsv1.2 https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | /bin/bash'
+/bin/bash -o pipefail -c 'curl -fsSL --proto-redir =https https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | bash'
 ```
 
 MailCLI gives command-line tools and agents a typed interface to the accounts already configured in Apple Mail. It reads mail from Mail's local store, performs mailbox mutations over IMAP, and sends reviewed drafts over SMTP with credentials stored in the macOS Keychain via `mailcli send setup`; it never asks for passwords or tokens in chat.
