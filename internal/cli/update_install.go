@@ -112,7 +112,7 @@ type updateInstallOutcome struct {
 }
 
 func readInstalledBinaryVersion(ctx context.Context, binaryPath string) (string, error) {
-	output, err := exec.CommandContext(ctx, binaryPath, "version").CombinedOutput()
+	output, err := versionProbeCommand(ctx, binaryPath).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("run installed binary: %w: %s", err, strings.TrimSpace(string(output)))
 	}

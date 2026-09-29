@@ -1301,8 +1301,28 @@ func checksumFile(archiveName string, archive []byte) []byte {
 	return []byte(fmt.Sprintf("%x  %s\n", digest, archiveName))
 }
 
+// testUpdateBinary mirrors the real CLI: `version` prints JSON on a pipe unless
+// MAILCLI_OUTPUT=human asks for the plain `mailcli X.Y.Z` line.
 func testUpdateBinary(releaseVersion string) string {
-	return "#!/bin/sh\nif [ \"${1:-}\" = version ]; then printf 'mailcli " + releaseVersion + "\\n'; exit 0; fi\nexit 2\n"
+	return "#!/bin/sh\nif [ \"${1:-}\" = version ]; then\n" +
+		"if [ \"${MAILCLI_OUTPUT:-}\" = human ]; then printf 'mailcli " + releaseVersion + "\\n'; exit 0; fi\n" +
+		"printf '{\"schema_version\":1,\"ok\":true,\"command\":\"version\",\"data\":{\"name\":\"mailcli\",\"version\":\"" + releaseVersion + "\"}}\\n'; exit 0\nfi\nexit 2\n"
+}
+
+func TestReadInstalledBinaryVersionRequestsHumanOutput(t *testing.T) {
+	for _, callerMode := range []string{"", "json", "human"} {
+		t.Run("caller="+callerMode, func(t *testing.T) {
+			t.Setenv("MAILCLI_OUTPUT", callerMode)
+			binary := filepath.Join(t.TempDir(), "mailcli")
+			if err := os.WriteFile(binary, []byte(testUpdateBinary("1.2.3")), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			version, err := readInstalledBinaryVersion(context.Background(), binary)
+			if err != nil || version != "1.2.3" {
+				t.Fatalf("readInstalledBinaryVersion() = %q, %v", version, err)
+			}
+		})
+	}
 }
 
 func updateErrorCodeForTest(err error) string {

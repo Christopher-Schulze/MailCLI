@@ -92,7 +92,9 @@ func verifyInstalledBinary(ctx context.Context, binaryPath string, expectedVersi
 	return verifyBinaryVersion(ctx, binaryPath, expectedVersion)
 }
 
-func verifyBinaryVersion(ctx context.Context, binaryPath string, expectedVersion string) error {
+// versionProbeCommand runs `version` with plain output: a piped invocation
+// prints JSON by default, and the probes compare the `mailcli X.Y.Z` line.
+func versionProbeCommand(ctx context.Context, binaryPath string) *exec.Cmd {
 	command := exec.CommandContext(ctx, binaryPath, "version")
 	for _, entry := range command.Environ() {
 		if !strings.HasPrefix(entry, "MAILCLI_OUTPUT=") {
@@ -100,7 +102,11 @@ func verifyBinaryVersion(ctx context.Context, binaryPath string, expectedVersion
 		}
 	}
 	command.Env = append(command.Env, "MAILCLI_OUTPUT=human")
-	output, err := command.CombinedOutput()
+	return command
+}
+
+func verifyBinaryVersion(ctx context.Context, binaryPath string, expectedVersion string) error {
+	output, err := versionProbeCommand(ctx, binaryPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("run installed binary: %w: %s", err, strings.TrimSpace(string(output)))
 	}
