@@ -26,6 +26,9 @@ type excerptInput struct {
 	complete bool
 	source   mail.ExcerptSource
 	err      error
+	// readBytes is what the local read took from the source, kept even when
+	// the row then goes to IMAP, the cache or fails.
+	readBytes int64
 	// cached marks an excerpt served from the excerpt cache instead of data.
 	cached  bool
 	excerpt string
@@ -118,17 +121,15 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 }
 
 // excerptSourceCharge is what one row takes from the page's excerpt source
-// budget: the local source bytes it read, the bound of a planned IMAP prefix
-// fetch, and nothing for a cache hit or an unavailable source.
+// budget: every local source byte it read, also when the row then fails or goes
+// to IMAP, plus the bound of a planned IMAP prefix fetch. A cache hit that
+// skipped the local read costs nothing.
 func excerptSourceCharge(input excerptInput, needsRemote bool) int64 {
-	switch {
-	case needsRemote:
-		return mail.IMAPExcerptTextBytes
-	case input.cached:
-		return 0
-	default:
-		return int64(len(input.data))
+	charge := input.readBytes
+	if needsRemote {
+		charge += mail.IMAPExcerptTextBytes
 	}
+	return charge
 }
 
 // noteEnrichmentFailure reports the first local or remote failure per row
@@ -141,6 +142,10 @@ func noteEnrichmentFailure(summary *mail.MessageSummary, err error) {
 }
 
 func (c *Client) enrichThreading(ctx context.Context, ref string, summary *mail.MessageSummary) {
+	if c.store == nil {
+		noteEnrichmentFailure(summary, c.readUnavailableError())
+		return
+	}
 	// No full-source fallback: production transports implement headers.
 	local, err := c.store.GetMessageWithIntent(ctx, ref, mail.MessageReadIntentHeaders)
 	switch {
@@ -165,27 +170,54 @@ func (c *Client) enrichThreading(ctx context.Context, ref string, summary *mail.
 // and an excerpt fetcher exists, it also resolves the IMAP target; the
 // returned input is then the fallback if the remote fetch fails.
 func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, imapTarget, bool) {
-	unavailable := excerptInput{source: mail.ExcerptSourceUnavailable}
 	if c.store == nil {
-		return unavailable, imapTarget{}, false
+		return excerptInput{source: mail.ExcerptSourceUnavailable, err: c.readUnavailableError()}, imapTarget{}, false
 	}
-	data, complete, localPartial, err := c.store.readExcerptSource(ctx, ref)
-	fallback := excerptInput{data: data, complete: complete, source: mail.ExcerptSourceLocal, err: err}
-	if err != nil {
-		fallback = excerptInput{source: mail.ExcerptSourceUnavailable, err: err}
-	}
-	if !excerptNeedsRemote(err, localPartial) {
-		return fallback, imapTarget{}, false
-	}
-	if _, supported := c.send.ImapClient().(transport.MessageExcerptFetcher); !supported {
-		return fallback, imapTarget{}, false
-	}
-	if key, keyErr := c.store.excerptCacheKey(ctx, ref); keyErr == nil {
-		if entry, hit := c.excerpts.load(key); hit {
-			return excerptInput{source: mail.ExcerptSourceIMAPPartial, cached: true, excerpt: entry.Excerpt, complete: entry.Complete}, imapTarget{}, false
+	_, remoteCapable := c.send.ImapClient().(transport.MessageExcerptFetcher)
+	// The cache is asked as soon as the source is known to be partial, before
+	// any of its bytes are read; a complete local source never consults it.
+	var cacheKey string
+	lookedUp := false
+	lookup := func() (excerptInput, bool) {
+		lookedUp = true
+		key, keyErr := c.store.excerptCacheKey(ctx, ref)
+		if keyErr != nil {
+			return excerptInput{}, false
 		}
-		fallback.cacheKey = key
+		cacheKey = key
+		entry, hit := c.excerpts.load(key)
+		if !hit {
+			return excerptInput{}, false
+		}
+		return excerptInput{source: mail.ExcerptSourceIMAPPartial, cached: true, excerpt: entry.Excerpt, complete: entry.Complete}, true
 	}
+	var cachedInput excerptInput
+	skipRead := func(partial bool) bool {
+		if !partial || !remoteCapable {
+			return false
+		}
+		var hit bool
+		cachedInput, hit = lookup()
+		return hit
+	}
+	data, complete, localPartial, skipped, err := c.store.readExcerptSourceUnless(ctx, ref, skipRead)
+	if skipped {
+		return cachedInput, imapTarget{}, false
+	}
+	fallback := excerptInput{data: data, complete: complete, source: mail.ExcerptSourceLocal, err: err, readBytes: int64(len(data))}
+	if err != nil {
+		fallback = excerptInput{source: mail.ExcerptSourceUnavailable, err: err, readBytes: int64(len(data))}
+	}
+	if !excerptNeedsRemote(err, localPartial) || !remoteCapable {
+		return fallback, imapTarget{}, false
+	}
+	if !lookedUp {
+		if cached, hit := lookup(); hit {
+			cached.readBytes = fallback.readBytes
+			return cached, imapTarget{}, false
+		}
+	}
+	fallback.cacheKey = cacheKey
 	target, targetErr := c.resolveImapTargetForExcerpt(ctx, ref)
 	if targetErr != nil {
 		fallback.err = targetErr
@@ -282,14 +314,28 @@ func excerptNeedsRemote(localErr error, localPartial bool) bool {
 }
 
 func (s *Store) readExcerptSource(ctx context.Context, ref string) (data []byte, complete bool, localPartial bool, resultErr error) {
+	data, complete, localPartial, _, resultErr = s.readExcerptSourceUnless(ctx, ref, nil)
+	return data, complete, localPartial, resultErr
+}
+
+// readExcerptSourceUnless opens the local source and reads at most the excerpt
+// cap of it. skip is asked whether the source is partial before any byte is
+// read; when it returns true nothing is read and skipped is set. A read error
+// returns the bytes read up to it.
+func (s *Store) readExcerptSourceUnless(
+	ctx context.Context, ref string, skip func(partial bool) bool,
+) (data []byte, complete bool, localPartial bool, skipped bool, resultErr error) {
 	_, source, err := s.openMessageSource(ctx, ref)
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, false, false, err
 	}
 	defer joinCloseError(&resultErr, source, "excerpt source")
+	if skip != nil && skip(source.partial) {
+		return nil, false, source.partial, true, nil
+	}
 	reader := mimeContextReader{ctx: ctx, reader: s.measuredSourceReader(source)}
 	data, err = io.ReadAll(io.LimitReader(reader, mail.MaximumExcerptSourceBytes))
-	return data, !source.partial && source.length <= mail.MaximumExcerptSourceBytes, source.partial, err
+	return data, !source.partial && source.length <= mail.MaximumExcerptSourceBytes, source.partial, false, err
 }
 
 // Input, decoded text and part count are independently bounded. Parsing uses

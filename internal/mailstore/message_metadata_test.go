@@ -245,6 +245,136 @@ func TestEnrichMessagesReusesCachedIMAPExcerpts(t *testing.T) {
 	}
 }
 
+func TestEnrichMessagesWithoutALocalStoreReportsPerRowErrorsInsteadOfPanicking(t *testing.T) {
+	storeBound, err := mailref.EncodeMessage(mailref.Message{
+		AccountID: testAccountID, MailboxPath: []string{"INBOX"}, LibraryID: "1",
+		ExpectedStoreUUID: "38BF1CB5-482E-4470-9418-2C3F146C62F1", ExpectedStoreMailboxID: 1,
+		ExpectedStoreMessageID: 5, ExpectedStoreGlobalID: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appleEvents, err := mailref.EncodeMessage(mailref.Message{AccountID: "A", MailboxPath: []string{"INBOX"}, LibraryID: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []mail.MessageEnrichmentRequest{
+		{Threading: true}, {Excerpt: true, ExcerptLength: 40}, {Threading: true, Excerpt: true, ExcerptLength: 40},
+	} {
+		summaries, err := (&Client{}).EnrichMessages(context.Background(), []string{storeBound, appleEvents}, request)
+		if err != nil {
+			t.Fatalf("EnrichMessages(%+v) error = %v", request, err)
+		}
+		if summaries[0].EnrichmentError != "mail_store_unavailable" {
+			t.Fatalf("store-bound row with %+v: enrichment_error = %q, want mail_store_unavailable", request, summaries[0].EnrichmentError)
+		}
+		if summaries[1].EnrichmentError == "" {
+			t.Fatalf("Apple Events row with %+v carries no enrichment_error", request)
+		}
+	}
+}
+
+func TestEnrichMessagesCacheHitReadsNoLocalSource(t *testing.T) {
+	operator := &excerptBatchOperator{sources: map[uint32]string{
+		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nCached remote text",
+		203: "Message-ID: <local-103@example.com>\r\nContent-Type: text/plain\r\n\r\nSecond remote text",
+	}}
+	client, refs := newLocalUIDExcerptFixture(t, operator)
+	client.excerpts = excerptCache{dir: t.TempDir()}
+	partialRows := []string{refs[0], refs[2]}
+	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240}
+	if _, err := client.EnrichMessages(context.Background(), partialRows, request); err != nil {
+		t.Fatal(err)
+	}
+	metrics := &readMetrics{}
+	client.store.readMetrics = metrics
+	summaries, err := client.EnrichMessages(context.Background(), partialRows, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.sourceBytes.Load() != 0 {
+		t.Fatalf("a cached page read %d local source bytes, want none", metrics.sourceBytes.Load())
+	}
+	for index, summary := range summaries {
+		if summary.ExcerptSource != mail.ExcerptSourceIMAPPartial || summary.Excerpt == "" || summary.EnrichmentError != "" {
+			t.Fatalf("row %d = %+v, want the cached IMAP excerpt", index, summary)
+		}
+	}
+}
+
+func TestEnrichMessagesIgnoresACachedExcerptOnceTheLocalSourceIsComplete(t *testing.T) {
+	operator := &excerptBatchOperator{sources: map[uint32]string{
+		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nStale IMAP text",
+		203: "Message-ID: <local-103@example.com>\r\nContent-Type: text/plain\r\n\r\nSecond remote text",
+	}}
+	client, refs := newLocalUIDExcerptFixture(t, operator)
+	client.excerpts = excerptCache{dir: t.TempDir()}
+	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240}
+	if _, err := client.EnrichMessages(context.Background(), refs[:1], request); err != nil {
+		t.Fatal(err)
+	}
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := client.store.messageBasePath(location, 102)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(base + ".partial.emlx"); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureEMLX(t, client.store, 102, "imap://"+testAccountID+"/INBOX",
+		[]byte("Message-ID: <local-102@example.com>\r\nSubject: Status Update\r\nContent-Type: text/plain\r\n\r\nDownloaded local text"))
+	summaries, err := client.EnrichMessages(context.Background(), refs[:1], request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaries[0].ExcerptSource != mail.ExcerptSourceLocal || summaries[0].Excerpt != "Downloaded local text" {
+		t.Fatalf("summary = %+v, want the complete local source to win over the cached IMAP excerpt", summaries[0])
+	}
+}
+
+func TestEnrichMessagesBudgetCountsTheLocalBytesReadBeforeTheIMAPFetch(t *testing.T) {
+	operator := &excerptBatchOperator{sources: map[uint32]string{
+		202: "Message-ID: <local-102@example.com>\r\nContent-Type: text/plain\r\n\r\nRemote text",
+		203: "Message-ID: <local-103@example.com>\r\nContent-Type: text/plain\r\n\r\nRemote text",
+	}}
+	client, refs := newLocalUIDExcerptFixture(t, operator)
+	location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rowID := range []int64{102, 103} {
+		base, err := client.store.messageBasePath(location, rowID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		headers := []byte(fmt.Sprintf("Message-ID: <local-%d@example.com>\r\nSubject: partial\r\nX-Padding: %s\r\n\r\n", rowID, strings.Repeat("a", 100<<10)))
+		framed := append([]byte(fmt.Sprintf("%-10d\n", len(headers))), headers...)
+		if err := os.WriteFile(base+".partial.emlx", append(framed, validPlistTrailer()...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pageRows := make([]string, 0, 3*enrichmentConcurrency)
+	for range 3 * enrichmentConcurrency / 2 {
+		pageRows = append(pageRows, refs[0], refs[2])
+	}
+	// Each row reads about 100 KiB locally and plans a 64 KiB IMAP prefix: the
+	// first chunk alone is over this budget once the local reads are counted.
+	request := mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 40, ExcerptSourceBudget: 400 << 10}
+	summaries, err := client.EnrichMessages(context.Background(), pageRows, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, summary := range summaries {
+		exhausted := summary.EnrichmentError == mail.EnrichmentBudgetExhausted
+		if (index < enrichmentConcurrency && exhausted) || (index >= enrichmentConcurrency && !exhausted) {
+			t.Fatalf("row %d = %+v; the first chunk is read and the budget stops every later chunk", index, summary)
+		}
+	}
+}
+
 func TestExcerptCacheIgnoresExpiredAndOversizedEntries(t *testing.T) {
 	cache := excerptCache{dir: t.TempDir()}
 	if err := cache.store("fresh", cachedExcerpt{Excerpt: "text", Complete: true}); err != nil {
@@ -405,7 +535,7 @@ func TestEnrichMessagesStopsExcerptsAtTheByteBudgetButKeepsThreading(t *testing.
 }
 
 func TestExcerptSourceChargeCountsRealBytes(t *testing.T) {
-	local := excerptInput{data: make([]byte, 1000), source: mail.ExcerptSourceLocal}
+	local := excerptInput{data: make([]byte, 1000), readBytes: 1000, source: mail.ExcerptSourceLocal}
 	cached := excerptInput{cached: true, excerpt: "cached", source: mail.ExcerptSourceIMAPPartial}
 	for _, test := range []struct {
 		name        string
@@ -414,8 +544,10 @@ func TestExcerptSourceChargeCountsRealBytes(t *testing.T) {
 		want        int64
 	}{
 		{"local source counts its bytes", local, false, 1000},
-		{"cache hit costs nothing", cached, false, 0},
-		{"planned IMAP fetch counts its bound", excerptInput{}, true, mail.IMAPExcerptTextBytes},
+		{"cache hit without a local read costs nothing", cached, false, 0},
+		{"cache hit after a local read counts that read", excerptInput{cached: true, readBytes: 500}, false, 500},
+		{"planned IMAP fetch counts the local read and its bound", excerptInput{readBytes: 700}, true, 700 + mail.IMAPExcerptTextBytes},
+		{"failed read keeps the bytes it read", excerptInput{source: mail.ExcerptSourceUnavailable, readBytes: 300}, false, 300},
 		{"unavailable source costs nothing", excerptInput{source: mail.ExcerptSourceUnavailable}, false, 0},
 	} {
 		if got := excerptSourceCharge(test.input, test.needsRemote); got != test.want {
