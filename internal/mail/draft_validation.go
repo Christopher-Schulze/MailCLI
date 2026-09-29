@@ -15,8 +15,11 @@ const (
 	SendBlockerRecipientsMissing = "recipients_missing"
 )
 
-// SendBlockers lists what stops a send of this draft today. It is derived
-// review evidence, never part of the draft revision.
+// SendBlockers lists the two content blockers a draft shows without contacting
+// anything: an empty sender and no recipients. An empty list is not a
+// readiness signal: sending still validates stored limits, claims, the thread
+// source, addresses, identity and transport, and its errors stay authoritative.
+// The list is derived review evidence, never part of the draft revision.
 func SendBlockers(draft Draft) []string {
 	blockers := []string{}
 	if strings.TrimSpace(draft.From) == "" {

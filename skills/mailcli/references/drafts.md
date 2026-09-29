@@ -4,7 +4,7 @@ Review a local create or update before any authorized send or destruction.
 
 A draft ref is given as `--ref` or as a positional REF; when several are supplied they must all match. Open and adopt take store refs, every other command takes local refs, and scripts and recovery commands use `--ref`.
 
-Reply and forward drafts take `from` from the source account's address when that address is unique, and leave it empty otherwise. Draft views carry `from` and `send_blockers` (`from_missing`, `recipients_missing`); resolve every blocker (`--from ADDRESS` on update) before sending. Blockers are not part of the revision.
+Reply and forward drafts take `from` from the source account's address when that address is unique, and leave it empty otherwise. Draft views carry `from` and `send_blockers` (`from_missing`, `recipients_missing`); resolve every blocker (`--from ADDRESS` on update) before sending. Blockers are not part of the revision, and an empty list does not mean sendable: `drafts send` still validates and its errors decide.
 
 - A preview never truncates. When a view overflows, run `drafts inspect --ref REF --view full --export /absolute/new/path --json`.
 - Rich drafts are bounded (see the manual); review the persisted loss diagnostics and sanitization. A rejected or canceled render is not saved.

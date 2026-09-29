@@ -71,7 +71,7 @@ func TestSendBlockersNameWhatStopsASend(t *testing.T) {
 		draft Draft
 		want  []string
 	}{
-		{"ready", Draft{From: "me@example.com", To: []Recipient{{Address: "you@example.com"}}}, []string{}},
+		{"no content blocker", Draft{From: "me@example.com", To: []Recipient{{Address: "you@example.com"}}}, []string{}},
 		{"no sender", Draft{To: []Recipient{{Address: "you@example.com"}}}, []string{"from_missing"}},
 		{"blank sender and no recipients", Draft{From: "  "}, []string{"from_missing", "recipients_missing"}},
 		{"bcc counts as a recipient", Draft{From: "me@example.com", BCC: []Recipient{{Address: "you@example.com"}}}, []string{}},

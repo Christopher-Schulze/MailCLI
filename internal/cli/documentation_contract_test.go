@@ -32,6 +32,26 @@ func TestOperationalDocumentationMatchesRuntimeContracts(t *testing.T) {
 	assertQualifiedMailAppClaim(t, artifacts)
 }
 
+func TestSendBlockersAreDocumentedAsContentChecksOnly(t *testing.T) {
+	manual := strings.Join(strings.Fields(readRepositoryFile(t, "docs/documentation.md")), " ")
+	guide := strings.Join(strings.Fields(readRepositoryFile(t, "skills/mailcli/references/drafts.md")), " ")
+	for name, content := range map[string]string{"manual": manual, "drafts guide": guide} {
+		for _, claim := range []string{"send_blockers", mail.SendBlockerFromMissing, mail.SendBlockerRecipientsMissing, "does not mean"} {
+			if !strings.Contains(content, claim) {
+				t.Errorf("%s omits %q", name, claim)
+			}
+		}
+	}
+	for _, path := range []string{"README.md", "docs/documentation.md", "skills/mailcli/SKILL.md", "skills/mailcli/references/drafts.md"} {
+		content := strings.ToLower(readRepositoryFile(t, path))
+		for _, claim := range []string{"ready to send", "is sendable", "send-ready"} {
+			if strings.Contains(content, claim) {
+				t.Errorf("%s makes a readiness claim %q", path, claim)
+			}
+		}
+	}
+}
+
 func TestCatalogCursorDocumentationMatchesRuntimeContract(t *testing.T) {
 	documentation := strings.Join(strings.Fields(readRepositoryFile(t, "docs/documentation.md")), " ")
 	for _, claim := range []string{

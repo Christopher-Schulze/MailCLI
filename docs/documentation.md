@@ -776,6 +776,7 @@ Reply-all moves the other To and CC recipients into CC, excluding reply targets 
 Explicit input fields win over derived values, including an intentionally empty `subject`, `to` or `cc`; native recipient flags accept an empty value for that case.
 Without `--from` and `--account`, the sender is the account that holds the source message: its address found in the source To or CC, otherwise its only address; a degraded account or an ambiguous choice leaves `from` empty.
 `drafts create`, `inspect`, `preview` and the reply and forward responses carry `from` (empty when unset) and `send_blockers` (`from_missing`, `recipients_missing`); the blockers are review evidence and never part of the revision.
+`send_blockers` covers only these two content checks, which need no contact with any server: an empty list does not mean the draft can be sent, because `drafts send` still validates stored limits, claims, the thread source, addresses, sender identity and transport, and its errors are authoritative.
 Final recipient roles are deduplicated by normalized address before validation.
 The draft stores a canonical source Message-ID and thread chain: valid entries in first-seen order without duplicates, the direct parent once at the end, capped at the newest 20 entries.
 Sending emits that `In-Reply-To` and `References` chain; malformed entries and control characters are rejected.
