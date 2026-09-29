@@ -65,11 +65,31 @@ func TestHeaderIdentityNormalizesWhatALocalRowStores(t *testing.T) {
 	header := "From: =?UTF-8?Q?J=C3=BCrgen?= <J.Mueller@Example.COM>\r\nSubject: =?UTF-8?B?QVc6ICBHcsO8w59lICAgYXVzIE3DvG5jaGVu?=\r\n" +
 		"Date: Tue, 29 Sep 2026 10:15:00 +0200\r\n\r\n"
 	identity, ok := ParseHeaderIdentity([]byte(header))
-	if !ok || identity.Address != "j.mueller@example.com" || identity.SentUnix != 1790669700 || identity.Subject != "aw: grüße aus münchen" {
+	if !ok || identity.Address != "j.mueller@example.com" || identity.SentUnix != 1790669700 || identity.Subject != "grüße aus münchen" {
 		t.Fatalf("identity = %+v, ok = %t", identity, ok)
 	}
 	if _, ok := ParseHeaderIdentity([]byte("Subject: no sender and no date\r\n\r\n")); ok {
 		t.Fatal("a header without sender and date produced an identity")
+	}
+}
+
+// The Envelope Index stores a subject without its reply or forward prefix, so
+// both sides of an identity comparison drop them.
+func TestNormalizeIdentitySubjectDropsReplyAndForwardPrefixes(t *testing.T) {
+	for subject, want := range map[string]string{
+		"Status Update":                    "status update",
+		"Re: Status Update":                "status update",
+		"AW:  RE: Status   Update":         "status update",
+		"Fwd: WG: Status Update":           "status update",
+		"RE[2]: Status Update":             "status update",
+		"Antwort: Status Update":           "antwort: status update",
+		"Re: Reinvent: the plan":           "reinvent: the plan",
+		"  SV: VS: TR: ODP: RES: RV: Plan": "plan",
+		"Re:":                              "",
+	} {
+		if got := NormalizeIdentitySubject(subject); got != want {
+			t.Errorf("NormalizeIdentitySubject(%q) = %q, want %q", subject, got, want)
+		}
 	}
 }
 

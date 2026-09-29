@@ -77,6 +77,10 @@ func localIdentityHeader(t *testing.T, store *Store, rowID int64) []byte {
 	return []byte(fmt.Sprintf("From: %s\r\nSubject: %s\r\nDate: %s\r\n\r\n", address, subject, time.Unix(sent, 0).UTC().Format(time.RFC1123Z)))
 }
 
+func prefixedSubject(header []byte, prefix string) []byte {
+	return []byte(strings.Replace(string(header), "Subject: ", "Subject: "+prefix, 1))
+}
+
 // Gmail keeps every message once, in All Mail, and shows a label such as INBOX
 // through the labels table: the local rows carry All Mail UIDs, which are not
 // comparable with INBOX UIDs, so the comparison uses sender, subject and date.
@@ -86,7 +90,8 @@ func TestNewMessagesMatchesLabelBackedMailboxesByHeaderIdentity(t *testing.T) {
 	updateFixtureMessage(t, client.store, `INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`)
 	operator.recent = map[string]transport.RecentMailbox{"INBOX": {UIDValidity: 900, Exists: 3, Messages: []transport.RecentMessage{
 		{UID: 41001, Seen: true, Header: localIdentityHeader(t, client.store, 102)},
-		{UID: 41002, Seen: true, Header: localIdentityHeader(t, client.store, 103)},
+		// A reply the server shows as "Re: ...": the store keeps the subject without its prefix.
+		{UID: 41002, Seen: true, Header: prefixedSubject(localIdentityHeader(t, client.store, 103), "Re: ")},
 		{UID: 41003, Header: []byte("From: New Sender <new@example.com>\r\nSubject: Really new\r\nDate: Tue, 29 Sep 2026 10:15:00 +0200\r\nMessage-ID: <new@example.com>\r\n\r\n")},
 	}}}
 	result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"mime"
 	stdmail "net/mail"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -192,10 +193,16 @@ func ParseHeaderIdentity(header []byte) (HeaderIdentity, bool) {
 	return identity, haveAddress && haveDate
 }
 
+// subjectPrefix matches the reply and forward prefixes of common mail clients
+// (Re, Aw, Fw, Fwd, Wg, Sv, Vs, Tr, Odp, Res, Rv, optionally numbered such as
+// Re[2]); the Envelope Index keeps the subject without them.
+var subjectPrefix = regexp.MustCompile(`^(?:(?:re|aw|fwd?|wg|sv|vs|tr|odp|res|rv)(?:\[\d+\])?\s*:\s*)+`)
+
 // NormalizeIdentitySubject folds a subject for identity comparison: NFC,
-// lower case, single spaces.
+// lower case, single spaces, without reply and forward prefixes.
 func NormalizeIdentitySubject(subject string) string {
-	return strings.ToLower(strings.Join(strings.Fields(norm.NFC.String(subject)), " "))
+	folded := strings.ToLower(strings.Join(strings.Fields(norm.NFC.String(subject)), " "))
+	return subjectPrefix.ReplaceAllString(folded, "")
 }
 
 // cleanHeaderText collapses whitespace and control characters to single
