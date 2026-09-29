@@ -1128,8 +1128,6 @@ MailCLI implements the app-specific-password path with SMTP `AUTH PLAIN` and IMA
 Provider policy is distinct from that path.
 Google ended username-and-password-only access from third-party apps for Google Workspace accounts beginning in January 2025, not app passwords for every Google Account; app passwords need 2-Step Verification and may be unavailable for organization-managed or Advanced Protection accounts ([Google less-secure app guidance](https://support.google.com/accounts/answer/6010255), [Google app-password guidance](https://support.google.com/mail/answer/185833)).
 Apple documents Apple Account authorization for supported third-party apps and app-specific passwords otherwise ([Apple Account authorization](https://support.apple.com/en-us/121539), [Apple app-specific passwords](https://support.apple.com/en-us/102654)).
-A Gmail OAuth2/XOAUTH2 path (authorization code with PKCE, a Keychain-stored refresh token and XOAUTH2 beside the existing mechanisms) was evaluated and deferred because the `https://mail.google.com/` scope is restricted and needs Google verification ([restricted-scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)).
-Revisit it if provider policy invalidates app passwords, an authorization flow works with direct SMTP and IMAP, or valid app passwords are rejected.
 
 ### Scope
 
