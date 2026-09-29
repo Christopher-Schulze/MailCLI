@@ -14,7 +14,14 @@ for command_name in awk base64 basename cat cp dirname grep mkdir mktemp openssl
   require_command "${command_name}"
 done
 
-OPENSSL_BIN="${MAILCLI_TEST_OPENSSL_BIN:-$(command -v openssl || true)}"
+OPENSSL_BIN="${MAILCLI_TEST_OPENSSL_BIN:-}"
+if [[ -z "${OPENSSL_BIN}" ]] && command -v brew >/dev/null 2>&1; then
+  BREW_OPENSSL_PREFIX="$(brew --prefix openssl@3 2>/dev/null || true)"
+  if [[ -n "${BREW_OPENSSL_PREFIX}" && -x "${BREW_OPENSSL_PREFIX}/bin/openssl" ]]; then
+    OPENSSL_BIN="${BREW_OPENSSL_PREFIX}/bin/openssl"
+  fi
+fi
+OPENSSL_BIN="${OPENSSL_BIN:-$(command -v openssl || true)}"
 if [[ -z "${OPENSSL_BIN}" || ! -x "${OPENSSL_BIN}" ]]; then
   printf 'Bootstrap verification requires an independently trusted OpenSSL 3 binary\n' >&2
   exit 2
