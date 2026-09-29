@@ -273,6 +273,96 @@ func TestNewMessagesDoesNotCompareUIDsWithoutLocalValidity(t *testing.T) {
 	}
 }
 
+func TestNewMessagesUsesOnlyVisibleMailboxMembership(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		sql         string
+		validity    uint32
+		moveToAll   bool
+		wrongID     bool
+		serverEmpty bool
+		serverNoGen bool
+		state       string
+		matchedBy   string
+		newUIDs     []uint32
+	}{
+		{name: "deleted physical row is missing", sql: `UPDATE messages SET deleted = 1 WHERE ROWID = 102`, validity: 900, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID, newUIDs: []uint32{5001}},
+		{name: "deleted label does not select header matching", sql: `UPDATE messages SET deleted = 1, mailbox = 2 WHERE ROWID = 102; INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1)`, validity: 900, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID, newUIDs: []uint32{5001}},
+		{name: "dangling label does not select header matching", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (999999, 1)`, validity: 900, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID},
+		{name: "empty physical membership needs no generation", sql: `UPDATE messages SET deleted = 1 WHERE mailbox = 1`, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID, newUIDs: []uint32{5002, 5001}},
+		{name: "empty label membership needs no generation", sql: `UPDATE messages SET deleted = 1, mailbox = 2 WHERE ROWID IN (102, 103); INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID, newUIDs: []uint32{5002, 5001}},
+		{name: "empty membership ignores stale generation", sql: `UPDATE messages SET deleted = 1 WHERE mailbox = 1`, validity: 901, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID, newUIDs: []uint32{5002, 5001}},
+		{name: "empty server and local membership", sql: `UPDATE messages SET deleted = 1 WHERE mailbox = 1`, serverEmpty: true, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByUID},
+		{name: "empty membership still requires server generation", sql: `UPDATE messages SET deleted = 1 WHERE mailbox = 1`, serverNoGen: true, state: mail.NewMailboxStateUnresolved},
+		{name: "physical candidate needs generation despite dangling labels", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (999999, 1)`, state: mail.NewMailboxStateUnresolved},
+		{name: "mixed membership needs physical generation", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1)`, state: mail.NewMailboxStateUnresolved},
+		{name: "mixed membership rejects stale physical generation", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1)`, validity: 901, state: mail.NewMailboxStateUIDValidityChange},
+		{name: "visible labels need exact ID not physical generation", sql: `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103); INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`, moveToAll: true, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByHeaders},
+		{name: "label metadata cannot substitute for exact ID", sql: `UPDATE messages SET mailbox = 2, remote_id = ROWID + 77000 WHERE ROWID IN (102, 103); INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1), (103, 1)`, moveToAll: true, wrongID: true, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByHeaders, newUIDs: []uint32{5001}},
+		{name: "mixed membership keeps exact ID verification", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1)`, validity: 900, wrongID: true, state: mail.NewMailboxStateChecked, matchedBy: mail.NewMatchedByHeaders, newUIDs: []uint32{5001}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, operator := newMessagesFixture(t, "new-visible@gmail.com", nil)
+			first := localIdentityHeader(t, client.store, 102)
+			if test.wrongID {
+				first = []byte(strings.Replace(string(first), "<102@example.com>", "<other@example.com>", 1))
+			}
+			recent := transport.RecentMailbox{UIDValidity: 900, Exists: 2, Messages: []transport.RecentMessage{
+				{UID: 5001, Header: first}, {UID: 5002, Header: localIdentityHeader(t, client.store, 103)},
+			}}
+			if test.serverEmpty {
+				recent.Exists, recent.Messages = 0, nil
+			}
+			if test.serverNoGen {
+				recent.UIDValidity = 0
+			}
+			operator.recent = map[string]transport.RecentMailbox{"INBOX": recent}
+			updateFixtureMessage(t, client.store, test.sql)
+			if test.moveToAll {
+				moveFixtureMessagesToAll(t, client.store, 102, 103)
+			}
+			location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.validity == 0 {
+				path, err := mailboxInfoPath(client.store.versionRoot, location)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else if test.validity != 900 {
+				writeFixtureMailboxInfo(t, client.store, location, test.validity)
+			}
+			result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 5})
+			if err != nil || len(result.Failures) != 0 || len(result.Mailboxes) != 1 || result.Complete != (test.state == mail.NewMailboxStateChecked) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			mailbox := result.Mailboxes[0]
+			if mailbox.State != test.state || mailbox.MatchedBy != test.matchedBy || mailbox.NewCount != len(test.newUIDs) || len(mailbox.Messages) != len(test.newUIDs) || mailbox.Truncated {
+				t.Fatalf("mailbox=%+v; want state=%s matched_by=%s UIDs=%v", mailbox, test.state, test.matchedBy, test.newUIDs)
+			}
+			for index, row := range mailbox.Messages {
+				server, err := mailref.DecodeServer(row.ServerRef)
+				if err != nil || server.UID != test.newUIDs[index] || server.UIDValidity != 900 {
+					t.Fatalf("server ref=%+v error=%v; want UID=%d generation=900", server, err, test.newUIDs[index])
+				}
+			}
+		})
+	}
+}
+
+func TestLocalServerUIDsUsesVisiblePhysicalAndLabelMembers(t *testing.T) {
+	client, _ := newMessagesFixture(t, "visible-uids@gmail.com", nil)
+	updateFixtureMessage(t, client.store, `UPDATE messages SET deleted = 1 WHERE ROWID = 102; UPDATE messages SET remote_id = 5003 WHERE ROWID = 101; INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1), (102, 1), (999999, 1)`)
+	known, err := client.store.localServerUIDs(context.Background(), 1, []uint32{5001, 5002, 5003, 5004})
+	if err != nil || len(known) != 2 || known[5001] || !known[5002] || !known[5003] || known[5004] {
+		t.Fatalf("visible local UIDs=%v error=%v; want only physical 5002 and label 5003", known, err)
+	}
+}
+
 func TestNewMessagesKeepsGoingAfterAFailureAndReportsIt(t *testing.T) {
 	for _, code := range []string{transport.CodeIMAPTimeout, transport.CodeIMAPResponseMalformed, "mailbox_uidvalidity_changed"} {
 		t.Run(code, func(t *testing.T) {

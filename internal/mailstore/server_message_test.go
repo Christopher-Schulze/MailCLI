@@ -136,6 +136,59 @@ func TestServerRefDoesNotChooseAHeaderCollisionAsLocalRef(t *testing.T) {
 	}
 }
 
+func TestServerRefLocalLookupUsesVisibleMembershipAndGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		sql            string
+		validity       uint32
+		matchingHeader bool
+		wantRef        bool
+	}{
+		{name: "deleted label cannot hide the physical UID match", sql: `UPDATE messages SET deleted = 1 WHERE ROWID = 101; INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1), (999999, 1)`, validity: 900, wantRef: true},
+		{name: "deleted physical UID cannot publish a local ref", sql: `UPDATE messages SET deleted = 1 WHERE ROWID = 102`, validity: 900},
+		{name: "empty visible membership has no counterpart", sql: `UPDATE messages SET deleted = 1 WHERE mailbox = 1; INSERT INTO labels(message_id, mailbox_id) VALUES (102, 1)`, validity: 0},
+		{name: "mixed membership needs physical generation", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1)`, validity: 0, matchingHeader: true},
+		{name: "mixed membership rejects changed physical generation", sql: `INSERT INTO labels(message_id, mailbox_id) VALUES (101, 1)`, validity: 901, matchingHeader: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := serverReadFixture(t, "srv-visible@gmail.com")
+			updateFixtureMessage(t, client.store, test.sql)
+			location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.validity == 0 {
+				path, err := mailboxInfoPath(client.store.versionRoot, location)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else if test.validity != 900 {
+				writeFixtureMailboxInfo(t, client.store, location, test.validity)
+			}
+			server := mailref.Server{AccountID: testAccountID, MailboxPath: []string{"INBOX"}, UIDValidity: 900, UID: 5001}
+			// A deleted label cannot override a physical UID. In mixed membership,
+			// even a matching exact Message-ID cannot bypass physical generation.
+			headers := []byte("Subject: unrelated\r\n\r\n")
+			if test.matchingHeader {
+				headers = localIdentityHeader(t, client.store, 102)
+			}
+			ref, err := client.store.localRefForServerMessage(context.Background(), server, headers)
+			if err != nil || (ref != "") != test.wantRef {
+				t.Fatalf("local ref=%q error=%v; want reference=%t", ref, err, test.wantRef)
+			}
+			if test.wantRef {
+				local, err := mailref.DecodeMessage(ref)
+				if err != nil || !local.IsStoreBound() || local.LibraryID != "102" || local.ExpectedIMAPUID != 5001 {
+					t.Fatalf("local ref=%+v error=%v; want verified physical row 102 UID 5001", local, err)
+				}
+			}
+		})
+	}
+}
+
 func TestServerRefRawSourceAndAttachmentSave(t *testing.T) {
 	client, _ := serverReadFixture(t, "srv-raw@gmail.com")
 	ref := serverRefFor(t, 5003)

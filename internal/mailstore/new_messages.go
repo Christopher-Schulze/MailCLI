@@ -168,11 +168,11 @@ func (c *Client) compareMailbox(
 		compared.State, compared.Reason = mail.NewMailboxStateUnresolved, "the server did not report UIDVALIDITY"
 		return compared, nil
 	}
-	hasLabels, err := c.store.mailboxHasLabels(ctx, record.RowID)
+	hasPhysical, hasLabels, err := c.store.mailboxMembership(ctx, record.RowID)
 	if err != nil {
 		return compared, err
 	}
-	if !hasLabels {
+	if hasPhysical {
 		localValidity, validityErr := c.store.mailboxUIDValidity(ctx, record.Location)
 		if validityErr != nil {
 			return compared, validityErr
@@ -188,11 +188,14 @@ func (c *Client) compareMailbox(
 		}
 	}
 	var missing []transport.RecentMessage
-	if hasLabels {
+	compared.MatchedBy = mail.NewMatchedByUID
+	if !hasPhysical && !hasLabels {
+		// No local candidate exists, so no UID equality or generation is asserted.
+		missing = append([]transport.RecentMessage(nil), recent.Messages...)
+	} else if hasLabels {
 		compared.MatchedBy = mail.NewMatchedByHeaders
 		missing, err = c.store.missingByHeaderIdentity(ctx, record.RowID, reference.AccountID, reference.Path, recent.Messages)
 	} else {
-		compared.MatchedBy = mail.NewMatchedByUID
 		missing, err = c.store.missingByServerUID(ctx, record.RowID, recent.Messages)
 	}
 	if err != nil {
@@ -214,16 +217,18 @@ func (c *Client) compareMailbox(
 	return compared, nil
 }
 
-// mailboxHasLabels reports whether the local store keeps this mailbox as
-// labels of other rows (Gmail) instead of as physical rows.
-func (s *Store) mailboxHasLabels(ctx context.Context, mailboxRowID int64) (bool, error) {
-	var hasLabels bool
-	if err := s.database.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM labels WHERE mailbox_id = ?)", mailboxRowID,
-	).Scan(&hasLabels); err != nil {
-		return false, fmt.Errorf("check Envelope Index mailbox labels: %w", err)
+// mailboxMembership observes visible physical and label-backed candidates.
+// Empty membership does not establish how a provider represents the mailbox.
+func (s *Store) mailboxMembership(ctx context.Context, mailboxRowID int64) (bool, bool, error) {
+	var hasPhysical, hasLabels bool
+	if err := s.database.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM messages WHERE mailbox = ? AND deleted = 0),
+		       EXISTS(SELECT 1 FROM labels l JOIN messages m ON m.ROWID = l.message_id
+		              WHERE l.mailbox_id = ? AND m.deleted = 0)
+	`, mailboxRowID, mailboxRowID).Scan(&hasPhysical, &hasLabels); err != nil {
+		return false, false, fmt.Errorf("check Envelope Index visible mailbox membership: %w", err)
 	}
-	return hasLabels, nil
+	return hasPhysical, hasLabels, nil
 }
 
 // missingByServerUID returns the server messages whose UID the local mailbox
@@ -343,21 +348,21 @@ func (s *Store) missingByHeaderIdentity(ctx context.Context, mailboxRowID int64,
 	return missing, nil
 }
 
-// localServerUIDs returns which of the server UIDs the local mailbox row
-// already holds.
+// localServerUIDs returns UIDs held by non-deleted physical or label members.
+// Callers must verify the applicable mailbox generation before comparing UIDs.
 func (s *Store) localServerUIDs(ctx context.Context, mailboxRowID int64, uids []uint32) (map[uint32]bool, error) {
 	known := make(map[uint32]bool, len(uids))
 	if len(uids) == 0 {
 		return known, nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(uids)), ",")
-	arguments := make([]any, 0, len(uids)+1)
-	arguments = append(arguments, mailboxRowID)
+	arguments := make([]any, 0, len(uids)+2)
+	arguments = append(arguments, mailboxRowID, mailboxRowID)
 	for _, uid := range uids {
 		arguments = append(arguments, int64(uid))
 	}
 	rows, err := s.database.QueryContext(ctx,
-		"SELECT remote_id FROM messages WHERE mailbox = ? AND remote_id IN ("+placeholders+")", arguments...)
+		"SELECT remote_id FROM messages WHERE deleted = 0 AND (mailbox = ? OR ROWID IN (SELECT message_id FROM labels WHERE mailbox_id = ?)) AND remote_id IN ("+placeholders+")", arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("read local server UIDs: %w", err)
 	}

@@ -273,7 +273,7 @@ func (s *Store) localRFCMessageID(ctx context.Context, rowID int64, accountID st
 
 // localRefForServerMessage finds the local row that holds the server message
 // and returns its ref: same account, mailbox and server UID for a physical
-// mailbox, same sender, sent time and subject for a label-backed one.
+// mailbox, metadata narrowing plus exact RFC Message-ID for label members.
 func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Server, headers []byte) (string, error) {
 	records, err := s.mailboxRecords(ctx)
 	if err != nil {
@@ -283,11 +283,14 @@ func (s *Store) localRefForServerMessage(ctx context.Context, server mailref.Ser
 	if !found {
 		return "", nil
 	}
-	hasLabels, err := s.mailboxHasLabels(ctx, mailbox.RowID)
+	hasPhysical, hasLabels, err := s.mailboxMembership(ctx, mailbox.RowID)
 	if err != nil {
 		return "", err
 	}
-	if !hasLabels {
+	if !hasPhysical && !hasLabels {
+		return "", nil
+	}
+	if hasPhysical {
 		validity, validityErr := s.mailboxUIDValidity(ctx, mailbox.Location)
 		if validityErr != nil || validity == 0 || validity != server.UIDValidity {
 			return "", validityErr
