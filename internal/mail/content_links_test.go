@@ -44,17 +44,30 @@ func TestShortenLinks(t *testing.T) {
 	}
 }
 
-// Removing wrapped links must not rewrite the text seen so far: 40,000 of them
-// took 1.16 s when every removal copied the whole output again.
+// Removing wrapped links must not rewrite the text seen so far: every removal
+// used to copy the whole output again, so four times the links took about
+// sixteen times as long. The test compares the cost of two sizes instead of a
+// wall-clock limit, so a slow or instrumented machine cannot fail it.
 func TestShortenLinksStaysLinearForManyWrappedLinks(t *testing.T) {
-	text := strings.Repeat("Click <https://example.com/a?x=1> now (https://example.com/b?y=2) ok.\n", 40000)
-	start := time.Now()
-	got := ShortenLinks(text, LinkModeNone)
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Fatalf("ShortenLinks took %v for %d KiB with 80,000 wrapped links", elapsed, len(text)/1024)
+	const unit = "Click <https://example.com/a?x=1> now (https://example.com/b?y=2) ok.\n"
+	best := func(repeat int) time.Duration {
+		text := strings.Repeat(unit, repeat)
+		shortest := time.Duration(1 << 62)
+		for range 3 {
+			start := time.Now()
+			got := ShortenLinks(text, LinkModeNone)
+			if elapsed := time.Since(start); elapsed < shortest {
+				shortest = elapsed
+			}
+			if want := strings.Repeat("Click  now ok.\n", repeat); strings.ReplaceAll(got, "\n\n", "\n") != want {
+				t.Fatalf("unexpected result prefix %q", got[:min(len(got), 80)])
+			}
+		}
+		return shortest
 	}
-	if want := strings.Repeat("Click  now ok.\n", 40000); strings.ReplaceAll(got, "\n\n", "\n") != want {
-		t.Fatalf("unexpected result prefix %q", got[:min(len(got), 80)])
+	small, large := best(10000), best(40000)
+	if ratio := float64(large) / float64(max(small, time.Microsecond)); ratio > 8 {
+		t.Fatalf("four times the links took %.1f times as long (%v versus %v); linear work is about 4, quadratic about 16", ratio, small, large)
 	}
 }
 
