@@ -52,19 +52,22 @@ type NewMessage struct {
 }
 
 // NewMailbox reports one compared mailbox. NewCount counts the server
-// messages of the newest window that the local store lacks; Truncated says
-// more than Limit of them exist.
+// messages missing within ScannedMessages, never all historical missing mail.
+// WindowLimited marks older server messages outside the scan. Truncated marks
+// omitted rows or an entirely missing window with older server messages.
 type NewMailbox struct {
-	AccountRef     string       `json:"account_ref"`
-	MailboxRef     string       `json:"mailbox_ref"`
-	Name           string       `json:"name"`
-	State          string       `json:"state"`
-	MatchedBy      string       `json:"matched_by"`
-	Reason         string       `json:"reason,omitempty"`
-	ServerMessages int          `json:"server_messages"`
-	NewCount       int          `json:"new_count"`
-	Truncated      bool         `json:"truncated"`
-	Messages       []NewMessage `json:"messages"`
+	AccountRef      string       `json:"account_ref"`
+	MailboxRef      string       `json:"mailbox_ref"`
+	Name            string       `json:"name"`
+	State           string       `json:"state"`
+	MatchedBy       string       `json:"matched_by"`
+	Reason          string       `json:"reason,omitempty"`
+	ServerMessages  int          `json:"server_messages"`
+	ScannedMessages int          `json:"scanned_messages"`
+	WindowLimited   bool         `json:"window_limited"`
+	NewCount        int          `json:"new_count"`
+	Truncated       bool         `json:"truncated"`
+	Messages        []NewMessage `json:"messages"`
 }
 
 // NewMessagesFailure explains one account or mailbox that could not be compared.

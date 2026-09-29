@@ -229,6 +229,70 @@ func TestNewMessagesMarksAnExhaustedWindowAsTruncated(t *testing.T) {
 	}
 }
 
+func TestNewMessagesReportsValidatedWindowScope(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		exists     int
+		scanned    int
+		allKnown   bool
+		noValidity bool
+		limited    bool
+		truncated  bool
+		newCount   int
+		listed     int
+	}{
+		{name: "all 100 known with older server mail", exists: 900, scanned: 100, allKnown: true, limited: true},
+		{name: "window and output limits", exists: 900, scanned: 100, limited: true, truncated: true, newCount: 98, listed: 20},
+		{name: "output limit without older server mail", exists: 100, scanned: 100, truncated: true, newCount: 98, listed: 20},
+		{name: "unresolved comparison keeps scanned window", exists: 900, scanned: 100, noValidity: true, limited: true},
+		{name: "fully scanned small mailbox", exists: 2, scanned: 2},
+		{name: "successfully scanned empty mailbox"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages := make([]transport.RecentMessage, test.scanned)
+			for index := range messages {
+				messages[index] = recentMessage(uint32(5001+index), false, fmt.Sprintf("window-%d", index))
+			}
+			client, _ := newMessagesFixture(t, "new-scope@gmail.com", map[string]transport.RecentMailbox{
+				"INBOX": {UIDValidity: 900, Exists: test.exists, Messages: messages},
+			})
+			if test.allKnown {
+				updateFixtureMessage(t, client.store, `
+					WITH RECURSIVE ids(row_id) AS (VALUES(104) UNION ALL SELECT row_id + 1 FROM ids WHERE row_id < 201)
+					INSERT INTO messages(ROWID, remote_id, mailbox, deleted)
+					SELECT row_id, row_id - 102 + 5001, 1, 0 FROM ids
+				`)
+			}
+			if test.noValidity {
+				location, err := parseMailboxURL("imap://" + testAccountID + "/INBOX")
+				if err != nil {
+					t.Fatal(err)
+				}
+				path, err := mailboxInfoPath(client.store.versionRoot, location)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{Limit: 20})
+			if err != nil || len(result.Failures) != 0 || len(result.Mailboxes) != 1 || result.Complete == test.noValidity || result.NewCount != test.newCount {
+				t.Fatalf("window result=%+v error=%v", result, err)
+			}
+			mailbox := result.Mailboxes[0]
+			state := mail.NewMailboxStateChecked
+			if test.noValidity {
+				state = mail.NewMailboxStateUnresolved
+			}
+			if mailbox.State != state || mailbox.ServerMessages != test.exists || mailbox.ScannedMessages != test.scanned || mailbox.WindowLimited != test.limited ||
+				mailbox.NewCount != test.newCount || mailbox.Truncated != test.truncated || len(mailbox.Messages) != test.listed {
+				t.Fatalf("window mailbox=%+v; want scanned=%d limited=%t truncated=%t missing=%d listed=%d", mailbox, test.scanned, test.limited, test.truncated, test.newCount, test.listed)
+			}
+		})
+	}
+}
+
 func TestNewMessagesReportsAChangedUIDValidityWithoutRows(t *testing.T) {
 	client, _ := newMessagesFixture(t, "new-validity@gmail.com", map[string]transport.RecentMailbox{
 		"INBOX": {UIDValidity: 901, Exists: 3, Messages: []transport.RecentMessage{recentMessage(5003, false, "fresh")}},

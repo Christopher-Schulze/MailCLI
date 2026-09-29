@@ -27,6 +27,12 @@
       "description": "maximum new messages listed per mailbox (1-50)"
     },
     {
+      "name": "--require-complete",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "return exit 3 when discovery has incomplete account or mailbox coverage"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,

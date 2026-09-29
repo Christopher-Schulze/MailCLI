@@ -15,6 +15,7 @@ func runMessagesNew(ctx context.Context, service *mail.Service, args []string, s
 	accountRef := flags.String("account", "", "account ref; omit to compare every account with credentials")
 	mailboxRef := flags.String("mailbox", "", "mailbox ref, role, or exact path to compare with the server; default inbox")
 	limit := flags.Int("limit", mail.DefaultNewMessagesLimit, "maximum new messages listed per mailbox (1-50)")
+	requireComplete := flags.Bool("require-complete", false, "return exit 3 when discovery has incomplete account or mailbox coverage")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
@@ -32,13 +33,20 @@ func runMessagesNew(ctx context.Context, service *mail.Service, args []string, s
 	if err != nil {
 		return failCommand("messages.new", *jsonOutput, err, stdout, stderr)
 	}
+	exitCode := 0
+	if *requireComplete && !result.Complete {
+		exitCode = syncCheckIncompleteExitCode
+	}
 	if *jsonOutput {
-		return writeSuccess(stdout, "messages.new", responseData{NewMessages: &result})
+		if code := writeSuccess(stdout, "messages.new", responseData{NewMessages: &result}); code != 0 {
+			return code
+		}
+		return exitCode
 	}
 	writeFormat(stdout, "complete\t%t\tnew_count\t%d\n", result.Complete, result.NewCount)
 	for _, mailbox := range result.Mailboxes {
-		writeFormat(stdout, "mailbox\t%s\t%s\tserver=%d\tnew=%d\ttruncated=%t\t%s\n",
-			mailbox.AccountRef, mailbox.Name, mailbox.ServerMessages, mailbox.NewCount, mailbox.Truncated, mailbox.State)
+		writeFormat(stdout, "mailbox\t%s\t%s\tserver=%d\tscanned_messages=%d\twindow_limited=%t\tnew=%d\ttruncated=%t\t%s\n",
+			mailbox.AccountRef, mailbox.Name, mailbox.ServerMessages, mailbox.ScannedMessages, mailbox.WindowLimited, mailbox.NewCount, mailbox.Truncated, mailbox.State)
 		rows := make([][]string, 0, len(mailbox.Messages))
 		for _, message := range mailbox.Messages {
 			state := "seen"
@@ -65,5 +73,5 @@ func runMessagesNew(ctx context.Context, service *mail.Service, args []string, s
 			writeFormat(stdout, "%s\t%s\t%s\t%s\n", failure.Account, failure.Mailbox, failure.Code, failure.Message)
 		}
 	}
-	return 0
+	return exitCode
 }

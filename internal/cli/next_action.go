@@ -191,10 +191,10 @@ func pendingNextAction(data responseData) *nextAction {
 	}
 	if result := data.NewMessages; result != nil {
 		switch {
+		case !result.Complete:
+			return &nextAction{Do: "ask_user", Why: "Discovery is incomplete; inspect failures and mailbox reasons for account, credential, network or generation problems."}
 		case result.NewCount > 0:
 			return &nextAction{Do: "check_state", Why: "The local store lacks these server messages; run sync to have Mail.app fetch them."}
-		case !result.Complete:
-			return &nextAction{Do: "ask_user", Why: "Some accounts could not be compared; see failures for credentials or network problems."}
 		}
 	}
 	if data.Complete != nil && !*data.Complete {

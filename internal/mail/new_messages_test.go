@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -119,5 +120,31 @@ func TestServiceNewMessagesValidatesTheLimitAndNeedsAReader(t *testing.T) {
 	}
 	if _, err := NewService(struct{ Gateway }{}).NewMessages(context.Background(), NewMessagesRequest{}); err == nil {
 		t.Error("a gateway without NewMessagesReader accepted the call")
+	}
+}
+
+func TestNewMailboxSerializesScopeEvenWhenEmpty(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		scanned int
+		limited bool
+	}{
+		{name: "empty verified window"},
+		{name: "bounded window", scanned: 100, limited: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(NewMailbox{ScannedMessages: test.scanned, WindowLimited: test.limited})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire struct {
+				Scanned *int  `json:"scanned_messages"`
+				Limited *bool `json:"window_limited"`
+			}
+			if err := json.Unmarshal(encoded, &wire); err != nil || wire.Scanned == nil || wire.Limited == nil ||
+				*wire.Scanned != test.scanned || *wire.Limited != test.limited {
+				t.Fatalf("scope omitted or changed: %s; error=%v", encoded, err)
+			}
+		})
 	}
 }

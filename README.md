@@ -193,6 +193,8 @@ mailcli attachments save --ref MESSAGE_REF --attachment ATTACHMENT_ID --output /
 
 `messages get` defaults to metadata read from the header block only (summary, recipients, reply address); `--view plain` adds the normalized body with attachments and completeness evidence, and `--view full` adds headers. `--links host` (or `none`) shortens the long tracking URLs that dominate marketing mail to `<host>`; exports stay complete. `--max-bytes` defaults to 1 MiB (up to 64 MiB); larger JSON fails with `output_too_large` and the exact required size instead of truncating. `--export` writes complete content to a new mode-0600 file and returns its size and SHA-256 instead of embedding it. A message that is not fully downloaded is completed with one targeted IMAP FETCH; if that fails, the local content is returned with `content_complete:false` and a hydration diagnostic. Attachment saves write the decoded part to a new absolute path and never overwrite a file. `messages thread` pages a conversation around the given message in both directions.
 
+`messages new` reports `scanned_messages` and `window_limited` per mailbox; `new_count` covers only the newest scanned window, at most 100 messages. `--require-complete` returns exit 3 with the normal `ok:true` result when account/mailbox comparison is incomplete; without it, partial results exit 0. A bounded window alone is not incomplete coverage. Resolve reported failures and mailbox reasons before relying on completeness, even when new rows were found.
+
 ### Create and review a draft
 
 Local structured drafts are the review boundary; creating or editing one never sends mail.
@@ -312,7 +314,7 @@ A failure keeps any retained evidence in `data` and adds typed guidance plus one
 }
 ```
 
-`next.do` is one of `retry`, `fix_input`, `check_state`, `ask_user`, or `stop`; a completed, partial, or unknown effect always means `check_state`, never a blind replay. Exit `0` means success, `1` a runtime or operation failure, `2` an invalid invocation or input, and `3` only an incomplete `sync --check --require-complete`. References and cursors are opaque and bound to the current Mail store; resolve a fresh reference after moving, copying, deleting, or synchronizing a message. The [output contract](docs/documentation.md#output-contract) and [errors and recovery](docs/documentation.md#errors-and-recovery) have the full rules.
+`next.do` is one of `retry`, `fix_input`, `check_state`, `ask_user`, or `stop`; a completed, partial, or unknown effect always means `check_state`, never a blind replay. Exit `0` means success, `1` a runtime or operation failure, `2` an invalid invocation or input, and `3` an incomplete `sync --check --require-complete` or `messages new --require-complete` with normal `ok:true` evidence. References and cursors are opaque and bound to the current Mail store; resolve a fresh reference after moving, copying, deleting, or synchronizing a message. The [output contract](docs/documentation.md#output-contract) and [errors and recovery](docs/documentation.md#errors-and-recovery) have the full rules.
 
 ## Agent skill
 

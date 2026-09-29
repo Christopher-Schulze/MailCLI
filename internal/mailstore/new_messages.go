@@ -164,6 +164,8 @@ func (c *Client) compareMailbox(
 		return compared, err
 	}
 	compared.ServerMessages = recent.Exists
+	compared.ScannedMessages = len(recent.Messages)
+	compared.WindowLimited = recent.Exists > compared.ScannedMessages
 	if recent.UIDValidity == 0 {
 		compared.State, compared.Reason = mail.NewMailboxStateUnresolved, "the server did not report UIDVALIDITY"
 		return compared, nil
