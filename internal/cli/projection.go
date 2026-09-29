@@ -210,6 +210,7 @@ type messagePageItemProjection struct {
 	Flagged           *bool                        `json:"flagged,omitempty"`
 	Junk              *bool                        `json:"junk,omitempty"`
 	Deleted           *bool                        `json:"deleted,omitempty"`
+	FlagsState        *string                      `json:"flags_state,omitempty"`
 	Size              *int64                       `json:"size,omitempty"`
 	AttachmentCount   *int                         `json:"attachment_count,omitempty"`
 	ConversationID    *int64                       `json:"conversation_id,omitempty"`
@@ -661,10 +662,10 @@ func projectionRegistry(target projectionTarget) projectionFieldRegistry {
 			optional: []string{"age_days", "created_at", "updated_at"}}
 	case projectionTargetListPage:
 		return projectionFieldRegistry{core: []string{"ref"},
-			optional: []string{"account", "attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "staleness_note", "subject", "threading_complete"}}
+			optional: []string{"account", "attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "flags_state", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "staleness_note", "subject", "threading_complete"}}
 	case projectionTargetSearchPage:
 		return projectionFieldRegistry{core: []string{"ref"},
-			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "snippet", "staleness_note", "subject", "threading_complete"}}
+			optional: []string{"attachment_count", "conversation_id", "date_received", "date_sent", "deleted", "excerpt", "excerpt_complete", "excerpt_source", "flagged", "flags_state", "from", "in_reply_to", "junk", "mailbox_ref", "message_id", "read", "references", "sender", "server_truth", "size", "snippet", "staleness_note", "subject", "threading_complete"}}
 	default:
 		return projectionFieldRegistry{}
 	}
@@ -734,6 +735,9 @@ func projectMessageSummary(message mail.MessageSummary, fields map[string]struct
 		return include
 	}
 	projected := messagePageItemProjection{Ref: message.Ref}
+	if message.FlagsState != "" && (selected("flags_state") || selected("read") || selected("flagged") || selected("deleted")) {
+		projected.FlagsState = &message.FlagsState
+	}
 	if selected("mailbox_ref") {
 		projected.MailboxRef = message.MailboxRef
 	}
@@ -870,6 +874,13 @@ func messageStateProjectionField(field string) bool {
 //go:noinline
 func (o outputOptions) includes(field string) bool {
 	if o.fieldsProvided {
+		if (o.target == projectionTargetListPage || o.target == projectionTargetSearchPage) && field == "flags_state" {
+			for _, peer := range []string{"read", "flagged", "deleted"} {
+				if _, selected := o.fields[peer]; selected {
+					return true
+				}
+			}
+		}
 		if o.target == projectionTargetMessage && (field == "excerpt" || field == "excerpt_complete" || field == "excerpt_source") {
 			for _, peer := range []string{"excerpt", "excerpt_complete", "excerpt_source"} {
 				if _, selected := o.fields[peer]; selected {

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -55,11 +57,117 @@ func TestServerRefReadsTheFullMessageOverIMAP(t *testing.T) {
 	summary := message.Summary
 	if summary.Ref != ref || summary.Subject != "Überraschung" || summary.Sender != "Jürgen <j@example.com>" ||
 		summary.DateSent != "2026-09-29T08:15:00Z" || summary.MessageID != "srv-1@example.com" || !summary.Read ||
-		summary.LocalRef != "" || summary.StalenessNote == "" {
+		summary.LocalRef != "" || summary.StalenessNote == "" || summary.FlagsState != mail.MessageServerStateObserved {
 		t.Fatalf("summary = %+v", summary)
 	}
 	if operator.fetchFlagsUID != 5003 {
 		t.Fatalf("flags were read for UID %d, want 5003", operator.fetchFlagsUID)
+	}
+}
+
+func TestServerRefFlagObservationQualifiesUsefulContent(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		state       transport.FlagState
+		failure     error
+		unsupported bool
+		wantState   string
+		wantFlags   bool
+	}{
+		{name: "empty observed flags", state: transport.FlagState{UIDValidity: 900}, wantState: "observed"},
+		{name: "observed set flags", state: transport.FlagState{UIDValidity: 900, Flags: []string{`\sEeN`, `\FLAGGED`, `\Deleted`, "$Junk"}}, wantState: "observed", wantFlags: true},
+		{name: "missing UID", state: transport.FlagState{UIDValidity: 900, Missing: true}, wantState: "missing"},
+		{name: "wrong generation", state: transport.FlagState{UIDValidity: 901, Flags: []string{`\Seen`}}, wantState: "unverified"},
+		{name: "missing in wrong generation", state: transport.FlagState{UIDValidity: 901, Missing: true}, wantState: "unverified"},
+		{name: "timeout", failure: &transport.TransportError{Code: transport.CodeIMAPTimeout, Message: "timed out"}, wantState: "unverified"},
+		{name: "transport failure", failure: errors.New("flag observation failed"), wantState: "unverified"},
+		{name: "unsupported reader", unsupported: true, wantState: "unverified"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, operator := serverReadFixture(t, "srv-flags@gmail.com")
+			operator.flagState, operator.flagStateErr = test.state, test.failure
+			if test.unsupported {
+				client.send.Imap = struct{ transport.ImapOperator }{operator}
+			}
+			message, err := client.GetMessage(context.Background(), serverRefFor(t, 5003))
+			if err != nil || message.Content != "Fresh from the server" || !message.ContentComplete {
+				t.Fatalf("optional flags discarded useful content: message=%+v error=%v", message, err)
+			}
+			summary := message.Summary
+			if summary.FlagsState != test.wantState || summary.Read != test.wantFlags || summary.Flagged != test.wantFlags ||
+				summary.Deleted != test.wantFlags || summary.Junk || summary.StalenessNote == "" {
+				t.Fatalf("summary=%+v; want state=%s flags=%t without a junk claim", summary, test.wantState, test.wantFlags)
+			}
+			if (summary.StalenessNote == serverRefStalenessNote) != (test.wantState == "observed") {
+				t.Fatalf("state=%s has misleading note %q", test.wantState, summary.StalenessNote)
+			}
+		})
+	}
+}
+
+func TestServerRefFailedIdentityResolutionKeepsUnverifiedContent(t *testing.T) {
+	client, operator := serverReadFixture(t, "srv-resolve@gmail.com")
+	client.send.Credentials = strictCredentials{}
+	message := client.finishServerMessage(context.Background(), serverRefFor(t, 5003), mail.Message{
+		Headers: serverMessageRaw, Content: "already fetched", ContentComplete: true,
+	})
+	if message.Summary.FlagsState != "unverified" || message.Content != "already fetched" ||
+		!message.ContentComplete || operator.fetchFlagsCalls != 0 {
+		t.Fatalf("failed optional resolution lost evidence: %+v, calls=%d", message, operator.fetchFlagsCalls)
+	}
+}
+
+func TestServerRefDetailHeadersRemainCompleteBeyondTriageLimit(t *testing.T) {
+	subject := strings.Repeat("Überraschung", 30) + " Ende"
+	name := strings.Repeat("Jürgen", 40) + " Ende"
+	raw := strings.Replace(serverMessageRaw, "=?UTF-8?B?w5xiZXJyYXNjaHVuZw==?=", mime.BEncoding.Encode("utf-8", subject), 1)
+	raw = strings.Replace(raw, "=?UTF-8?Q?J=C3=BCrgen?=", mime.QEncoding.Encode("utf-8", name), 1)
+	for _, intent := range []mail.MessageReadIntent{mail.MessageReadIntentFull, mail.MessageReadIntentHeaders, mail.MessageReadIntentAttachments} {
+		t.Run(string(intent), func(t *testing.T) {
+			client, operator := serverReadFixture(t, "srv-long@gmail.com")
+			operator.raw = []byte(raw)
+			message, err := client.GetMessageWithIntent(context.Background(), serverRefFor(t, 5003), intent)
+			if err != nil || message.Summary.Subject != subject || message.Summary.Sender != name+" <j@example.com>" ||
+				message.Summary.DateSent != "2026-09-29T08:15:00Z" || message.Summary.FlagsState != "observed" {
+				t.Fatalf("detail headers shortened or changed: %+v error=%v", message.Summary, err)
+			}
+			if intent == mail.MessageReadIntentAttachments && (message.Headers != "" || message.Content != "" || len(message.Attachments) != 1) {
+				t.Fatalf("attachment intent retained temporary headers/body or lost metadata: %+v", message)
+			}
+		})
+	}
+	triage := mail.NewMessageFromHeader("server", []byte(raw), true)
+	if utf8.RuneCountInString(triage.Subject) != 200 || utf8.RuneCountInString(triage.Sender) != 200 ||
+		!strings.HasSuffix(triage.Subject, "…") || !strings.HasSuffix(triage.Sender, "…") {
+		t.Fatalf("triage lost its bounded contract: %+v", triage)
+	}
+}
+
+func TestServerHeaderSummaryRetainsUndecodableBoundedValues(t *testing.T) {
+	subject := "=?not-a-real-charset?Q?" + strings.Repeat("subject", 40) + "?="
+	sender := strings.Repeat("invalid-address", 20)
+	var summary mail.MessageSummary
+	completeServerHeaderSummary(&summary, "From: "+sender+"\r\nSubject: "+subject+"\r\n\r\n")
+	if summary.Subject != subject || summary.Sender != sender {
+		t.Fatalf("optional decoders discarded useful raw headers: %+v", summary)
+	}
+	oversized := "Subject: " + strings.Repeat("s", maximumHeaderBytes) + "\r\n\r\n"
+	summary = mail.MessageSummary{Subject: "retained"}
+	completeServerHeaderSummary(&summary, oversized)
+	if summary.Subject != "retained" {
+		t.Fatalf("summary decoder bypassed the existing header bound: %+v", summary)
+	}
+}
+
+func TestServerHeaderTextKeepsCompleteSafeSingleLines(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{input: " \tÜber\x00raschung\r\n\u2028Ende\x1b ", want: "Über raschung Ende"},
+		{input: strings.Repeat("Ü", 300), want: strings.Repeat("Ü", 300)},
+		{input: "\r\n\x00", want: ""},
+	} {
+		if got := serverHeaderText(test.input); got != test.want {
+			t.Errorf("serverHeaderText(%q)=%q, want %q", test.input, got, test.want)
+		}
 	}
 }
 
@@ -241,7 +349,8 @@ func TestServerRefWorksInBatchReadAndAttachmentSaveButNotInBatchMutations(t *tes
 		t.Fatalf("batch read = %+v, %v", read, err)
 	}
 	for _, item := range read.Items {
-		if item.State != mail.BatchItemCompleted || item.Message == nil || item.Message.Summary.Subject != "Überraschung" {
+		if item.State != mail.BatchItemCompleted || item.Message == nil || item.Message.Summary.Subject != "Überraschung" ||
+			item.Message.Summary.FlagsState != mail.MessageServerStateObserved {
 			t.Fatalf("batch read item %s = %+v", item.ID, item)
 		}
 	}

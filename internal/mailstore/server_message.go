@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
+
+	messageMail "github.com/emersion/go-message/mail"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -90,10 +93,23 @@ func (c *Client) parseServerSource(ctx context.Context, ref string, intent mail.
 		return mail.Message{}, errors.Join(serverMessageNotFound(), source.Close())
 	}
 	message, parseErr := messageFromRawReaderWithIntent(ctx, mail.Message{}, summary, source, intent)
+	if parseErr == nil && intent == mail.MessageReadIntentAttachments {
+		// MIME metadata reads omit headers. Replay only the bounded header block
+		// from the already fetched local source to complete the server summary.
+		if _, seekErr := source.Seek(0, io.SeekStart); seekErr != nil {
+			parseErr = seekErr
+		} else {
+			message.Headers, parseErr = readRawHeaders(mimeContextReader{ctx: ctx, reader: source})
+		}
+	}
 	if err := errors.Join(parseErr, source.Close()); err != nil {
 		return mail.Message{}, err
 	}
-	return c.finishServerMessage(ctx, ref, message), nil
+	message = c.finishServerMessage(ctx, ref, message)
+	if intent == mail.MessageReadIntentAttachments {
+		message.Headers = ""
+	}
+	return message, nil
 }
 
 func serverMessageNotFound() error {
@@ -106,29 +122,67 @@ func serverMessageNotFound() error {
 func (c *Client) finishServerMessage(ctx context.Context, ref string, message mail.Message) mail.Message {
 	row := mail.NewMessageFromHeader(ref, []byte(message.Headers), true)
 	message.Summary.Ref = ref
-	message.Summary.Subject, message.Summary.Sender, message.Summary.DateSent = row.Subject, row.Sender, row.DateSent
+	message.Summary.DateSent = row.DateSent
+	completeServerHeaderSummary(&message.Summary, message.Headers)
+	message.Summary.FlagsState = mail.MessageServerStateUnverified
 	message.Summary.LocalRef = c.localRefForServerRef(ctx, ref, []byte(message.Headers))
 	if target, err := c.resolveServerTarget(ctx, ref); err == nil {
 		if reader, supported := c.send.ImapClient().(transport.FlagStateReader); supported {
 			state, flagErr := reader.FetchFlags(ctx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity)
-			if flagErr == nil && !state.Missing {
-				for _, flag := range state.Flags {
-					switch strings.ToLower(flag) {
-					case `\seen`:
-						message.Summary.Read = true
-					case `\flagged`:
-						message.Summary.Flagged = true
-					case `\deleted`:
-						message.Summary.Deleted = true
-					}
+			if flagErr == nil && state.UIDValidity == target.uidvalidity {
+				if state.Missing {
+					message.Summary.FlagsState = mail.MessageServerStateMissing
+				} else {
+					message.Summary.FlagsState = mail.MessageServerStateObserved
+					message.Summary.Read = hasServerFlag(state.Flags, `\Seen`)
+					message.Summary.Flagged = hasServerFlag(state.Flags, `\Flagged`)
+					message.Summary.Deleted = hasServerFlag(state.Flags, `\Deleted`)
+					message.Summary.StalenessNote = serverRefStalenessNote
+					return message
 				}
-				message.Summary.StalenessNote = serverRefStalenessNote
-				return message
 			}
 		}
 	}
 	message.Summary.StalenessNote = "server read state unavailable; read is not verified"
 	return message
+}
+
+func completeServerHeaderSummary(summary *mail.MessageSummary, raw string) {
+	headers, err := sourceHeadersFromReader(strings.NewReader(raw))
+	if err != nil {
+		return
+	}
+	// Preserve useful raw values when an optional MIME word/address decoder
+	// cannot interpret them. The raw block already passed the header bound.
+	fields, _ := mail.ParseHeaderFields(headers.Raw)
+	for _, field := range fields {
+		if strings.EqualFold(field.Name, "Subject") && summary.Subject == "" {
+			summary.Subject = serverHeaderText(field.Value)
+		}
+		if strings.EqualFold(field.Name, "From") && summary.Sender == "" {
+			summary.Sender = serverHeaderText(field.Value)
+		}
+	}
+	if headers.Subject != "" {
+		summary.Subject = serverHeaderText(headers.Subject)
+	}
+	addresses, err := messageMail.ParseAddressList(headers.From)
+	if err != nil || len(addresses) == 0 {
+		return
+	}
+	address := addresses[0]
+	sender := address.Address
+	if address.Name != "" {
+		sender = address.Name + " <" + address.Address + ">"
+	}
+	summary.Sender = serverHeaderText(sender)
+}
+
+// serverHeaderText keeps complete bounded detail headers on one safe line.
+func serverHeaderText(value string) string {
+	return strings.Join(strings.FieldsFunc(value, func(character rune) bool {
+		return unicode.IsSpace(character) || unicode.IsControl(character)
+	}), " ")
 }
 
 // localRefForServerRef returns the store-bound ref of the same message when

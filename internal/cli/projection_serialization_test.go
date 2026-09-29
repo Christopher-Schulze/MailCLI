@@ -276,6 +276,10 @@ func TestProjectionSerializedKeysMatchEveryRegistry(t *testing.T) {
 						}
 					}
 				}
+				if (target == projectionTargetListPage || target == projectionTargetSearchPage) &&
+					(selected == "read" || selected == "flagged" || selected == "deleted") {
+					want = append(want, "flags_state")
+				}
 				// A healthy draft summary never invents a corrupt-state diagnostic.
 				if target == projectionTargetDraftList {
 					want = slices.DeleteFunc(want, func(field string) bool { return field == "state_error" })
@@ -350,6 +354,7 @@ func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map
 	message.Summary.MailboxRef, message.Summary.DateReceived, message.Summary.DateSent = "mailbox", "received", "sent"
 	message.Summary.ConversationID, message.Summary.StalenessNote = 7, "retained metadata"
 	message.Summary.ServerTruth = &mail.ServerMutationEvidence{Command: "STORE", UID: 3, UIDValidity: 5}
+	message.Summary.FlagsState = mail.MessageServerStateObserved
 	if target == projectionTargetListPage {
 		// Unified inbox rows include their resolved account identity.
 		message.Summary.Account = "account"
@@ -367,6 +372,82 @@ func serializedRegistryFixture(t *testing.T, target projectionTarget, fields map
 	}
 	delete(result, "projection")
 	return result
+}
+
+func TestMessageFlagEvidenceSurvivesPageAndDetailProjections(t *testing.T) {
+	for _, state := range []string{"", "observed", "missing", "unverified"} {
+		for _, target := range []projectionTarget{projectionTargetListPage, projectionTargetSearchPage} {
+			for _, selector := range []string{"read", "flagged", "deleted", "read,flagged,deleted", "flags_state", "subject", "all"} {
+				t.Run(state+"/"+string(target)+"/"+selector, func(t *testing.T) {
+					fields, err := parseProjectionFields(target, selector)
+					if err != nil {
+						t.Fatal(err)
+					}
+					actual := serializedPageRegistryFixture(t, target, mail.MessageSummary{Ref: "message", FlagsState: state}, fields)
+					value, present := actual["flags_state"]
+					wantPresent := state != "" && selector != "subject"
+					if present != wantPresent || present && string(value) != `"`+state+`"` {
+						t.Fatalf("flag evidence changed: state=%q projection=%v", state, actual)
+					}
+					for _, flag := range []string{"read", "flagged", "deleted"} {
+						if raw, present := actual[flag]; present && string(raw) != "false" {
+							t.Fatalf("zero flag changed: %s=%s", flag, raw)
+						}
+					}
+					if state != "" && (selector == "read" || selector == "flagged" || selector == "deleted") {
+						declared := projectionFields(target, registryFixtureOptions(target, fields), false)
+						if !slices.Contains(declared, "flags_state") {
+							t.Fatalf("contract drops mandatory evidence peer: %v", declared)
+						}
+					}
+				})
+			}
+		}
+		for _, selector := range []string{"summary", "content", "all"} {
+			fields, err := parseProjectionFields(projectionTargetMessage, selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := encodedRegistryFixture(projectionTargetMessage, mail.Message{Summary: mail.MessageSummary{FlagsState: state}},
+				registryFixtureOptions(projectionTargetMessage, fields))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var actual struct {
+				Summary map[string]json.RawMessage `json:"summary"`
+			}
+			if err := json.Unmarshal(encoded, &actual); err != nil {
+				t.Fatal(err)
+			}
+			value, present := actual.Summary["flags_state"]
+			if present != (state != "") || present && string(value) != `"`+state+`"` {
+				t.Fatalf("detail %s discarded flag evidence: %s", selector, encoded)
+			}
+		}
+	}
+}
+
+func TestPublishedFlagEvidenceContracts(t *testing.T) {
+	manifest, outputs := fixtureOutputContracts(t)
+	for _, name := range []string{"message_summary", "message_page_item_projection"} {
+		definition := manifest.OutputDefinitions[name]
+		index := slices.IndexFunc(definition.Fields, func(field outputNode) bool { return field.Name == "flags_state" })
+		if index < 0 {
+			t.Fatalf("%s omits flags_state", name)
+		}
+		field := definition.Fields[index]
+		if field.Type != "string" || field.AlwaysPresent || field.Nullable || !strings.Contains(field.Description, "unverified") ||
+			!strings.Contains(field.Description, "junk is not covered") {
+			t.Fatalf("%s.flags_state has the wrong contract: %+v", name, field)
+		}
+	}
+	for _, command := range []string{"messages.list", "messages.search", "messages.filter"} {
+		for _, flag := range []string{"read", "flagged", "deleted"} {
+			if len(outputs[command].Variants) == 0 || !slices.Contains(outputs[command].Variants[0].Fields[flag], "flags_state") {
+				t.Fatalf("%s %s contract discards flag qualification: %+v", command, flag, outputs[command].Variants)
+			}
+		}
+	}
 }
 
 func TestMessageListProjectionPreservesAvailableAccountIdentity(t *testing.T) {

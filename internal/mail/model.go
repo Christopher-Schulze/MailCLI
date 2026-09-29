@@ -640,6 +640,9 @@ type MessageSummary struct {
 	Deleted         bool   `json:"deleted"`
 	Size            int64  `json:"size"`
 	AttachmentCount int    `json:"attachment_count"`
+	// FlagsState qualifies server-ref Read, Flagged and Deleted observations;
+	// missing or unverified carries no negative flag claim. Junk is not covered.
+	FlagsState string `json:"flags_state,omitempty"`
 	// ConversationID is Mail's opaque store-local conversation-grouping key.
 	// It is not RFC threading and has no cross-store stability.
 	ConversationID    int64                   `json:"conversation_id,omitempty"`
@@ -670,8 +673,9 @@ type MarkMessageRequest struct {
 
 // MessageServerState identifies how the server-side flag snapshot resolved.
 const (
-	MessageServerStateObserved = "observed"
-	MessageServerStateMissing  = "missing"
+	MessageServerStateObserved   = "observed"
+	MessageServerStateMissing    = "missing"
+	MessageServerStateUnverified = "unverified"
 )
 
 // LocalIndexFlags mirrors the Envelope Index flag projection the local

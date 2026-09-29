@@ -119,6 +119,8 @@ func outputDefinitionName(value reflect.Type) string {
 
 func outputDescription(name string) string {
 	switch name {
+	case "flags_state":
+		return "Flag observation: observed, missing or unverified. In server-ref summaries only observed verifies read/flagged/deleted, including false; summary junk is not covered; local-only summaries omit this field."
 	case "in_reply_to":
 		return "Every valid In-Reply-To msg-id in header order, including angle brackets; [] when absent or unavailable; present only when reply metadata was requested."
 	case "references":
