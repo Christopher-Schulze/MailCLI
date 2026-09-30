@@ -128,7 +128,7 @@ func outputDescription(name string) string {
 	case "from":
 		return "Structured From identity; decoded name and address with only its domain lowercased; existing sender is unchanged; present only when reply metadata was requested."
 	case "threading_complete":
-		return "True only after a complete readable RFC header block; false for unavailable or bounded-out headers; present only when reply metadata was requested."
+		return "True only for a complete readable header block with fully parsed threading values and any present From representable as one unambiguous sender; false for malformed, unavailable or bounded-out evidence; valid IDs/sender evidence remain; present only when reply metadata was requested."
 	case "excerpt":
 		return "Plain-first, HTML-fallback excerpt with quoted lines/signature removed, whitespace collapsed and at most --excerpt-length runes."
 	case "excerpt_complete":

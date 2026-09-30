@@ -41,6 +41,97 @@ func TestOrderedHeaderFields(t *testing.T) {
 	}
 }
 
+func TestThreadingIDsAccountForEveryInputSpan(t *testing.T) {
+	for _, test := range []struct {
+		name, value string
+		ids         []string
+		complete    bool
+	}{
+		{"garbage before", "lost <a@b>", []string{"<a@b>"}, false},
+		{"garbage after", "<a@b> lost", []string{"<a@b>"}, false},
+		{"garbage between", "<a@b> lost <c@d>", []string{"<a@b>", "<c@d>"}, false},
+		{"only garbage", "lost", []string{}, false},
+		{"valid invalid valid", "<a@b> <nodomain> <c@d>", []string{"<a@b>", "<c@d>"}, false},
+		{"empty mailbox", "<@b> <c@d>", []string{"<c@d>"}, false},
+		{"empty domain", "<a@> <c@d>", []string{"<c@d>"}, false},
+		{"comma and whitespace", " ,\t<a@b>, <c@d> , ", []string{"<a@b>", "<c@d>"}, true},
+		{"adjacent IDs", "<a@b><c@d>", []string{"<a@b>", "<c@d>"}, true},
+		{"empty optional", "", []string{}, true},
+		{"escaped and nested comments", `<a@b> (ignore \) <fake@id> (nested)) , <c@d>`, []string{"<a@b>", "<c@d>"}, true},
+		{"comments only", "(ignore <fake@id>)", []string{}, true},
+		{"unclosed comment", "<a@b> (ignored <fake@id>", []string{"<a@b>"}, false},
+		{"unfinished comment escape", `<a@b> (ignored\`, []string{"<a@b>"}, false},
+		{"unmatched closing comment", "<a@b>) <c@d>", []string{"<a@b>", "<c@d>"}, false},
+		{"unfinished bracket", "<a@b> <broken", []string{"<a@b>"}, false},
+		{"nested opening resynchronizes", "<broken <a@b>> <c@d>", []string{"<a@b>", "<c@d>"}, false},
+		{"multiple nested openings", "<<<a@b>>", []string{"<a@b>"}, false},
+		{"stray closing bracket", "> <a@b> > <c@d> >", []string{"<a@b>", "<c@d>"}, false},
+		{"comment cannot fabricate an ID", "<a(ignored)@b> <c@d>", []string{"<c@d>"}, false},
+		{"closing comment cannot fabricate an ID", "<a)@b> <c@d>", []string{"<c@d>"}, false},
+		{"comment cannot repair garbage", "lost(ignored)<a@b>", []string{"<a@b>"}, false},
+		{"duplicates preserve source order", "<a@b> <c@d> <a@b>", []string{"<a@b>", "<c@d>", "<a@b>"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ids, complete := scanMessageIDs(test.value)
+			if !reflect.DeepEqual(ids, test.ids) || complete != test.complete {
+				t.Fatalf("IDs = %#v, complete = %t; want %#v, %t", ids, complete, test.ids, test.complete)
+			}
+			for _, field := range []string{"In-Reply-To", "References"} {
+				summary := MessageSummary{Sender: "unchanged", EnrichmentError: "imap_timeout"}
+				ApplyThreadingHeaders(&summary, field+": "+test.value+"\r\n\r\n")
+				actual := summary.References
+				if field == "In-Reply-To" {
+					actual = summary.InReplyTo
+				}
+				if !reflect.DeepEqual(actual, test.ids) || summary.ThreadingComplete != test.complete || !summary.ThreadingRequested || summary.Sender != "unchanged" || summary.EnrichmentError != "imap_timeout" {
+					t.Fatalf("%s metadata = %+v", field, summary)
+				}
+			}
+		})
+	}
+}
+
+func TestThreadingFromCompletenessPreservesAvailableEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name, headers string
+		from          Recipient
+		complete      bool
+	}{
+		{"absent optional From", "", Recipient{}, true},
+		{"malformed present From", "From: malformed\r\n", Recipient{}, false},
+		{"empty present From", "From: \r\n", Recipient{}, false},
+		{"partial From list", "From: valid@example.com, malformed\r\n", Recipient{}, false},
+		{"multiple senders", "From: First <Local@EXAMPLE.COM>, Other <other@example.com>\r\n", Recipient{Name: "First", Address: "Local@example.com"}, false},
+		{"incompatible duplicates", "From: Local@EXAMPLE.COM\r\nFrom: other@example.com\r\n", Recipient{Address: "Local@example.com"}, false},
+		{"duplicate local case differs", "From: Local@example.com\r\nFrom: local@example.com\r\n", Recipient{Address: "Local@example.com"}, false},
+		{"compatible duplicate domains", "From: Local@EXAMPLE.COM\r\nFrom: Local@example.com\r\n", Recipient{Address: "Local@example.com"}, true},
+		{"incompatible duplicate names", "From: First <Local@example.com>\r\nFrom: Second <Local@example.com>\r\n", Recipient{Name: "First", Address: "Local@example.com"}, false},
+		{"valid then malformed", "From: Local@example.com\r\nFrom: malformed\r\n", Recipient{Address: "Local@example.com"}, false},
+		{"malformed then valid", "From: malformed\r\nFrom: Local@example.com\r\n", Recipient{Address: "Local@example.com"}, false},
+		{"quoted singular", "From: Named <\"A B\"@EXAMPLE.COM>\r\n", Recipient{Name: "Named", Address: `"A B"@example.com`}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			summary := MessageSummary{Sender: "unchanged", From: Recipient{Address: "stale@example.com"}}
+			ApplyThreadingHeaders(&summary, test.headers+"References: <a@b>\r\n\r\n")
+			if summary.From != test.from || summary.ThreadingComplete != test.complete || summary.Sender != "unchanged" || !reflect.DeepEqual(summary.References, []string{"<a@b>"}) {
+				t.Fatalf("metadata = %+v; want sender %+v, complete %t", summary, test.from, test.complete)
+			}
+			payload, err := json.Marshal(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var serialized struct {
+				From       Recipient `json:"from"`
+				Complete   *bool     `json:"threading_complete"`
+				References []string  `json:"references"`
+			}
+			if err := json.Unmarshal(payload, &serialized); err != nil || serialized.Complete == nil || *serialized.Complete != test.complete || serialized.From != test.from || !reflect.DeepEqual(serialized.References, []string{"<a@b>"}) {
+				t.Fatalf("serialized metadata = %s, error = %v", payload, err)
+			}
+		})
+	}
+}
+
 func TestBoundedExcerptText(t *testing.T) {
 	for _, test := range []struct {
 		name, input string

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	messageMail "github.com/emersion/go-message/mail"
@@ -196,6 +197,7 @@ func validHeaderName(name string) bool {
 func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	fields, complete := ParseHeaderFields(raw)
 	summary.InReplyTo, summary.References = []string{}, []string{}
+	summary.From = Recipient{}
 	summary.ThreadingComplete = complete
 	summary.ThreadingRequested = true
 	for _, field := range fields {
@@ -211,16 +213,21 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 				summary.References = append(summary.References, ids...)
 			}
 		case "from":
-			if summary.From.Address != "" {
-				continue
-			}
 			addresses, err := messageMail.ParseAddressList(field.Value)
+			if err != nil || len(addresses) != 1 {
+				summary.ThreadingComplete = false
+			}
 			if err == nil && len(addresses) > 0 {
 				address := addresses[0].Address
 				if at := strings.LastIndexByte(address, '@'); at >= 0 {
 					address = address[:at+1] + strings.ToLower(address[at+1:])
 				}
-				summary.From = Recipient{Name: addresses[0].Name, Address: MailboxAddrSpec(address)}
+				from := Recipient{Name: addresses[0].Name, Address: MailboxAddrSpec(address)}
+				if summary.From.Address == "" {
+					summary.From = from
+				} else if summary.From != from {
+					summary.ThreadingComplete = false
+				}
 			}
 		}
 	}
@@ -247,12 +254,16 @@ func scanMessageIDs(value string) ([]string, bool) {
 			continue
 		}
 		if character == '(' {
+			if depth == 0 {
+				cleaned.WriteByte(' ')
+			}
 			depth++
 			continue
 		}
 		if character == ')' {
 			if depth == 0 {
 				valid = false
+				cleaned.WriteByte(' ')
 				continue
 			}
 			depth--
@@ -269,12 +280,21 @@ func scanMessageIDs(value string) ([]string, bool) {
 	for {
 		start := strings.IndexByte(remaining, '<')
 		if start < 0 {
+			valid = valid && threadingSeparators(remaining)
 			break
+		}
+		if !threadingSeparators(remaining[:start]) {
+			valid = false
 		}
 		remaining = remaining[start+1:]
 		end := strings.IndexByte(remaining, '>')
 		if end < 0 {
 			return ids, false
+		}
+		if nested := strings.IndexByte(remaining[:end], '<'); nested >= 0 {
+			valid = false
+			remaining = remaining[nested:]
+			continue
 		}
 		token := remaining[:end]
 		at := strings.LastIndexByte(token, '@')
@@ -286,6 +306,15 @@ func scanMessageIDs(value string) ([]string, bool) {
 		remaining = remaining[end+1:]
 	}
 	return ids, valid
+}
+
+func threadingSeparators(value string) bool {
+	for _, character := range value {
+		if character != ',' && !unicode.IsSpace(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func BuildExcerpt(text string, length int) string {

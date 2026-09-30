@@ -200,3 +200,48 @@ func TestExcerptLengthHelpNamesTheCommandsSelector(t *testing.T) {
 		}
 	}
 }
+
+type threadingHeaderGateway struct {
+	testGateway
+	headers string
+}
+
+func (g *threadingHeaderGateway) GetMessage(context.Context, string) (mail.Message, error) {
+	return mail.Message{Summary: mail.MessageSummary{Ref: "msg_ref", Sender: "unchanged"}, Headers: g.headers}, nil
+}
+
+func TestGetProjectionRetainsPartialThreadingEvidence(t *testing.T) {
+	for _, test := range []struct{ name, headers string }{
+		{"discarded spans", "From: First <Local@EXAMPLE.COM>\r\nReferences: lost <a@b> between <c@d> trailing\r\n"},
+		{"malformed later sender", "From: First <Local@EXAMPLE.COM>\r\nFrom: malformed\r\nReferences: <a@b> <c@d>\r\n"},
+		{"ambiguous sender", "From: First <Local@EXAMPLE.COM>, other@example.com\r\nReferences: <a@b> <c@d>\r\n"},
+	} {
+		for _, fields := range []string{"summary", "summary,header_fields"} {
+			t.Run(test.name+"/"+fields, func(t *testing.T) {
+				service := mail.NewService(&threadingHeaderGateway{headers: test.headers + "\r\n"})
+				data := captureOutputFixture(t, service, "messages", "get", "--ref", "msg_ref", "--fields", fields)
+				var response struct {
+					OK   bool `json:"ok"`
+					Data struct {
+						Message struct {
+							Summary struct {
+								Complete   *bool          `json:"threading_complete"`
+								References []string       `json:"references"`
+								InReplyTo  []string       `json:"in_reply_to"`
+								From       mail.Recipient `json:"from"`
+								Sender     string         `json:"sender"`
+							}
+						}
+					}
+				}
+				if err := json.Unmarshal(data, &response); err != nil {
+					t.Fatal(err)
+				}
+				summary := response.Data.Message.Summary
+				if !response.OK || summary.Complete == nil || *summary.Complete || len(summary.References) != 2 || summary.References[0] != "<a@b>" || summary.References[1] != "<c@d>" || summary.InReplyTo == nil || len(summary.InReplyTo) != 0 || summary.From != (mail.Recipient{Name: "First", Address: "Local@example.com"}) || summary.Sender != "unchanged" {
+					t.Fatalf("partial metadata lost or overstated: %s", data)
+				}
+			})
+		}
+	}
+}
