@@ -387,7 +387,7 @@ func editDraftInput(
 	if err := runDraftEditor(ctx, process, streams); err != nil {
 		return mail.Draft{}, err
 	}
-	edited, err := readDraftInput(path)
+	edited, err := readDraftInput(ctx, path)
 	if err != nil {
 		return mail.Draft{}, fmt.Errorf("validate edited draft: %w", err)
 	}

@@ -2,13 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	stdmail "net/mail"
-	"os"
 	"strings"
 
 	mailmodel "mailcli/internal/mail"
@@ -91,23 +90,26 @@ func registerDraftInputFlags(flags *flag.FlagSet) *draftInputFlags {
 	return options
 }
 
-func (options *draftInputFlags) read() (mailmodel.DraftInput, error) {
-	return options.readMode(true)
+func (options *draftInputFlags) read(ctx context.Context) (mailmodel.DraftInput, error) {
+	return options.readMode(ctx, true)
 }
 
 // readUpdate reads partial input for `drafts update`: fields the caller did
 // not supply stay unset so the caller can merge them from the stored draft.
-func (options *draftInputFlags) readUpdate() (mailmodel.DraftInput, error) {
-	return options.readMode(false)
+func (options *draftInputFlags) readUpdate(ctx context.Context) (mailmodel.DraftInput, error) {
+	return options.readMode(ctx, false)
 }
 
-func (options *draftInputFlags) readMode(requireBody bool) (mailmodel.DraftInput, error) {
+func (options *draftInputFlags) readMode(ctx context.Context, requireBody bool) (mailmodel.DraftInput, error) {
+	if err := ctx.Err(); err != nil {
+		return mailmodel.DraftInput{}, err
+	}
 	if !options.nativeMode() {
 		path := "-"
 		if options.input.set {
 			path = options.input.value
 		}
-		return readDraftInputMode(path, requireBody)
+		return readDraftInputMode(ctx, path, requireBody)
 	}
 	if options.input.set {
 		return mailmodel.DraftInput{}, invalidDraftInput("--input cannot be combined with terminal-native draft flags")
@@ -121,7 +123,7 @@ func (options *draftInputFlags) readMode(requireBody bool) (mailmodel.DraftInput
 	body := options.body.value
 	if options.bodyFile.set {
 		var err error
-		body, err = readDraftBody(options.bodyFile.value)
+		body, err = readDraftBody(ctx, options.bodyFile.value)
 		if err != nil {
 			return mailmodel.DraftInput{}, err
 		}
@@ -229,19 +231,18 @@ func parseRecipientFlags(values []string) ([]mailmodel.Recipient, error) {
 	return recipients, nil
 }
 
-func readDraftBody(path string) (string, error) {
+func readDraftBody(ctx context.Context, path string) (string, error) {
 	if path == "" {
 		return "", invalidDraftInput("body file path is required")
 	}
-	if path == "-" {
-		return readBoundedDraftBody(os.Stdin)
-	}
-	file, err := os.Open(path)
+	payload, err := readInvocationInput(ctx, path, mailmodel.MaximumDraftBodyBytes)
 	if err != nil {
-		return "", fmt.Errorf("open draft body: %w", err)
+		return "", fmt.Errorf("read draft body: %w", err)
 	}
-	body, readErr := readBoundedDraftBody(file)
-	return body, errors.Join(readErr, file.Close())
+	if len(payload) > mailmodel.MaximumDraftBodyBytes {
+		return "", invalidDraftInput("draft body exceeds 4 MiB")
+	}
+	return string(payload), nil
 }
 
 func readBoundedDraftBody(reader io.Reader) (string, error) {
@@ -255,23 +256,19 @@ func readBoundedDraftBody(reader io.Reader) (string, error) {
 	return string(payload), nil
 }
 
-func readDraftInput(path string) (mailmodel.DraftInput, error) {
-	return readDraftInputMode(path, true)
+func readDraftInput(ctx context.Context, path string) (mailmodel.DraftInput, error) {
+	return readDraftInputMode(ctx, path, true)
 }
 
-func readDraftInputMode(path string, requireBody bool) (mailmodel.DraftInput, error) {
+func readDraftInputMode(ctx context.Context, path string, requireBody bool) (mailmodel.DraftInput, error) {
 	if path == "" {
 		return mailmodel.DraftInput{}, &commandError{code: "invalid_argument", message: "input path is required"}
 	}
-	if path == "-" {
-		return decodeDraftInputMode(os.Stdin, requireBody)
-	}
-	file, err := os.Open(path)
+	payload, err := readInvocationInput(ctx, path, maximumDraftInputBytes)
 	if err != nil {
-		return mailmodel.DraftInput{}, fmt.Errorf("open draft input: %w", err)
+		return mailmodel.DraftInput{}, fmt.Errorf("read draft input: %w", err)
 	}
-	input, decodeErr := decodeDraftInputMode(file, requireBody)
-	return input, errors.Join(decodeErr, file.Close())
+	return decodeDraftInputPayload(payload, requireBody)
 }
 
 func decodeDraftInput(reader io.Reader) (mailmodel.DraftInput, error) {
@@ -283,6 +280,10 @@ func decodeDraftInputMode(reader io.Reader, requireBody bool) (mailmodel.DraftIn
 	if err != nil {
 		return mailmodel.DraftInput{}, fmt.Errorf("read draft input: %w", err)
 	}
+	return decodeDraftInputPayload(payload, requireBody)
+}
+
+func decodeDraftInputPayload(payload []byte, requireBody bool) (mailmodel.DraftInput, error) {
 	if len(payload) == 0 {
 		return mailmodel.DraftInput{}, invalidDraftInput(
 			"no input received on stdin; pipe JSON or use --input <path>")

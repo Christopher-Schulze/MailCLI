@@ -79,7 +79,7 @@ func TestDraftInputRejectsMixedJSONAndNativeFlags(t *testing.T) {
 	if err := flags.Parse([]string{"--input", "draft.json", "--body", "Body"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := options.read(); err == nil {
+	if _, err := options.read(context.Background()); err == nil {
 		t.Fatal("read() error = nil")
 	}
 }

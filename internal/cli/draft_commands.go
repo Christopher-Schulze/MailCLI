@@ -187,7 +187,7 @@ func runDraftCreateContext(ctx context.Context, service *mail.Service, args []st
 		return failCommand("drafts.create", *jsonOutput, err, stdout, stderr)
 	}
 	output.stderr = stderr
-	input, err := inputFlags.read()
+	input, err := inputFlags.read(ctx)
 	if err != nil {
 		return failProjectedEmpty("drafts.create", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -495,7 +495,7 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 		return failProjectedEmpty("drafts.update", *jsonOutput, output,
 			invalidDraftInput("missing required --expected-revision; inspect the draft before updating"), stdout, stderr)
 	}
-	input, err := inputFlags.readUpdate()
+	input, err := inputFlags.readUpdate(ctx)
 	if err != nil {
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
@@ -608,7 +608,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 		return failCommand("messages."+string(kind), *jsonOutput, err, stdout, stderr)
 	}
 	output.stderr = stderr
-	input, err := inputFlags.read()
+	input, err := inputFlags.read(ctx)
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}

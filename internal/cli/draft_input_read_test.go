@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func TestReadBoundedDraftBodyRejectsOversize(t *testing.T) {
 func TestReadDraftBodyRequiresPath(t *testing.T) {
 	t.Parallel()
 
-	if _, err := readDraftBody(""); err == nil {
+	if _, err := readDraftBody(context.Background(), ""); err == nil {
 		t.Fatal("error = nil, want path required")
 	}
 }
@@ -46,7 +47,7 @@ func TestReadDraftBodyFromFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("file body"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	body, err := readDraftBody(path)
+	body, err := readDraftBody(context.Background(), path)
 	if err != nil {
 		t.Fatalf("readDraftBody() error = %v", err)
 	}
@@ -78,7 +79,7 @@ func TestDraftInputPresenceNativeAndJSONEquivalent(t *testing.T) {
 	if err := flags.Parse([]string{"--subject", "", "--cc", "", "--body", "Body"}); err != nil {
 		t.Fatal(err)
 	}
-	nativeInput, err := native.read()
+	nativeInput, err := native.read(context.Background())
 	if err != nil {
 		t.Fatalf("native.read() error = %v", err)
 	}

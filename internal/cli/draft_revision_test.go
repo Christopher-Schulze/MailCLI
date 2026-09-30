@@ -120,7 +120,7 @@ func TestDraftEditorConflictPreservesConcurrentUpdateAndCandidate(t *testing.T) 
 	if err != nil || current.Subject != "Concurrent B" || current.Body != "Concurrent body" || current.Revision != conflict.CurrentRevision || conflict.ExpectedRevision != draft.Revision {
 		t.Fatalf("concurrent update lost: draft=%+v conflict=%+v error=%v", current, conflict, err)
 	}
-	candidate, err := readDraftInput(conflict.CandidatePath)
+	candidate, err := readDraftInput(context.Background(), conflict.CandidatePath)
 	if err != nil || candidate.Subject != "Editor candidate A" || candidate.Body != "Candidate body" {
 		t.Fatalf("candidate=%+v error=%v", candidate, err)
 	}
@@ -157,7 +157,7 @@ func TestDraftRevisionEditorProcess(t *testing.T) {
 		return
 	}
 	path := os.Args[len(os.Args)-1]
-	candidate, err := readDraftInput(path)
+	candidate, err := readDraftInput(context.Background(), path)
 	if err != nil {
 		os.Exit(2)
 	}

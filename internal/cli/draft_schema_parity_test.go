@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -76,7 +77,7 @@ func TestPartialUpdateSchemaFieldParity(t *testing.T) {
 					options := registerDraftInputFlags(flags)
 					input, err := mail.DraftInput{}, flags.Parse(args)
 					if err == nil {
-						input, err = options.readUpdate()
+						input, err = options.readUpdate(context.Background())
 					}
 					if mode == "flags" && change == "clear" && (field.name == "attachments" || field.name == "body_format") {
 						if err == nil {
@@ -129,7 +130,7 @@ func TestPartialUpdateSchemaRejectionsMatchParser(t *testing.T) {
 		if err := flags.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := options.readUpdate(); err == nil {
+		if _, err := options.readUpdate(context.Background()); err == nil {
 			t.Fatalf("incompatible input accepted: %v", args)
 		}
 	}
@@ -149,7 +150,7 @@ func TestPartialUpdateSchemaRejectionsMatchParser(t *testing.T) {
 	if err := flags.Parse([]string{"--subject", "no body"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := options.read(); err == nil {
+	if _, err := options.read(context.Background()); err == nil {
 		t.Fatal("native create accepted omitted body")
 	}
 }

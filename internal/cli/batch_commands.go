@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -150,7 +148,7 @@ func runBatch(
 	if !input.set || input.value == "" {
 		return failCommand("batch", *jsonOutput, invalidDraftInput("missing required --input"), stdout, stderr)
 	}
-	request, err := readBatchInput(input.value)
+	request, err := readBatchInput(ctx, input.value)
 	if err != nil {
 		return failCommand("batch", *jsonOutput, err, stdout, stderr)
 	}
@@ -451,24 +449,11 @@ func preflightBatchOutputBudget(request mail.BatchRequest, maxBytes int64) error
 	return nil
 }
 
-func readBatchInput(path string) (mail.BatchRequest, error) {
+func readBatchInput(ctx context.Context, path string) (mail.BatchRequest, error) {
 	if path == "" {
 		return mail.BatchRequest{}, invalidDraftInput("batch input path is required")
 	}
-	var reader io.Reader = os.Stdin
-	var file *os.File
-	if path != "-" {
-		opened, err := os.Open(path)
-		if err != nil {
-			return mail.BatchRequest{}, fmt.Errorf("open batch input: %w", err)
-		}
-		file = opened
-		reader = opened
-	}
-	payload, readErr := io.ReadAll(io.LimitReader(reader, mail.MaximumBatchInputBytes+1))
-	if file != nil {
-		readErr = errors.Join(readErr, file.Close())
-	}
+	payload, readErr := readInvocationInput(ctx, path, mail.MaximumBatchInputBytes)
 	if readErr != nil {
 		return mail.BatchRequest{}, fmt.Errorf("read batch input: %w", readErr)
 	}

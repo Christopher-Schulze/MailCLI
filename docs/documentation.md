@@ -312,6 +312,7 @@ Each single-reference command accepts canonical `--ref REF` or one positional `R
 Repeated `--ref` flags and a positional ref must be identical; missing, empty, conflicting or excess references return `invalid_argument` before dispatch, and `--` ends option parsing.
 Message and local-draft references keep their distinct semantics; `messages.search` keeps its separate query operand.
 Standard input accepts structured JSON payloads for long bodies and recipient lists, avoiding shell quoting problems.
+Draft JSON, draft body files and batch input honor caller cancellation before dispatch. Standard input waits without an added input timeout; cancellation is checked while polling readiness, without closing stdin, changing its descriptor flags or leaving a background reader. Explicit input paths must resolve to regular files, including regular-file symlinks; use `-` for piped streams. Local reads check cancellation between bounded chunks.
 Draft and batch JSON require one object of at most 16 MiB with unique, exact-case schema keys.
 Duplicate keys (also escaped duplicates, even with identical values), case aliases, unknown fields, invalid value shapes and trailing documents return `invalid_input` (exit `2`) before draft mutation or batch dispatch; diagnostics name the field or container and byte location without echoing values.
 The same boundary validates create, update, reply, forward and editor output; omission and intentional empty fields keep their distinct meaning, and draft attachments are path strings, not objects.

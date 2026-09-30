@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	stdmail "net/mail"
 	"path/filepath"
@@ -22,7 +23,7 @@ func TestQuotedMailboxNativeAndJSONDraftInputs(t *testing.T) {
 			if err := flags.Parse([]string{"--from", "sender@icloud.com", "--to", "Jörg <" + address + ">", "--body", "Body"}); err != nil {
 				t.Fatal(err)
 			}
-			input, err := options.read()
+			input, err := options.read(context.Background())
 			if err != nil || len(input.To) != 1 || input.To[0].Address != address || input.To[0].Name != "Jörg" {
 				t.Fatalf("native input = %+v, %v", input, err)
 			}
