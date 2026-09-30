@@ -828,6 +828,7 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 	return mail.ThreadSource{
 		Subject:             headers.Subject,
 		From:                headers.From,
+		FromParseError:      headers.FromError,
 		ReplyTo:             headers.ReplyTo,
 		To:                  headers.To,
 		CC:                  headers.CC,

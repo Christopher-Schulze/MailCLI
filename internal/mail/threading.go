@@ -14,6 +14,7 @@ import (
 type ThreadSource struct {
 	Subject             string
 	From                string
+	FromParseError      error
 	ReplyTo             []Recipient
 	To                  []Recipient
 	CC                  []Recipient
@@ -147,7 +148,7 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 
 	if kind == DraftKindReply {
 		targets, err := replyTargetRecipients(source)
-		if err != nil {
+		if err != nil && !input.ToSet && len(out.To) == 0 {
 			return DraftInput{}, "", "", err
 		}
 		if !input.ToSet && len(out.To) == 0 {
@@ -244,6 +245,11 @@ func promotedReplyAllRecipients(to []Recipient, cc []Recipient, targets []Recipi
 func replyTargetRecipients(source ThreadSource) ([]Recipient, error) {
 	if len(source.ReplyTo) > 0 {
 		return append([]Recipient(nil), source.ReplyTo...), nil
+	}
+	if source.FromParseError != nil {
+		return nil, &OperationError{
+			Code: "invalid_message_source", Message: source.FromParseError.Error(),
+		}
 	}
 	if source.From != "" {
 		recipient, err := recipientFromFormatted(source.From)

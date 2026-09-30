@@ -23,6 +23,7 @@ type sourceHeaders struct {
 	InReplyToPresent  bool
 	Subject           string
 	From              string
+	FromError         error
 	ReplyToText       string
 	ReplyTo           []mail.Recipient
 	ReplyToError      error
@@ -56,6 +57,10 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 		out.Subject = subject
 	}
 	out.From, _ = firstFormattedAddress(&header, "From")
+	fields, complete := mail.ParseHeaderFields(headers)
+	if _, authorComplete := mail.ParseHeaderAuthor(fields); !complete || !authorComplete {
+		out.FromError = fmt.Errorf("source From header is malformed or identifies incompatible authors")
+	}
 	out.ReplyToText, _ = firstFormattedAddress(&header, "Reply-To")
 	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
 	out.To, _, out.ToError = headerRecipients(&header, "To")

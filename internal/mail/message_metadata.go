@@ -204,8 +204,9 @@ func validHeaderName(name string) bool {
 func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	fields, complete := ParseHeaderFields(raw)
 	summary.InReplyTo, summary.References = []string{}, []string{}
-	summary.From = Recipient{}
-	summary.ThreadingComplete = complete
+	var authorComplete bool
+	summary.From, authorComplete = ParseHeaderAuthor(fields)
+	summary.ThreadingComplete = complete && authorComplete
 	summary.ThreadingRequested = true
 	for _, field := range fields {
 		switch strings.ToLower(field.Name) {
@@ -219,25 +220,39 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 			} else {
 				summary.References = append(summary.References, ids...)
 			}
-		case "from":
-			addresses, err := messageMail.ParseAddressList(field.Value)
-			if err != nil || len(addresses) != 1 {
-				summary.ThreadingComplete = false
-			}
-			if err == nil && len(addresses) > 0 {
-				address := addresses[0].Address
-				if at := strings.LastIndexByte(address, '@'); at >= 0 {
-					address = address[:at+1] + strings.ToLower(address[at+1:])
-				}
-				from := Recipient{Name: addresses[0].Name, Address: MailboxAddrSpec(address)}
-				if summary.From.Address == "" {
-					summary.From = from
-				} else if summary.From != from {
-					summary.ThreadingComplete = false
-				}
-			}
 		}
 	}
+}
+
+// ParseHeaderAuthor retains the first available author and reports whether
+// every From field identifies that same single author. An absent field is
+// complete but supplies no author.
+func ParseHeaderAuthor(fields []HeaderField) (Recipient, bool) {
+	var author Recipient
+	complete := true
+	for _, field := range fields {
+		if !strings.EqualFold(field.Name, "From") {
+			continue
+		}
+		addresses, err := messageMail.ParseAddressList(field.Value)
+		if err != nil || len(addresses) != 1 {
+			complete = false
+		}
+		if err != nil || len(addresses) == 0 {
+			continue
+		}
+		address := addresses[0].Address
+		if at := strings.LastIndexByte(address, '@'); at >= 0 {
+			address = address[:at+1] + strings.ToLower(address[at+1:])
+		}
+		from := Recipient{Name: addresses[0].Name, Address: MailboxAddrSpec(address)}
+		if author.Address == "" {
+			author = from
+		} else if author != from {
+			complete = false
+		}
+	}
+	return author, complete
 }
 
 // scanMessageIDs returns every well-formed msg-id in order and reports whether
