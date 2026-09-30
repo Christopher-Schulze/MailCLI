@@ -777,14 +777,14 @@ Structures that need HTML5 repair after filtering, such as removed table caption
 ### Replies and forwards
 
 Reply and forward drafts derive from the source message's stored header block without a body scan.
-The subject becomes `Re: <subject>` or `Fwd: <subject>` with stacked prefixes collapsed.
+The subject becomes `Re: <subject>` or `Fwd: <subject>` with stacked common localized and numbered prefixes collapsed; leading list tags and display case are preserved.
 Every valid Reply-To address becomes a reply target in header order, and From is used only when Reply-To is absent; a malformed or partially parsed Reply-To fails with `invalid_message_source`.
-Reply-all moves the other To and CC recipients into CC, excluding reply targets and any final To address.
+Reply-all moves the other To and CC recipients into CC, excluding reply targets, any final To address and the usable source account's email addresses, configured aliases and discovered sender identities. Own identities are excluded only from automatic CC, never from explicit recipient input. Malformed source To or CC fails automatic reply-all with `invalid_message_source` before a draft is created; ordinary reply and an explicit CC override remain usable.
 Explicit input fields win over derived values, including an intentionally empty `subject`, `to` or `cc`; native recipient flags accept an empty value for that case.
-Without `--from` and `--account`, the sender is the account that holds the source message: its address found in the source To or CC, otherwise its only address; a degraded account or an ambiguous choice leaves `from` empty.
+Without `--from` and `--account`, the sender is inferred from the account that holds the source message: exactly one distinct own identity matching source To or CC, otherwise its only identity when no match exists. Multiple matches, malformed To/CC, an unavailable or degraded account leave automatic `from` and account selection unset; recipient order never breaks a tie.
 `drafts create`, `inspect`, `preview` and the reply and forward responses carry `from` (empty when unset) and `send_blockers` (`from_missing`, `recipients_missing`); the blockers are review evidence and never part of the revision.
 `send_blockers` covers only these two content checks, which need no contact with any server: an empty list does not mean the draft can be sent, because `drafts send` still validates stored limits, claims, the thread source, addresses, sender identity and transport, and its errors are authoritative.
-Final recipient roles are deduplicated by normalized address before validation.
+Reply-all CC is deduplicated against final To before validation. Recipient comparison parses mailbox syntax and folds only domain case; local-part case and required quoting are preserved, so `User@example.com` and `user@example.com` remain distinct.
 The draft stores a canonical source Message-ID and thread chain: valid entries in first-seen order without duplicates, the direct parent once at the end, capped at the newest 20 entries.
 Sending emits that `In-Reply-To` and `References` chain; malformed entries and control characters are rejected.
 Both commands require a fresh store-bound message ref and the Mail store.

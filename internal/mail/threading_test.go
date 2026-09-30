@@ -45,7 +45,7 @@ func TestInferDerivedSenderUsesTheAccountThatHoldsTheSourceMessage(t *testing.T)
 		wantFrom    string
 		wantAccount string
 	}{
-		{"addressee alias wins", "ACC-GMAIL", ThreadSource{To: []Recipient{{Address: "other@example.com"}, {Address: "Alias@Example.com"}}}, "alias@example.com", accountRef("ACC-GMAIL")},
+		{"addressee alias wins", "ACC-GMAIL", ThreadSource{To: []Recipient{{Address: "other@example.com"}, {Address: "alias@Example.com"}}}, "alias@example.com", accountRef("ACC-GMAIL")},
 		{"cc counts as addressee", "ACC-MANY", ThreadSource{To: []Recipient{{Address: "x@elsewhere.example"}}, CC: []Recipient{{Address: "b@many.example"}}}, "b@many.example", accountRef("ACC-MANY")},
 		{"single address is the fallback", "ACC-ICLOUD", ThreadSource{To: []Recipient{{Address: "list@example.com"}}}, "me@icloud.com", accountRef("ACC-ICLOUD")},
 		{"several addresses without a match stay open", "ACC-MANY", ThreadSource{To: []Recipient{{Address: "list@example.com"}}}, "", ""},
@@ -53,13 +53,13 @@ func TestInferDerivedSenderUsesTheAccountThatHoldsTheSourceMessage(t *testing.T)
 		{"unknown account stays open", "ACC-NONE", ThreadSource{To: []Recipient{{Address: "me@gmail.com"}}}, "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			from, account := service.InferDerivedSender(context.Background(), messageRef(test.account), test.source)
+			from, account, _ := service.InferDerivedSender(context.Background(), messageRef(test.account), test.source)
 			if from != test.wantFrom || account != test.wantAccount {
 				t.Fatalf("InferDerivedSender() = %q, %q; want %q, %q", from, account, test.wantFrom, test.wantAccount)
 			}
 		})
 	}
-	if from, account := service.InferDerivedSender(context.Background(), "msg_not-a-ref", ThreadSource{}); from != "" || account != "" {
+	if from, account, own := service.InferDerivedSender(context.Background(), "msg_not-a-ref", ThreadSource{}); from != "" || account != "" || len(own) != 0 {
 		t.Fatalf("invalid ref inferred %q, %q", from, account)
 	}
 }
@@ -83,6 +83,117 @@ func TestSendBlockersNameWhatStopsASend(t *testing.T) {
 	}
 }
 
+func TestDerivedSenderIdentitiesRequireOneDistinctMatch(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount("SOURCE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageRef, err := mailref.EncodeMessage(mailref.Message{AccountID: "SOURCE", MailboxPath: []string{"INBOX"}, LibraryID: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, state, wantFrom string
+		source                ThreadSource
+		wantOwn               []string
+	}{
+		{"two own To", "ok", "", ThreadSource{To: []Recipient{{Address: "Me@example.com"}, {Address: "alias@example.com"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"reversed own To", "ok", "", ThreadSource{To: []Recipient{{Address: "alias@example.com"}, {Address: "Me@example.com"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"own To and CC", "ok", "", ThreadSource{To: []Recipient{{Address: "Me@example.com"}}, CC: []Recipient{{Address: "alias@example.com"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"duplicate domain casing", "ok", "alias@example.com", ThreadSource{To: []Recipient{{Address: "alias@EXAMPLE.COM"}}, CC: []Recipient{{Address: "alias@example.com"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"local case is distinct", "ok", "", ThreadSource{To: []Recipient{{Address: "me@example.com"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"quoted discovered sender", "ok", `"A B"@example.com`, ThreadSource{CC: []Recipient{{Address: `"A B"@EXAMPLE.COM`}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"malformed recipient", "ok", "", ThreadSource{To: []Recipient{{Address: "alias@example.com"}, {Address: "broken"}}}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"parser loss", "ok", "", ThreadSource{CC: []Recipient{{Address: "alias@example.com"}}, RecipientParseError: fmt.Errorf("malformed To")}, []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}},
+		{"degraded", "degraded", "", ThreadSource{}, nil},
+		{"disabled", "disabled", "", ThreadSource{}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(&gatewayStub{accounts: []Account{{Ref: accountRef, State: test.state,
+				EmailAddresses: []string{"Me@EXAMPLE.COM", "invalid"}, ConfiguredSenderAliases: []string{"alias@example.com", "alias@EXAMPLE.COM"},
+				DiscoveredSenderIdentities: []string{`"A B"@example.com`}}}})
+			from, account, own := service.InferDerivedSender(context.Background(), messageRef, test.source)
+			wantAccount := ""
+			if test.wantFrom != "" {
+				wantAccount = accountRef
+			}
+			if from != test.wantFrom || account != wantAccount || !reflect.DeepEqual(own, test.wantOwn) {
+				t.Fatalf("sender = %q/%q, own = %#v; want %q/%q, %#v", from, account, own, test.wantFrom, wantAccount, test.wantOwn)
+			}
+		})
+	}
+}
+
+func TestReplyAllOwnIdentitiesAndRecipientCase(t *testing.T) {
+	source := ThreadSource{From: "target@example.com", MessageID: "<source@example.com>",
+		To: []Recipient{{Address: "Me@EXAMPLE.COM"}, {Address: "User@EXAMPLE.COM"}, {Address: "user@example.com"}},
+		CC: []Recipient{{Address: "alias@example.com"}, {Address: "User@example.com"}, {Address: `"A B"@example.com`}}}
+	own := []string{"Me@example.com", "alias@example.com", `"A B"@example.com`}
+	for _, test := range []struct {
+		name   string
+		input  DraftInput
+		own    []string
+		wantCC []Recipient
+	}{
+		{"automatic", DraftInput{Body: "Reply"}, own, []Recipient{{Address: "User@EXAMPLE.COM"}, {Address: "user@example.com"}}},
+		{"no verified identities", DraftInput{Body: "Reply"}, nil, []Recipient{{Address: "Me@EXAMPLE.COM"}, {Address: "User@EXAMPLE.COM"}, {Address: "user@example.com"}, {Address: "alias@example.com"}, {Address: `"A B"@example.com`}}},
+		{"explicit own roles", DraftInput{Body: "Reply", ToSet: true, To: []Recipient{{Address: "Me@example.com"}}, CCSet: true, CC: []Recipient{{Address: "alias@example.com"}}, BCC: []Recipient{{Address: `"A B"@example.com`}}}, own, []Recipient{{Address: "alias@example.com"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input, id, refs, err := DeriveReplyInput(source, DraftKindReply, true, test.input, test.own)
+			if err != nil || !reflect.DeepEqual(input.CC, test.wantCC) || !reflect.DeepEqual(input.BCC, test.input.BCC) {
+				t.Fatalf("input = %+v, error = %v", input, err)
+			}
+			if test.input.ToSet && !reflect.DeepEqual(input.To, test.input.To) {
+				t.Fatalf("explicit To changed: %+v", input.To)
+			}
+			service := NewServiceWithDraftRoot(&gatewayStub{}, t.TempDir())
+			draft, err := service.CreateDraft(CreateDraftRequest{Kind: DraftKindReply, SourceRef: storeBoundSourceRef(t), ReplyAll: true, Input: input, SourceMessageID: id, SourceReferences: refs})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := BuildMessage(draft, "<reply@example.com>")
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := readComposedHeaderTestMessage(t, payload)
+			cc, err := message.Header.AddressList("Cc")
+			if err != nil || len(cc) != len(test.wantCC) {
+				t.Fatalf("composed CC = %+v, error = %v", cc, err)
+			}
+			for index, recipient := range test.wantCC {
+				parsed, err := stdmail.ParseAddress(recipient.Address)
+				if err != nil || cc[index].Address != parsed.Address {
+					t.Fatalf("composed CC[%d] = %+v, expected %+v, error = %v", index, cc[index], parsed, err)
+				}
+			}
+		})
+	}
+}
+
+func TestThreadSubjectLocalizedPrefixesPreserveOriginalOffsets(t *testing.T) {
+	for _, test := range []struct{ source, want string }{
+		{"AW[2]: Wg: Mixed CASE", "Mixed CASE"},
+		{"[Kİ List] Re[12]: Sv: Vs: Tr: Odp: Res: Rv: Update", "[Kİ List] Update"},
+		{"Re: [K Team] AW: FWD: Update", "[K Team] Update"},
+		{"[First] Re: [Second] AW: Update", "[First] [Second] Update"},
+		{"[List] Unprefixed CASE", "[List] Unprefixed CASE"},
+		{"Awareness: Keep", "Awareness: Keep"},
+	} {
+		for _, kind := range []DraftKind{DraftKindReply, DraftKindForward} {
+			t.Run(string(kind)+"/"+test.source, func(t *testing.T) {
+				prefix := "Re: "
+				if kind == DraftKindForward {
+					prefix = "Fwd: "
+				}
+				if got := threadSubject(test.source, kind); got != prefix+test.want {
+					t.Fatalf("subject = %q, want %q", got, prefix+test.want)
+				}
+			})
+		}
+	}
+}
+
 func TestDeriveReplyInputDefaults(t *testing.T) {
 	t.Parallel()
 	source := ThreadSource{
@@ -93,7 +204,7 @@ func TestDeriveReplyInputDefaults(t *testing.T) {
 		MessageID:  "<m1@example.com>",
 		References: "<m0@example.com>",
 	}
-	input, messageID, references, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	input, messageID, references, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -114,7 +225,7 @@ func TestDeriveReplyInputDefaults(t *testing.T) {
 func TestDeriveReplyInputFallsBackToFrom(t *testing.T) {
 	t.Parallel()
 	source := ThreadSource{Subject: "s", From: "Alice <alice@example.com>", MessageID: "<m1@example.com>"}
-	input, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -133,7 +244,7 @@ func TestDeriveReplyInputUsesCompleteReplyToList(t *testing.T) {
 		},
 		MessageID: "<m1@example.com>",
 	}
-	input, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -170,7 +281,7 @@ func TestDeriveReplyInputReplyAllPromotes(t *testing.T) {
 		CC:        []Recipient{{Address: "dave@example.com"}},
 		MessageID: "<m1@example.com>",
 	}
-	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{Body: "x"})
+	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -198,7 +309,7 @@ func TestDeriveReplyInputExplicitInputWins(t *testing.T) {
 	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{
 		Subject: "custom subject", To: []Recipient{{Address: "zoe@example.com"}},
 		CC: []Recipient{{Address: "keep@example.com"}}, Body: "x",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -221,7 +332,7 @@ func TestDeriveReplyInputPreservesExplicitEmptyFields(t *testing.T) {
 	}
 	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{
 		SubjectSet: true, CCSet: true, Subject: "", CC: []Recipient{}, Body: "x",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -244,12 +355,12 @@ func TestDeriveReplyInputReplyAllDeduplicatesExplicitTo(t *testing.T) {
 		CC: []Recipient{{Address: "dave@example.com"}}, MessageID: "<m1@example.com>",
 	}
 	input, _, _, err := DeriveReplyInput(source, DraftKindReply, true, DraftInput{
-		ToSet: true, To: []Recipient{{Name: "Bob", Address: "BOB@example.com"}}, Body: "x",
-	})
+		ToSet: true, To: []Recipient{{Name: "Bob", Address: "bob@EXAMPLE.COM"}}, Body: "x",
+	}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
-	if len(input.To) != 1 || input.To[0].Address != "BOB@example.com" {
+	if len(input.To) != 1 || input.To[0].Address != "bob@EXAMPLE.COM" {
 		t.Fatalf("to = %+v", input.To)
 	}
 	if len(input.CC) != 2 || input.CC[0].Address != "carol@example.com" || input.CC[1].Address != "dave@example.com" {
@@ -262,7 +373,7 @@ func TestDeriveReplyInputForward(t *testing.T) {
 	source := ThreadSource{Subject: "Re: s", MessageID: "<m1@example.com>"}
 	input, messageID, references, err := DeriveReplyInput(source, DraftKindForward, false, DraftInput{
 		To: []Recipient{{Address: "zoe@example.com"}}, Body: "x",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -294,7 +405,7 @@ func TestDeriveReplyInputCapsReferencesChain(t *testing.T) {
 		refs = append(refs, fmt.Sprintf("<r%d@example.com>", index))
 	}
 	source := ThreadSource{Subject: "s", From: "a@example.com", References: strings.Join(refs, " "), MessageID: "<new@example.com>"}
-	_, _, chain, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	_, _, chain, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -311,7 +422,7 @@ func TestDeriveReplyInputDeduplicatesReferencesAndKeepsParentLast(t *testing.T) 
 		Subject: "s", From: "a@example.com", MessageID: parent,
 		References: "<first@example.com> <second@example.com> <first@example.com> " + parent + " <third@example.com> <second@example.com>",
 	}
-	_, _, chain, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"})
+	_, _, chain, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -328,7 +439,7 @@ func TestDeriveReplyInputRejectsMalformedMessageIDs(t *testing.T) {
 		{Subject: "s", From: "a@example.com", MessageID: "<parent@example.com>", References: "<valid@example.com> invalid"},
 	}
 	for _, source := range tests {
-		if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}); errorCode(err) != "invalid_message_source" {
+		if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil); errorCode(err) != "invalid_message_source" {
 			t.Fatalf("DeriveReplyInput(%+v) error = %v, want invalid_message_source", source, err)
 		}
 	}
@@ -345,7 +456,7 @@ func TestDerivedReplyDraftComposesCanonicalThreading(t *testing.T) {
 		Subject: "Project update", From: "Alice <alice@example.com>", MessageID: parent,
 		References: strings.Join(append(historical, parent, historical[0]), " "),
 	}
-	input, sourceMessageID, references, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "Reply"})
+	input, sourceMessageID, references, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "Reply"}, nil)
 	if err != nil {
 		t.Fatalf("DeriveReplyInput() error = %v", err)
 	}
@@ -386,7 +497,7 @@ func TestDeriveReplyInputRejectsControlCharacters(t *testing.T) {
 		Subject: "s", From: "a@example.com", MessageID: "<m1@example.com>",
 		References: "<r0@example.com>\r\nBcc: victim@example.com",
 	}
-	if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}); err == nil ||
+	if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil); err == nil ||
 		errorCode(err) != "invalid_message_source" {
 		t.Fatalf("control characters error = %v", err)
 	}
@@ -395,7 +506,7 @@ func TestDeriveReplyInputRejectsControlCharacters(t *testing.T) {
 func TestDeriveReplyInputRequiresReplyTarget(t *testing.T) {
 	t.Parallel()
 	source := ThreadSource{Subject: "s", MessageID: "<m1@example.com>"}
-	if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}); err == nil ||
+	if _, _, _, err := DeriveReplyInput(source, DraftKindReply, false, DraftInput{Body: "x"}, nil); err == nil ||
 		errorCode(err) != "invalid_message_source" {
 		t.Fatalf("missing reply target error = %v", err)
 	}

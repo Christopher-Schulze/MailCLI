@@ -7,11 +7,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"mailcli/internal/compose"
 	"mailcli/internal/mail"
+	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
 )
 
@@ -443,5 +445,89 @@ func TestDraftsAdoptPublishedFailureGuidanceInspectsDraftList(t *testing.T) {
 		guidance.Recovery.Command != "drafts.list" || !equalStrings(guidance.Recovery.Args, []string{"--json"}) ||
 		!strings.Contains(guidance.Recovery.Instruction, "drafts inspect --ref REF --json") {
 		t.Fatalf("published-adoption guidance = %+v", guidance)
+	}
+}
+
+type derivedDraftGateway struct {
+	testGateway
+	source       mail.ThreadSource
+	account      mail.Account
+	accountErr   error
+	accountCalls int
+}
+
+func (g *derivedDraftGateway) MessageThreadSource(context.Context, string) (mail.ThreadSource, error) {
+	return g.source, nil
+}
+
+func (g *derivedDraftGateway) ListAccounts(context.Context) ([]mail.Account, error) {
+	g.accountCalls++
+	return []mail.Account{g.account}, g.accountErr
+}
+
+func TestDerivedDraftReplyIdentityAndNoDraftOnRecipientLoss(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount("account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name                   string
+		args                   []string
+		state                  string
+		malformed, unavailable bool
+		wantFrom, wantError    string
+		wantCC                 []mail.Recipient
+		wantCalls              int
+	}{
+		{"ambiguous sender and own aliases", []string{"--all"}, "ok", false, false, "", "", []mail.Recipient{{Address: "external@example.com"}}, 1},
+		{"explicit sender still filters generated CC", []string{"--all", "--from", "named@example.com"}, "ok", false, false, "named@example.com", "", []mail.Recipient{{Address: "external@example.com"}}, 1},
+		{"explicit own CC survives", []string{"--all", "--from", "named@example.com", "--cc", "alias@example.com"}, "ok", false, false, "named@example.com", "", []mail.Recipient{{Address: "alias@example.com"}}, 0},
+		{"malformed automatic reply-all", []string{"--all"}, "ok", true, false, "", "invalid_message_source", nil, 1},
+		{"malformed ordinary reply", nil, "ok", true, false, "", "", []mail.Recipient{}, 1},
+		{"malformed explicit CC", []string{"--all", "--cc", "alias@example.com"}, "ok", true, false, "", "", []mail.Recipient{{Address: "alias@example.com"}}, 1},
+		{"malformed explicit empty CC", []string{"--all", "--cc", ""}, "ok", true, false, "", "", []mail.Recipient{}, 1},
+		{"degraded has no invented own set", []string{"--all"}, "degraded", false, false, "", "", []mail.Recipient{{Address: "me@example.com"}, {Address: "alias@example.com"}, {Address: "external@example.com"}}, 1},
+		{"unavailable has no invented own set", []string{"--all"}, "ok", false, true, "", "", []mail.Recipient{{Address: "me@example.com"}, {Address: "alias@example.com"}, {Address: "external@example.com"}}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			gateway := &derivedDraftGateway{account: mail.Account{Ref: accountRef, State: test.state, EmailAddresses: []string{"me@example.com"}, ConfiguredSenderAliases: []string{"alias@example.com"}},
+				source: mail.ThreadSource{Subject: "[K List] AW[2]: Update", From: "sender@example.com", MessageID: "<source@example.com>",
+					To: []mail.Recipient{{Address: "me@example.com"}}, CC: []mail.Recipient{{Address: "alias@example.com"}, {Address: "external@example.com"}}}}
+			if test.malformed {
+				gateway.source.RecipientParseError = errors.New("source recipient parse loss")
+			}
+			if test.unavailable {
+				gateway.accountErr = errors.New("catalog unavailable")
+			}
+			service := mail.NewServiceWithDraftRoot(gateway, root)
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--ref", jsonInputSourceRef(t), "--body", "Reply", "--json"}, test.args...)
+			code := runMessageReply(context.Background(), service, args, &stdout, &stderr)
+			var response envelope
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatalf("response = %q, error = %v", stdout.String(), err)
+			}
+			if gateway.accountCalls != test.wantCalls || stderr.Len() != 0 {
+				t.Fatalf("account calls = %d, want %d; stderr = %q", gateway.accountCalls, test.wantCalls, stderr.String())
+			}
+			if test.wantError != "" {
+				entries, err := os.ReadDir(root)
+				if code != 1 || response.OK || response.Error == nil || response.Error.Code != test.wantError || response.Data.Draft != nil || err != nil || len(entries) != 0 {
+					t.Fatalf("failed reply created state: code=%d response=%+v entries=%v error=%v", code, response, entries, err)
+				}
+				return
+			}
+			if code != 0 || !response.OK || response.Data.Draft == nil {
+				t.Fatalf("code = %d, response = %s", code, stdout.String())
+			}
+			draft, err := service.GetDraft(response.Data.Draft.Ref)
+			if err != nil || draft.From != test.wantFrom || !reflect.DeepEqual(draft.CC, test.wantCC) || draft.Subject != "Re: [K List] Update" || len(draft.To) != 1 || draft.To[0].Address != "sender@example.com" {
+				t.Fatalf("persisted reply = %+v, error = %v", draft, err)
+			}
+			if draft.From == "" && draft.AccountRef != "" {
+				t.Fatalf("ambiguous sender retained an inferred account: %q", draft.AccountRef)
+			}
+		})
 	}
 }

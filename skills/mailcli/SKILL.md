@@ -55,6 +55,8 @@ Placeholders come from earlier output; quote them:
 | Send | `mailcli drafts preview DRAFT`, then, once the user approved it, `mailcli drafts send DRAFT --confirm --expected-revision REV`. | `data.send_result`; reconcile a pending or unknown one with `mailcli drafts reconcile`. |
 | Replies | `mailcli messages search --after DATE --with-threading --with-excerpt`, paging with NEXT. | Sent Message-IDs in `in_reply_to[]` or `references[]`; `threading_complete:false` means unknown, a sender domain is only a candidate. |
 
+Reply-all automatically excludes the usable source account's own identities from generated CC. Multiple own To/CC matches leave the sender unset; name a sender only from user intent. Malformed source To/CC blocks automatic reply-all; an explicit CC override or ordinary reply remains usable.
+
 Follow NEXT on lists and filters too. Review only complete content. Inspect a completed draft instead of recreating it.
 
 Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged. Save and export only to new absolute paths, then verify size and hash.

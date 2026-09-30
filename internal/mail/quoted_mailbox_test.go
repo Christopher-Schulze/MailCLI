@@ -43,7 +43,7 @@ func TestQuotedMailboxCompositionPreservesIdentity(t *testing.T) {
 					t.Errorf("valid quoted recipient rejected: %v", err)
 				}
 				key, err := recipientAddressKey(draft.To[0])
-				if err != nil || key != strings.ToLower(test.identity) {
+				if err != nil || key != MailboxAddrSpec(test.identity) {
 					t.Errorf("deduplication identity with name %q = %q, %v", name, key, err)
 				}
 			}
@@ -62,6 +62,32 @@ func TestQuotedMailboxDuplicateNamesDoNotChangeIdentity(t *testing.T) {
 				t.Errorf("stored validation did not reject duplicate: %v", err)
 			}
 		})
+	}
+}
+
+func TestRecipientKeysPreserveLocalCaseAndCanonicalQuoting(t *testing.T) {
+	for _, test := range []struct{ address, want string }{
+		{"User@EXAMPLE.COM", "User@example.com"},
+		{"user@example.com", "user@example.com"},
+		{`"User"@EXAMPLE.COM`, "User@example.com"},
+		{`"A@B"@EXAMPLE.COM`, `"A@B"@example.com`},
+		{`"A\ B"@EXAMPLE.COM`, `"A B"@example.com`},
+		{`"A\"B"@EXAMPLE.COM`, `"A\"B"@example.com`},
+	} {
+		t.Run(test.address, func(t *testing.T) {
+			key, err := recipientAddressKey(Recipient{Address: test.address})
+			if err != nil || key != test.want {
+				t.Fatalf("key = %q, error = %v; want %q", key, err, test.want)
+			}
+		})
+	}
+	draft := Draft{From: "sender@example.com", To: []Recipient{{Address: "User@example.com"}, {Address: "user@example.com"}}}
+	if err := validateStoredDraftAddresses(draft); err != nil {
+		t.Fatal(err)
+	}
+	recipients, err := draftEnvelopeRecipients(draft)
+	if err != nil || len(recipients) != 2 || recipients[0] != "User@example.com" || recipients[1] != "user@example.com" {
+		t.Fatalf("envelope recipients = %v, error = %v", recipients, err)
 	}
 }
 

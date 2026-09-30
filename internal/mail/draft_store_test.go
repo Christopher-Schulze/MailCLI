@@ -779,7 +779,7 @@ func TestDraftValidationRejectsDuplicateRecipientAcrossRoles(t *testing.T) {
 	service := NewServiceWithDraftRoot(&draftGateway{}, filepath.Join(t.TempDir(), "drafts"))
 	_, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
 		To: []Recipient{{Address: "person@example.com"}},
-		CC: []Recipient{{Address: "PERSON@example.com"}}, Body: "Body",
+		CC: []Recipient{{Address: "person@EXAMPLE.COM"}}, Body: "Body",
 	}})
 	if errorCode(err) != "invalid_argument" {
 		t.Fatalf("CreateDraft() error = %v, want invalid_argument", err)

@@ -24,7 +24,9 @@ type sourceHeaders struct {
 	ReplyTo      []mail.Recipient
 	ReplyToError error
 	To           []mail.Recipient
+	ToError      error
 	CC           []mail.Recipient
+	CCError      error
 	BCC          []mail.Recipient
 	Raw          string
 }
@@ -53,8 +55,8 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	out.From, _ = firstFormattedAddress(&header, "From")
 	out.ReplyToText, _ = firstFormattedAddress(&header, "Reply-To")
 	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
-	out.To, _, _ = headerRecipients(&header, "To")
-	out.CC, _, _ = headerRecipients(&header, "Cc")
+	out.To, _, out.ToError = headerRecipients(&header, "To")
+	out.CC, _, out.CCError = headerRecipients(&header, "Cc")
 	out.BCC, _, _ = headerRecipients(&header, "Bcc")
 	out.References = strings.TrimSpace(header.Get("References"))
 	return out, nil

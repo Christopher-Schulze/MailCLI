@@ -596,7 +596,7 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	inputFlags := registerDraftInputFlags(flags)
 	replyAll := false
 	if kind == mail.DraftKindReply {
-		flags.BoolVar(&replyAll, "all", false, "reply to all recipients")
+		flags.BoolVar(&replyAll, "all", false, "promote other source recipients to CC; exclude own identities")
 	}
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	outputFlags := addOutputFlags(flags, projectionTargetDraft, defaultDraftOutputView, false)
@@ -616,14 +616,19 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
-	derived, sourceMessageID, references, err := mail.DeriveReplyInput(source, kind, replyAll, input)
+	var from, account string
+	var ownIdentities []string
+	if input.From == "" && input.AccountRef == "" || kind == mail.DraftKindReply && replyAll && !input.CCSet && len(input.CC) == 0 {
+		from, account, ownIdentities = service.InferDerivedSender(ctx, *ref, source)
+	}
+	derived, sourceMessageID, references, err := mail.DeriveReplyInput(source, kind, replyAll, input, ownIdentities)
 	if err != nil {
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	if derived.From == "" && derived.AccountRef == "" {
 		// The account that holds the source message sends the answer; without a
 		// unique choice the draft stays open and reports from_missing.
-		derived.From, derived.AccountRef = service.InferDerivedSender(ctx, *ref, source)
+		derived.From, derived.AccountRef = from, account
 	}
 	draft, err := service.CreateDraftContext(ctx, mail.CreateDraftRequest{
 		Kind: kind, SourceRef: *ref, ReplyAll: replyAll, Input: derived,

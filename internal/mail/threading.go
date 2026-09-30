@@ -12,13 +12,14 @@ import (
 // ThreadSource carries the reply/forward derivation inputs read from the
 // source message's header block.
 type ThreadSource struct {
-	Subject    string
-	From       string
-	ReplyTo    []Recipient
-	To         []Recipient
-	CC         []Recipient
-	MessageID  string
-	References string
+	Subject             string
+	From                string
+	ReplyTo             []Recipient
+	To                  []Recipient
+	CC                  []Recipient
+	MessageID           string
+	References          string
+	RecipientParseError error
 }
 
 // ThreadSourceProvider resolves a source message's thread headers from the
@@ -52,15 +53,16 @@ func (s *Service) ThreadSource(ctx context.Context, ref string) (ThreadSource, e
 // account that holds the source message: the address of that account found in
 // the source's To or CC, otherwise its only address. It returns empty values
 // when the choice is not unique or the account is unusable, so the draft stays
-// unsendable until the caller names a sender.
-func (s *Service) InferDerivedSender(ctx context.Context, messageRef string, source ThreadSource) (string, string) {
+// unsendable until the caller names a sender. The third return value carries
+// the usable source account's own identities even when its sender is ambiguous.
+func (s *Service) InferDerivedSender(ctx context.Context, messageRef string, source ThreadSource) (string, string, []string) {
 	message, err := mailref.DecodeMessage(messageRef)
 	if err != nil {
-		return "", ""
+		return "", "", nil
 	}
 	accounts, err := s.ListAccounts(ctx)
 	if err != nil {
-		return "", ""
+		return "", "", nil
 	}
 	for _, account := range accounts {
 		decoded, err := mailref.DecodeAccount(account.Ref)
@@ -68,36 +70,55 @@ func (s *Service) InferDerivedSender(ctx context.Context, messageRef string, sou
 			continue
 		}
 		if account.State == "disabled" || account.State == "degraded" {
-			return "", ""
+			return "", "", nil
 		}
-		if from := derivedSenderAddress(account, source); from != "" {
-			return from, account.Ref
+		identities := derivedSenderIdentities(account)
+		if from := derivedSenderAddress(identities, source); from != "" {
+			return from, account.Ref, identities
 		}
-		return "", ""
+		return "", "", identities
 	}
-	return "", ""
+	return "", "", nil
 }
 
-func derivedSenderAddress(account Account, source ThreadSource) string {
+func derivedSenderIdentities(account Account) []string {
 	var addresses []string
 	seen := map[string]bool{}
 	for _, group := range [][]string{account.EmailAddresses, account.ConfiguredSenderAliases, account.DiscoveredSenderIdentities} {
 		for _, candidate := range group {
-			key := strings.ToLower(strings.TrimSpace(candidate))
-			if key != "" && !seen[key] {
+			key, err := recipientAddressKey(Recipient{Address: candidate})
+			if err == nil && !seen[key] {
 				seen[key] = true
-				addresses = append(addresses, strings.TrimSpace(candidate))
+				addresses = append(addresses, key)
 			}
 		}
 	}
+	return addresses
+}
+
+func derivedSenderAddress(addresses []string, source ThreadSource) string {
+	if source.RecipientParseError != nil {
+		return ""
+	}
+	matched := ""
 	for _, group := range [][]Recipient{source.To, source.CC} {
 		for _, recipient := range group {
+			key, err := recipientAddressKey(recipient)
+			if err != nil {
+				return ""
+			}
 			for _, address := range addresses {
-				if strings.EqualFold(strings.TrimSpace(recipient.Address), address) {
-					return address
+				if key == address {
+					if matched != "" && matched != address {
+						return ""
+					}
+					matched = address
 				}
 			}
 		}
+	}
+	if matched != "" {
+		return matched
 	}
 	if len(addresses) == 1 {
 		return addresses[0]
@@ -110,10 +131,10 @@ func derivedSenderAddress(account Account, source ThreadSource) string {
 // one Re:/Fwd: prefix after stripping existing ones; reply recipients default
 // to the complete source Reply-To list (preferred) or From address; reply --all
 // promotes the source To/CC recipients into CC minus the reply targets and
-// final To roles; the thread chain is the source References plus the source
-// Message-ID, bounded to maximumThreadReferences, deduplicated, and free of
-// control characters.
-func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input DraftInput) (DraftInput, string, string, error) {
+// final To roles and verified own identities; the thread chain is the source
+// References plus the source Message-ID, bounded to maximumThreadReferences,
+// deduplicated, and free of control characters.
+func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input DraftInput, ownIdentities []string) (DraftInput, string, string, error) {
 	subject := threadSubject(source.Subject, kind)
 	if input.SubjectSet || input.Subject != "" {
 		subject = input.Subject
@@ -130,7 +151,12 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 			out.To = append([]Recipient(nil), targets...)
 		}
 		if replyAll && !input.CCSet && len(out.CC) == 0 {
-			out.CC = promotedReplyAllRecipients(source.To, source.CC, targets, out.To)
+			if source.RecipientParseError != nil {
+				return DraftInput{}, "", "", &OperationError{
+					Code: "invalid_message_source", Message: "source To or CC header is malformed; automatic reply-all requires complete recipients",
+				}
+			}
+			out.CC = promotedReplyAllRecipients(source.To, source.CC, targets, out.To, ownIdentities)
 		}
 		if replyAll {
 			out.CC = deduplicateRecipientsAgainst(out.CC, out.To)
@@ -148,18 +174,11 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 func threadSubject(subject string, kind DraftKind) string {
 	trimmed := strings.TrimSpace(subject)
 	for {
-		lowered := strings.ToLower(trimmed)
-		cut := -1
-		for _, prefix := range []string{"re:", "fwd:", "fw:"} {
-			if strings.HasPrefix(lowered, prefix) {
-				cut = len(prefix)
-				break
-			}
-		}
-		if cut < 0 {
+		match := subjectPrefix.FindStringSubmatchIndex(trimmed)
+		if match == nil {
 			break
 		}
-		trimmed = strings.TrimSpace(trimmed[cut:])
+		trimmed = strings.TrimSpace(trimmed[match[2]:match[3]] + trimmed[match[1]:])
 	}
 	prefix := "Re: "
 	if kind == DraftKindForward {
@@ -168,8 +187,13 @@ func threadSubject(subject string, kind DraftKind) string {
 	return prefix + trimmed
 }
 
-func promotedReplyAllRecipients(to []Recipient, cc []Recipient, targets []Recipient, existingTo []Recipient) []Recipient {
-	seen := make(map[string]struct{}, len(existingTo)+len(targets))
+func promotedReplyAllRecipients(to []Recipient, cc []Recipient, targets []Recipient, existingTo []Recipient, ownIdentities []string) []Recipient {
+	seen := make(map[string]struct{}, len(existingTo)+len(targets)+len(ownIdentities))
+	for _, identity := range ownIdentities {
+		if key, err := recipientAddressKey(Recipient{Address: identity}); err == nil {
+			seen[key] = struct{}{}
+		}
+	}
 	for _, target := range targets {
 		if key, err := recipientAddressKey(target); err == nil {
 			seen[key] = struct{}{}
@@ -252,7 +276,11 @@ func recipientAddressKey(recipient Recipient) (string, error) {
 		}
 		return "", err
 	}
-	return strings.ToLower(parsed.Address), nil
+	at := strings.LastIndexByte(parsed.Address, '@')
+	if at <= 0 || at == len(parsed.Address)-1 {
+		return "", fmt.Errorf("recipient address has no mailbox domain")
+	}
+	return MailboxAddrSpec(parsed.Address[:at+1] + strings.ToLower(parsed.Address[at+1:])), nil
 }
 
 // threadChain builds the outgoing References value from the source headers.

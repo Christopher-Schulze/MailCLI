@@ -201,7 +201,7 @@ func ParseHeaderIdentity(header []byte) (HeaderIdentity, bool) {
 // Re[2]); the Envelope Index keeps the subject without them.
 // A list tag such as "[Reddit Support]" may precede the prefix; Mail drops the
 // prefix behind it as well.
-var subjectPrefix = regexp.MustCompile(`^((?:\[[^\]]*\]\s*)*)(?:(?:re|aw|fwd?|wg|sv|vs|tr|odp|res|rv)(?:\[\d+\])?\s*:\s*)+`)
+var subjectPrefix = regexp.MustCompile(`(?i)^((?:\[[^\]]*\]\s*)*)(?:(?:re|aw|fwd?|wg|sv|vs|tr|odp|res|rv)(?:\[\d+\])?\s*:\s*)+`)
 
 // NormalizeIdentitySubject folds a subject for identity comparison: NFC,
 // lower case, single spaces, without reply and forward prefixes (also behind

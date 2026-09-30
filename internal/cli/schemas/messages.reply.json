@@ -136,7 +136,7 @@
       "name": "--all",
       "value_type": "boolean",
       "takes_value": false,
-      "description": "reply to all recipients"
+      "description": "promote other source recipients to CC; exclude own identities"
     }
   ],
   "positional_arguments": [

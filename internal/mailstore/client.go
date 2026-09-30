@@ -801,13 +801,14 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 		messageID = "<" + messageID + ">"
 	}
 	return mail.ThreadSource{
-		Subject:    headers.Subject,
-		From:       headers.From,
-		ReplyTo:    headers.ReplyTo,
-		To:         headers.To,
-		CC:         headers.CC,
-		MessageID:  messageID,
-		References: headers.References,
+		Subject:             headers.Subject,
+		From:                headers.From,
+		ReplyTo:             headers.ReplyTo,
+		To:                  headers.To,
+		CC:                  headers.CC,
+		MessageID:           messageID,
+		References:          headers.References,
+		RecipientParseError: errors.Join(headers.ToError, headers.CCError),
 	}, nil
 }
 
