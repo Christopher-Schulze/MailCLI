@@ -27,6 +27,26 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 	if c.store == nil {
 		return result, c.safeWriteUnavailableError()
 	}
+	if strings.HasPrefix(request.MailboxRef, "mbx_") {
+		mailbox, err := mailref.DecodeMailbox(request.MailboxRef)
+		if err != nil {
+			return result, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
+		}
+		if request.AccountRef != "" {
+			account, err := mailref.DecodeAccount(request.AccountRef)
+			if err != nil {
+				return result, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid account ref: %v", err)}
+			}
+			if !strings.EqualFold(account.AccountID, mailbox.AccountID) {
+				return result, &mail.ValidationError{Code: "invalid_argument", Message: "mailbox ref does not belong to the selected account"}
+			}
+		}
+		accountRef, err := mailref.EncodeAccount(strings.ToUpper(mailbox.AccountID))
+		if err != nil {
+			return result, err
+		}
+		request.AccountRef = accountRef
+	}
 	lister, ok := c.send.ImapClient().(transport.RecentMessageLister)
 	if !ok {
 		return result, &transport.TransportError{
@@ -105,12 +125,12 @@ func (c *Client) newMessagesForAccount(
 		result.Skipped = append(result.Skipped, skip)
 		return
 	}
-	email, cfg, err := imapConfigForAccount(ctx, account, c.send.Credentials, bindings)
+	mailboxes, err := c.store.selectedSearchMailboxes(ctx, selector, account.Ref)
 	if err != nil {
 		fail("", err)
 		return
 	}
-	mailboxes, err := c.store.selectedSearchMailboxes(ctx, selector, account.Ref)
+	email, cfg, err := imapConfigForAccount(ctx, account, c.send.Credentials, bindings)
 	if err != nil {
 		fail("", err)
 		return

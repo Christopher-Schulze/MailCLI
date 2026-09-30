@@ -49,6 +49,22 @@ func (s *Store) matchedListMailboxes(ctx context.Context, request mail.ListMessa
 	if err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(request.MailboxRef, "mbx_") {
+		reference, err := mailref.DecodeMailbox(request.MailboxRef)
+		if err != nil {
+			return nil, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
+		}
+		accountRef, err := mailref.EncodeAccount(strings.ToUpper(reference.AccountID))
+		if err != nil {
+			return nil, err
+		}
+		for _, mailbox := range mailboxes {
+			if mailbox.AccountRef == accountRef && slices.Equal(mailbox.Path, reference.Path) {
+				return []mail.Mailbox{mailbox}, nil
+			}
+		}
+		return nil, nil
+	}
 	selector := request.MailboxRef
 	if selector == "" {
 		selector = "inbox"
