@@ -30,7 +30,9 @@ const (
 	commandBudget = transport.TransferCommandBudget
 	// transferCap bounds the DATA phase even for the largest messages:
 	// 512 MiB at the floor needs ~542 s, inside the 15 min cap.
-	transferCap = transport.TransferBudgetCap
+	transferCap        = transport.TransferBudgetCap
+	maxFinalReplyLines = 128
+	maxFinalReplyBytes = 64 << 10
 )
 
 // Client submits fully composed RFC 5322 messages to an SMTP submission
@@ -271,16 +273,28 @@ func readFinalSMTPResponse(reader *bufio.Reader) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
+	if len(line)+2 > maxFinalReplyBytes {
+		return 0, "", textproto.ProtocolError(fmt.Sprintf("SMTP final reply exceeds %d bytes", maxFinalReplyBytes))
+	}
 	code, continued, message, err := parseSMTPResponseLine(line)
 	if err != nil {
 		return 0, "", err
 	}
 	var builder strings.Builder
 	builder.WriteString(message)
+	responseLines, responseBytes := 1, len(line)+2
 	for continued {
+		if responseLines >= maxFinalReplyLines {
+			return 0, "", textproto.ProtocolError(fmt.Sprintf("SMTP final reply exceeds %d lines", maxFinalReplyLines))
+		}
 		line, err = readCRLFLine(reader)
 		if err != nil {
 			return 0, "", err
+		}
+		responseLines++
+		responseBytes += len(line) + 2
+		if responseBytes > maxFinalReplyBytes {
+			return 0, "", textproto.ProtocolError(fmt.Sprintf("SMTP final reply exceeds %d bytes", maxFinalReplyBytes))
 		}
 		lineCode, lineContinued, lineMessage, lineErr := parseSMTPResponseLine(line)
 		if lineErr != nil {

@@ -36,6 +36,7 @@ type fakeSMTPServer struct {
 	rcpts       []string
 	data        []byte
 	authCalls   int
+	dataCalls   int
 
 	authUser          string
 	authPass          string
@@ -215,6 +216,9 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 				return
 			}
 		case upper == "DATA":
+			s.mu.Lock()
+			s.dataCalls++
+			s.mu.Unlock()
 			if !writeLine(conn, "354 End data with <CR><LF>.<CR><LF>") {
 				return
 			}
