@@ -19,10 +19,14 @@ const newMessagesWindow = 100
 
 // NewMessages compares the newest server messages of the selected mailboxes
 // with the local store and returns the ones the store lacks. It reads headers
-// only, changes nothing on the server and keeps going after a failing account.
+// only, changes nothing on the server and keeps going after ordinary account
+// failures. Caller cancellation stops discovery.
 func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesRequest) (mail.NewMessagesResult, error) {
 	result := mail.NewMessagesResult{
 		Mailboxes: []mail.NewMailbox{}, Failures: []mail.NewMessagesFailure{}, Skipped: []mail.SyncCheckSkip{},
+	}
+	if err := newMessagesCancellation(ctx, nil); err != nil {
+		return result, err
 	}
 	if c.store == nil {
 		return result, c.safeWriteUnavailableError()
@@ -56,6 +60,9 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 	}
 	accounts, err := c.store.ListAccounts(ctx)
 	if err != nil {
+		if canceled := newMessagesCancellation(ctx, err); canceled != nil {
+			return result, canceled
+		}
 		return result, err
 	}
 	targets := accounts
@@ -72,6 +79,9 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 	}
 	bindings, err := c.loadAccountBindings()
 	if err != nil {
+		if canceled := newMessagesCancellation(ctx, err); canceled != nil {
+			return result, canceled
+		}
 		return result, err
 	}
 	selector := request.MailboxRef
@@ -79,7 +89,15 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 		selector = "inbox"
 	}
 	for _, account := range targets {
-		c.newMessagesForAccount(ctx, lister, account, selector, bindings, request.Limit, &result)
+		if err := newMessagesCancellation(ctx, nil); err != nil {
+			return result, err
+		}
+		if err := c.newMessagesForAccount(ctx, lister, account, selector, bindings, request.Limit, &result); err != nil {
+			return result, err
+		}
+	}
+	if err := newMessagesCancellation(ctx, nil); err != nil {
+		return result, err
 	}
 	result.Complete = len(result.Failures) == 0
 	for _, mailbox := range result.Mailboxes {
@@ -111,43 +129,65 @@ func (c *Client) newMessagesForAccount(
 	bindings mail.AccountBindingFile,
 	limit int,
 	result *mail.NewMessagesResult,
-) {
-	fail := func(mailbox string, err error) {
+) error {
+	fail := func(mailbox string, err error) error {
+		if canceled := newMessagesCancellation(ctx, err); canceled != nil {
+			return canceled
+		}
 		result.Failures = append(result.Failures, mail.NewMessagesFailure{
 			Account: account.Ref, Mailbox: mailbox, Code: newMessagesFailureCode(ctx, err), Message: err.Error(),
 		})
+		return nil
 	}
 	if account.State == "degraded" {
-		fail("", operationError("account_degraded", "account is degraded: "+account.DegradedReason+"; remediation: "+account.DegradedRemediation))
-		return
+		return fail("", operationError("account_degraded", "account is degraded: "+account.DegradedReason+"; remediation: "+account.DegradedRemediation))
 	}
 	if skip, skipped := syncSkipForAccount(account); skipped {
 		result.Skipped = append(result.Skipped, skip)
-		return
+		return nil
 	}
 	mailboxes, err := c.store.selectedSearchMailboxes(ctx, selector, account.Ref)
 	if err != nil {
-		fail("", err)
-		return
+		return fail("", err)
+	}
+	if err := newMessagesCancellation(ctx, nil); err != nil {
+		return err
 	}
 	email, cfg, err := imapConfigForAccount(ctx, account, c.send.Credentials, bindings)
 	if err != nil {
-		fail("", err)
-		return
+		return fail("", err)
+	}
+	if err := newMessagesCancellation(ctx, nil); err != nil {
+		return err
 	}
 	serverBoxes, err := c.getOrLoadMailboxes(ctx, c.send.ImapClient(), cfg, email)
 	if err != nil {
-		fail("", err)
-		return
+		return fail("", err)
 	}
 	for _, mailbox := range mailboxes {
+		if err := newMessagesCancellation(ctx, nil); err != nil {
+			return err
+		}
 		compared, err := c.compareMailbox(ctx, lister, cfg, serverBoxes, mailbox, limit)
 		if err != nil {
-			fail(strings.Join(mailbox.Path, "/"), err)
+			if err := fail(strings.Join(mailbox.Path, "/"), err); err != nil {
+				return err
+			}
 			continue
 		}
 		result.Mailboxes = append(result.Mailboxes, compared)
 	}
+	return nil
+}
+
+func newMessagesCancellation(ctx context.Context, err error) error {
+	if ctx.Err() == context.Canceled {
+		err = errors.Join(context.Canceled, err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return operationErrorWithCause("operation_canceled", "new-message discovery canceled", err)
+	}
+	return nil
 }
 
 func (c *Client) compareMailbox(
