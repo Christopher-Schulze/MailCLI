@@ -1,7 +1,7 @@
 package mail
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -34,13 +34,14 @@ type mimeIdentityAttachment struct {
 }
 
 type mimeIdentity struct {
-	plain          string
-	html           string
-	hasPlain       bool
-	hasHTML        bool
-	attachments    []mimeIdentityAttachment
-	partCount      int
-	unexpectedPart bool
+	plain           string
+	html            string
+	hasPlain        bool
+	hasHTML         bool
+	attachments     []mimeIdentityAttachment
+	attachmentBytes int64
+	partCount       int
+	unexpectedPart  bool
 }
 
 func envelopeFingerprint(draft Draft, messageID string) string {
@@ -112,11 +113,16 @@ func attachmentMIMEType(path string) string {
 	return strings.ToLower(baseType)
 }
 
-func rawMessageIdentities(raw []byte) (string, string, error) {
-	message, err := stdmail.ReadMessage(bytes.NewReader(raw))
+func rawMessageIdentities(source io.Reader) (string, string, error) {
+	headers := &io.LimitedReader{R: source, N: MaximumRawSourceBytes}
+	message, err := stdmail.ReadMessage(headers)
 	if err != nil {
-		return "", "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate is not a readable RFC 5322 message: %v", err)}
+		return "", "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate is not a readable RFC 5322 message: %v", err), Err: err}
 	}
+	if headers.N == 0 {
+		return "", "", &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate headers exceed the reconciliation limit"}
+	}
+	message.Body = io.MultiReader(message.Body, source)
 	from, err := canonicalHeaderAddress(message.Header.Get("From"))
 	if err != nil {
 		return "", "", &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate has an invalid From header: %v", err)}
@@ -144,7 +150,7 @@ func rawMessageIdentities(raw []byte) (string, string, error) {
 	return envelope, hashMIMEIdentity(identity), nil
 }
 
-func verifySentMessageIdentity(raw []byte, draft Draft, messageID string, expectedMIMEFingerprint ...string) error {
+func verifySentMessageIdentity(source io.Reader, draft Draft, messageID string, expectedMIMEFingerprint ...string) error {
 	if len(expectedMIMEFingerprint) == 0 || strings.TrimSpace(expectedMIMEFingerprint[0]) == "" {
 		return &OperationError{Code: "send_identity_unverifiable", Message: "the send claim has no versioned MIME fingerprint; the Sent candidate cannot be adopted safely"}
 	}
@@ -155,7 +161,7 @@ func verifySentMessageIdentity(raw []byte, draft Draft, messageID string, expect
 	if expectedDraftMIMEFingerprint != expectedMIMEFingerprint[0] {
 		return &OperationError{Code: "send_fingerprint_mismatch", Message: "the draft no longer matches the MIME content claimed for this send"}
 	}
-	actual, actualMIMEFingerprint, err := rawMessageIdentities(raw)
+	actual, actualMIMEFingerprint, err := rawMessageIdentities(source)
 	if err != nil {
 		return err
 	}
@@ -169,6 +175,27 @@ func verifySentMessageIdentity(raw []byte, draft Draft, messageID string, expect
 		return &OperationError{Code: "send_identity_mismatch", Message: "the Sent candidate MIME alternatives or attachments do not match the claimed content"}
 	}
 	return nil
+}
+
+func verifyFetchedSentIdentity(ctx context.Context, source io.ReadCloser, size int64, draft Draft, attempt SendAttempt) (resultErr error) {
+	if source == nil {
+		return &OperationError{Code: "send_identity_unreadable", Message: "the Sent FETCH returned no source"}
+	}
+	defer func() { resultErr = errors.Join(resultErr, source.Close()) }()
+	if size < 0 || size > maximumAcceptedMessageSpoolBytes {
+		return &OperationError{Code: "send_identity_unreadable", Message: "the Sent FETCH size exceeds the supported composed-message limit"}
+	}
+	bounded := &io.LimitedReader{R: contextReader{ctx: ctx, reader: source}, N: size + 1}
+	if err := verifySentMessageIdentity(bounded, draft, attempt.MessageID, attempt.MIMEFingerprint); err != nil {
+		return err
+	}
+	if _, err := io.Copy(io.Discard, bounded); err != nil {
+		return &OperationError{Code: "send_identity_unreadable", Message: "reading the complete Sent candidate failed", Err: err}
+	}
+	if bounded.N != 1 {
+		return &OperationError{Code: "send_identity_unreadable", Message: "the Sent FETCH source length differs from its declared size"}
+	}
+	return ctx.Err()
 }
 
 func hashMIMEIdentity(identity mimeIdentity) string {
@@ -219,7 +246,7 @@ func parseMIMEIdentityPart(header stdmail.Header, body io.Reader, identity *mime
 				return nil
 			}
 			if nextErr != nil {
-				return &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate multipart body is malformed: %v", nextErr)}
+				return &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("the Sent candidate multipart body is malformed: %v", nextErr), Err: nextErr}
 			}
 			if part == nil {
 				return &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate multipart body has an empty part"}
@@ -243,19 +270,27 @@ func parseMIMEIdentityPart(header stdmail.Header, body io.Reader, identity *mime
 		name = parameters["name"]
 	}
 	if strings.EqualFold(disposition, "attachment") || name != "" {
-		data, readErr := readMIMEIdentityPart(header, body, MaximumRawSourceBytes, false)
-		if readErr != nil {
-			return readErr
+		if len(identity.attachments) >= MaximumDraftAttachments {
+			return &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate exceeds the supported attachment count"}
 		}
-		digest := sha256.Sum256(data)
+		remaining := MaximumDraftAttachmentBytes - identity.attachmentBytes
+		digest := sha256.New()
+		size, readErr := io.Copy(digest, io.LimitReader(decodedMIMEIdentityPart(header, body), remaining+1))
+		if readErr != nil {
+			return &OperationError{Code: "send_identity_unreadable", Message: "reading the Sent candidate attachment failed", Err: readErr}
+		}
+		if size > remaining {
+			return &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate exceeds the supported aggregate attachment bytes"}
+		}
+		identity.attachmentBytes += size
 		identity.attachments = append(identity.attachments, mimeIdentityAttachment{
-			mediaType: mediaType, name: name, size: int64(len(data)), sha256: hex.EncodeToString(digest[:]),
+			mediaType: mediaType, name: name, size: size, sha256: hex.EncodeToString(digest.Sum(nil)),
 		})
 		return nil
 	}
 	switch mediaType {
 	case "text/plain", "text/html":
-		data, readErr := readMIMEIdentityPart(header, body, MaximumComposeBodyBytes, true)
+		data, readErr := readMIMEIdentityPart(header, body, MaximumComposeBodyBytes)
 		if readErr != nil {
 			return readErr
 		}
@@ -278,23 +313,23 @@ func parseMIMEIdentityPart(header stdmail.Header, body io.Reader, identity *mime
 	}
 }
 
-func readMIMEIdentityPart(header stdmail.Header, body io.Reader, maximum int64, text bool) ([]byte, error) {
-	decoded := body
+func decodedMIMEIdentityPart(header stdmail.Header, body io.Reader) io.Reader {
 	switch strings.ToLower(strings.TrimSpace(header.Get("Content-Transfer-Encoding"))) {
 	case "base64":
-		decoded = base64.NewDecoder(base64.StdEncoding, body)
+		return base64.NewDecoder(base64.StdEncoding, body)
 	case "quoted-printable":
-		decoded = quotedprintable.NewReader(body)
+		return quotedprintable.NewReader(body)
 	}
-	data, err := io.ReadAll(io.LimitReader(decoded, maximum+1))
+	return body
+}
+
+func readMIMEIdentityPart(header stdmail.Header, body io.Reader, maximum int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(decodedMIMEIdentityPart(header, body), maximum+1))
 	if err != nil {
-		return nil, &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("reading the Sent candidate MIME part failed: %v", err)}
+		return nil, &OperationError{Code: "send_identity_unreadable", Message: fmt.Sprintf("reading the Sent candidate MIME part failed: %v", err), Err: err}
 	}
 	if int64(len(data)) > maximum {
 		return nil, &OperationError{Code: "send_identity_unreadable", Message: "the Sent candidate MIME part exceeds the reconciliation limit"}
-	}
-	if !text {
-		return data, nil
 	}
 	_, parameters, parseErr := mime.ParseMediaType(header.Get("Content-Type"))
 	if parseErr == nil {

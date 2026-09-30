@@ -581,7 +581,7 @@ Multipart containers are never selected in place of leaf part `1`.
 
 Complete local reads never contact Gmail, iCloud, IMAP, SMTP, OAuth or account-login endpoints.
 Incomplete content is hydrated with bounded IMAP `FETCH BODY.PEEK[]` over the account's transport without launching Mail.app.
-The shared 64 MiB message cap binds local raw-source reads and every full-message hydration path: oversized local sources and remote literals fail with `raw_source_too_large` before buffering.
+The shared 64 MiB message cap binds local raw-source reads and full-message hydration for reads and attachment saving: oversized local sources and remote literals fail with `raw_source_too_large` before buffering. Sent reconciliation uses the separate composed-message limits described below.
 FETCH parses complete logical responses across literal boundaries, accepts UID and BODY in either order, ignores unrelated flag updates, and fails closed on duplicate or contradictory BODY values; an authoritative UIDVALIDITY change during FETCH invalidates the result.
 Large literals spill to private unlinked temporary files instead of the heap, which can add disk I/O latency.
 
@@ -936,6 +936,7 @@ Repeating `drafts send` with the same revision, or `drafts reconcile`, on a cons
 
 Crash recovery closes the submit-to-record window.
 If the process dies after SMTP acceptance but before the claim update, `drafts reconcile` finds `outcome_unknown` with a Message-ID and verifies it against Sent: exactly one match is fetched and checked against Message-ID, sender, recipients, subject, body and complete MIME fingerprint before the claim becomes `sent`, proving a Sent copy, not delivery.
+Sent verification uses an owned streaming FETCH source bounded by the 1 GiB composed spool limit, hashes decoded attachments incrementally within the 512 MiB aggregate and 100-attachment limits, and keeps the existing 16 MiB text-part and 64 MiB header bounds. The source must match its declared length and close successfully before adoption. Legacy byte-only fetchers retain the 64 MiB source cap and fail closed for larger candidates.
 Duplicate matches, an identity mismatch or an unreadable candidate fail closed; absence returns `send_outcome_unverifiable` with manual remediation and never triggers an automatic retry, and a fingerprint mismatch returns `send_fingerprint_mismatch`.
 Legacy claims without a Message-ID stay blocked with `send_reconcile_unavailable`, and claims without a versioned MIME fingerprint with `send_identity_unverifiable`.
 

@@ -1,9 +1,11 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -308,11 +310,11 @@ func (s *Service) adoptObservedSentMessage(
 			Message: "the Sent Message-ID match did not include a usable UID",
 		}
 	}
-	raw, fetchErr := imap.FetchMessage(ctx, cfg, sentBox, uid, uidValidity, MaximumRawSourceBytes)
+	source, size, fetchErr := fetchSentMessageSource(ctx, imap, cfg, sentBox, uid, uidValidity)
 	if fetchErr != nil {
 		return result, mirrorPendingError(fetchErr)
 	}
-	if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID, attempt.MIMEFingerprint); identityErr != nil {
+	if identityErr := verifyFetchedSentIdentity(ctx, source, size, draft, attempt); identityErr != nil {
 		return result, identityErr
 	}
 	attempt.SentStoreObserved = true
@@ -332,6 +334,25 @@ func (s *Service) adoptObservedSentMessage(
 		}
 	}
 	return finishObservedSend(lease, root, ref, attempt, true)
+}
+
+func fetchSentMessageSource(ctx context.Context, imap transport.ImapOperator, cfg transport.ImapConfig, mailbox string, uid uint32, validity uint32) (io.ReadCloser, int64, error) {
+	if streaming, ok := imap.(transport.StreamingFetcher); ok {
+		source, size, err := streaming.FetchMessageReader(ctx, cfg, mailbox, uid, validity, maximumAcceptedMessageSpoolBytes)
+		if err != nil && source != nil {
+			err = errors.Join(err, source.Close())
+			return nil, 0, err
+		}
+		return source, size, err
+	}
+	raw, err := imap.FetchMessage(ctx, cfg, mailbox, uid, validity, MaximumRawSourceBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(raw)) > MaximumRawSourceBytes {
+		return nil, 0, &OperationError{Code: "send_identity_unreadable", Message: "the legacy Sent FETCH exceeds the bounded byte-source limit"}
+	}
+	return io.NopCloser(bytes.NewReader(raw)), int64(len(raw)), nil
 }
 
 func mirrorOutcomeUnknownError(attempt SendAttempt) error {
@@ -541,11 +562,11 @@ func (s *Service) reconcileUnknownViaImap(
 			fmt.Sprintf("the Sent mailbox contains %d messages with the claimed Message-ID", matchCount))
 	}
 	if uid != 0 && matchCount == 1 {
-		raw, fetchErr := imap.FetchMessage(ctx, cfg, sentBox, uid, uidValidity, MaximumRawSourceBytes)
+		source, size, fetchErr := fetchSentMessageSource(ctx, imap, cfg, sentBox, uid, uidValidity)
 		if fetchErr != nil {
 			return resultForReconcile(ref, attempt), fetchErr
 		}
-		if identityErr := verifySentMessageIdentity(raw, draft, attempt.MessageID, attempt.MIMEFingerprint); identityErr != nil {
+		if identityErr := verifyFetchedSentIdentity(ctx, source, size, draft, attempt); identityErr != nil {
 			return resultForReconcile(ref, attempt), identityErr
 		}
 		attempt.InvocationStarted = true

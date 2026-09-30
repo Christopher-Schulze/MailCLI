@@ -2047,7 +2047,7 @@ func TestVerifySentMessageIdentityRequiresMIMEProof(t *testing.T) {
 		"Subject: Subject\r\n" +
 		"Message-ID: <identity@example.com>\r\n" +
 		"Content-Type: text/plain; charset=utf-8\r\n\r\nBody\r\n")
-	if err := verifySentMessageIdentity(raw, draft, "<identity@example.com>"); errorCode(err) != "send_identity_unverifiable" {
+	if err := verifySentMessageIdentity(bytes.NewReader(raw), draft, "<identity@example.com>"); errorCode(err) != "send_identity_unverifiable" {
 		t.Fatalf("verifySentMessageIdentity() error = %v, want send_identity_unverifiable", err)
 	}
 }
@@ -2081,7 +2081,7 @@ func TestVerifySentMessageIdentityChecksHTMLAttachmentsAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildMessage() error = %v", err)
 	}
-	if err := verifySentMessageIdentity(raw, draft, messageID, expected); err != nil {
+	if err := verifySentMessageIdentity(bytes.NewReader(raw), draft, messageID, expected); err != nil {
 		t.Fatalf("verifySentMessageIdentity(equal) error = %v", err)
 	}
 
@@ -2091,12 +2091,12 @@ func TestVerifySentMessageIdentityChecksHTMLAttachmentsAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildMessage(withoutHTML) error = %v", err)
 	}
-	if err := verifySentMessageIdentity(missingHTML, draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+	if err := verifySentMessageIdentity(bytes.NewReader(missingHTML), draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
 		t.Fatalf("verifySentMessageIdentity(missing HTML) error = %v, want send_identity_mismatch", err)
 	}
 
 	changedAttachment := strings.Replace(string(raw), base64.StdEncoding.EncodeToString([]byte("first")), base64.StdEncoding.EncodeToString([]byte("other")), 1)
-	if err := verifySentMessageIdentity([]byte(changedAttachment), draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+	if err := verifySentMessageIdentity(strings.NewReader(changedAttachment), draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
 		t.Fatalf("verifySentMessageIdentity(changed attachment) error = %v, want send_identity_mismatch", err)
 	}
 
@@ -2106,7 +2106,7 @@ func TestVerifySentMessageIdentityChecksHTMLAttachmentsAndOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildMessage(reordered) error = %v", err)
 	}
-	if err := verifySentMessageIdentity(reorderedRaw, draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
+	if err := verifySentMessageIdentity(bytes.NewReader(reorderedRaw), draft, messageID, expected); errorCode(err) != "send_identity_mismatch" {
 		t.Fatalf("verifySentMessageIdentity(reordered) error = %v, want send_identity_mismatch", err)
 	}
 }
@@ -2141,7 +2141,7 @@ func TestVerifySentMessageIdentityAllowsBoundaryAndTransferReencoding(t *testing
 	mutated = strings.Replace(mutated,
 		"Content-Transfer-Encoding: quoted-printable\r\n\r\nBody",
 		"Content-Transfer-Encoding: 8bit\r\n\r\nBody", 1)
-	if err := verifySentMessageIdentity([]byte(mutated), draft, messageID, expected); err != nil {
+	if err := verifySentMessageIdentity(strings.NewReader(mutated), draft, messageID, expected); err != nil {
 		t.Fatalf("verifySentMessageIdentity(reencoded) error = %v", err)
 	}
 }
