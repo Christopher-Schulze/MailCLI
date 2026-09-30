@@ -10,9 +10,13 @@ import (
 )
 
 func wrapDialError(ctx context.Context, err error) error {
-	if ctx.Err() == context.Canceled {
+	contextErr := ctx.Err()
+	if contextErr != nil {
+		err = errors.Join(err, contextErr)
+	}
+	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
 		return &transport.TransportError{
-			Code:    transport.CodeIMAPTimeout,
+			Code:    transport.CodeIMAPCanceled,
 			Message: "IMAP connection canceled",
 			Err:     err,
 		}
@@ -35,9 +39,13 @@ func wrapIOError(ctx context.Context, err error, code, message string) error {
 	if err == nil {
 		return nil
 	}
-	if ctx.Err() == context.Canceled {
+	contextErr := ctx.Err()
+	if contextErr != nil {
+		err = errors.Join(err, contextErr)
+	}
+	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
 		return &transport.TransportError{
-			Code:    transport.CodeIMAPTimeout,
+			Code:    transport.CodeIMAPCanceled,
 			Message: message,
 			Err:     err,
 		}
@@ -60,6 +68,10 @@ func wrapCommandIOError(ctx context.Context, err error, message string) error {
 	if err == nil {
 		return nil
 	}
+	contextErr := ctx.Err()
+	if contextErr != nil {
+		err = errors.Join(err, contextErr)
+	}
 	if transport.ErrorCode(err) != "" {
 		return err
 	}
@@ -73,9 +85,9 @@ func wrapCommandIOError(ctx context.Context, err error, message string) error {
 	}
 	code := transport.CodeIMAPDisconnected
 	switch {
-	case errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled):
+	case contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled):
 		code = transport.CodeIMAPCanceled
-	case errors.Is(ctx.Err(), context.DeadlineExceeded) || isTimeout(err):
+	case isTimeout(err):
 		code = transport.CodeIMAPTimeout
 	}
 	return &transport.TransportError{Code: code, Message: message, Err: err}

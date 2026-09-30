@@ -1950,7 +1950,7 @@ func TestSyncCheckReportsAmbiguousSpecialMailboxMapping(t *testing.T) {
 	}
 }
 
-// A dead context maps to sync_check_timeout per unchecked mailbox.
+// An elapsed deadline maps to sync_check_timeout per unchecked mailbox.
 func TestSyncCheckReportsTimeoutPerMailbox(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	closeTestResource(t, store, "test store")
@@ -2145,9 +2145,8 @@ func TestSyncCheckMatchesCanonicallyEquivalentMailboxPaths(t *testing.T) {
 	t.Fatalf("SyncCheck() mailboxes = %+v, want matched NFC server mailbox %q", result.Mailboxes, composed)
 }
 
-// failureCode maps deadline/cancelation to sync_check_timeout even when the
-// context is still alive, typed errors to their code, and anything else to
-// sync_check_failed.
+// failureCode distinguishes deadlines from cancellation, preserves unrelated
+// typed errors, and maps uncoded failures to sync_check_failed.
 func TestFailureCodeMapping(t *testing.T) {
 	ctx := context.Background()
 	if got := failureCode(ctx, context.DeadlineExceeded); got != "sync_check_timeout" {
@@ -2155,8 +2154,8 @@ func TestFailureCodeMapping(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if got := failureCode(canceled, nil); got != "sync_check_timeout" {
-		t.Fatalf("canceled ctx = %q, want sync_check_timeout", got)
+	if got := failureCode(canceled, nil); got != "operation_canceled" {
+		t.Fatalf("canceled ctx = %q, want operation_canceled", got)
 	}
 	typed := &transport.TransportError{Code: transport.CodeIMAPAuthFailed, Message: "no"}
 	if got := failureCode(ctx, typed); got != transport.CodeIMAPAuthFailed {

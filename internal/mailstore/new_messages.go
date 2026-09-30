@@ -380,7 +380,11 @@ func (s *Store) localServerUIDs(ctx context.Context, mailboxRowID int64, uids []
 }
 
 func newMessagesFailureCode(ctx context.Context, err error) string {
-	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	contextErr := ctx.Err()
+	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
+		return "operation_canceled"
+	}
+	if contextErr == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
 		return "operation_timeout"
 	}
 	var typed interface{ ErrorCode() string }

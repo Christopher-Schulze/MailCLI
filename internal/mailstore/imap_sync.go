@@ -706,12 +706,15 @@ func sortSyncCheckMailboxes(mailboxes []mail.MailboxDelta) {
 	})
 }
 
-// failureCode maps a sync-check error to its typed entry code. A dead
-// context (or a deadline/cancelation error, which implies one) means the
-// 30 s budget ran out: the entry is honest about partial coverage instead
-// of repeating a stale server code.
+// failureCode maps a sync-check error to its typed entry code. Caller
+// cancellation and deadlines take precedence over stale server errors;
+// cancellation is distinct from exhausted comparison coverage budgets.
 func failureCode(ctx context.Context, err error) string {
-	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	contextErr := ctx.Err()
+	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
+		return "operation_canceled"
+	}
+	if contextErr == context.DeadlineExceeded || errors.Is(err, context.DeadlineExceeded) {
 		return "sync_check_timeout"
 	}
 	if code := transport.ErrorCode(err); code != "" {

@@ -28,7 +28,7 @@ func TestMoveCommandPreservesDispatchEvidence(t *testing.T) {
 		wantCode          string
 	}{
 		{name: "deadline", command: command, failDeadline: true, wantOutcome: transport.MutationOutcomeNotStarted, wantCode: transport.CodeIMAPTimeout},
-		{name: "canceled before write", command: command, cancel: true, wantOutcome: transport.MutationOutcomeNotStarted, wantCode: transport.CodeIMAPTimeout},
+		{name: "canceled before write", command: command, cancel: true, wantOutcome: transport.MutationOutcomeNotStarted, wantCode: transport.CodeIMAPCanceled},
 		{name: "validation", command: "A001 UID MOVE 42\r\n\"Archive\"", wantOutcome: transport.MutationOutcomeNotStarted, wantCode: transport.CodeIMAPInvalidValue},
 		{name: "partial write", command: command, failWriteAfter: 3, wantBytes: "A00", wantDispatched: true, wantOutcome: transport.MutationOutcomeUnknown, wantCode: transport.CodeIMAPMoveOutcomeUnknown},
 		{name: "lost reply", command: command, closeAfterCommand: true, wantBytes: command + "\r\n", wantDispatched: true, wantOutcome: transport.MutationOutcomeUnknown, wantCode: transport.CodeIMAPMoveOutcomeUnknown},

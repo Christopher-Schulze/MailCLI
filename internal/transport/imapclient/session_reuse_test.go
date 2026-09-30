@@ -3,6 +3,7 @@ package imapclient
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -159,8 +160,8 @@ func TestAcquireRejectsCanceledContextBeforeConnection(t *testing.T) {
 	cancel()
 
 	_, _, err := client.acquire(ctx, transport.ImapConfig{})
-	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
-		t.Fatalf("acquire() code = %s, want %s: %v", code, transport.CodeIMAPTimeout, err)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire() code = %s, want %s: %v", code, transport.CodeIMAPCanceled, err)
 	}
 }
 
@@ -581,8 +582,8 @@ func TestCloseCancelsPendingAcquisitionGeneration(t *testing.T) {
 	}
 	select {
 	case err := <-pendingResult:
-		if transport.ErrorCode(err) != transport.CodeIMAPTimeout {
-			t.Fatalf("pending acquire error = %v, want %s", err, transport.CodeIMAPTimeout)
+		if transport.ErrorCode(err) != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
+			t.Fatalf("pending acquire error = %v, want %s", err, transport.CodeIMAPCanceled)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("pending acquisition did not finish after Close")

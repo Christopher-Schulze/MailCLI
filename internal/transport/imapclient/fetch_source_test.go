@@ -185,7 +185,7 @@ func TestFetchReaderCancellationReleasesPool(t *testing.T) {
 		t.Fatal("FETCH did not start")
 	}
 	cancel()
-	if err := <-result; transport.ErrorCode(err) != transport.CodeIMAPTimeout || ctx.Err() != context.Canceled {
+	if err := <-result; transport.ErrorCode(err) != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 	if err := client.Close(); err != nil {

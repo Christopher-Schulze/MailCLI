@@ -498,8 +498,8 @@ func TestAppendToSentContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on cancelled context")
 	}
-	if code := transport.ErrorCode(err); code != transport.CodeIMAPTimeout {
-		t.Fatalf("expected code %s, got %s: %v", transport.CodeIMAPTimeout, code, err)
+	if code := transport.ErrorCode(err); code != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected code %s with canceled cause, got %s: %v", transport.CodeIMAPCanceled, code, err)
 	}
 }
 

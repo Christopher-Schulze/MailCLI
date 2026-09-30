@@ -223,8 +223,8 @@ func TestMutationLockHonorsCallerCancellation(t *testing.T) {
 	cancel()
 	_, err = acquireMutationLock(ctx, dir, testLockIdentity())
 	var transportErr *transport.TransportError
-	if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPTimeout {
-		t.Fatalf("canceled acquire error = %v, want imap_timeout", err)
+	if !errors.As(err, &transportErr) || transportErr.Code != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled acquire error = %v, want imap_canceled with original cause", err)
 	}
 }
 

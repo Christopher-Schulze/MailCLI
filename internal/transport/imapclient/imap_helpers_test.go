@@ -58,7 +58,7 @@ func TestWrapIOError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := wrapIOError(ctx, errors.New("closed"), transport.CodeIMAPConnectFailed, "read")
-	if transport.ErrorCode(err) != transport.CodeIMAPTimeout {
+	if transport.ErrorCode(err) != transport.CodeIMAPCanceled || !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled wrap code = %q", transport.ErrorCode(err))
 	}
 	err = wrapIOError(context.Background(), context.DeadlineExceeded, transport.CodeIMAPConnectFailed, "read")
@@ -105,7 +105,7 @@ func TestWrapDialErrorClassifiesAndPreservesCause(t *testing.T) {
 		err      error
 		wantCode string
 	}{
-		{name: "canceled", ctx: canceled, err: cause, wantCode: transport.CodeIMAPTimeout},
+		{name: "canceled", ctx: canceled, err: cause, wantCode: transport.CodeIMAPCanceled},
 		{name: "timeout", ctx: context.Background(), err: context.DeadlineExceeded, wantCode: transport.CodeIMAPTimeout},
 		{name: "connect", ctx: context.Background(), err: cause, wantCode: transport.CodeIMAPConnectFailed},
 	}

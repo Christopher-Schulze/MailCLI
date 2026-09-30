@@ -311,8 +311,9 @@ func (c *Client) acquireOperation(
 		c.lifecycle.RUnlock()
 		releaseOperation(weight)
 		return nil, nil, &transport.TransportError{
-			Code:    transport.CodeIMAPTimeout,
+			Code:    transport.CodeIMAPCanceled,
 			Message: "IMAP operation acquisition interrupted by client Close",
+			Err:     context.Canceled,
 		}
 	}
 	var once sync.Once
