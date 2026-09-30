@@ -13,6 +13,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"mailcli/internal/mail"
 )
 
 const (
@@ -105,14 +108,19 @@ func (cache excerptCache) load(key string) (cachedExcerpt, bool) {
 	if err != nil || len(payload) > maximumExcerptCacheEntryBytes {
 		return cachedExcerpt{}, false
 	}
-	var entry cachedExcerpt
+	var entry struct {
+		Version  int     `json:"v"`
+		Excerpt  *string `json:"excerpt"`
+		Complete *bool   `json:"complete"`
+	}
 	if err := json.Unmarshal(payload, &entry); err != nil {
 		return cachedExcerpt{}, false
 	}
-	if entry.Version != excerptCacheVersion {
+	if entry.Version != excerptCacheVersion || entry.Excerpt == nil || entry.Complete == nil ||
+		utf8.RuneCountInString(*entry.Excerpt) > mail.MaximumExcerptLength {
 		return cachedExcerpt{}, false
 	}
-	return entry, true
+	return cachedExcerpt{Version: entry.Version, Excerpt: *entry.Excerpt, Complete: *entry.Complete}, true
 }
 
 // store writes the entry atomically with owner-only permissions and prunes

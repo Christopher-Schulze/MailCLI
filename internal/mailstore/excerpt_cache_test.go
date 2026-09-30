@@ -7,7 +7,44 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"mailcli/internal/mail"
 )
+
+func TestExcerptCacheRequiresTypedFieldsAndRuneBound(t *testing.T) {
+	for _, test := range []struct {
+		name, payload string
+		want          bool
+	}{
+		{"version only", `{"v":1}`, false},
+		{"missing excerpt", `{"v":1,"complete":true}`, false},
+		{"missing complete", `{"v":1,"excerpt":"x"}`, false},
+		{"null excerpt", `{"v":1,"excerpt":null,"complete":true}`, false},
+		{"null complete", `{"v":1,"excerpt":"x","complete":null}`, false},
+		{"number excerpt", `{"v":1,"excerpt":12,"complete":true}`, false},
+		{"string complete", `{"v":1,"excerpt":"x","complete":"false"}`, false},
+		{"array excerpt", `{"v":1,"excerpt":[],"complete":true}`, false},
+		{"empty incomplete", `{"v":1,"excerpt":"","complete":false}`, true},
+		{"empty complete", `{"v":1,"excerpt":"","complete":true}`, true},
+		{"exact Unicode bound", `{"v":1,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength) + `","complete":false}`, true},
+		{"over Unicode bound", `{"v":1,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
+		{"over ASCII bound", `{"v":1,"excerpt":"` + strings.Repeat("x", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cache := excerptCache{dir: t.TempDir()}
+			if err := os.WriteFile(cache.path("entry"), []byte(test.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entry, hit := cache.load("entry")
+			if hit != test.want {
+				t.Fatalf("load=%+v hit=%t want=%t", entry, hit, test.want)
+			}
+			if hit && (entry.Version != excerptCacheVersion || strings.Contains(test.name, "incomplete") && entry.Complete || test.name == "exact Unicode bound" && (entry.Complete || entry.Excerpt != strings.Repeat("界", mail.MaximumExcerptLength))) {
+				t.Fatalf("cache values changed: %+v", entry)
+			}
+		})
+	}
+}
 
 func TestExcerptCacheRequiresOneBoundedDocument(t *testing.T) {
 	t.Parallel()
