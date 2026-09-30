@@ -17,13 +17,13 @@ var (
 	errorScopeMutation  = []string{"messages.mark", "messages.move", "messages.copy", "messages.delete", "batch"}
 	errorScopeIMAPRead  = []string{"messages.new", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "sync", "batch"}
 	errorScopeIMAP      = []string{"messages.new", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
-	errorScopeIdentity  = []string{"messages.new", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
-	errorScopeBinding   = []string{"messages.new", "send.setup", "accounts.list", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
+	errorScopeIdentity  = []string{"messages.new", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
+	errorScopeBinding   = []string{"messages.new", "send.setup", "accounts.list", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.send", "drafts.reconcile", "batch"}
 	errorScopeDraft     = []string{"drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.update", "drafts.discard", "drafts.prune", "drafts.adopt", "drafts.send", "drafts.reconcile", "drafts.handoff", "drafts.handoff-reconcile", "messages.reply", "messages.forward"}
 	errorScopeSend      = []string{"drafts.send", "drafts.reconcile"}
 	errorScopeHandoff   = []string{"drafts.handoff", "drafts.handoff-reconcile"}
 	errorScopeMailApp   = []string{"doctor", "sync", "accounts.list", "mailboxes.list", "messages.list"}
-	errorScopeKeychain  = []string{"messages.new", "send.setup", "drafts.send", "drafts.reconcile", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "batch"}
+	errorScopeKeychain  = []string{"messages.new", "send.setup", "drafts.send", "drafts.reconcile", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "messages.state", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "batch"}
 	errorScopeEditor    = []string{"drafts.edit"}
 	errorScopeUpdate    = []string{"update"}
 	// errorScopeMailStore lists the commands that open Mail's store.
@@ -131,7 +131,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"imap_command_rejected", "The server rejected an IMAP command; see error.imap_rejection.", errorScopeIMAP},
 	{"imap_connect_failed", "The IMAP connection or TLS verification failed.", errorScopeIMAP},
 	{"imap_copy_outcome_unknown", "A COPY cannot be safely started or its effects are unverified; observe the destination before any retry.", []string{"messages.copy", "messages.move", "messages.delete", "batch"}},
-	{"imap_credentials_missing", "No IMAP credential or account identity is configured.", errorScopeIMAP},
+	{"imap_credentials_missing", "No IMAP password or credential store is configured; run send setup.", append([]string{"messages.list", "messages.filter", "messages.search"}, errorScopeIMAP...)},
 	{"imap_disconnected", "The IMAP connection dropped.", errorScopeIMAP},
 	{"imap_fetch_failed", "An IMAP FETCH failed.", errorScopeIMAPRead},
 	{"imap_flag_read_unsupported", "The configured transport cannot read server flags.", []string{"messages.state"}},

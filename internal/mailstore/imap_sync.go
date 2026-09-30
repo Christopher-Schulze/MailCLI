@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"mailcli/internal/keychain"
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -16,16 +17,20 @@ import (
 
 // SyncCheck inspects server-vs-local message counts across mailboxes without launching Mail.app.
 func syncIdentity(account mail.Account, credentials transport.CredentialStore) (string, string, int, string, error) {
-	return syncIdentityWithBindings(account, credentials, mail.AccountBindingFile{
+	return syncIdentityWithBindings(context.Background(), account, credentials, mail.AccountBindingFile{
 		Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{},
 	})
 }
 
 func syncIdentityWithBindings(
+	ctx context.Context,
 	account mail.Account,
 	credentials transport.CredentialStore,
 	bindings mail.AccountBindingFile,
 ) (string, string, int, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", 0, "", err
+	}
 	candidates := append([]string(nil), account.EmailAddresses...)
 	if accountRef, err := mailref.DecodeAccount(account.Ref); err == nil {
 		if binding, found, bindingErr := mail.FindAccountBinding(bindings, accountRef.AccountID); bindingErr != nil {
@@ -43,70 +48,84 @@ func syncIdentityWithBindings(
 					"account binding has no sender alias present in the local account catalog",
 				)
 			}
+			_, _, imapHost, imapPort, providerErr := mail.ResolveTransportHosts(candidates[0], &binding)
+			if providerErr != nil {
+				return "", "", 0, "", providerErr
+			}
 			if credentials == nil {
 				return "", "", 0, "", operationError(
 					"imap_credentials_missing",
 					"no credential store configured; run '"+credentialSetupCommand(candidates[0], binding.CredentialAccount)+"'",
 				)
 			}
+			if err := ctx.Err(); err != nil {
+				return "", "", 0, "", err
+			}
 			password, loadErr := credentials.Load(binding.CredentialAccount)
+			if err := ctx.Err(); err != nil {
+				return "", "", 0, "", err
+			}
+			if loadErr != nil && transport.ErrorCode(loadErr) != keychain.CodeNotFound {
+				return "", "", 0, "", fmt.Errorf("load IMAP credentials: %w", loadErr)
+			}
 			if loadErr != nil || password == "" {
-				return "", "", 0, "", operationError(
+				return "", "", 0, "", operationErrorWithCause(
 					"imap_credentials_missing",
 					"no stored password for "+binding.CredentialAccount+"; run 'mailcli send setup --from "+candidates[0]+" --account "+account.Ref+" --credential-account "+binding.CredentialAccount+"'",
+					loadErr,
 				)
 			}
-			for _, candidate := range candidates {
-				_, _, imapHost, imapPort, providerErr := mail.ResolveTransportHosts(candidate, &binding)
-				if providerErr == nil {
-					return candidate, imapHost, imapPort, password, nil
-				}
-			}
-			return "", "", 0, "", operationError("account_binding_stale", "account binding has no supported sender alias")
+			return candidates[0], imapHost, imapPort, password, nil
 		}
 	}
 	if len(candidates) == 0 {
 		return "", "", 0, "", operationError("account_no_email", "account has no email addresses; cannot resolve provider endpoints")
 	}
-	if credentials == nil {
-		return "", "", 0, "", operationError("imap_credentials_missing", "no credential store configured; run 'mailcli send setup --from "+candidates[0]+"'")
-	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return strings.ToLower(candidates[i]) < strings.ToLower(candidates[j])
 	})
-	var lastErr error
+	var providerErr, missingErr error
 	for _, candidate := range candidates {
 		_, _, imapHost, imapPort, err := transport.ProviderHosts(candidate)
 		if err != nil {
-			lastErr = err
+			providerErr = err
 			continue
+		}
+		if credentials == nil {
+			return "", "", 0, "", operationError("imap_credentials_missing", "no credential store configured; run 'mailcli send setup --from "+candidate+"'")
+		}
+		if err := ctx.Err(); err != nil {
+			return "", "", 0, "", err
 		}
 		password, err := credentials.Load(candidate)
-		if err != nil {
-			lastErr = err
-			continue
+		if contextErr := ctx.Err(); contextErr != nil {
+			return "", "", 0, "", contextErr
 		}
-		if password == "" {
-			lastErr = operationError("imap_credentials_missing", "no stored password; run 'mailcli send setup --from "+candidate+"'")
+		if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
+			return "", "", 0, "", fmt.Errorf("load IMAP credentials: %w", err)
+		}
+		if err != nil || password == "" {
+			missingErr = operationErrorWithCause("imap_credentials_missing", "no stored password; run 'mailcli send setup --from "+candidate+"'", err)
 			continue
 		}
 		return candidate, imapHost, imapPort, password, nil
 	}
-	if lastErr == nil {
-		lastErr = operationError("imap_credentials_missing", "no usable account identity is configured")
+	if missingErr != nil {
+		return "", "", 0, "", missingErr
 	}
-	return "", "", 0, "", lastErr
+	return "", "", 0, "", providerErr
 }
 
 // imapConfigForAccount resolves the IMAP endpoint and login of one account:
 // the provider or bound host, the stored password and, for a binding, its
 // credential account as the login name.
 func imapConfigForAccount(
+	ctx context.Context,
 	account mail.Account,
 	credentials transport.CredentialStore,
 	bindings mail.AccountBindingFile,
 ) (string, transport.ImapConfig, error) {
-	email, imapHost, imapPort, password, err := syncIdentityWithBindings(account, credentials, bindings)
+	email, imapHost, imapPort, password, err := syncIdentityWithBindings(ctx, account, credentials, bindings)
 	if err != nil {
 		return "", transport.ImapConfig{}, err
 	}
@@ -349,7 +368,7 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 			})
 			continue
 		}
-		email, cfg, err := imapConfigForAccount(acct, credStore, bindings)
+		email, cfg, err := imapConfigForAccount(ctx, acct, credStore, bindings)
 		if err != nil {
 			code := failureCode(ctx, err)
 			if code == "" {

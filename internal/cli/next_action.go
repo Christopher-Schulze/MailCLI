@@ -117,6 +117,8 @@ var environmentRepairWhy = map[string]string{
 	"smtp_tls_failed":                    "The SMTP TLS handshake failed; check the bound host, port and certificate, then retry.",
 	"smtp_credentials_missing":           "No app-specific password is stored; ask the user to run `mailcli send setup`, then retry.",
 	"imap_credentials_missing":           "No app-specific password is stored; ask the user to run `mailcli send setup`, then retry.",
+	"keychain_load_failed":               "Allow or unlock Keychain access, then retry; this is a credential read failure, not a missing password.",
+	"keychain_unsupported":               "Use a MailCLI build with Keychain support, then retry.",
 	"smtp_utf8_unsupported":              "The SMTP server lacks SMTPUTF8; use ASCII addresses and headers or another account.",
 	"transport_unsupported_provider":     "Direct transport supports Gmail and iCloud; bind explicit SMTP/IMAP hosts or use drafts handoff.",
 	"editor_unavailable":                 "No editor is available; pass --editor or set VISUAL or EDITOR, then retry.",

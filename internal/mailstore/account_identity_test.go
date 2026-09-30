@@ -121,7 +121,7 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 	if err != nil {
 		t.Fatalf("EncodeAccount() error = %v", err)
 	}
-	sender, credential, binding, err := resolveAccountIdentityFromCatalog(
+	sender, cfg, binding, err := resolveAccountIdentityFromCatalog(
 		context.Background(),
 		[]mail.Account{{Ref: accountRef, State: "ok", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
 		"TARGET-ACCOUNT",
@@ -131,8 +131,8 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 			Bindings: []mail.AccountBinding{{AccountID: "TARGET-ACCOUNT", SenderAliases: []string{"alias@icloud.com"}, CredentialAccount: "login@icloud.com"}},
 		},
 	)
-	if err != nil || sender != "alias@icloud.com" || credential != "login@icloud.com" {
-		t.Fatalf("resolveAccountIdentityFromCatalog() = sender:%q credential:%q error:%v", sender, credential, err)
+	if err != nil || sender != "alias@icloud.com" || cfg.Username != "login@icloud.com" || cfg.Host != "imap.mail.me.com" || cfg.Port != 993 || cfg.Password != "secret" {
+		t.Fatalf("resolveAccountIdentityFromCatalog() = sender:%q username:%q host:%q port:%d error:%v", sender, cfg.Username, cfg.Host, cfg.Port, err)
 	}
 	if binding == nil || binding.CredentialAccount != "login@icloud.com" {
 		t.Fatalf("resolveAccountIdentityFromCatalog() binding = %+v, want credential login@icloud.com", binding)
@@ -181,9 +181,9 @@ func TestMutationAccountResolutionLoadsOnlyTargetAccount(t *testing.T) {
 	messageRefs := mutationTargetReferences(t, store, fixture.searchFixtureData, 100)
 
 	initialInvocation := client.WithAccountBindingSnapshot(context.Background())
-	sender, credential, binding, err := client.resolveAccountIdentity(initialInvocation, testAccountID)
-	if err != nil || sender != "identity@gmail.com" || credential != "identity@gmail.com" {
-		t.Fatalf("resolveAccountIdentity() = sender:%q credential:%q error:%v", sender, credential, err)
+	sender, cfg, binding, err := client.resolveAccountIdentity(initialInvocation, testAccountID)
+	if err != nil || sender != "identity@gmail.com" || cfg.Username != "identity@gmail.com" || cfg.Host != "imap.gmail.com" || cfg.Port != 993 || cfg.Password != "generated-test-password" {
+		t.Fatalf("resolveAccountIdentity() = sender:%q username:%q host:%q port:%d error:%v", sender, cfg.Username, cfg.Host, cfg.Port, err)
 	}
 	if binding == nil || binding.AccountID != testAccountID {
 		t.Fatalf("resolveAccountIdentity() binding = %+v, want target account binding", binding)
@@ -211,7 +211,7 @@ func TestMutationAccountResolutionLoadsOnlyTargetAccount(t *testing.T) {
 				t.Fatalf("binding loads = %d, want 1 shared load for the invocation", got)
 			}
 			assertMutationMailboxRows(t, invocationCtx, client, testAccountID, 3)
-			if got, want := credentials.loadCalls.Load(), int64(2*test.items); got != want {
+			if got, want := credentials.loadCalls.Load(), int64(test.items); got != want {
 				t.Fatalf("credential loads = %d, want %d across account resolution and IMAP setup", got, want)
 			}
 		})
@@ -238,8 +238,8 @@ func TestMutationAccountBindingSnapshotIsFreshPerInvocation(t *testing.T) {
 	}
 
 	secondInvocation := client.WithAccountBindingSnapshot(context.Background())
-	if _, _, _, err := client.resolveAccountIdentity(secondInvocation, testAccountID); errorCodeForTest(err) != accountIdentityMissingCode {
-		t.Fatalf("next-invocation error = %v, want fresh binding failure %s", err, accountIdentityMissingCode)
+	if _, _, _, err := client.resolveAccountIdentity(secondInvocation, testAccountID); errorCodeForTest(err) != "imap_credentials_missing" {
+		t.Fatalf("next-invocation error = %v, want fresh binding failure imap_credentials_missing", err)
 	}
 	if got := bindings.loadCalls.Load(); got != 2 {
 		t.Fatalf("binding loads across two invocations = %d, want 2", got)
@@ -377,16 +377,16 @@ func TestMutationAccountResolutionPreservesSentSenderEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAccountBindings() for Sent evidence: %v", err)
 	}
-	wantSender, wantCredential, wantBinding, err := resolveAccountIdentityFromCatalog(context.Background(), accounts, testAccountID, credentials, bindingFile)
-	if err != nil || wantSender != "history@gmail.com" || wantCredential != "history@gmail.com" || wantBinding != nil {
-		t.Fatalf("full-catalog identity = sender:%q credential:%q binding:%+v error:%v", wantSender, wantCredential, wantBinding, err)
+	wantSender, wantConfig, wantBinding, err := resolveAccountIdentityFromCatalog(context.Background(), accounts, testAccountID, credentials, bindingFile)
+	if err != nil || wantSender != "history@gmail.com" || wantConfig.Username != "history@gmail.com" || wantBinding != nil {
+		t.Fatalf("full-catalog identity = sender:%q username:%q binding:%+v error:%v", wantSender, wantConfig.Username, wantBinding, err)
 	}
 
 	emptyBindings.loadCalls.Store(0)
 	credentials.loadCalls.Store(0)
-	sender, credential, binding, err := client.resolveAccountIdentity(context.Background(), testAccountID)
-	if err != nil || sender != wantSender || credential != wantCredential || binding != nil {
-		t.Fatalf("targeted identity = sender:%q credential:%q binding:%+v error:%v; want full-catalog identity", sender, credential, binding, err)
+	sender, cfg, binding, err := client.resolveAccountIdentity(context.Background(), testAccountID)
+	if err != nil || sender != wantSender || cfg != wantConfig || binding != nil {
+		t.Fatalf("targeted identity = sender:%q username:%q binding:%+v error:%v; want full-catalog identity", sender, cfg.Username, binding, err)
 	}
 	if got := emptyBindings.loadCalls.Load(); got != 1 {
 		t.Fatalf("binding loads = %d, want 1 shared load for the invocation", got)

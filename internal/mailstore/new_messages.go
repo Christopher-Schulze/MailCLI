@@ -105,7 +105,7 @@ func (c *Client) newMessagesForAccount(
 		result.Skipped = append(result.Skipped, skip)
 		return
 	}
-	email, cfg, err := imapConfigForAccount(account, c.send.Credentials, bindings)
+	email, cfg, err := imapConfigForAccount(ctx, account, c.send.Credentials, bindings)
 	if err != nil {
 		fail("", err)
 		return

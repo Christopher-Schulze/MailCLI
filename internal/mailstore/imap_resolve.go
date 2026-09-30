@@ -242,42 +242,8 @@ func (c *Client) imapConfigForAccountID(ctx context.Context, accountID string) (
 	if err := ctx.Err(); err != nil {
 		return "", transport.ImapConfig{}, err
 	}
-	email, credential, binding, err := c.resolveAccountIdentity(ctx, accountID)
-	if err != nil {
-		var typed interface{ ErrorCode() string }
-		if errors.As(err, &typed) {
-			return "", transport.ImapConfig{}, err
-		}
-		return "", transport.ImapConfig{}, &transport.TransportError{
-			Code:    transport.CodeLocalOnlyMailbox,
-			Message: err.Error(),
-		}
-	}
-	_, _, imapHost, imapPort, err := mail.ResolveTransportHosts(email, binding)
-	if err != nil {
-		return "", transport.ImapConfig{}, err
-	}
-	credStore := c.send.Credentials
-	if credStore == nil {
-		return "", transport.ImapConfig{}, &transport.TransportError{
-			Code:    transport.CodeSMTPCredentialsMissing,
-			Message: "credential store is not available",
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return "", transport.ImapConfig{}, err
-	}
-	password, err := credStore.Load(credential)
-	if contextErr := ctx.Err(); contextErr != nil {
-		return "", transport.ImapConfig{}, contextErr
-	}
-	if err != nil || password == "" {
-		return "", transport.ImapConfig{}, &transport.TransportError{
-			Code:    transport.CodeSMTPCredentialsMissing,
-			Message: fmt.Sprintf("no stored credentials for %s (run '%s')", credential, credentialSetupCommand(email, credential)),
-		}
-	}
-	return email, transport.ImapConfig{Host: imapHost, Port: imapPort, Username: credential, Password: password}, nil
+	email, cfg, _, err := c.resolveAccountIdentity(ctx, accountID)
+	return email, cfg, err
 }
 
 func identityResolutionError(messageRef string, localErr, remoteErr error) error {
@@ -325,18 +291,18 @@ func credentialSetupCommand(sender, credential string) string {
 	return command
 }
 
-func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (string, string, *mail.AccountBinding, error) {
+func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (string, transport.ImapConfig, *mail.AccountBinding, error) {
 	if err := ctx.Err(); err != nil {
-		return "", "", nil, err
+		return "", transport.ImapConfig{}, nil, err
 	}
 	ctx = c.WithAccountBindingSnapshot(ctx)
 	bindings, err := c.accountBindingsForResolution(ctx)
 	if err != nil {
-		return "", "", nil, err
+		return "", transport.ImapConfig{}, nil, err
 	}
 	account, found, err := c.store.accountForIdentity(ctx, accountID, bindings)
 	if err != nil {
-		return "", "", nil, operationErrorWithCause(
+		return "", transport.ImapConfig{}, nil, operationErrorWithCause(
 			"account_catalog_incomplete",
 			fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
 			err,
@@ -346,7 +312,7 @@ func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (
 	if !found {
 		accounts, err = c.store.listAccountsWithBindings(ctx, bindings)
 		if err != nil {
-			return "", "", nil, operationErrorWithCause(
+			return "", transport.ImapConfig{}, nil, operationErrorWithCause(
 				"account_catalog_incomplete",
 				fmt.Sprintf("cannot resolve account %s from the local Mail store; run 'mailcli doctor' and retry: %v", accountID, err),
 				err,
@@ -374,9 +340,9 @@ func resolveAccountIdentityFromCatalog(
 	accountID string,
 	credentials transport.CredentialStore,
 	bindings mail.AccountBindingFile,
-) (string, string, *mail.AccountBinding, error) {
+) (string, transport.ImapConfig, *mail.AccountBinding, error) {
 	if err := ctx.Err(); err != nil {
-		return "", "", nil, err
+		return "", transport.ImapConfig{}, nil, err
 	}
 	decodeFailures := make([]error, 0)
 	for index, acct := range accounts {
@@ -389,114 +355,48 @@ func resolveAccountIdentityFromCatalog(
 			continue
 		}
 		if acct.State == "disabled" {
-			return "", "", nil, operationError(
+			return "", transport.ImapConfig{}, nil, operationError(
 				accountDisabledCode,
 				fmt.Sprintf("account %s is disabled in the local Mail catalog; enable it in Mail.app and retry", accountID),
 			)
 		}
 		if acct.State == "degraded" {
-			return "", "", nil, operationError(
+			return "", transport.ImapConfig{}, nil, operationError(
 				"account_degraded",
 				fmt.Sprintf("account %s is degraded (%s): %s", accountID, acct.DegradedReason, acct.DegradedRemediation),
 			)
 		}
 		binding, bindingFound, err := mail.FindAccountBinding(bindings, accountID)
 		if err != nil {
-			return "", "", nil, err
+			return "", transport.ImapConfig{}, nil, err
 		}
-		if bindingFound {
-			sender := ""
-			for _, candidate := range binding.SenderAliases {
-				if accountCatalogContainsAddress(acct, candidate) {
-					sender = candidate
-					break
-				}
-			}
-			if sender == "" {
-				return "", "", nil, operationError(
-					accountBindingStaleCode,
-					fmt.Sprintf("account binding %s has no sender alias present in the local account catalog", accountID),
-				)
-			}
-			if _, _, _, _, err := mail.ResolveTransportHosts(sender, &binding); err != nil {
-				return "", "", nil, err
-			}
-			if credentials == nil {
-				return "", "", nil, operationError(
-					accountIdentityMissingCode,
-					"no credential store configured; run 'mailcli send setup --from "+sender+" --credential-account "+binding.CredentialAccount+"' first",
-				)
-			}
-			if err := ctx.Err(); err != nil {
-				return "", "", nil, err
-			}
-			password, loadErr := credentials.Load(binding.CredentialAccount)
-			if err := ctx.Err(); err != nil {
-				return "", "", nil, err
-			}
-			if loadErr != nil || password == "" {
-				return "", "", nil, operationError(
-					accountIdentityMissingCode,
-					fmt.Sprintf("account %s has no stored credentials for %s; run 'mailcli send setup --from %s --account <account-ref>'", accountID, binding.CredentialAccount, sender),
-				)
-			}
-			return sender, binding.CredentialAccount, &binding, nil
-		}
-		if len(acct.EmailAddresses) == 0 {
-			return "", "", nil, operationError(
+		if !bindingFound && len(acct.EmailAddresses) == 0 {
+			return "", transport.ImapConfig{}, nil, operationError(
 				accountIdentityMissingCode,
 				fmt.Sprintf("account %s has no provable sender identity; run 'mailcli send setup --from ADDRESS' or complete one successful send", accountID),
 			)
 		}
-		usableAddresses := make([]string, 0, len(acct.EmailAddresses))
-		var providerErr error
-		for _, address := range acct.EmailAddresses {
-			if _, _, _, _, err := transport.ProviderHosts(address); err != nil {
-				providerErr = err
-				continue
-			}
-			usableAddresses = append(usableAddresses, address)
+		sender, cfg, err := imapConfigForAccount(ctx, acct, credentials, bindings)
+		if err != nil {
+			return "", transport.ImapConfig{}, nil, err
 		}
-		if len(usableAddresses) == 0 && providerErr != nil {
-			return "", "", nil, providerErr
+		if bindingFound {
+			return sender, cfg, &binding, nil
 		}
-		if credentials == nil {
-			return "", "", nil, operationError(
-				accountIdentityMissingCode,
-				"no credential store configured; run 'mailcli send setup --from ADDRESS' first",
-			)
-		}
-		for _, address := range usableAddresses {
-			if err := ctx.Err(); err != nil {
-				return "", "", nil, err
-			}
-			pw, lerr := credentials.Load(address)
-			if err := ctx.Err(); err != nil {
-				return "", "", nil, err
-			}
-			if lerr == nil && pw != "" {
-				return address, address, nil, nil
-			}
-		}
-		return "", "", nil, operationError(
-			accountIdentityMissingCode,
-			fmt.Sprintf("account %s has no address with stored credentials; run 'mailcli send setup --from ADDRESS' for one of %v",
-				accountID, acct.EmailAddresses,
-			),
-		)
+		return sender, cfg, nil, nil
 	}
 	if len(decodeFailures) > 0 {
-		return "", "", nil, accountReferenceDecodeError(accountID, decodeFailures)
+		return "", transport.ImapConfig{}, nil, accountReferenceDecodeError(accountID, decodeFailures)
 	}
 	if binding, found, bindingErr := mail.FindAccountBinding(bindings, accountID); bindingErr != nil {
-		return "", "", nil, bindingErr
+		return "", transport.ImapConfig{}, nil, bindingErr
 	} else if found {
-		return "", "", nil, operationError(
+		return "", transport.ImapConfig{}, nil, operationError(
 			accountBindingStaleCode,
 			fmt.Sprintf("account binding %s refers to an account that is no longer enabled in Mail.app", binding.AccountID),
 		)
 	}
-	return "", "", nil, operationError(
+	return "", transport.ImapConfig{}, nil, operationError(
 		accountDisabledCode,
 		fmt.Sprintf("account %s is not enabled in the local Mail catalog; enable it in Mail.app and retry", accountID),
 	)
