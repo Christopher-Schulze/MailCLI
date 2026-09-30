@@ -925,6 +925,7 @@ A confirmed result keeps compatibility outcome `sent` and exposes `submission_ac
 
 If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending`; MailCLI never resubmits, and `drafts reconcile` searches and verifies Sent before retrying a known failed APPEND from the retained exact bytes, even when the original attachment paths changed or vanished.
 Every Sent APPEND is preceded by a durable mirror-attempt marker with a unique attempt ID; a known pre-APPEND failure may retry only after a fresh Sent search and a new marker.
+Only one complete SEARCH response with unique positive 32-bit message identities proves absence or candidates; missing, repeated or malformed SEARCH evidence blocks APPEND. Malformed post-APPEND evidence retains `imap_append_outcome_unknown` and its underlying cause, never authorization to repeat the write.
 A literal copy, source-length, deadline or flush failure before the terminating CRLF returns `imap_append_incomplete` and discards the session; reconcile searches Sent, then retries only that APPEND.
 After the terminating CRLF, a failed write or unreadable reply returns `imap_append_outcome_unknown`; reconciliation searches and verifies Sent but never retries automatically, and a duplicate or unprovable result stays `send_mirror_outcome_unknown`.
 Missing or changed recovery-spool bytes block APPEND and keep the draft.

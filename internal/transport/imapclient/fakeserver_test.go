@@ -32,6 +32,7 @@ type fakeServerConfig struct {
 	searchUID                uint32
 	searchUIDs               []uint32
 	uidSearchResponse        []string
+	searchResponses          [][]string
 	appendOK                 bool
 	dropAppendResponse       bool
 	appendReadStartedEvents  chan<- struct{}
@@ -425,6 +426,12 @@ func (s *fakeServer) handle(conn net.Conn) {
 			}
 			if searchContinue != nil {
 				<-searchContinue
+			}
+			if searchCall <= len(s.config.searchResponses) && s.config.searchResponses[searchCall-1] != nil {
+				for _, response := range s.config.searchResponses[searchCall-1] {
+					s.writeLine(bw, strings.ReplaceAll(response, "<tag>", tag))
+				}
+				continue
 			}
 			matchCount := 0
 			if queryMessageID != "" && queryMessageID == searchMatchID {

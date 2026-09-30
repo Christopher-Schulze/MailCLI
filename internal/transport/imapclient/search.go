@@ -228,53 +228,56 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 	if err := c.writeLine(sess, tag+" UID SEARCH "+criteria); err != nil {
 		return nil, wrapCommandIOError(ctx, err, "IMAP UID SEARCH write")
 	}
+	return c.readSearchResults(ctx, sess, tag, "UID SEARCH")
+}
 
+func (c *Client) readSearchResults(ctx context.Context, sess *session, tag, command string) ([]uint32, error) {
 	var uids []uint32
 	seenSearch := false
 	seenUIDs := make(map[uint32]struct{})
 	for {
 		line, err := c.readLine(sess)
 		if err != nil {
-			return nil, wrapCommandIOError(ctx, err, "IMAP UID SEARCH read")
+			return nil, wrapCommandIOError(ctx, err, "IMAP "+command+" read")
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			status, statusErr := parseTaggedCompletionStatus(line, tag)
 			if statusErr != nil {
-				return nil, malformedTaggedCommandResponse(sess, "UID SEARCH", statusErr)
+				return nil, malformedTaggedCommandResponse(sess, command, statusErr)
 			}
 			if status == "OK" {
 				if !seenSearch {
-					return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH completed without a SEARCH response")
+					return nil, malformedSearchResponse(sess, "IMAP "+command+" completed without a SEARCH response")
 				}
 				return uids, nil
 			}
-			return nil, rejectedTaggedCompletion(line, tag, "UID SEARCH", status)
+			return nil, rejectedTaggedCompletion(line, tag, command, status)
 		}
 		if strings.HasPrefix(line, "* SEARCH") {
 			if line != "* SEARCH" && !strings.HasPrefix(line, "* SEARCH ") {
-				return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH response has an invalid SEARCH prefix")
+				return nil, malformedSearchResponse(sess, "IMAP "+command+" response has an invalid SEARCH prefix")
 			}
 			if seenSearch {
-				return nil, malformedUIDSearchResponse(sess, "IMAP UID SEARCH returned multiple SEARCH responses")
+				return nil, malformedSearchResponse(sess, "IMAP "+command+" returned multiple SEARCH responses")
 			}
 			seenSearch = true
 			fields := strings.Fields(line)
 			for _, field := range fields[2:] {
 				uid, parseErr := strconv.ParseUint(field, 10, 32)
 				if parseErr != nil || uid == 0 {
-					return nil, malformedUIDSearchResponse(
-						sess, fmt.Sprintf("IMAP UID SEARCH returned invalid UID %q", field),
+					return nil, malformedSearchResponse(
+						sess, fmt.Sprintf("IMAP %s returned invalid message identity %q", command, field),
 					)
 				}
 				if len(uids) >= maxUIDSearchResults {
-					return nil, malformedUIDSearchResponse(
-						sess, fmt.Sprintf("IMAP UID SEARCH result count exceeds %d", maxUIDSearchResults),
+					return nil, malformedSearchResponse(
+						sess, fmt.Sprintf("IMAP %s result count exceeds %d", command, maxUIDSearchResults),
 					)
 				}
 				parsedUID := uint32(uid)
 				if _, duplicate := seenUIDs[parsedUID]; duplicate {
-					return nil, malformedUIDSearchResponse(
-						sess, fmt.Sprintf("IMAP UID SEARCH returned duplicate UID %d", parsedUID),
+					return nil, malformedSearchResponse(
+						sess, fmt.Sprintf("IMAP %s returned duplicate message identity %d", command, parsedUID),
 					)
 				}
 				seenUIDs[parsedUID] = struct{}{}
@@ -284,7 +287,7 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 	}
 }
 
-func malformedUIDSearchResponse(sess *session, message string) error {
+func malformedSearchResponse(sess *session, message string) error {
 	sess.dirty = true
 	return &transport.TransportError{
 		Code:    transport.CodeIMAPResponseMalformed,

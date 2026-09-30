@@ -91,36 +91,8 @@ func (c *Client) doSearch(ctx context.Context, sess *session, tag, messageID str
 		return 0, wrapCommandIOError(ctx, err, "IMAP SEARCH write")
 	}
 
-	matchCount := 0
-	for {
-		line, err := c.readLine(sess)
-		if err != nil {
-			return 0, wrapCommandIOError(ctx, err, "IMAP SEARCH read")
-		}
-		if strings.HasPrefix(line, tag+" ") {
-			status, statusErr := parseTaggedCompletionStatus(line, tag)
-			if statusErr != nil {
-				return 0, malformedTaggedCommandResponse(sess, "SEARCH", statusErr)
-			}
-			if status == "OK" {
-				return matchCount, nil
-			}
-			return 0, rejectedTaggedCompletion(line, tag, "SEARCH", status)
-		}
-		if strings.HasPrefix(line, "* SEARCHING") {
-			return 0, &transport.TransportError{
-				Code:    transport.CodeIMAPResponseMalformed,
-				Message: "IMAP SEARCH returned invalid SEARCHING response",
-			}
-		}
-		if line != "* SEARCH" && !strings.HasPrefix(line, "* SEARCH ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) > 2 {
-			matchCount += len(fields) - 2
-		}
-	}
+	identities, err := c.readSearchResults(ctx, sess, tag, "SEARCH")
+	return len(identities), err
 }
 
 func (c *Client) doAppend(ctx context.Context, sess *session, tag, mbox string, msg io.Reader, size int64) error {
