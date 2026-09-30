@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -105,6 +106,28 @@ func TestOpenPathAtRejectsDirectoryAsRegularFile(t *testing.T) {
 	}
 	if secureOpenErrorCode(err) != "unsafe_message_source" {
 		t.Fatalf("openRegularPath() directory error = %v, want unsafe_message_source", err)
+	}
+}
+
+func TestOpenPathAtRejectsFIFOWithoutWaiting(t *testing.T) {
+	t.Parallel()
+	rootDirectory, root := openDarwinTestRoot(t)
+	path := filepath.Join(root, "pipe.emlx")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var openErr error
+	assertFIFOReadReturnsPromptly(t, path, func() {
+		opened, _, err := openRegularPath(rootDirectory, root, path)
+		openErr = err
+		if opened != nil {
+			if err := opened.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if secureOpenErrorCode(openErr) != "unsafe_message_source" {
+		t.Fatalf("FIFO error = %v, want unsafe_message_source", openErr)
 	}
 }
 

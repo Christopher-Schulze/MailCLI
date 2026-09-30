@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -91,7 +92,7 @@ func (cache excerptCache) load(key string) (cachedExcerpt, bool) {
 	if cache.dir == "" || key == "" {
 		return cachedExcerpt{}, false
 	}
-	file, err := os.Open(cache.path(key))
+	file, err := os.OpenFile(cache.path(key), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return cachedExcerpt{}, false
 	}
@@ -100,8 +101,12 @@ func (cache excerptCache) load(key string) (cachedExcerpt, bool) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maximumExcerptCacheEntryBytes || time.Since(info.ModTime()) > excerptCacheTTL {
 		return cachedExcerpt{}, false
 	}
+	payload, err := io.ReadAll(io.LimitReader(file, maximumExcerptCacheEntryBytes+1))
+	if err != nil || len(payload) > maximumExcerptCacheEntryBytes {
+		return cachedExcerpt{}, false
+	}
 	var entry cachedExcerpt
-	if err := json.NewDecoder(io.LimitReader(file, maximumExcerptCacheEntryBytes)).Decode(&entry); err != nil {
+	if err := json.Unmarshal(payload, &entry); err != nil {
 		return cachedExcerpt{}, false
 	}
 	if entry.Version != excerptCacheVersion {

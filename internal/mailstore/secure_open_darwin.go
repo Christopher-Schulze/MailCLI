@@ -34,7 +34,7 @@ func openPathAt(
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, nil, operationError("unsafe_message_source", "Mail store path escapes its root")
 	}
-	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW_ANY
+	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW_ANY | unix.O_NONBLOCK
 	if directory {
 		flags |= unix.O_DIRECTORY
 	}
