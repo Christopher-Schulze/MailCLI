@@ -113,6 +113,8 @@ SMTP and IMAP are platform-independent, but MailCLI is deliberately a macOS prod
 
 Both installers put the binary at `~/.local/bin/mailcli` and the skill at `~/.agents/skills/mailcli` by default, staged, verified, and committed with rollback. Add `~/.local/bin` to your `PATH` if needed. Start a new agent session afterwards so the skill is discovered.
 
+Missing destination directories, including `~/.agents/skills`, are created automatically. Installation does not configure Mail accounts, change permissions or install a SQL database: MailCLI uses Apple's existing Mail store. For a new user, run `mailcli doctor --json` first. If it reports `mail_store_not_initialized`, open Mail.app, configure the intended account and let the initial download finish. Grant Full Disk Access to the calling app when requested, rerun `doctor`, then discover accounts with `mailcli accounts list --json`. The bundled skill gives the agent these steps; credentials for direct operations are configured separately with the local `mailcli send setup` prompt. Existing working installations need no setup rerun.
+
 `mailcli update --check` only reports whether a newer release exists and installs nothing. Later updates of both components run through `mailcli update` (`--json` for one envelope). The updater verifies the signed `SHA256SUMS` against the pinned key before it downloads the archive, accepts only exact GitHub release hosts over HTTPS, checks the binary's architecture, signature, and version, and installs through the same rollback-safe transaction; concurrent installers are serialized. When updating from an older binary that expects plain version output, use `MAILCLI_OUTPUT=human mailcli update`.
 
 ### Grant permissions

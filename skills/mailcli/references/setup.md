@@ -1,6 +1,8 @@
 # Installation, setup, and diagnostics
 
-Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --json` when it changes. Install or update with `mailcli update` or the signed release the user provides.
+Check the installation with `mailcli version --json`. Its `data.contract_sha256` identifies the contract; reload `mailcli capabilities --for IDS --schemas --json` when it changes. The GitHub installer creates missing directories and installs binary plus skill together; it installs no SQL database and changes no Mail accounts or permissions. Update an installed binary with `mailcli update`.
+
+For a new user, run `mailcli doctor --json` first. `mail_store_not_initialized` means the user must open Mail.app, configure the intended account and let its initial download finish; do not create Apple's store yourself. For access failures, request Full Disk Access for the actual calling app in System Settings > Privacy & Security > Full Disk Access. After the user completes the requested step, rerun doctor, then `mailcli accounts list --json`; ask which discovered account to use when intent is ambiguous. Existing working installations need no setup rerun. Configure credentials only when a requested direct operation needs them, using the local no-echo prompt below.
 
 Obey conditional dependencies; an empty list means none. Run `mailcli doctor --json` before store work and again after a store, permission, schema, account or read failure. Never cache `doctor --live`; run it before Apple Events or a read fallback, with Mail running and Automation permission granted. Store reads need Full Disk Access and no Automation; direct send needs neither Mail nor Full Disk Access.
 

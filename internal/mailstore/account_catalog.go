@@ -10,7 +10,7 @@ func (c *Client) ListAccountCatalog(ctx context.Context) (mail.AccountCatalog, e
 	if c.store != nil {
 		return c.store.ListAccountCatalog(ctx)
 	}
-	if c.fallback == nil {
+	if c.fallback == nil || nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
 		return mail.AccountCatalog{}, c.readUnavailableError()
 	}
 	accounts, err := c.fallback.ListAccounts(ctx)

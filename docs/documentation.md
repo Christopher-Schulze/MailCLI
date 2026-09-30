@@ -81,6 +81,8 @@ Self-update ignores skill-destination overrides and refreshes the canonical inst
 
 Requirements are macOS on Apple silicon, `/System/Applications/Mail.app`, `/usr/bin/osascript` and at least one account already configured in Mail.app.
 
+The installer creates missing binary and skill directories, including `~/.agents/skills`; it installs no SQL database and does not configure Mail accounts or grant permissions. On first use, the bundled skill directs the agent to its setup guide and `mailcli doctor --json`. An absent Mail directory or a readable directory without a generation returns `mail_store_not_initialized` with `next.do:ask_user`: ask the user to open Mail.app, configure the intended account and finish its initial download, then rerun doctor. Inaccessible directories, incomplete stores and unsupported generations keep their distinct failure evidence. Let the user choose among discovered accounts when their intent is ambiguous; never create Apple's store or guess account settings. Existing working installations need no setup rerun.
+
 1. Grant Full Disk Access to the process hosting MailCLI (Terminal, an IDE or an agent host) so it can read `~/Library/Mail`.
    This one permission enables all zero-Apple-Events reads; IMAP mutations and `sync --check` also need it for local identity and comparison data.
 2. Run `mailcli accounts list --json`, then `mailcli mailboxes list --account ACCOUNT_REF --json` to discover opaque refs.

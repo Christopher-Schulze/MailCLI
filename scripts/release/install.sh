@@ -853,3 +853,4 @@ INSTALL_COMPLETE=1
 printf 'Installed MailCLI binary at %s\n' "${BINARY_DESTINATION}"
 printf 'Installed MailCLI skill at %s\n' "${SKILL_DESTINATION}"
 printf 'Start a new agent session to load the installed skill.\n'
+printf 'First use: run "%s" doctor --json; configure accounts in Mail.app and grant the calling app Full Disk Access when requested.\n' "${BINARY_DESTINATION}"

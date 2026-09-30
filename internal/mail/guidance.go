@@ -377,6 +377,9 @@ func guidanceForAccessGatePreflight(command string, code string) (OperationGuida
 }
 
 func guidanceForKnownReadError(code string) (OperationGuidance, bool) {
+	if code == "mail_store_not_initialized" {
+		return guidanceForReadCorrection("Ask the user to open Mail.app, configure an account and let its initial download finish; then run `mailcli doctor --json`. MailCLI does not create Apple's store or choose an account for the user."), true
+	}
 	if isMailStoreAvailabilityError(code) {
 		return guidanceForReadCorrection("Grant Full Disk Access to the calling app, or open Mail once to create its local store, then retry the read."), true
 	}

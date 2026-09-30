@@ -132,6 +132,7 @@ var environmentRepairWhy = map[string]string{
 	"account_binding_provider_invalid":   "Bind this account to a supported provider or explicit hosts with `mailcli send setup`, then retry.",
 	"account_binding_unavailable":        "Fix access to the MailCLI account-binding file or its directory, then retry; keep its contents.",
 	"mail_store_unavailable":             fullDiskAccessWhy,
+	"mail_store_not_initialized":         "Ask the user to set up an account in Mail.app and finish its initial download, then run `mailcli doctor --json`.",
 	"mail_store_preferences_unavailable": fullDiskAccessWhy,
 	"safe_mailbox_listing_unavailable":   fullDiskAccessWhy,
 	"safe_search_unavailable":            fullDiskAccessWhy,

@@ -20,7 +20,7 @@ var preEffectCorrectionCodes = map[string]bool{
 	"keychain_delete_failed": true, "keychain_invalid_identifier": true, "keychain_item_duplicate": true,
 	"keychain_item_not_found": true, "keychain_load_failed": true, "keychain_store_failed": true,
 	"keychain_unsupported": true, "mail_service_unavailable": true, "mail_store_preferences_invalid": true,
-	"mail_store_preferences_unavailable": true, "mail_store_unavailable": true, "message_source_missing": true,
+	"mail_store_preferences_unavailable": true, "mail_store_unavailable": true, "mail_store_not_initialized": true, "message_source_missing": true,
 	"not_found": true, "prune_candidate_limit_exceeded": true, "raw_source_partial": true,
 	"ambiguous_mailbox": true, "stale_reference": true, "attachment_changed": true,
 	"safe_write_unavailable": true, "send_transport_unavailable": true, "smtp_credentials_missing": true,

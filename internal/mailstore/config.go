@@ -97,8 +97,8 @@ func discoverVersionRoot(mailRoot string) (string, error) {
 	}
 	if len(candidates) == 0 {
 		return "", operationError(
-			"mail_store_unavailable",
-			fmt.Sprintf("no readable Mail Envelope Index exists under %s; no Mail store generation directory is present", mailRoot),
+			"mail_store_not_initialized",
+			fmt.Sprintf("no Mail Envelope Index exists under %s; open Mail.app, configure an account and let its initial download finish, then run `mailcli doctor --json`", mailRoot),
 		)
 	}
 	return chooseVersionRoot(mailRoot, candidates)
@@ -163,9 +163,15 @@ func selectVersionRoot(config Config) (string, error) {
 func inventoryStoreGenerations(mailRoot string) ([]storeGenerationCandidate, error) {
 	entries, err := os.ReadDir(mailRoot)
 	if err != nil {
-		return nil, operationError(
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, operationErrorWithCause(
+				"mail_store_not_initialized",
+				fmt.Sprintf("Mail store directory %s does not exist; open Mail.app, configure an account and let its initial download finish, then run `mailcli doctor --json`", mailRoot), err,
+			)
+		}
+		return nil, operationErrorWithCause(
 			"mail_store_unavailable",
-			fmt.Sprintf("cannot read %s; grant Full Disk Access to the agent host: %v", mailRoot, err),
+			fmt.Sprintf("cannot read %s; grant the calling app Full Disk Access in System Settings > Privacy & Security > Full Disk Access: %v", mailRoot, err), err,
 		)
 	}
 	var candidates []storeGenerationCandidate

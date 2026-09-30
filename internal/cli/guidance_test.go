@@ -636,6 +636,10 @@ func TestRealMailStoreMissingMessageGetEmitsCorrectRecovery(t *testing.T) {
 func TestUnavailableMailStoreMessageGetEmitsUserRecovery(t *testing.T) {
 	ctx := context.Background()
 	mailRoot := filepath.Join(t.TempDir(), "Library", "Mail")
+	// An incomplete generation still needs store repair rather than onboarding.
+	if err := os.MkdirAll(filepath.Join(mailRoot, "V10", "MailData"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	client := mailstore.NewClient(ctx, nil, mailstore.Config{MailRoot: mailRoot}, mail.SendTransport{})
 	t.Cleanup(func() {
 		if err := client.Close(); err != nil {

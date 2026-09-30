@@ -90,6 +90,42 @@ func TestParseVersionDirectoryNameRequiresNumericSuffix(t *testing.T) {
 	}
 }
 
+func TestDiscoverVersionRootDistinguishesFirstUseFromBrokenStore(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, want string
+		prepare    func(*testing.T, string) string
+	}{
+		{name: "absent root", want: "mail_store_not_initialized", prepare: func(t *testing.T, root string) string {
+			return filepath.Join(root, "Mail")
+		}},
+		{name: "empty root", want: "mail_store_not_initialized", prepare: func(t *testing.T, root string) string {
+			return root
+		}},
+		{name: "incomplete generation", want: "mail_store_unavailable", prepare: func(t *testing.T, root string) string {
+			writeStoreGeneration(t, root, "V10", false)
+			return root
+		}},
+		{name: "not a directory", want: "mail_store_unavailable", prepare: func(t *testing.T, root string) string {
+			path := filepath.Join(root, "Mail")
+			if err := os.WriteFile(path, []byte("not a store"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := discoverVersionRoot(test.prepare(t, t.TempDir()))
+			if errorCodeForTest(err) != test.want {
+				t.Fatalf("discoverVersionRoot error = %v, want %s", err, test.want)
+			}
+			if test.want == "mail_store_not_initialized" && !strings.Contains(err.Error(), "Mail.app") {
+				t.Fatalf("missing first-use remediation: %v", err)
+			}
+		})
+	}
+}
+
 func TestDiscoverVersionRootRejectsNewerLayout(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

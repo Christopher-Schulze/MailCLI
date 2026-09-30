@@ -205,7 +205,7 @@ func (c *Client) ListAccounts(ctx context.Context) ([]mail.Account, error) {
 	if c.store != nil {
 		return c.store.ListAccounts(ctx)
 	}
-	if c.fallback == nil {
+	if c.fallback == nil || nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
 		return nil, c.readUnavailableError()
 	}
 	return c.fallback.ListAccounts(ctx)
@@ -217,6 +217,9 @@ func (c *Client) ListMailboxes(
 ) ([]mail.Mailbox, error) {
 	if c.store != nil {
 		return c.store.ListMailboxes(ctx, request)
+	}
+	if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+		return nil, c.storeErr
 	}
 	return nil, operationError(
 		"safe_mailbox_listing_unavailable",
@@ -230,6 +233,9 @@ func (c *Client) ListMessages(
 ) (mail.MessagePage, error) {
 	if c.store != nil {
 		return c.store.ListMessages(ctx, request)
+	}
+	if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+		return mail.MessagePage{}, c.storeErr
 	}
 	if !strings.HasPrefix(request.MailboxRef, "mbx_") || request.AccountRef != "" {
 		return mail.MessagePage{}, operationErrorWithCause("safe_message_listing_unavailable",
@@ -246,6 +252,9 @@ func (c *Client) SearchMessages(
 	query mail.PreparedQuery,
 ) (mail.SearchPage, error) {
 	if c.store == nil {
+		if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+			return mail.SearchPage{}, c.storeErr
+		}
 		return mail.SearchPage{}, operationError(
 			"safe_search_unavailable",
 			"safe search requires the supported local Mail store; no Apple Events global scan will be attempted: "+c.readUnavailableError().Error(),
@@ -837,6 +846,9 @@ func (c *Client) writeUnavailableError() error {
 }
 
 func (c *Client) safeWriteUnavailableError() error {
+	if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+		return c.storeErr
+	}
 	return operationError(
 		"safe_write_unavailable",
 		"verified message mutation requires the supported read-only local Mail store; no unverified write was attempted",

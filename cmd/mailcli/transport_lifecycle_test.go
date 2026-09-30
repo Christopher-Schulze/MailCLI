@@ -240,7 +240,8 @@ func TestRunWithConfigFactoryReportsJSONInitializationFailure(t *testing.T) {
 func TestRunWithFactoriesPreservesServiceJSONEvidenceOnCleanupFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, "Library", "Mail"), 0o700); err != nil {
+	// An incomplete generation is unavailable, not a first-use home.
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Mail", "V10", "MailData"), 0o700); err != nil {
 		t.Fatalf("create isolated Mail root: %v", err)
 	}
 	closeErr := errors.New("transport close failed")

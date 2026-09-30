@@ -181,6 +181,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"mail_not_running", "Mail.app is not running; open it and retry.", errorScopeMailApp},
 	{"mail_recovery_required", "A previous Mail.app operation may still be running; quit and reopen Mail.app.", errorScopeMailApp},
 	{"mail_service_unavailable", "The mail service is not available to the batch.", []string{"batch"}},
+	{"mail_store_not_initialized", "Mail's store directory is absent or has no generation; open Mail.app and configure an account.", errorScopeMailStore},
 	{"mail_store_not_read_only", "The Envelope Index connection is not query-only.", errorScopeMailStore},
 	{"mail_store_path_mismatch", "The opened Envelope Index is not the verified store path.", errorScopeMailStore},
 	{"mail_store_preferences_invalid", "Mail's account ordering preferences are invalid.", errorScopeStoreRead},
