@@ -65,6 +65,11 @@ func parseReleaseVersion(value string) ([3]int, string, error) {
 		if part == "" || (len(part) > 1 && strings.HasPrefix(part, "0")) {
 			return [3]int{}, "", fmt.Errorf("invalid numeric component %q", part)
 		}
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return [3]int{}, "", fmt.Errorf("invalid numeric component %q", part)
+			}
+		}
 		number, err := strconv.Atoi(part)
 		if err != nil || number < 0 {
 			return [3]int{}, "", fmt.Errorf("invalid numeric component %q", part)

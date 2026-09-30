@@ -1219,6 +1219,7 @@ Source builds are ad-hoc signed, so macOS asks again for Keychain access after e
 ### Self-update
 
 `mailcli update` queries the public latest-release endpoint, compares strict `MAJOR.MINOR.PATCH` versions, requires the exact `darwin/arm64` archive plus `SHA256SUMS` and `SHA256SUMS.sig`, and verifies the signature before downloading or trusting the archive.
+Version components contain only ASCII decimal digits, with no signs or leading zeros except `0`; the optional `v` prefix and surrounding-whitespace normalization remain supported.
 Metadata, asset and redirect URLs must use exact trusted GitHub hosts (`api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`), HTTPS on the default port and at most 10 redirects.
 Credentials, fragments, malformed URLs, untrusted hosts, alternate ports and HTTP downgrades fail with `update_host_untrusted`, `update_url_invalid`, `update_url_invalid_port`, `update_url_insecure`, `update_redirect_invalid` or `update_redirect_limit`, which never echo rejected URLs, credentials or paths.
 The archive is authenticated in memory before the shared lock; after acquiring it, the updater reads the installed version and reports an equal or newer installation without reinstalling, and no network request happens while the lock is held.
