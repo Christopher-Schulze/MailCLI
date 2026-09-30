@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"mailcli/internal/keychain"
 	"mailcli/internal/transport"
 )
 
@@ -153,6 +154,9 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 		}
 	}()
 	password, err := s.send.Credentials.Load(identity.Credential)
+	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
+		return SendResult{}, fmt.Errorf("load send credentials: %w", err)
+	}
 	if err != nil || password == "" {
 		return SendResult{}, missingCredentialsErrorFor(sender, identity.Credential)
 	}
@@ -510,6 +514,9 @@ func (s *Service) reconcileUnknownViaImap(
 		return resultForReconcile(ref, attempt), err
 	}
 	password, err := s.send.Credentials.Load(identity.Credential)
+	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
+		return resultForReconcile(ref, attempt), fmt.Errorf("load send credentials: %w", err)
+	}
 	if err != nil || password == "" {
 		return resultForReconcile(ref, attempt), missingCredentialsErrorFor(sender, identity.Credential)
 	}
@@ -629,6 +636,9 @@ func (s *Service) reconcileMirrorPending(
 		return result, err
 	}
 	password, err := s.send.Credentials.Load(identity.Credential)
+	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
+		return result, fmt.Errorf("load send credentials: %w", err)
+	}
 	if err != nil || password == "" {
 		return result, missingCredentialsErrorFor(sender, identity.Credential)
 	}

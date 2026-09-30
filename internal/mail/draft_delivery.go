@@ -9,6 +9,7 @@ import (
 	stdmail "net/mail"
 	"strings"
 
+	"mailcli/internal/keychain"
 	"mailcli/internal/transport"
 )
 
@@ -164,6 +165,9 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 		return TransportEvidence{}, err
 	}
 	password, err := send.Credentials.Load(identity.Credential)
+	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
+		return TransportEvidence{}, fmt.Errorf("load send credentials: %w", err)
+	}
 	if err != nil || password == "" {
 		return TransportEvidence{}, missingCredentialsErrorFor(sender, identity.Credential)
 	}

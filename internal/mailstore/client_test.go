@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcli/internal/keychain"
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 	"mailcli/internal/transport"
@@ -2827,7 +2828,7 @@ func TestClientSendDraftMissingCredentialsBlocksSubmission(t *testing.T) {
 	mirror := &stubSendMirror{}
 	client := &Client{send: mail.SendTransport{
 		Submitter: submitter, Mirror: mirror,
-		Credentials: &stubSendCredentials{loadErr: os.ErrNotExist},
+		Credentials: &stubSendCredentials{loadErr: &keychain.KeychainError{Code: keychain.CodeNotFound, Message: "item not found"}},
 	}}
 	_, err := client.SendDraft(context.Background(), mail.Draft{
 		From: "alice@icloud.com", To: []mail.Recipient{{Address: "christopher@example.com"}},

@@ -52,3 +52,25 @@ func TestIMAPCredentialCatalogAndRepairGuidance(t *testing.T) {
 		t.Fatalf("SMTP missing credential semantics changed: %+v", group)
 	}
 }
+
+func TestSendCredentialCatalogAndRepairGuidance(t *testing.T) {
+	for _, command := range []string{"drafts.send", "drafts.reconcile"} {
+		for _, test := range []struct{ code, why string }{
+			{"smtp_credentials_missing", "send setup"},
+			{keychain.CodeLoadFailed, "Keychain access"},
+			{keychain.CodeUnsupported, "build with Keychain support"},
+		} {
+			t.Run(command+"/"+test.code, func(t *testing.T) {
+				code, _, response := captureCapabilitiesJSON(t, "--for", command, "--errors", test.code, "--json")
+				if code != 0 || len(response.Data.Capabilities.ErrorCodes) != 1 || !slices.Equal(response.Data.Capabilities.ErrorCodes[0].Commands, []string{command}) {
+					t.Fatalf("reachable credential error absent from catalog: response=%+v", response)
+				}
+				failure := newErrorData(command, responseData{}, &mail.OperationError{Code: test.code, Message: "credential preflight failed"})
+				next := failureNextAction(failure, nil)
+				if next.Do != "ask_user" || !strings.Contains(next.Why, test.why) || failure.Guidance.EffectCertainty != mail.EffectNone {
+					t.Fatalf("credential repair lost: next=%+v guidance=%+v", next, failure.Guidance)
+				}
+			})
+		}
+	}
+}

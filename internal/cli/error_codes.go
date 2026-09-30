@@ -244,7 +244,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"send_transport_unavailable", "No direct SMTP transport is configured.", errorScopeSend},
 	{"serialization_failed", "The command output could not be serialized.", errorScopeAll},
 	{"smtp_auth_failed", "SMTP rejected the stored app-specific password.", []string{"drafts.send"}},
-	{"smtp_credentials_missing", "No app-specific password is stored; run send setup.", []string{"drafts.send"}},
+	{"smtp_credentials_missing", "No app-specific password is stored; run send setup.", errorScopeSend},
 	{"smtp_data_incomplete", "SMTP DATA stopped before the terminator; no acceptance occurred.", []string{"drafts.send"}},
 	{"smtp_rejected", "The SMTP server rejected the message with a final 4xx/5xx reply.", []string{"drafts.send"}},
 	{"smtp_source_invalid", "The composed source was short, oversized or unreadable before the terminator.", []string{"drafts.send"}},
