@@ -68,8 +68,8 @@ func runMessagesQuery(
 	defer cancel()
 	page, err := service.SearchMessages(operationCtx, query)
 	if err != nil {
-		if command == "messages.search" && errorCode(err) == "search_budget_too_small" {
-			data := responseData{searchRecoveryArgs: buildSearchRecoveryArgs(query, *fields, *jsonOutput, err)}
+		if errorCode(err) == "search_budget_too_small" {
+			data := responseData{searchRecoveryArgs: buildSearchRecoveryArgs(query, *enrichment, *fields, *maxOutputBytes, *jsonOutput, err)}
 			return failCommandWithData(command, *jsonOutput, data, err, stdout, stderr)
 		}
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
@@ -107,17 +107,15 @@ func defineSearchFlags(flags *flag.FlagSet, query *mail.Query, allowText bool) *
 	flags.IntVar(&query.Limit, "limit", mail.DefaultPageLimit, "page size (1-200)")
 	flags.StringVar(&query.Cursor, "cursor", "", "pagination cursor")
 	flags.BoolVar(&query.ExactCount, "exact-count", false, "request a bounded exact candidate total")
-	if allowText {
-		flags.IntVar(&query.MaxMessages, "max-messages", mail.DefaultSearchMaxMessages, "maximum messages for body search")
-		flags.Int64Var(&query.MaxBytes, "max-scan-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body search")
-	}
+	flags.IntVar(&query.MaxMessages, "max-messages", mail.DefaultSearchMaxMessages, "maximum scan candidates or exact-count probe")
+	flags.Int64Var(&query.MaxBytes, "max-scan-bytes", mail.DefaultSearchMaxBytes, "maximum RFC bytes for body or attachment scanning")
 	addOptionalBoolFlag(flags, "read", "read status", &query.Read)
 	addOptionalBoolFlag(flags, "flagged", "flagged status", &query.Flagged)
 	addOptionalBoolFlag(flags, "attachment", "attachment presence", &query.HasAttachment)
 	return flags.Bool("json", false, "emit JSON")
 }
 
-func buildSearchRecoveryArgs(query mail.Query, fields string, jsonOutput bool, err error) []string {
+func buildSearchRecoveryArgs(query mail.Query, enrichment mail.MessageEnrichmentRequest, fields string, maxOutputBytes int64, jsonOutput bool, err error) []string {
 	var sized interface{ RequiredBytes() int64 }
 	if !errors.As(err, &sized) {
 		return nil
@@ -126,7 +124,7 @@ func buildSearchRecoveryArgs(query mail.Query, fields string, jsonOutput bool, e
 	if requiredBytes <= query.MaxBytes || requiredBytes > mail.MaximumSearchMaxBytes {
 		return nil
 	}
-	args := make([]string, 0, 34)
+	args := make([]string, 0, 40)
 	args = appendSearchStringArg(args, "--query", query.Text)
 	args = appendSearchStringArg(args, "--sender", query.Sender)
 	args = appendSearchStringArg(args, "--recipient", query.Recipient)
@@ -145,9 +143,19 @@ func buildSearchRecoveryArgs(query mail.Query, fields string, jsonOutput bool, e
 	args = appendSearchBoolArg(args, "--read", query.Read)
 	args = appendSearchBoolArg(args, "--flagged", query.Flagged)
 	args = appendSearchBoolArg(args, "--attachment", query.HasAttachment)
+	if enrichment.Threading {
+		args = append(args, "--with-threading")
+	}
+	if enrichment.Excerpt {
+		args = append(args, "--with-excerpt")
+	}
+	args = append(args, "--excerpt-length", strconv.Itoa(enrichment.ExcerptLength))
 	args = appendSearchStringArg(args, "--fields", fields)
+	args = append(args, "--max-bytes", strconv.FormatInt(maxOutputBytes, 10))
 	if jsonOutput {
 		args = append(args, "--json")
+	} else {
+		args = append(args, "--json=false")
 	}
 	return args
 }

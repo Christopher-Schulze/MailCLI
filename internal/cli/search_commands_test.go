@@ -123,7 +123,7 @@ func TestSearchBudgetTooSmallJSONIncludesRequiredBytesAndRecovery(t *testing.T) 
 		response.Error.Guidance.Recovery.Action != "correct" || response.Error.Guidance.Recovery.Command != "messages.search" ||
 		!reflect.DeepEqual(response.Error.Guidance.Recovery.Args, []string{
 			"--query", "needle", "--limit", fmt.Sprint(mail.DefaultPageLimit), "--max-messages", "50000",
-			"--max-scan-bytes", fmt.Sprint(requiredBytes), "--json",
+			"--max-scan-bytes", fmt.Sprint(requiredBytes), "--excerpt-length", "240", "--max-bytes", "1048576", "--json",
 		}) {
 		t.Fatalf("search error response: code=%d response=%+v stderr=%q", code, response, stderr.String())
 	}
@@ -155,7 +155,7 @@ func TestSearchBudgetRecoveryArgumentsRetainScopeAndResumeSameCursor(t *testing.
 		"--account", query.AccountRef, "--mailbox", query.MailboxRef, "--limit", "7", "--cursor", query.Cursor,
 		"--exact-count", "--max-messages", "99", "--max-scan-bytes", fmt.Sprint(requiredBytes),
 		"--read", "false", "--flagged", "true", "--attachment", "true",
-		"--fields", "sender,snippet", "--json",
+		"--excerpt-length", "240", "--fields", "sender,snippet", "--max-bytes", "1048576", "--json",
 	}
 	if code != 1 || firstStderr != "" || response.RequiredBytes != requiredBytes ||
 		response.Command != "messages.search" || !reflect.DeepEqual(response.Args, wantArgs) {

@@ -30,7 +30,7 @@ func TestHelpContractTable(t *testing.T) {
 		{name: "messages list", args: []string{"messages", "list", "--help"}, want: "mailcli messages list [options]"},
 		{
 			name: "messages filter", args: []string{"messages", "filter", "--help"},
-			want: "mailcli messages filter [options]", notWanted: []string{"max-messages"},
+			want: "mailcli messages filter [options]", notWanted: []string{"--query"},
 		},
 		{name: "messages search", args: []string{"messages", "search", "--help"}, want: "mailcli messages search [options]"},
 		{name: "messages get", args: []string{"messages", "get", "--help"}, want: "mailcli messages get [REF] [options]"},
@@ -223,6 +223,11 @@ func TestFocusedHelpUsesProfessionalOptionFormatting(t *testing.T) {
 		{
 			args: []string{"messages", "search", "help"},
 			want: []string{"Options:", "--mailbox <ref>", "--attachment <true|false>", "--max-bytes <int>", "(default: 1 MiB)", "--max-scan-bytes <bytes>", "(default: 4 GiB)", "-h, --help"},
+		},
+		{
+			args:    []string{"messages", "filter", "help"},
+			want:    []string{"--max-messages <number>", "(default: 50000)", "--max-scan-bytes <bytes>", "(default: 4 GiB)"},
+			notWant: []string{"--query"},
 		},
 		{
 			args:    []string{"drafts", "preview", "help"},

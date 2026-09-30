@@ -140,7 +140,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
 
 - `messages.list`: page the unified inbox or a selected mailbox without loading bodies; main flags `--account`, `--mailbox`, `--limit`, `--cursor`, `--fields`.
   Example: `mailcli messages list --limit 20 --json`. Output: `page`.
-- `messages.filter`: apply typed metadata filters through the local store; main flags `--mailbox`, `--sender`, `--subject`, `--read`, `--exact-count`, `--cursor`.
+- `messages.filter`: apply typed metadata filters and bounded attachment scans through the local store; main flags `--mailbox`, `--sender`, `--subject`, `--read`, `--attachment`, `--max-messages`, `--max-scan-bytes`, `--exact-count`, `--cursor`.
   Example: `mailcli messages filter --subject invoice --json`. Output: `page`.
 - `messages.search`: search metadata and bounded local bodies across the selected scope; main flags `--query`, `--max-messages`, `--max-scan-bytes`, `--exact-count`, `--cursor`.
   Example: `mailcli messages search --query invoice --json`. Output: `page`.
@@ -480,7 +480,7 @@ MailCLI cannot guarantee recipient delivery or close an external window.
 | Area | Bound |
 | --- | --- |
 | Pages | List commands default to 20 items and accept `--limit` values from 1 through 200; JSON responses default to a 1 MiB envelope, `--max-bytes` up to 64 MiB. |
-| Search | `--max-messages` defaults to 50,000 candidates, `--max-scan-bytes` to 4 GiB; see [Search](#search) for caps. |
+| Search and filter | `--max-messages` defaults to 50,000 candidates, `--max-scan-bytes` to 4 GiB; see [Search](#search) for caps. |
 | Drafts | 64 KiB subject, 4 MiB reviewed body, 200 recipients, 100 attachments, 512 MiB attachment bytes. |
 | Structured input | Draft and batch JSON one object of 16 MiB or less; batch 100 items. |
 | Raw source | 64 MiB per message, local or hydrated. |
@@ -646,8 +646,9 @@ Keep the same date strings when continuing with a cursor.
 Two bounded workers stream each `.emlx` source, decode text/plain or text/html, and skip decoding non-text bodies so attachment names stay searchable.
 The first scan window matches the requested page, doubles only after a window without a match, and never exceeds 64 candidates.
 A full result page stops loading candidates; the cursor stays anchored at the last classified candidate.
-`--max-messages` defaults to 50,000 and is capped at 100,000; it bounds body candidates and the exact-count probe for metadata filters.
-`--max-scan-bytes` defaults to 4 GiB and is capped at 8 GiB.
+Both search and filter accept these scan budgets; `--max-bytes` independently bounds JSON output.
+`--max-messages` defaults to 50,000 and is capped at 100,000; it bounds scan candidates and the exact-count probe for metadata filters.
+`--max-scan-bytes` defaults to 4 GiB and is capped at 8 GiB for body or attachment scanning.
 These limits bound work rather than pretending that full-text search is instant; narrow account, mailbox, sender, date or subject scope for large stores.
 
 Metadata-only pages fetch the requested page plus one continuation candidate and run no count query by default: `candidate_messages` is that observed lower bound and `candidate_messages_exact` is true only when no continuation remains.
@@ -662,7 +663,8 @@ No refresh command exists because MailCLI maintains no index.
 
 An incomplete body search returns `next_cursor` after the last fully classified candidate when later candidates remain; a candidate blocked after earlier progress gets an inclusive cursor and is retried with the next page's byte budget.
 If no candidate was classified and the next source cannot fit, the search returns `search_budget_too_small` with `error.required_bytes` (rounded up to a binary MiB) and no cursor.
-Recovery arguments keep the original query, filters, projection and incoming cursor while raising `--max-scan-bytes`.
+Recovery keeps the original search/filter command, query, filters including explicit false values, projection, incoming cursor, exact-count setting, candidate limit, requested threading/excerpt and excerpt length, output mode and `--max-bytes`. Only `--max-scan-bytes` increases.
+If the required budget is invalid, unavailable or above 8 GiB, terminal guidance supplies no retry command; narrow the query or inspect the source before a new search.
 Page size, `--max-scan-bytes` and `--max-messages` may change between pages; filters and `--exact-count` stay bound to the cursor.
 
 Search pagination is best-effort because a SQLite snapshot cannot survive separate processes.

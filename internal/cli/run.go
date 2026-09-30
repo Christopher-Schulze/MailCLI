@@ -232,9 +232,17 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 	if command == "drafts.list" && errorCode(err) == "output_too_large" && data.draftListRecovery != nil {
 		guidance.Recovery = *data.draftListRecovery
 	}
-	if command == "messages.search" && errorCode(err) == "search_budget_too_small" && len(data.searchRecoveryArgs) > 0 {
-		guidance.Recovery.Command = command
-		guidance.Recovery.Args = data.searchRecoveryArgs
+	if (command == "messages.search" || command == "messages.filter") && errorCode(err) == "search_budget_too_small" {
+		if len(data.searchRecoveryArgs) > 0 {
+			guidance.Recovery.Command = command
+			guidance.Recovery.Args = data.searchRecoveryArgs
+		} else {
+			guidance.Retryability = mail.RetryTerminal
+			guidance.Recovery = mail.RecoveryGuidance{
+				Action:      mail.RecoveryInspect,
+				Instruction: "No valid scan-budget increase within the 8 GiB maximum is available. Narrow the query or inspect the source before starting a new search; do not repeat this page unchanged.",
+			}
+		}
 	}
 	if command == "drafts.send" {
 		var operation *mail.OperationError
