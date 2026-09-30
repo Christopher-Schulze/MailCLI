@@ -60,7 +60,7 @@ func failureNextAction(failure *errorData, previous *nextAction) *nextAction {
 			next.WaitSeconds = 1
 		}
 	case guidance.Retryability == mail.RetryUserInputRequired:
-		next.Do, next.Why = "fix_input", boundedWhy("Fix the input: ", failure.Message)
+		next.Do, next.Why = "fix_input", "Fix the input."
 	}
 	attachNextRecovery(next, guidance.Recovery)
 	if next.Do == "check_state" && next.Command != "" {

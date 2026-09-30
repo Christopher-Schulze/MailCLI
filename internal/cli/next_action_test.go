@@ -168,7 +168,8 @@ func TestNextActionWhyNamesTheConcreteFix(t *testing.T) {
 	for _, test := range []struct {
 		name, command, code, message, want string
 	}{
-		{"input names the message", "messages.get", "invalid_argument", "missing required --ref or REF", "Fix the input: missing required --ref or REF"},
+		{"input avoids repeating the message", "messages.get", "invalid_argument", "missing required --ref or REF", "Fix the input."},
+		{"long input stays compact", "messages.get", "invalid_argument", long, "Fix the input."},
 		{"terminal outcome", "messages.delete", "message_already_trashed", "already in trash", "The message is already in Trash; nothing to do."},
 		{"terminal default names the message", "update", "update_signature_invalid", "SHA256SUMS signature is invalid", "Stop: SHA256SUMS signature is invalid"},
 	} {
@@ -177,11 +178,14 @@ func TestNextActionWhyNamesTheConcreteFix(t *testing.T) {
 			if next := failureNextAction(failure, nil); next.Why != test.want {
 				t.Fatalf("why = %q, want %q", next.Why, test.want)
 			}
+			if failure.Message != test.message {
+				t.Fatalf("detailed diagnostic changed: %q", failure.Message)
+			}
 		})
 	}
-	failure := newErrorData("messages.get", responseData{}, &mail.OperationError{Code: "invalid_argument", Message: long})
+	failure := newErrorData("messages.get", responseData{}, &mail.OperationError{Code: "unsafe_message_source", Message: long})
 	why := failureNextAction(failure, nil).Why
-	if utf8.RuneCountInString(why) != 120 || !strings.HasSuffix(why, "…") || !strings.HasPrefix(why, "Fix the input: value") {
+	if utf8.RuneCountInString(why) != 120 || !strings.HasSuffix(why, "…") || !strings.HasPrefix(why, "Stop: value") {
 		t.Fatalf("long why = %q (%d runes)", why, utf8.RuneCountInString(why))
 	}
 }
