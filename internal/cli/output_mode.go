@@ -74,8 +74,7 @@ func outputCommandFlagArity(args []string) map[string]bool {
 		}
 	}
 	if contract, _ := commandContractForArgs(lookup); contract != nil {
-		arity, _ := referenceGlobalJSONFlagArity(contract)
-		return arity
+		return commandGlobalJSONFlagArity(contract)
 	}
 	return nil
 }

@@ -79,7 +79,7 @@ func TestResolveOutputModeTerminal(t *testing.T) {
 
 func TestOutputModePreservesEveryPublishedFlagValue(t *testing.T) {
 	for _, contract := range commandContracts {
-		arity, _ := referenceGlobalJSONFlagArity(&contract)
+		arity := commandGlobalJSONFlagArity(&contract)
 		for name, takesValue := range arity {
 			if !takesValue {
 				continue

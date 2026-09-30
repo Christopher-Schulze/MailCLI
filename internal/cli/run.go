@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"slices"
 	"strings"
 	"time"
 
@@ -827,15 +826,15 @@ func NormalizeGlobalJSON(args []string) ([]string, bool) {
 }
 
 func normalizeCommandGlobalJSON(args []string) ([]string, bool, bool) {
-	contract, commandEnd, found := referenceCommandForArgs(args)
+	contract, commandEnd, found := globalJSONCommandForArgs(args)
 	if !found {
 		return nil, false, false
 	}
-	flagArity, _ := referenceGlobalJSONFlagArity(contract)
+	flagArity := commandGlobalJSONFlagArity(contract)
 	if flagArity == nil {
 		return nil, false, false
 	}
-	beforeDelimiter, afterDelimiter, requested := separateReferenceGlobalJSON(args, commandEnd, flagArity)
+	beforeDelimiter, afterDelimiter, requested := separateCommandGlobalJSON(args, commandEnd, flagArity)
 	if !requested {
 		return args, false, true
 	}
@@ -843,7 +842,7 @@ func normalizeCommandGlobalJSON(args []string) ([]string, bool, bool) {
 	return append(beforeDelimiter, afterDelimiter...), true, true
 }
 
-func referenceCommandForArgs(args []string) (*commandContract, int, bool) {
+func globalJSONCommandForArgs(args []string) (*commandContract, int, bool) {
 	commandArgs := make([]string, 0, len(args))
 	for _, argument := range args {
 		if argument != "--json" {
@@ -855,11 +854,11 @@ func referenceCommandForArgs(args []string) (*commandContract, int, bool) {
 		return nil, 0, false
 	}
 	parts := strings.Split(contract.ID, ".")
-	commandEnd := referenceCommandEnd(args, parts)
+	commandEnd := globalJSONCommandEnd(args, parts)
 	return contract, commandEnd, commandEnd > 0
 }
 
-func referenceCommandEnd(args, parts []string) int {
+func globalJSONCommandEnd(args, parts []string) int {
 	matched := 0
 	for index, argument := range args {
 		if argument == "--json" {
@@ -875,28 +874,24 @@ func referenceCommandEnd(args, parts []string) int {
 	return 0
 }
 
-func referenceGlobalJSONFlagArity(contract *commandContract) (map[string]bool, bool) {
+func commandGlobalJSONFlagArity(contract *commandContract) map[string]bool {
 	var schema struct {
 		Flags []struct {
 			Name       string `json:"name"`
 			TakesValue bool   `json:"takes_value"`
 		} `json:"flags"`
-		PositionalArguments []string `json:"positional_arguments"`
 	}
 	if err := json.Unmarshal(schemaForCommand(contract.ID), &schema); err != nil {
-		return nil, false
+		return nil
 	}
 	flagArity := make(map[string]bool, len(schema.Flags))
-	hasReferenceFlag := false
 	for _, option := range schema.Flags {
 		flagArity[strings.TrimPrefix(option.Name, "--")] = option.TakesValue
-		hasReferenceFlag = hasReferenceFlag || option.Name == "--ref"
 	}
-	hasReferenceOperand := slices.Contains(schema.PositionalArguments, "REF")
-	return flagArity, hasReferenceFlag && hasReferenceOperand
+	return flagArity
 }
 
-func separateReferenceGlobalJSON(args []string, commandEnd int, flagArity map[string]bool) ([]string, []string, bool) {
+func separateCommandGlobalJSON(args []string, commandEnd int, flagArity map[string]bool) ([]string, []string, bool) {
 	beforeDelimiter := make([]string, 0, len(args)+1)
 	afterDelimiter := make([]string, 0, 1)
 	requested, parsingOptions := false, true
