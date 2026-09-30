@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -12,10 +14,43 @@ type updateReporter struct {
 	writer   io.Writer
 	enabled  bool
 	animated bool
+	colored  bool
 }
 
 func newUpdateReporter(writer io.Writer, enabled bool, animated bool) *updateReporter {
-	return &updateReporter{writer: writer, enabled: enabled, animated: animated}
+	_, noColor := os.LookupEnv("NO_COLOR")
+	animated = enabled && animated && os.Getenv("TERM") != "dumb"
+	return &updateReporter{writer: writer, enabled: enabled, animated: animated, colored: animated && !noColor}
+}
+
+func (r *updateReporter) paint(color, text string) string {
+	if r.colored {
+		return color + text + "\x1b[0m"
+	}
+	return text
+}
+
+func (r *updateReporter) result(result updateResult) {
+	if !r.enabled {
+		return
+	}
+	message := fmt.Sprintf("Already up to date (mailcli %s).", result.CurrentVersion)
+	mark, color := "✓", "\x1b[32m"
+	switch {
+	case result.Updated:
+		message = fmt.Sprintf("Updated mailcli from %s to %s.", result.CurrentVersion, result.LatestVersion)
+		if r.animated {
+			message = fmt.Sprintf("Updated mailcli  %s → %s", result.CurrentVersion, result.LatestVersion)
+		}
+	case result.UpdateAvailable != nil && *result.UpdateAvailable:
+		message = fmt.Sprintf("Update available: mailcli %s -> %s; run `mailcli update` to install it.", result.CurrentVersion, result.LatestVersion)
+		mark, color = "→", "\x1b[36m"
+	}
+	if r.animated {
+		writeFormat(r.writer, "\n  %s %s\n\n", r.paint(color, mark), message)
+		return
+	}
+	writeLine(r.writer, message)
 }
 
 func (r *updateReporter) step(message string, action func() error) error {
@@ -27,19 +62,22 @@ func (r *updateReporter) step(message string, action func() error) error {
 		return action()
 	}
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	for index := range frames {
+		frames[index] = r.paint("\x1b[36m", frames[index])
+	}
 	done := make(chan struct{})
 	var wait sync.WaitGroup
 	wait.Add(1)
-	writeFormat(r.writer, "\r%s %s...", frames[0], message)
+	writeFormat(r.writer, "\r  %s %s...", frames[0], message)
 	go animateUpdateStatus(r.writer, message, frames, done, &wait)
 	err := action()
 	close(done)
 	wait.Wait()
 	if err != nil {
-		writeFormat(r.writer, "\r\x1b[2K✗ %s failed.\n", message)
+		writeFormat(r.writer, "\r\x1b[2K  %s %s failed.\n", r.paint("\x1b[31m", "✗"), message)
 		return err
 	}
-	writeFormat(r.writer, "\r\x1b[2K✓ %s.\n", message)
+	writeFormat(r.writer, "\r\x1b[2K  %s %s.\n", r.paint("\x1b[32m", "✓"), message)
 	return nil
 }
 
@@ -59,7 +97,7 @@ func animateUpdateStatus(
 		case <-done:
 			return
 		case <-ticker.C:
-			writeFormat(writer, "\r%s %s...", frames[frameIndex%len(frames)], message)
+			writeFormat(writer, "\r  %s %s...", frames[frameIndex%len(frames)], message)
 			frameIndex++
 		}
 	}

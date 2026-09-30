@@ -155,6 +155,9 @@ func runUpdateWithEnvironment(
 	operationCtx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
 	reporter := newUpdateReporter(stdout, !jsonOutput, !jsonOutput && writerIsTerminal(stdout))
+	if reporter.animated {
+		writeFormat(stdout, "\n%s / update\n\n", reporter.paint("\x1b[1;36m", "MailCLI"))
+	}
 	result, err := performUpdate(operationCtx, environment, reporter)
 	if err != nil {
 		if result.FailedPhase != "" {
@@ -168,16 +171,7 @@ func runUpdateWithEnvironment(
 	if jsonOutput {
 		return writeSuccess(stdout, "update", responseData{UpdateResult: &result})
 	}
-	if result.Updated {
-		writeFormat(stdout, "Updated mailcli from %s to %s.\n", result.CurrentVersion, result.LatestVersion)
-		return 0
-	}
-	if result.UpdateAvailable != nil && *result.UpdateAvailable {
-		writeFormat(stdout, "Update available: mailcli %s -> %s; run `mailcli update` to install it.\n",
-			result.CurrentVersion, result.LatestVersion)
-		return 0
-	}
-	writeFormat(stdout, "Already up to date (mailcli %s).\n", result.CurrentVersion)
+	reporter.result(result)
 	return 0
 }
 

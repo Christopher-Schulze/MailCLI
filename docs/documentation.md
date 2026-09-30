@@ -1208,7 +1208,7 @@ Extraction rejects traversal, links, unexpected roots, oversized expansion and e
 `codesign --verify --strict` only proves a kernel-acceptable arm64 signature; byte authenticity comes from the Ed25519 and `SHA256SUMS` chain.
 The installer pins the binary's SHA-256 and the skill tree digest once and compares every staged and installed artifact against them.
 Its subprocess strips shell startup and function-injection variables and ambient `MAILCLI_INSTALL_PACKAGE_ROOT`, runs in a private process group, and on cancellation receives `SIGTERM` with a five-second grace before descendants are force-cleaned.
-Interactive mode shows progress; `--json` emits exactly one envelope.
+Interactive human output shows a compact MailCLI heading, indented progress and a version outcome with restrained status colors. `NO_COLOR` disables color; `TERM=dumb` disables animation and styling. Redirected text retains plain progress/outcome lines; `--json` emits exactly one envelope without presentation text.
 
 After an installation attempt, errors keep `data.update_result` with `binary_path`, `latest_version`, `updated` and `failed_phase` (`installer`, `installed_binary_verification`, `package_cleanup`, `update_lock_validation` or `update_lock_close`).
 `updated:true` and `effect_certainty:"complete"` require a verified installed version; an installer or verification error without it reports `unknown`, while cleanup or lock errors after verification report `complete`.
