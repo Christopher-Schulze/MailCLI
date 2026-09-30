@@ -412,6 +412,7 @@ JSON invocations finalize initialization, execution and resource teardown before
 A configuration failure before service creation emits one `ok:false` envelope with `error.code:"initialization_failed"` (or a preserved typed initialization code) and exit `1`.
 Each invocation owns its direct transport graph; the IMAP pool closes after execution and before the local store.
 If teardown fails, `data.finalization` reports `state:"failed"` with `finalization_failed`: a successful command becomes `ok:false` with exit `1`, while an existing command failure stays the top-level error and operation evidence stays in `data`.
+Finalization retains every original data value and projection omission; it adds cleanup evidence without rebuilding projected messages, drafts, batches or lists. Typed payload validation still runs before finalization.
 Human mode writes cleanup failures to stderr.
 stdout write failures stay exit `1` and never fabricate success; an invalid payload is replaced with `serialization_failed`.
 

@@ -444,7 +444,12 @@ func FinalizeJSON(writer io.Writer, args []string, payload []byte, code int, cle
 			value.OK = false
 			value.Error = failure
 		}
-		if writeJSON(writer, value) != 0 {
+		finalized, err := marshalFinalizedEnvelope(payload, value)
+		if err != nil {
+			WriteFailureEnvelope(writer, command, serializationFailureCode, err.Error())
+			return 1
+		}
+		if writeEnvelopeBytes(writer, finalized) != 0 {
 			return 1
 		}
 		if code == 0 || code == 3 {
@@ -456,6 +461,32 @@ func FinalizeJSON(writer io.Writer, args []string, payload []byte, code int, cle
 		return 1
 	}
 	return code
+}
+
+func marshalFinalizedEnvelope(payload []byte, value envelope) ([]byte, error) {
+	var retained struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &retained); err != nil {
+		return nil, err
+	}
+	if retained.Data == nil {
+		retained.Data = make(map[string]json.RawMessage)
+	}
+	finalization, err := marshalCLIJSON(value.Data.Finalization)
+	if err != nil {
+		return nil, err
+	}
+	retained.Data["finalization"] = finalization
+	value.Next = envelopeNextAction(value)
+	encoded, err := marshalCLIJSON(struct {
+		*envelope
+		Data map[string]json.RawMessage `json:"data"`
+	}{envelope: &value, Data: retained.Data})
+	if err != nil {
+		return nil, err
+	}
+	return append(encoded, '\n'), nil
 }
 
 func RequiresMailService(args []string) bool {
