@@ -1601,7 +1601,7 @@ func TestSendDraftPreservesClaimedRecoverySpool(t *testing.T) {
 			t.Errorf("remove composed test message: %v", err)
 		}
 	}()
-	spool, err := persistAcceptedMessageSpool(root, draft.Ref, message, lease.storage)
+	spool, err := persistAcceptedMessageSpool(context.Background(), root, draft.Ref, message, lease.storage)
 	if err != nil {
 		t.Fatalf("persistAcceptedMessageSpool() error = %v", err)
 	}

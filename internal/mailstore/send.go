@@ -676,7 +676,7 @@ func (s *Store) recordAttachmentsMatchDraft(
 				return false, nil
 			}
 			var err error
-			fingerprint, complete, err = s.observedAttachmentFingerprint(resolved, attachment, parts)
+			fingerprint, complete, err = s.observedAttachmentFingerprint(ctx, resolved, attachment, parts)
 			if err != nil || !complete {
 				return false, err
 			}
@@ -696,6 +696,7 @@ func fingerprintMIMEPart(part mimePart) (attachmentFingerprint, bool) {
 }
 
 func (s *Store) observedAttachmentFingerprint(
+	ctx context.Context,
 	resolved resolvedMessage,
 	record attachmentRecord,
 	parts map[string]mimePart,
@@ -708,12 +709,12 @@ func (s *Store) observedAttachmentFingerprint(
 	if name == "" {
 		name = part.Name
 	}
-	external, available, err := s.findExternalAttachment(resolved, record)
+	external, available, err := s.findExternalAttachment(ctx, resolved, record)
 	if err != nil {
 		return attachmentFingerprint{}, false, err
 	}
 	if available {
-		digest, err := s.hashStoreFile(external)
+		digest, err := s.hashStoreFile(ctx, external)
 		if err != nil {
 			return attachmentFingerprint{}, false, err
 		}

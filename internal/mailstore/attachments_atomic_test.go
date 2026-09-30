@@ -124,14 +124,14 @@ func TestExternalAttachmentOperationsRejectSelectedFileReplacement(t *testing.T)
 		{
 			name: "hash",
 			run: func(store *Store, selected externalAttachment, _ string) error {
-				_, err := store.hashStoreFile(selected)
+				_, err := store.hashStoreFile(context.Background(), selected)
 				return err
 			},
 		},
 		{
 			name: "copy",
 			run: func(store *Store, selected externalAttachment, output string) error {
-				return store.copyExternalAttachment(selected, output)
+				return store.copyExternalAttachment(context.Background(), selected, output)
 			},
 		},
 	}
@@ -176,7 +176,7 @@ func TestFindExternalAttachmentBoundsDirectoryEntries(t *testing.T) {
 	store, _, resolved, directory := newExternalAttachmentFixture(t)
 	createExternalAttachmentHardLinks(t, store, directory, maximumExternalAttachmentDirectoryEntries)
 	selected, available, err := store.findExternalAttachment(
-		resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+		context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 	)
 	if err != nil || !available {
 		t.Fatalf("findExternalAttachment() available = %t, error = %v", available, err)
@@ -192,7 +192,7 @@ func TestFindExternalAttachmentBoundsHashedAmbiguityCandidates(t *testing.T) {
 		store, _, resolved, directory := newExternalAttachmentFixture(t)
 		contents := createExternalAttachmentCandidates(t, directory, maximumExternalAttachmentHashCandidates, false)
 		selected, available, err := store.findExternalAttachment(
-			resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+			context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 		)
 		if err != nil || !available {
 			t.Fatalf("findExternalAttachment() available = %t, error = %v", available, err)
@@ -210,7 +210,7 @@ func TestFindExternalAttachmentBoundsHashedAmbiguityCandidates(t *testing.T) {
 		store, _, resolved, directory := newExternalAttachmentFixture(t)
 		createExternalAttachmentCandidates(t, directory, maximumExternalAttachmentHashCandidates+1, false)
 		selected, available, err := store.findExternalAttachment(
-			resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+			context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 		)
 		if errorCodeForTest(err) != "attachment_resource_limit" || available || selected.Path != "" ||
 			!strings.Contains(err.Error(), "hashed ambiguity candidates") {
@@ -222,7 +222,7 @@ func TestFindExternalAttachmentBoundsHashedAmbiguityCandidates(t *testing.T) {
 		store, _, resolved, directory := newExternalAttachmentFixture(t)
 		createExternalAttachmentCandidates(t, directory, 2, true)
 		selected, available, err := store.findExternalAttachment(
-			resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+			context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 		)
 		if errorCodeForTest(err) != "ambiguous_attachment" || available || selected.Path != "" {
 			t.Fatalf("findExternalAttachment() = %+v, %t, %v; want ambiguous_attachment", selected, available, err)
@@ -263,7 +263,7 @@ func TestExternalAttachmentHashBudgetStopsBeforeCumulativeLimit(t *testing.T) {
 		t.Fatalf("Close(large candidate) error = %v", err)
 	}
 	selected, available, err := store.findExternalAttachment(
-		resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+		context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 	)
 	if errorCodeForTest(err) != "attachment_resource_limit" || available || selected.Path != "" ||
 		!strings.Contains(err.Error(), "cumulative hash bytes") {
@@ -307,7 +307,7 @@ func TestCopyExternalAttachmentCopiesAndVerifiesBytes(t *testing.T) {
 	}
 	output := filepath.Join(root, "output.bin")
 	selected := externalAttachment{Path: path, Size: identity.Size(), identity: identity}
-	if err := store.copyExternalAttachment(selected, output); err != nil {
+	if err := store.copyExternalAttachment(context.Background(), selected, output); err != nil {
 		t.Fatalf("copyExternalAttachment() error = %v", err)
 	}
 	got, err := os.ReadFile(output)
@@ -339,7 +339,7 @@ func TestCopyExternalAttachmentReturnsVerifiedEvidence(t *testing.T) {
 	}
 	output := filepath.Join(root, "output.bin")
 	evidence, err := store.copyExternalAttachmentWithEvidence(
-		externalAttachment{Path: path, Size: identity.Size(), identity: identity}, output,
+		context.Background(), externalAttachment{Path: path, Size: identity.Size(), identity: identity}, output,
 	)
 	if err != nil {
 		t.Fatalf("copyExternalAttachmentWithEvidence() error = %v", err)
@@ -564,7 +564,7 @@ func BenchmarkExternalAttachmentDiscovery(b *testing.B) {
 			var selected externalAttachment
 			for range b.N {
 				candidate, available, err := store.findExternalAttachment(
-					resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
+					context.Background(), resolved, attachmentRecord{ID: "2", Name: "invoice.pdf"},
 				)
 				if err != nil || !available {
 					b.Fatalf("findExternalAttachment() available = %t, error = %v", available, err)

@@ -75,7 +75,7 @@ func (s *Store) messageAttachments(
 	}
 	attachments := make([]mail.Attachment, 0, len(records))
 	for _, record := range records {
-		external, available, err := s.findExternalAttachment(resolved, record)
+		external, available, err := s.findExternalAttachment(ctx, resolved, record)
 		if err != nil {
 			return nil, err
 		}
@@ -139,12 +139,12 @@ func (s *Store) saveAttachmentToWithEvidence(
 		}
 	}
 	if foundInStore {
-		external, available, err := s.findExternalAttachment(resolved, selected)
+		external, available, err := s.findExternalAttachment(ctx, resolved, selected)
 		if err != nil {
 			return mail.AttachmentEvidence{}, err
 		}
 		if available {
-			return s.copyExternalAttachmentWithEvidence(external, outputPath)
+			return s.copyExternalAttachmentWithEvidence(ctx, external, outputPath)
 		}
 	}
 	document, err := parseMIMEDocumentWithContext(ctx, source.Reader(), source.partial, false, false)
@@ -167,7 +167,7 @@ func (s *Store) saveAttachmentToWithEvidence(
 			"attachment bytes are not downloaded; a targeted Mail.app fallback is required",
 		)
 	}
-	return extractMIMEAttachmentWithEvidence(source.Reader(), attachmentID, outputPath)
+	return extractMIMEAttachmentWithEvidence(ctx, source.Reader(), attachmentID, outputPath)
 }
 
 // saveMaterializedAttachmentWithEvidence copies an externally materialized
@@ -193,14 +193,14 @@ func (s *Store) saveMaterializedAttachmentWithEvidence(
 		if record.ID != attachmentID {
 			continue
 		}
-		external, available, err := s.findExternalAttachment(resolved, record)
+		external, available, err := s.findExternalAttachment(ctx, resolved, record)
 		if err != nil {
 			return mail.AttachmentEvidence{}, false, err
 		}
 		if !available {
 			return mail.AttachmentEvidence{}, false, nil
 		}
-		evidence, err := s.copyExternalAttachmentWithEvidence(external, outputPath)
+		evidence, err := s.copyExternalAttachmentWithEvidence(ctx, external, outputPath)
 		return evidence, true, err
 	}
 	return mail.AttachmentEvidence{}, false, nil
@@ -267,9 +267,13 @@ func (s *Store) attachmentRecords(
 }
 
 func (s *Store) findExternalAttachment(
+	ctx context.Context,
 	resolved resolvedMessage,
 	record attachmentRecord,
 ) (result externalAttachment, available bool, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return externalAttachment{}, false, err
+	}
 	directory, err := s.attachmentDirectory(resolved, record.ID)
 	if err != nil {
 		return externalAttachment{}, false, err
@@ -286,7 +290,13 @@ func (s *Store) findExternalAttachment(
 	entries := make([]os.DirEntry, 0)
 	directoryEnded := false
 	for len(entries) < maximumExternalAttachmentDirectoryEntries {
+		if err := ctx.Err(); err != nil {
+			return externalAttachment{}, false, err
+		}
 		readSize := maximumExternalAttachmentDirectoryEntries - len(entries)
+		if readSize > 128 {
+			readSize = 128
+		}
 		batch, readErr := directoryFile.ReadDir(readSize)
 		entries = append(entries, batch...)
 		budget.directoryEntries = len(entries)
@@ -314,6 +324,9 @@ func (s *Store) findExternalAttachment(
 	nameMatches := make([]externalAttachment, 0, 1)
 	wantedName := norm.NFC.String(record.Name)
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return externalAttachment{}, false, err
+		}
 		path := filepath.Join(directory, entry.Name())
 		file, fileInfo, err := openRegularPath(s.versionDirectory, s.versionRoot, path)
 		if err != nil {
@@ -334,7 +347,7 @@ func (s *Store) findExternalAttachment(
 		return nameMatches[0], true, nil
 	}
 	if len(nameMatches) > 1 {
-		return s.selectIdenticalAttachment(nameMatches)
+		return s.selectIdenticalAttachment(ctx, nameMatches)
 	}
 	if len(files) == 0 {
 		return externalAttachment{}, false, nil
@@ -342,7 +355,7 @@ func (s *Store) findExternalAttachment(
 	if len(files) == 1 {
 		return files[0], true, nil
 	}
-	return s.selectIdenticalAttachment(files)
+	return s.selectIdenticalAttachment(ctx, files)
 }
 
 func externalAttachmentPathError(kind string, err error) error {
@@ -382,7 +395,7 @@ func validAttachmentID(value string) bool {
 	return true
 }
 
-func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalAttachment, bool, error) {
+func (s *Store) selectIdenticalAttachment(ctx context.Context, files []externalAttachment) (externalAttachment, bool, error) {
 	if len(files) == 0 {
 		return externalAttachment{}, false, operationError(
 			"ambiguous_attachment", "external attachment candidate set is empty",
@@ -398,13 +411,16 @@ func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalA
 	sort.Slice(files, func(left int, right int) bool { return files[left].Path < files[right].Path })
 	var expected [sha256.Size]byte
 	for index, file := range files {
+		if err := ctx.Err(); err != nil {
+			return externalAttachment{}, false, err
+		}
 		if budget.hashedAmbiguityCandidates >= maximumExternalAttachmentHashCandidates {
 			return externalAttachment{}, false, externalAttachmentResourceLimit(
 				"hashed ambiguity candidates", maximumExternalAttachmentHashCandidates,
 			)
 		}
 		budget.hashedAmbiguityCandidates++
-		digest, err := s.hashStoreFile(file)
+		digest, err := s.hashStoreFile(ctx, file)
 		if err != nil {
 			return externalAttachment{}, false, err
 		}
@@ -421,7 +437,10 @@ func (s *Store) selectIdenticalAttachment(files []externalAttachment) (externalA
 	return files[0], true, nil
 }
 
-func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]byte, resultErr error) {
+func (s *Store) hashStoreFile(ctx context.Context, selected externalAttachment) (result [sha256.Size]byte, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	file, opened, err := openRegularPath(s.versionDirectory, s.versionRoot, selected.Path)
 	if err != nil {
 		return result, fmt.Errorf("open external attachment for hashing: %w", err)
@@ -438,7 +457,10 @@ func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]
 		return result, err
 	}
 	hash := sha256.New()
-	copied, err := io.CopyN(hash, file, selected.Size)
+	copied, err := io.CopyN(hash, mimeContextReader{ctx: ctx, reader: file}, selected.Size)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return result, contextErr
+	}
 	if errors.Is(err, io.EOF) {
 		return result, operationError("store_changed", "external attachment ended before its pinned size")
 	}
@@ -456,16 +478,17 @@ func (s *Store) hashStoreFile(selected externalAttachment) (result [sha256.Size]
 	return result, nil
 }
 
-func (s *Store) copyExternalAttachment(selected externalAttachment, outputPath string) error {
-	_, err := s.copyExternalAttachmentWithEvidence(selected, outputPath)
+func (s *Store) copyExternalAttachment(ctx context.Context, selected externalAttachment, outputPath string) error {
+	_, err := s.copyExternalAttachmentWithEvidence(ctx, selected, outputPath)
 	return err
 }
 
 func (s *Store) copyExternalAttachmentWithEvidence(
+	ctx context.Context,
 	selected externalAttachment,
 	outputPath string,
 ) (evidence mail.AttachmentEvidence, resultErr error) {
-	expectedDigest, err := s.hashStoreFile(selected)
+	expectedDigest, err := s.hashStoreFile(ctx, selected)
 	if err != nil {
 		return mail.AttachmentEvidence{}, err
 	}
@@ -478,7 +501,7 @@ func (s *Store) copyExternalAttachmentWithEvidence(
 		joinCloseError(&resultErr, source, "external attachment")
 		return mail.AttachmentEvidence{}, resultErr
 	}
-	proof, err := writeVerifiedExclusiveFileWithEvidence(outputPath, source, selected.Size, expectedDigest)
+	proof, err := writeVerifiedExclusiveFileWithEvidence(ctx, outputPath, source, selected.Size, expectedDigest)
 	if err != nil {
 		resultErr := err
 		joinCloseError(&resultErr, source, "external attachment")
@@ -526,18 +549,22 @@ func sameExternalAttachment(selected externalAttachment, opened os.FileInfo) boo
 }
 
 func extractMIMEAttachment(reader io.Reader, attachmentID string, outputPath string) error {
-	_, err := extractMIMEAttachmentWithEvidence(reader, attachmentID, outputPath)
+	_, err := extractMIMEAttachmentWithEvidence(context.Background(), reader, attachmentID, outputPath)
 	return err
 }
 
 func extractMIMEAttachmentWithEvidence(
+	ctx context.Context,
 	reader io.Reader,
 	attachmentID string,
 	outputPath string,
 ) (evidence mail.AttachmentEvidence, resultErr error) {
 	errAttachmentExtracted := errors.New("attachment extracted")
-	entity, readErr := message.Read(reader)
+	entity, readErr := message.Read(mimeContextReader{ctx: ctx, reader: reader})
 	if entity == nil || readErr != nil {
+		if err := ctx.Err(); err != nil {
+			return mail.AttachmentEvidence{}, err
+		}
 		return mail.AttachmentEvidence{}, operationError("invalid_message_source", fmt.Sprintf("parse RFC message: %v", readErr))
 	}
 	found := false
@@ -550,7 +577,7 @@ func extractMIMEAttachmentWithEvidence(
 		if partErr != nil {
 			return partErr
 		}
-		proof, err := writeExclusiveFileWithEvidence(outputPath, part.Body)
+		proof, err := writeExclusiveFileWithEvidence(ctx, outputPath, part.Body)
 		if err != nil {
 			return err
 		}
@@ -581,7 +608,7 @@ func writeVerifiedExclusiveFile(
 	size int64,
 	digest [sha256.Size]byte,
 ) error {
-	_, err := writeAttachmentOutputWithEvidence(path, reader, &attachmentOutputExpectation{size: size, digest: digest})
+	_, err := writeAttachmentOutputWithEvidence(context.Background(), path, reader, &attachmentOutputExpectation{size: size, digest: digest})
 	return err
 }
 
@@ -592,26 +619,32 @@ type attachmentOutputEvidence struct {
 }
 
 func writeExclusiveFileWithEvidence(
+	ctx context.Context,
 	path string,
 	reader io.Reader,
 ) (attachmentOutputEvidence, error) {
-	return writeAttachmentOutputWithEvidence(path, reader, nil)
+	return writeAttachmentOutputWithEvidence(ctx, path, reader, nil)
 }
 
 func writeVerifiedExclusiveFileWithEvidence(
+	ctx context.Context,
 	path string,
 	reader io.Reader,
 	size int64,
 	digest [sha256.Size]byte,
 ) (attachmentOutputEvidence, error) {
-	return writeAttachmentOutputWithEvidence(path, reader, &attachmentOutputExpectation{size: size, digest: digest})
+	return writeAttachmentOutputWithEvidence(ctx, path, reader, &attachmentOutputExpectation{size: size, digest: digest})
 }
 
 func writeAttachmentOutputWithEvidence(
+	ctx context.Context,
 	path string,
 	reader io.Reader,
 	expected *attachmentOutputExpectation,
 ) (proof attachmentOutputEvidence, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return attachmentOutputEvidence{}, err
+	}
 	parentPath := filepath.Dir(path)
 	parentIdentity, err := os.Lstat(parentPath)
 	if err != nil {
@@ -652,7 +685,7 @@ func writeAttachmentOutputWithEvidence(
 		}
 	}()
 	digest := sha256.New()
-	copied, copyErr := io.Copy(file, io.TeeReader(reader, digest))
+	copied, copyErr := io.Copy(file, io.TeeReader(mimeContextReader{ctx: ctx, reader: reader}, digest))
 	if copyErr != nil {
 		return attachmentOutputEvidence{}, fmt.Errorf("write attachment output: %w", copyErr)
 	}
@@ -664,7 +697,7 @@ func writeAttachmentOutputWithEvidence(
 	if copied != expected.size || actualDigest != expected.digest {
 		return attachmentOutputEvidence{}, operationError("store_changed", "attachment bytes changed while copying")
 	}
-	if err := verifyAttachmentOutput(root, parentPath, parentIdentity, name, file, identity, *expected); err != nil {
+	if err := verifyAttachmentOutput(ctx, root, parentPath, parentIdentity, name, file, identity, *expected); err != nil {
 		return attachmentOutputEvidence{}, err
 	}
 	finalIdentity, err := file.Stat()
@@ -725,6 +758,7 @@ func verifyAttachmentOutputParent(
 }
 
 func verifyAttachmentOutput(
+	ctx context.Context,
 	root *os.Root,
 	parentPath string,
 	parentIdentity os.FileInfo,
@@ -754,7 +788,7 @@ func verifyAttachmentOutput(
 		return fmt.Errorf("rewind attachment output for verification: %w", err)
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, mimeContextReader{ctx: ctx, reader: file}); err != nil {
 		return fmt.Errorf("hash attachment output: %w", err)
 	}
 	actualDigest := [sha256.Size]byte{}

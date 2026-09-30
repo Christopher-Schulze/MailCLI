@@ -68,7 +68,7 @@ func TestEmbeddedMessageEncodingAndNestedRetrieval(t *testing.T) {
 				t.Fatalf("embedded representation: %+v, part: %+v, error: %v", document, part, err)
 			}
 			output := filepath.Join(t.TempDir(), "original.eml")
-			proof, err := extractMIMEAttachmentWithEvidence(strings.NewReader(source), "2", output)
+			proof, err := extractMIMEAttachmentWithEvidence(context.Background(), strings.NewReader(source), "2", output)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -324,7 +324,7 @@ func FuzzEmbeddedMessageExactRawRetrieval(f *testing.F) {
 			t.Fatalf("raw embedded parse: %+v, part: %+v, error: %v", document, part, err)
 		}
 		output := filepath.Join(t.TempDir(), "binary.eml")
-		proof, err := extractMIMEAttachmentWithEvidence(strings.NewReader(source), "2", output)
+		proof, err := extractMIMEAttachmentWithEvidence(context.Background(), strings.NewReader(source), "2", output)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +348,7 @@ func TestExtractMIMEFirstPartNeverSelectsMultipartRoot(t *testing.T) {
 			source := "Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
 				"--b\r\nContent-Type: " + mediaType + "\r\n\r\n" + embeddedMessageFixture + "\r\n--b--\r\n"
 			output := filepath.Join(t.TempDir(), "original.eml")
-			proof, err := extractMIMEAttachmentWithEvidence(strings.NewReader(source), "1", output)
+			proof, err := extractMIMEAttachmentWithEvidence(context.Background(), strings.NewReader(source), "1", output)
 			if err != nil {
 				t.Fatal(err)
 			}

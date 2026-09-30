@@ -22,6 +22,7 @@ func draftContextError(ctx context.Context, operation string) error {
 	return &OperationError{
 		Code:    "draft_operation_canceled",
 		Message: fmt.Sprintf("draft %s canceled before completion", operation),
+		Err:     ctx.Err(),
 	}
 }
 

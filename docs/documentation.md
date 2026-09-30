@@ -894,6 +894,7 @@ It needs no Full Disk Access or Automation permission; the first Keychain read m
 5. The bytes are submitted over SMTP with STARTTLS and appended to the Sent mailbox over IMAP, which always uses implicit TLS on the bound port (993 for Gmail and iCloud); an IMAP server that offers only STARTTLS is unsupported; each consumer reads an independent view pinned to the spool's identity, so path replacement cannot redirect bytes or cleanup.
 
 Cancellation stops new hashing, spooling and transport work and releases the draft lease; a send claim is kept whenever SMTP or its final outcome is unknown, so cancellation never causes an automatic resend.
+External attachment discovery, copy and output verification, plus recovery-spool copy and verification, observe cancellation between bounded reads. Canceled verification preserves the cancellation cause and retained evidence; terminal cleanup still completes under its owning draft lease. Native filesystem Sync calls retain their existing semantics.
 Each accepted-message recovery spool is bounded to 1 GiB and is removed after durable terminal send evidence; unresolved or corrupt evidence stays for explicit recovery.
 
 ### SMTP rules

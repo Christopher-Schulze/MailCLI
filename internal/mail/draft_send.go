@@ -169,11 +169,12 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 	if err := recoverUnclaimedAcceptedMessageSpool(root, ref, storage); err != nil {
 		return SendResult{}, err
 	}
-	recoverySpool, err := persistAcceptedMessageSpool(root, ref, message, storage)
+	recoverySpool, err := persistAcceptedMessageSpool(ctx, root, ref, message, storage)
 	if err != nil {
 		return SendResult{}, &OperationError{
 			Code:    "send_recovery_spool_persist_failed",
 			Message: fmt.Sprintf("the composed message could not be retained before SMTP submission; SMTP was not contacted: %v", err),
+			Err:     err,
 		}
 	}
 	if s.afterSendRecoverySpoolPublished != nil {
@@ -712,7 +713,7 @@ func (s *Service) reconcileMirrorPending(
 	if outcomeUnknown {
 		return result, mirrorOutcomeUnknownError(attempt)
 	}
-	message, err := openAcceptedMessageSpool(ref, attempt, lease.storage)
+	message, err := openAcceptedMessageSpool(ctx, ref, attempt, lease.storage)
 	if err != nil {
 		return result, err
 	}

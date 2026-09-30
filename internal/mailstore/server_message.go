@@ -237,7 +237,7 @@ func (c *Client) saveServerAttachment(
 	if size <= 0 {
 		return mail.AttachmentEvidence{}, errors.Join(serverMessageNotFound(), source.Close())
 	}
-	evidence, saveErr := extractMIMEAttachmentWithEvidence(mimeContextReader{ctx: ctx, reader: source}, attachmentID, outputPath)
+	evidence, saveErr := extractMIMEAttachmentWithEvidence(ctx, source, attachmentID, outputPath)
 	return evidence, errors.Join(saveErr, source.Close())
 }
 

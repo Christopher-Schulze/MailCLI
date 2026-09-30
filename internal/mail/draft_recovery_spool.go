@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -29,7 +30,10 @@ func validAcceptedMessageSpool(spool *AcceptedMessageSpool) bool {
 	return err == nil && len(digest) == sha256.Size
 }
 
-func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessage, state *draftStorage) (*AcceptedMessageSpool, error) {
+func persistAcceptedMessageSpool(ctx context.Context, root string, ref string, message *ComposedMessage, state *draftStorage) (*AcceptedMessageSpool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if message == nil || message.Size() <= 0 || message.Size() > maximumAcceptedMessageSpoolBytes {
 		return nil, errors.New("accepted message spool exceeds its byte limit")
 	}
@@ -49,7 +53,7 @@ func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessa
 	}
 	cleanupTemporary := func() error { return removeDraftStorageFile(state, temporary, temporaryIdentity, "") }
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(source, message.Size()+1))
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), contextReader{ctx: ctx, reader: io.LimitReader(source, message.Size()+1)})
 	sourceCloseErr := source.Close()
 	syncErr := file.Sync()
 	closeErr := file.Close()
@@ -64,6 +68,9 @@ func persistAcceptedMessageSpool(root string, ref string, message *ComposedMessa
 			errors.New("recovery spool size changed while copying"),
 			cleanupTemporary(),
 		)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, cleanupTemporary())
 	}
 	current, err := state.lstat(temporary)
 	if err != nil || !current.Mode().IsRegular() ||
@@ -218,7 +225,10 @@ func unclaimedSpoolObjectType(mode os.FileMode) (string, bool) {
 	}
 }
 
-func openAcceptedMessageSpool(ref string, attempt SendAttempt, state *draftStorage) (*ComposedMessage, error) {
+func openAcceptedMessageSpool(ctx context.Context, ref string, attempt SendAttempt, state *draftStorage) (*ComposedMessage, error) {
+	if err := draftContextError(ctx, "recovery verification"); err != nil {
+		return nil, err
+	}
 	spool := attempt.RecoverySpool
 	if !validAcceptedMessageSpool(spool) {
 		return nil, &OperationError{Code: "send_recovery_spool_invalid", Message: "recovery spool metadata is invalid"}
@@ -249,10 +259,13 @@ func openAcceptedMessageSpool(ref string, attempt SendAttempt, state *draftStora
 		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the accepted-message recovery spool changed after it was retained"}
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(hash, io.LimitReader(file, spool.Size+1))
+	written, copyErr := io.Copy(hash, contextReader{ctx: ctx, reader: io.LimitReader(file, spool.Size+1)})
 	closeErr := file.Close()
+	if err := draftContextError(ctx, "recovery verification"); err != nil {
+		return nil, errors.Join(err, closeErr)
+	}
 	if copyErr != nil || closeErr != nil {
-		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the retained recovery spool could not be read"}
+		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the retained recovery spool could not be read", Err: errors.Join(copyErr, closeErr)}
 	}
 	if written != spool.Size || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), spool.SHA256) {
 		return nil, &OperationError{Code: "send_recovery_spool_changed", Message: "the retained recovery spool bytes no longer match"}
@@ -267,7 +280,8 @@ func removeAcceptedMessageSpool(ref string, attempt *SendAttempt, state *draftSt
 	if attempt == nil || attempt.RecoverySpool == nil {
 		return nil
 	}
-	message, err := openAcceptedMessageSpool(ref, *attempt, state)
+	// Terminal cleanup completes under the owning lease even after caller cancellation.
+	message, err := openAcceptedMessageSpool(context.Background(), ref, *attempt, state)
 	if err != nil {
 		var operation *OperationError
 		if errors.As(err, &operation) && operation.Code == "send_recovery_spool_missing" {

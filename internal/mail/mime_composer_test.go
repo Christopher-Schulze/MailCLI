@@ -726,7 +726,7 @@ func TestPersistAcceptedMessageSpoolUsesPinnedComposition(t *testing.T) {
 		_ = directory.Close()
 	})
 	state := &draftStorage{rootName: root, root: pinnedRoot, directory: directory}
-	retained, err := persistAcceptedMessageSpool(root, ref, message, state)
+	retained, err := persistAcceptedMessageSpool(context.Background(), root, ref, message, state)
 	if err != nil {
 		t.Fatalf("persistAcceptedMessageSpool() error = %v", err)
 	}

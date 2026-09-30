@@ -516,7 +516,7 @@ func (c *Client) SaveAttachmentToWithEvidence(
 			return mail.AttachmentEvidence{}, newHydrationError("save attachment", localErr, rawErr)
 		}
 		if size > 0 {
-			evidence, err := extractMIMEAttachmentWithEvidence(mimeContextReader{ctx: ctx, reader: source}, attachmentID, outputPath)
+			evidence, err := extractMIMEAttachmentWithEvidence(ctx, source, attachmentID, outputPath)
 			return evidence, errors.Join(err, source.Close())
 		}
 		if err := source.Close(); err != nil {
