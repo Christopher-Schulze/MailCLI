@@ -139,6 +139,7 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	}
 	output.stderr = stderr
 	operationCtx, cancel := hydrationReadContext(ctx)
+	output.readRecoveryArgs = append([]string(nil), args...)
 	defer cancel()
 	message, err := service.OpenDraft(operationCtx, *ref)
 	if err != nil {

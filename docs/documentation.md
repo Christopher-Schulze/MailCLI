@@ -334,6 +334,7 @@ Attachments and content state (`attachments`, `content_source`, `content_complet
 `attachments list` defaults to attachment metadata; `messages raw` has only its `full` view.
 `--fields` selects exact JSON field names; `all` selects the complete target registry and stands alone.
 Combining `--fields` with `--view`, an unknown field, or a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
+Hydration recovery for `messages get` and `drafts open` retains the validated invocation arguments, including projection, link, excerpt, budget and export options; recovery guidance never executes the retry itself.
 Seven target-specific field registries drive validation, embedded schemas and `data.capabilities.limits.output_projection`, including `draft_list_fields`, `list_page_fields` and `search_page_fields`; batch read input uses the message registry.
 
 `messages.list`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `flags_state`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth`, `staleness_note`, `mailbox_ref`, `account` (list only) and the reply-metadata and excerpt keys.

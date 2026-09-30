@@ -63,6 +63,7 @@ type outputOptions struct {
 	allowExport                bool
 	draftMutationCompleted     bool
 	omitUnselectedMessageState bool
+	readRecoveryArgs           []string
 	// links reduces the URLs of the plain body; empty means full.
 	links         mail.LinkMode
 	recoveryRoute string
@@ -1353,6 +1354,7 @@ func errorCode(err error) string {
 }
 
 func dataForProjection(data responseData, options outputOptions, failed bool) responseData {
+	data.readRecoveryArgs = options.readRecoveryArgs
 	switch options.target {
 	case projectionTargetMessage:
 		if data.Message != nil {

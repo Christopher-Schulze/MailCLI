@@ -436,6 +436,7 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	}
 
 	operationCtx, cancel := hydrationReadContext(ctx)
+	output.readRecoveryArgs = append([]string(nil), args...)
 	defer cancel()
 	intent := mail.MessageReadIntentFull
 	if *jsonOutput {

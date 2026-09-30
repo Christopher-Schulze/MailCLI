@@ -86,6 +86,7 @@ type responseData struct {
 	draftMutationCompleted   bool                         `json:"-"`
 	draftRef                 string                       `json:"-"`
 	searchRecoveryArgs       []string                     `json:"-"`
+	readRecoveryArgs         []string                     `json:"-"`
 	draftListRecovery        *mail.RecoveryGuidance       `json:"-"`
 	listRecovery             *mail.RecoveryGuidance       `json:"-"`
 }
@@ -320,6 +321,9 @@ func guidanceForResponse(command string, data responseData, err error) mail.Oper
 			(command == "messages.get" || command == "drafts.open") {
 			guidance.Recovery.Command = command
 			guidance.Recovery.Args = []string{"--ref", message.Summary.Ref, "--json"}
+			if len(data.readRecoveryArgs) > 0 {
+				guidance.Recovery.Args = append([]string(nil), data.readRecoveryArgs...)
+			}
 		}
 	}
 	return guidance
