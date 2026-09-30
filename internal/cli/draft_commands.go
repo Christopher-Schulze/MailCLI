@@ -141,7 +141,12 @@ func runMailDraftOpen(ctx context.Context, service *mail.Service, args []string,
 	operationCtx, cancel := hydrationReadContext(ctx)
 	output.readRecoveryArgs = append([]string(nil), args...)
 	defer cancel()
-	message, err := service.OpenDraft(operationCtx, *ref)
+	intent := mail.MessageReadIntentFull
+	if *jsonOutput {
+		output.omitUnselectedMessageState = output.fieldsProvided || output.view == outputViewMetadata
+		intent = messageReadIntentForProjection(output)
+	}
+	message, err := service.OpenDraftWithIntent(operationCtx, *ref, intent)
 	if err != nil {
 		return failMessageRead("drafts.open", *jsonOutput, message, err, stdout, stderr, output)
 	}

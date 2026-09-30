@@ -172,6 +172,15 @@ func (c *Client) GetMessageWithIntent(
 	}
 }
 
+// OpenDraftWithIntent rejects server references before narrower reads and
+// reuses the existing message read paths for draft projections.
+func (c *Client) OpenDraftWithIntent(ctx context.Context, ref string, intent mail.MessageReadIntent) (mail.Message, error) {
+	if intent == mail.MessageReadIntentFull || mailref.IsServerRef(ref) {
+		return c.OpenDraft(ctx, ref)
+	}
+	return c.GetMessageWithIntent(ctx, ref, intent)
+}
+
 func (c *Client) getMessageHeaders(ctx context.Context, ref string) (mail.Message, error) {
 	localCtx, cancelLocal := localReadOrResolveContext(ctx)
 	local, localErr := c.store.GetMessageWithIntent(localCtx, ref, mail.MessageReadIntentHeaders)

@@ -342,8 +342,9 @@ Every projected message keeps `ref` and the named fields (`mailbox_ref` and `acc
 Draft JSON lists (`content_diagnostics`, recipients, attachments) and `missing_parts` are `[]` when empty, never `null`.
 Draft-list `--fields` accepts combinations of `age_days`, `created_at` and `updated_at`; the fixed core stays in every healthy summary, `state_error` appears only for corrupt summaries, and capabilities list `draft_list_core_fields` and `draft_list_optional_fields`.
 
-For `messages get --json`, an explicit `--fields` request with only `summary` and header fields reads Envelope Index values plus only the bounded RFC header block; a missing local source with IMAP configured fetches only `BODY.PEEK[HEADER]`.
+For `messages get --json` and `drafts open --json`, an explicit `--fields` request with only `summary` and header fields reads Envelope Index values plus only the bounded RFC header block; a missing local source with IMAP configured fetches only `BODY.PEEK[HEADER]`.
 The default `metadata` view reads only the header block, one bounded `UID FETCH BODY.PEEK[HEADER]` for a message that is not downloaded; `--fields attachments`, `content_source`, `content_complete`, `missing_parts` or `hydration` use the MIME metadata parser without retaining body text or HTML; `content` keeps the full body path.
+Human draft opening keeps the full read, and every draft-open projection continues to reject server references before remote reads.
 
 `--max-bytes` defaults to 1 MiB and accepts values through the 64 MiB maximum published in capability JSON.
 MailCLI measures the complete encoded envelope before writing it; an oversized response returns exit `1` with `error.code:"output_too_large"` and never truncates content.
