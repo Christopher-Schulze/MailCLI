@@ -313,13 +313,13 @@ func canonicalThreadReferences(references, messageID string) (string, error) {
 		parent = messageID
 	}
 
-	fields := strings.Fields(references)
+	fields, complete := scanMessageIDs(references)
+	if !complete || references != "" && len(fields) == 0 {
+		return "", invalidThreadMessageID("source thread header contains a malformed Message-ID")
+	}
 	chain := make([]string, 0, len(fields)+1)
 	seen := make(map[string]struct{}, len(fields)+1)
 	for _, field := range fields {
-		if err := validateThreadMessageID(field); err != nil {
-			return "", err
-		}
 		if field == parent {
 			continue
 		}
@@ -342,8 +342,8 @@ func validateThreadMessageID(value string) error {
 	if value == "" || !strings.HasPrefix(value, "<") || !strings.HasSuffix(value, ">") {
 		return invalidThreadMessageID("source thread header contains a malformed Message-ID")
 	}
-	parsed, err := stdmail.ParseAddress(value)
-	if err != nil || parsed.Address == "" {
+	ids, complete := scanMessageIDs(value)
+	if !complete || len(ids) != 1 || ids[0] != value {
 		return invalidThreadMessageID("source thread header contains a malformed Message-ID")
 	}
 	return nil

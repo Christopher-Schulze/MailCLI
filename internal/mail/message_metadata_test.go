@@ -76,6 +76,12 @@ func TestThreadingIDsAccountForEveryInputSpan(t *testing.T) {
 			if !reflect.DeepEqual(ids, test.ids) || complete != test.complete {
 				t.Fatalf("IDs = %#v, complete = %t; want %#v, %t", ids, complete, test.ids, test.complete)
 			}
+			metadataComplete := test.complete
+			// Empty optional parser input is valid; a present threading field
+			// requires at least one msg-id under RFC 5322 section 3.6.4.
+			if test.name == "empty optional" || test.name == "comments only" {
+				metadataComplete = false
+			}
 			for _, field := range []string{"In-Reply-To", "References"} {
 				summary := MessageSummary{Sender: "unchanged", EnrichmentError: "imap_timeout"}
 				ApplyThreadingHeaders(&summary, field+": "+test.value+"\r\n\r\n")
@@ -83,7 +89,7 @@ func TestThreadingIDsAccountForEveryInputSpan(t *testing.T) {
 				if field == "In-Reply-To" {
 					actual = summary.InReplyTo
 				}
-				if !reflect.DeepEqual(actual, test.ids) || summary.ThreadingComplete != test.complete || !summary.ThreadingRequested || summary.Sender != "unchanged" || summary.EnrichmentError != "imap_timeout" {
+				if !reflect.DeepEqual(actual, test.ids) || summary.ThreadingComplete != metadataComplete || !summary.ThreadingRequested || summary.Sender != "unchanged" || summary.EnrichmentError != "imap_timeout" {
 					t.Fatalf("%s metadata = %+v", field, summary)
 				}
 			}

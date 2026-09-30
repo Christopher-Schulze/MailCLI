@@ -211,7 +211,7 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 		switch strings.ToLower(field.Name) {
 		case "in-reply-to", "references":
 			ids, valid := scanMessageIDs(field.Value)
-			if !valid {
+			if !valid || len(ids) == 0 {
 				summary.ThreadingComplete = false
 			}
 			if strings.EqualFold(field.Name, "in-reply-to") {
@@ -244,15 +244,32 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 // the whole value parsed; a malformed part never hides the valid IDs.
 func scanMessageIDs(value string) ([]string, bool) {
 	ids := []string{}
-	valid := true
+	valid := utf8.ValidString(value)
 	var cleaned strings.Builder
 	depth := 0
 	escaped := false
-	for _, character := range value {
+	identifier, literal := false, false
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if depth == 0 && identifier && character == '[' {
+			literal = true
+		}
+		if literal {
+			cleaned.WriteByte(character)
+			if character == ']' {
+				literal = false
+			}
+			continue
+		}
+		if depth == 0 && character == '<' {
+			identifier = true
+		} else if depth == 0 && character == '>' {
+			identifier = false
+		}
 		if escaped {
 			escaped = false
 			if depth == 0 {
-				cleaned.WriteRune(character)
+				cleaned.WriteByte(character)
 			}
 			continue
 		}
@@ -277,7 +294,7 @@ func scanMessageIDs(value string) ([]string, bool) {
 			continue
 		}
 		if depth == 0 {
-			cleaned.WriteRune(character)
+			cleaned.WriteByte(character)
 		}
 	}
 	if depth != 0 || escaped {
@@ -294,18 +311,17 @@ func scanMessageIDs(value string) ([]string, bool) {
 			valid = false
 		}
 		remaining = remaining[start+1:]
-		end := strings.IndexByte(remaining, '>')
+		end, nested := messageIDBoundary(remaining)
 		if end < 0 {
 			return ids, false
 		}
-		if nested := strings.IndexByte(remaining[:end], '<'); nested >= 0 {
+		if nested >= 0 {
 			valid = false
 			remaining = remaining[nested:]
 			continue
 		}
 		token := remaining[:end]
-		at := strings.LastIndexByte(token, '@')
-		if at > 0 && at < len(token)-1 && !strings.ContainsAny(token, "<>\r\n\t ,") {
+		if validMessageIDToken(token) {
 			ids = append(ids, "<"+token+">")
 		} else {
 			valid = false
@@ -313,6 +329,65 @@ func scanMessageIDs(value string) ([]string, bool) {
 		remaining = remaining[end+1:]
 	}
 	return ids, valid
+}
+
+// A no-fold-literal may contain parentheses, @ and angle brackets as dtext.
+// Only delimiters outside that literal end or resynchronize a msg-id.
+func messageIDBoundary(value string) (int, int) {
+	literal := false
+	nested := -1
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '[':
+			literal = true
+		case ']':
+			literal = false
+		case '<':
+			if !literal {
+				nested = index
+			}
+		case '>':
+			if !literal {
+				return index, nested
+			}
+		}
+	}
+	return -1, -1
+}
+
+func validMessageIDToken(token string) bool {
+	if !utf8.ValidString(token) {
+		return false
+	}
+	left, right, found := strings.Cut(token, "@")
+	if !found || !messageIDDotAtom(left) {
+		return false
+	}
+	if strings.HasPrefix(right, "[") && strings.HasSuffix(right, "]") {
+		for _, character := range right[1 : len(right)-1] {
+			if character < 33 || character == 127 || strings.ContainsRune("[]\\", character) {
+				return false
+			}
+		}
+		return true
+	}
+	return messageIDDotAtom(right)
+}
+
+func messageIDDotAtom(value string) bool {
+	if value == "" || strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") {
+		return false
+	}
+	for _, character := range value {
+		if character >= utf8.RuneSelf {
+			continue
+		}
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune(".!#$%&'*+-/=?^_`{|}~", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func threadingSeparators(value string) bool {
