@@ -782,14 +782,30 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 		}
 		return mail.ThreadSource{}, c.readUnavailableError()
 	}
-	_, source, err := c.store.openMessageSource(ctx, ref)
-	if err != nil {
-		return mail.ThreadSource{}, err
+	localCtx, cancelLocal := localReadOrResolveContext(ctx)
+	_, source, localErr := c.store.openMessageSource(localCtx, ref)
+	var headers sourceHeaders
+	if localErr == nil {
+		headers, localErr = sourceHeadersFromReader(mimeContextReader{ctx: localCtx, reader: source.Reader()})
+		localErr = errors.Join(localErr, source.Close())
 	}
-	defer func() { _ = source.Close() }()
-	headers, err := sourceHeadersFromReader(source.Reader())
-	if err != nil {
-		return mail.ThreadSource{}, err
+	cancelLocal()
+	if localErr != nil {
+		_, hasHeaderFetcher := c.send.ImapClient().(transport.MessageHeaderFetcher)
+		if !safeTargetedFallback(localErr) || !hasHeaderFetcher {
+			return mail.ThreadSource{}, localErr
+		}
+		var summary mail.MessageSummary
+		var remoteErr error
+		headers, summary, remoteErr = c.hydrateMessageHeaders(ctx, ref)
+		if remoteErr != nil {
+			return mail.ThreadSource{}, newHydrationError("read thread source headers", localErr, remoteErr)
+		}
+		if summary.MessageID != "" && headers.MessageID != summary.MessageID {
+			return mail.ThreadSource{}, &transport.TransportError{
+				Code: transport.CodeIMAPMessageUIDMismatch, Message: "IMAP thread source Message-ID differs from the bound source",
+			}
+		}
 	}
 	if headers.ReplyToError != nil {
 		return mail.ThreadSource{}, operationError(

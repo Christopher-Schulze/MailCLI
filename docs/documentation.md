@@ -787,7 +787,7 @@ Structures that need HTML5 repair after filtering, such as removed table caption
 
 ### Replies and forwards
 
-Reply and forward drafts derive from the source message's stored header block without a body scan.
+Reply and forward drafts derive from the source message's stored header block without a body scan. A safely missing local source uses the existing targeted IMAP header fetch with verified UID and UIDVALIDITY; a bound Message-ID must match. Unsafe or stale sources fail closed, and an operator without header-only fetching never falls back to a full-body fetch for derivation.
 The subject becomes `Re: <subject>` or `Fwd: <subject>` with stacked common localized and numbered prefixes collapsed; leading list tags and display case are preserved.
 Every valid Reply-To address becomes a reply target in header order, and From is used only when Reply-To is absent; a malformed or partially parsed Reply-To fails with `invalid_message_source`.
 Reply-all moves the other To and CC recipients into CC, excluding reply targets, any final To address and the usable source account's email addresses, configured aliases and discovered sender identities. Own identities are excluded only from automatic CC, never from explicit recipient input. Malformed source To or CC fails automatic reply-all with `invalid_message_source` before a draft is created; ordinary reply and an explicit CC override remain usable.
