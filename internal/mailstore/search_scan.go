@@ -64,7 +64,8 @@ func (s *Store) scanSearchRecordsChunked(
 	maximum int,
 ) (mail.SearchPage, error) {
 	coverage := mail.SearchCoverage{
-		Backend: "emlx_stream", CandidateMessages: total, CandidateMessagesExact: totalExact, Complete: true,
+		Backend: "emlx_stream", CandidateMessages: total, CandidateMessagesExact: totalExact,
+		SourcesComplete: true, Complete: true,
 	}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
@@ -498,6 +499,9 @@ func mergeSearchCoverage(coverage *mail.SearchCoverage, scan candidateScan) {
 	}
 	if scan.missing {
 		coverage.MissingSources++
+	}
+	if (scan.processed || scan.missing) && !scan.catalogProven && (!scan.contentWhole || scan.missing) {
+		coverage.SourcesComplete = false
 	}
 	if !scan.contentWhole || scan.missing {
 		coverage.Complete = false

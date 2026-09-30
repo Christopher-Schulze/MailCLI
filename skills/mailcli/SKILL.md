@@ -50,7 +50,7 @@ Placeholders come from earlier output; quote them:
 | Triage | `mailcli messages filter --mailbox inbox --read false`, then `mailcli messages get REF --view plain --links host`; several: one `batch` read. | Metadata, body. |
 | New mail | `mailcli messages new`, then `messages get SERVER_REF --view plain`. | Read-only server ref; `sync` makes a local ref appear. |
 | Thread | `mailcli messages thread REF`. For older or newer members repeat with `--cursor` `data.thread.prev_cursor` or `data.thread.next_cursor` until absent. | Members, oldest first. |
-| Search | `mailcli messages search --query QUERY`. Repeat with the same query and filters plus `--cursor NEXT` until NEXT is absent. | `data.page.coverage.complete` on the last page. |
+| Search | `mailcli messages search --query QUERY`. Repeat with the same query and filters plus `--cursor NEXT` until NEXT is absent. | Terminal `coverage.complete:true` AND `coverage.sources_complete:true` on every page of the same scan. |
 | Reply | `mailcli messages reply REF --body-file FILE`, then `mailcli drafts preview DRAFT`. Add `--from ADDRESS` only for a sender the user named. | Preview for the user. |
 | Send | `mailcli drafts preview DRAFT`, then, once the user approved it, `mailcli drafts send DRAFT --confirm --expected-revision REV`. | `data.send_result`; reconcile a pending or unknown one with `mailcli drafts reconcile`. |
 | Replies | `mailcli messages search --after DATE --with-threading --with-excerpt`, paging with NEXT. | Sent Message-IDs in `in_reply_to[]` or `references[]`; `threading_complete:false` means unknown, a sender domain is only a candidate. |
@@ -58,6 +58,8 @@ Placeholders come from earlier output; quote them:
 Reply-all automatically excludes the usable source account's own identities from generated CC. Multiple own To/CC matches leave the sender unset; name a sender only from user intent. Malformed source To/CC blocks automatic reply-all; an explicit CC override or ordinary reply remains usable.
 
 Follow NEXT on lists and filters too. Review only complete content. Inspect a completed draft instead of recreating it.
+
+For search/filter, retain the AND of `sources_complete` across the same query/scan; a clean final page never erases earlier source loss. NEXT continues that chain, even with changed budgets. Restart or a changed query/index revision starts a new chain. Coverage remains `best_effort`.
 
 Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged. Save and export only to new absolute paths, then verify size and hash.
 

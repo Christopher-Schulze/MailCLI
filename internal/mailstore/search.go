@@ -369,7 +369,7 @@ func (s *Store) searchMetadata(
 	}
 	page.Coverage = mail.SearchCoverage{
 		Backend: "envelope_sql", CandidateMessages: candidateMessages,
-		CandidateMessagesExact: candidateMessagesExact, Complete: true,
+		CandidateMessagesExact: candidateMessagesExact, SourcesComplete: true, Complete: true,
 	}
 	if hasMore && len(items) > 0 {
 		page.NextCursor, err = searchCursorFor(

@@ -28,6 +28,6 @@ func emptySearchPage(sourceScan bool) mail.SearchPage {
 	}
 	return mail.SearchPage{
 		Messages: []mail.SearchMessage{},
-		Coverage: mail.SearchCoverage{Backend: backend, CandidateMessagesExact: true, Complete: true},
+		Coverage: mail.SearchCoverage{Backend: backend, CandidateMessagesExact: true, SourcesComplete: true, Complete: true},
 	}
 }

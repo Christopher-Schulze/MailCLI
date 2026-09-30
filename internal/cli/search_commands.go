@@ -177,8 +177,9 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 			writeFormat(stdout, "\nNext cursor: %s\n", page.NextCursor)
 		}
 		writeFormat(
-			stdout, "Coverage: %s, consistency=%s, revision=%s, complete=%t, scanned=%d, candidates=%d, candidates_exact=%t, catalog_proven=%d, bytes=%d\n",
+			stdout, "Coverage: %s, consistency=%s, revision=%s, complete=%t, sources_complete=%t, scanned=%d, candidates=%d, candidates_exact=%t, catalog_proven=%d, bytes=%d\n",
 			page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
+			page.Coverage.SourcesComplete,
 			page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
 			page.Coverage.CandidateMessagesExact,
 			page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,
@@ -196,8 +197,9 @@ func writeSearchResults(stdout io.Writer, page mail.SearchPage) {
 		writeFormat(stdout, "next_cursor\t%s\n", page.NextCursor)
 	}
 	writeFormat(
-		stdout, "coverage\t%s\tconsistency=%s\trevision=%s\tcorpus_complete=%t\tscanned=%d\tcandidates=%d\tcandidates_exact=%t\tcatalog_proven=%d\tbytes=%d\n",
+		stdout, "coverage\t%s\tconsistency=%s\trevision=%s\tcorpus_complete=%t\tsources_complete=%t\tscanned=%d\tcandidates=%d\tcandidates_exact=%t\tcatalog_proven=%d\tbytes=%d\n",
 		page.Coverage.Backend, page.Coverage.Consistency, page.Coverage.IndexRevision, page.Coverage.Complete,
+		page.Coverage.SourcesComplete,
 		page.Coverage.ScannedMessages, page.Coverage.CandidateMessages,
 		page.Coverage.CandidateMessagesExact,
 		page.Coverage.CatalogProvenMessages, page.Coverage.ScannedBytes,

@@ -869,7 +869,7 @@ func monolithicBodySearch(ctx context.Context, store *Store, prepared mail.Prepa
 	coverage := mail.SearchCoverage{
 		Consistency: mail.SearchConsistencyBestEffort, IndexRevision: indexRevision,
 		Backend: "emlx_stream", CandidateMessages: total, CandidateMessagesExact: true,
-		Complete: !limitedByCount,
+		SourcesComplete: true, Complete: !limitedByCount,
 	}
 	terms := normalizedSearchTerms(prepared.Query.Text)
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)

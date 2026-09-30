@@ -62,6 +62,7 @@ type SearchCoverage struct {
 	FullSources            int    `json:"full_sources"`
 	PartialSources         int    `json:"partial_sources"`
 	MissingSources         int    `json:"missing_sources"`
+	SourcesComplete        bool   `json:"sources_complete"`
 	Complete               bool   `json:"complete"`
 	CatalogProvenMessages  int    `json:"catalog_proven_messages,omitempty"`
 }
