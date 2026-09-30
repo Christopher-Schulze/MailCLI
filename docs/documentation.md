@@ -909,6 +909,7 @@ A short, oversized or unreadable source returns `smtp_source_invalid` before the
 Write, deadline and transfer failures before the `.\r\n` terminator is attempted return `smtp_data_incomplete`; the transient claim is cleared and an explicit send retry is safe.
 Once the terminator write starts, a failed write or unreadable final reply is `smtp_submission_unknown`: keep the claim, reconcile, and never replay while acceptance is unknown.
 Final SMTP replies are bounded to 128 lines and 64 KiB including CRLF. Multiline overflow is a protocol failure after DATA and remains `smtp_submission_unknown`, including replies that begin with a negative status; it never proves acceptance or rejection.
+Greeting, EHLO/HELO, AUTH, MAIL, each RCPT and DATA acceptance additionally cap received wire bytes at 128 KiB per command; STARTTLS, its verified TLS handshake and automatic post-TLS EHLO share a 1 MiB inbound budget. TLS framing is counted, ordinary fragmented replies work, and overflowing early replies stop before message data or its terminator is sent. Existing TLS message limits and final-reply limits remain enforced.
 After DATA, a complete SMTP 4xx or 5xx final reply is a definitive `smtp_rejected` whose `error.message` keeps the full reply and enhanced status; 4xx may be retried by a later explicit send once the server condition is resolved, 5xx needs corrected content or recipients.
 If SMTP accepted the message but closing the composed reader fails, MailCLI keeps the acceptance evidence and diagnostic and never submits again.
 

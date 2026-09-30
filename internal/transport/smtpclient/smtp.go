@@ -88,6 +88,8 @@ func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, f
 	if err != nil {
 		return evidence, dialError(ctx, addr, err)
 	}
+	replies := &replyBudgetConn{Conn: conn}
+	conn = replies
 
 	// Abort blocked I/O promptly once ctx is done. Use sync.Once to avoid
 	// double-close races between the context goroutine and client.Close().
@@ -131,6 +133,7 @@ func (c *Client) SubmitReader(ctx context.Context, cfg transport.SubmitConfig, f
 	if err := bumpDeadline(conn, ctx); err != nil {
 		return evidence, sessionError(ctx, "STARTTLS", err)
 	}
+	replies.remaining = maxStartTLSReplyBytes
 	if err := client.StartTLS(tlsCfg); err != nil {
 		return evidence, startTLSError(ctx, err)
 	}
@@ -342,6 +345,9 @@ func parseSMTPResponseLine(line string) (int, bool, string, error) {
 // bumpDeadline caps the next command at commandBudget or the ctx deadline,
 // whichever is earlier.
 func bumpDeadline(conn net.Conn, ctx context.Context) error {
+	if replies, ok := conn.(*replyBudgetConn); ok {
+		replies.remaining = maxCommandReplyBytes
+	}
 	deadline := time.Now().Add(commandBudget)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl

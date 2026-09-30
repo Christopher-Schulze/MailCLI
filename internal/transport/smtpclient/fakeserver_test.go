@@ -58,6 +58,9 @@ type fakeSMTPServer struct {
 	finalReply string
 	// finalReplyBytes writes raw bytes and then closes, for malformed or partial replies.
 	finalReplyBytes []byte
+	// replyOverrides injects early replies by phase; EHLO_TLS is post-STARTTLS.
+	replyOverrides map[string]string
+	fragmentBytes  int
 }
 
 // newFakeSMTPServer starts the fake; configure runs before the accept loop
@@ -111,6 +114,9 @@ func (s *fakeSMTPServer) serve() {
 }
 
 func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
+	if s.fragmentBytes > 0 {
+		conn = &fragmentSMTPConn{Conn: conn, chunk: s.fragmentBytes}
+	}
 	defer func() { _ = conn.Close() }()
 	r := bufio.NewReader(conn)
 
@@ -121,7 +127,11 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 		}
 		return
 	}
-	if !writeLine(conn, "220 fake ESMTP ready") {
+	greeting := "220 fake ESMTP ready"
+	if override, ok := s.replyOverrides["greeting"]; ok {
+		greeting = override
+	}
+	if !writeLine(conn, greeting) {
 		return
 	}
 
@@ -133,6 +143,16 @@ func (s *fakeSMTPServer) handle(conn net.Conn, isTLS bool) {
 		}
 		cmd := strings.TrimRight(line, "\r\n")
 		upper := strings.ToUpper(cmd)
+		phase, _, _ := strings.Cut(upper, " ")
+		if phase == "EHLO" && isTLS {
+			phase = "EHLO_TLS"
+		}
+		if override, ok := s.replyOverrides[phase]; ok {
+			if !writeLine(conn, override) {
+				return
+			}
+			continue
+		}
 		switch {
 		case strings.HasPrefix(upper, "EHLO"):
 			if !writeLine(conn, "250-fake greets you") {
