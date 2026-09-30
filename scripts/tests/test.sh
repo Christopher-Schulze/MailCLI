@@ -184,6 +184,8 @@ fi
 # output is printed once it finishes.
 run_shell_lane() {
   set -euo pipefail
+  # This background lane is non-live; preserve the parent's later live flags.
+  unset MAILCLI_LIVE_TESTS MAILCLI_KEYCHAIN_LIVE MAILCLI_LIVE_RESPONSIVENESS
   run_shell_test scripts/tests/test-preflight-cache.sh
   run_shell_test scripts/tests/test-bootstrap.sh
   run_shell_test scripts/tests/test-benchmark-summary.sh
