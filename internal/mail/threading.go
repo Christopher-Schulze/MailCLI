@@ -19,6 +19,9 @@ type ThreadSource struct {
 	CC                  []Recipient
 	MessageID           string
 	References          string
+	ReferencesPresent   bool
+	InReplyTo           string
+	InReplyToPresent    bool
 	RecipientParseError error
 }
 
@@ -163,7 +166,20 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 		}
 	}
 
-	chain, err := threadChain(source.References, source.MessageID)
+	references := source.References
+	if source.ReferencesPresent && references == "" {
+		return DraftInput{}, "", "", invalidThreadMessageID("source References header contains no Message-ID")
+	}
+	if !source.ReferencesPresent && references == "" && (source.InReplyToPresent || source.InReplyTo != "") {
+		ancestors, complete := scanMessageIDs(source.InReplyTo)
+		if !complete || len(ancestors) == 0 {
+			return DraftInput{}, "", "", invalidThreadMessageID("source In-Reply-To header is malformed")
+		}
+		if len(ancestors) == 1 {
+			references = ancestors[0]
+		}
+	}
+	chain, err := threadChain(references, source.MessageID)
 	if err != nil {
 		return DraftInput{}, "", "", err
 	}

@@ -833,6 +833,9 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 		CC:                  headers.CC,
 		MessageID:           messageID,
 		References:          headers.References,
+		ReferencesPresent:   headers.ReferencesPresent,
+		InReplyTo:           headers.InReplyTo,
+		InReplyToPresent:    headers.InReplyToPresent,
 		RecipientParseError: errors.Join(headers.ToError, headers.CCError),
 	}, nil
 }
