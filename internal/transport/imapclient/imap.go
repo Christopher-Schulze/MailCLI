@@ -151,17 +151,22 @@ func (c *Client) enableUTF8(ctx context.Context, sess *session) error {
 			}
 			continue
 		}
-		if !strings.HasPrefix(line, tag+" ") {
+		if line != tag && !strings.HasPrefix(line, tag+" ") {
 			continue
 		}
-		if parseStatus(line, tag) == "OK" && enabled {
+		status, statusErr := parseTaggedCompletionStatus(line, tag)
+		if statusErr != nil {
+			return malformedTaggedCommandResponse(sess, "ENABLE", statusErr)
+		}
+		if status == "OK" && enabled {
 			sess.mailboxEncoding = transport.MailboxEncodingUTF8
 		}
 		if sess.utf8Only && sess.mailboxEncoding != transport.MailboxEncodingUTF8 {
+			sess.dirty = true
 			return &transport.TransportError{
 				Code:    transport.CodeIMAPResponseMalformed,
 				Message: "IMAP UTF8=ONLY capability was not enabled",
-				Err:     fmt.Errorf("ENABLE UTF8=ACCEPT returned %s without UTF8=ACCEPT", parseStatus(line, tag)),
+				Err:     fmt.Errorf("ENABLE UTF8=ACCEPT returned %s without UTF8=ACCEPT", status),
 			}
 		}
 		return nil

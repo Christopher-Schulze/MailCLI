@@ -98,9 +98,13 @@ func (c *Client) readExcerptResponses(
 			sess.dirty = true
 			return nil, err
 		}
-		if strings.HasPrefix(line, tag+" ") {
-			if status := parseStatus(line, tag); status != "OK" {
-				return nil, &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "IMAP FETCH failed: " + status}
+		if line == tag || strings.HasPrefix(line, tag+" ") {
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return nil, malformedTaggedCommandResponse(sess, "FETCH", statusErr)
+			}
+			if status != "OK" {
+				return nil, &transport.TransportError{Code: transport.CodeIMAPFetchFailed, Message: "IMAP FETCH failed: " + status, Err: rejectedTaggedCompletion(line, tag, "FETCH", status)}
 			}
 			return results, nil
 		}

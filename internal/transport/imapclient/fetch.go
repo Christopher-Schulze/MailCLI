@@ -188,8 +188,11 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 			sess.dirty = true
 			return nil, err
 		}
-		if strings.HasPrefix(line, tag+" ") {
-			status := parseStatus(line, tag)
+		if line == tag || strings.HasPrefix(line, tag+" ") {
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return nil, malformedTaggedCommandResponse(sess, "FETCH", statusErr)
+			}
 			if status == "OK" {
 				if !found {
 					if mismatchSeen {
@@ -221,6 +224,7 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 			return nil, &transport.TransportError{
 				Code:    transport.CodeIMAPFetchFailed,
 				Message: "IMAP FETCH failed: " + status,
+				Err:     rejectedTaggedCompletion(line, tag, "FETCH", status),
 			}
 		}
 		if !isFetchResponseCandidate(line) {

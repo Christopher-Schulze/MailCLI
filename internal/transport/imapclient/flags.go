@@ -378,14 +378,15 @@ func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, 
 			sess.dirty = true
 			return result, err
 		}
-		if strings.HasPrefix(line, tag+" ") {
-			result.status = strings.ToUpper(parseStatus(line, tag))
+		if line == tag || strings.HasPrefix(line, tag+" ") {
+			status, statusErr := parseTaggedCompletionStatus(line, tag)
+			if statusErr != nil {
+				return result, malformedTaggedCommandResponse(sess, "flag command", statusErr)
+			}
+			result.status = status
 			result.response = strings.TrimPrefix(line, tag+" ")
 			if result.status == "OK" {
 				return result, nil
-			}
-			if result.status != "NO" && result.status != "BAD" {
-				sess.dirty = true
 			}
 			return result, &transport.TransportError{Code: transport.CodeIMAPMutationFailed, Message: "IMAP flag command failed: " + result.response}
 		}

@@ -176,9 +176,3 @@ func pickSent(mailboxes []mailbox) (string, error) {
 	}
 	return transport.ResolveSentMailbox(infos)
 }
-
-func parseStatus(line, tag string) string {
-	rest := strings.TrimPrefix(line, tag+" ")
-	fields := strings.SplitN(rest, " ", 2)
-	return fields[0]
-}
