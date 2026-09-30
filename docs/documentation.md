@@ -46,7 +46,7 @@ Help remains human text; machines discover the contract through `capabilities`.
 ## For agents
 
 1. `mailcli capabilities --for <id> --json` returns the effects, confirmations, dependencies, result states and limits of the commands a workflow needs.
-2. `mailcli capabilities --for <id> --schemas --outputs --json` adds their full parameter schemas, `schema.output` trees and the error codes they can emit.
+2. `mailcli capabilities --for <id> --output-schema --json` adds full parameter schemas, `schema.output` trees and their reachable definitions for parsing data. Use `--outputs` for the additional envelope/error definitions and command error catalog.
 3. The error catalog `data.capabilities.error_codes` (published with `--outputs`) gives each code's meaning, emitting commands and guidance: `phase`, `effect_certainty`, `retryability`, `replay_allowed` and the recommended `next` action.
    A live envelope's `error.guidance` and `next` stay authoritative.
 4. Cache the contract per `data.capabilities.contract_sha256`.
@@ -106,7 +106,8 @@ All commands share the [Output contract](#output-contract); the selected capabil
 
 ### Discovery and maintenance
 
-- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--outputs`, `--errors`, `--limits`.
+- `capabilities`: discover contracts; main flags `--for`, `--schemas`, `--output-schema`, `--outputs`, `--errors`, `--limits`.
+  `--output-schema` requires `--for` and returns inline parameters, output/field variants and only reachable data definitions; it excludes `--outputs`, `--errors` and `--limits`.
   `--outputs` adds every selected command's `schema.output` tree, shared `$defs` and the error catalog.
   `--errors CODE[,CODE]` returns only the catalog entries of those codes (about 1 KB per code instead of the roughly 60 KB of `--outputs` for one command); `--for` restricts the commands inside each entry, and an unknown code, or one the selected commands cannot emit, is an `invalid_argument` error naming it.
   Example: `mailcli capabilities --for messages.get --json`.
@@ -364,6 +365,7 @@ Discovery uses one `--for` selector: an exact command ID, comma-separated IDs or
 Scoped output keeps effects, dependencies, confirmations and result states, includes `sync_check_policy` only with `sync` and `draft_save_policy` only with `drafts.*`, and limits `limits` to the keys in the selected commands' `limit_refs`; only a single-command selection returns `data.capabilities.scope`.
 Scoped discovery publishes `schema_ref.resolve` argv instead of inline parameter schemas; run it with the same binary, or request `--for IDS --schemas` to inline them (`--schemas` requires `--for`; unscoped discovery keeps all inline schemas).
 `--outputs`, with or without `--for`, adds each command's `schema.output` tree with `$ref` pointers into `data.capabilities.$defs` (including `$defs.error` and `$defs.envelope`) and the error catalog.
+`--for IDS --output-schema` includes the same inline parameter contracts, data output trees and projection variants with only their transitively reachable `$defs`. It omits the command error catalog and unconditional shared envelope/error roots; referenced error, finalization and partial-result evidence types remain. `--for` is required; `--outputs`, `--errors` and `--limits` are incompatible, while `--schemas` is redundant. Recursive output types remain supported, and the full-contract digest is the same as in every other view.
 
 The error catalog `data.capabilities.error_codes` has one entry per code with `code`, `meaning`, `commands` and `guidance` groups (`commands`, `phase`, `effect_certainty`, `retryability`, `replay_allowed`, `next`); with `--for` it is restricted to the selected commands.
 Catalog guidance is the runtime classification of the bare code; a live envelope's `error.guidance` and `next` stay authoritative because retained evidence can refine them.

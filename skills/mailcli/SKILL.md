@@ -12,7 +12,7 @@ Resolve the binary once with `command -v mailcli` and keep that path for the ses
 Load the contract:
 
 1. Run `mailcli version --json` and read `data.contract_sha256`. If a cached contract has the same digest, use it and skip step 2.
-2. Run `mailcli capabilities --for ID --schemas --json` for the command IDs you need. ID is a command ID, a comma-separated list or a family like `messages.*`. Accept it only when `ok` is true, envelope `schema_version` is 1 and capabilities schema 2; cache it under its `contract_sha256`.
+2. Run `mailcli capabilities --for ID --schemas --json` for the command IDs you need. When output fields are needed, use `--output-schema` in place of `--schemas`; it includes parameters and reachable data definitions without the command error catalog or unconditional envelope/error roots. ID is a command ID, a comma-separated list or a family like `messages.*`. Accept it only when `ok` is true, envelope `schema_version` is 1 and capabilities schema 2; cache it under its `contract_sha256` with the selected IDs and view.
 3. Obey each command's `dependencies`, `confirmation` and parameter schema. Look up one error with `capabilities --errors CODE --json`.
 
 Add `--json` to every call and check `ok` and the exit code. Copy refs, cursors and revisions exactly from MailCLI output. Refresh refs after a mutation or sync.

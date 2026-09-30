@@ -428,6 +428,10 @@ func publishOutputDefinitions(manifest *capabilityManifest) error {
 			return err
 		}
 	}
+	manifest.OutputDefinitions = builder.definitions
+	if manifest.outputDataOnly {
+		return nil
+	}
 	errorNode, err := builder.node(reflect.TypeFor[errorData](), "error", true)
 	if err != nil {
 		return err

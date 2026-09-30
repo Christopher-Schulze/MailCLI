@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"slices"
@@ -69,6 +70,7 @@ type capabilityManifest struct {
 	DraftSavePolicy   *draftSavePolicy      `json:"draft_save_policy,omitempty"`
 	OutputDefinitions map[string]outputNode `json:"$defs,omitempty"`
 	ErrorCodes        []errorCatalogEntry   `json:"error_codes,omitempty"`
+	outputDataOnly    bool
 }
 
 type syncCheckPolicy struct {
@@ -340,10 +342,20 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 	limitsOnly := flags.Bool("limits", false, "print the full limit set without command contracts")
 	includeSchemas := flags.Bool("schemas", false, "include complete parameter schemas with --for")
 	includeOutputs := flags.Bool("outputs", false, "include schema.output trees and shared $defs; implies inline schemas")
+	outputSchema := flags.Bool("output-schema", false, "include selected data output schemas and reachable $defs; requires --for; implies inline schemas")
 	errorLookup := flags.String("errors", "", "look up these error codes (comma list) in the error catalog without the other contracts; --for restricts the commands")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
+	}
+	errorLookupProvided := false
+	flags.Visit(func(option *flag.Flag) {
+		errorLookupProvided = errorLookupProvided || option.Name == "errors"
+	})
+	if *outputSchema && (len(selectors) == 0 || *includeOutputs || *limitsOnly || errorLookupProvided) {
+		return failCommand("capabilities", *jsonOutput, &commandError{
+			code: "invalid_argument", message: "--output-schema requires --for and cannot be combined with --outputs, --errors or --limits",
+		}, stdout, stderr)
 	}
 	if *errorLookup != "" {
 		return runCapabilityErrors(*errorLookup, selectors, *limitsOnly || *includeSchemas || *includeOutputs, *jsonOutput, stdout, stderr)
@@ -370,12 +382,13 @@ func runCapabilities(args []string, stdout io.Writer, stderr io.Writer) int {
 		if len(selected) == 1 {
 			manifest.Scope = selected[0]
 		}
-		if !*includeSchemas && !*includeOutputs {
+		manifest.outputDataOnly = *outputSchema
+		if !*includeSchemas && !*includeOutputs && !*outputSchema {
 			if err := referenceCapabilitySchemas(manifest.Commands); err != nil {
 				return failCommand("capabilities", *jsonOutput, err, stdout, stderr)
 			}
 		}
-		return writeCapabilitiesWithOutputs(stdout, stderr, *jsonOutput, manifest, *includeOutputs)
+		return writeCapabilitiesWithOutputs(stdout, stderr, *jsonOutput, manifest, *includeOutputs || *outputSchema)
 	}
 	manifest, err := capabilities()
 	if err != nil {
@@ -473,7 +486,9 @@ func writeCapabilitiesWithOutputs(stdout, stderr io.Writer, jsonOutput bool, man
 		if err := attachOutputSchemas(manifest.Commands); err != nil {
 			return failCommand("capabilities", jsonOutput, err, stdout, stderr)
 		}
-		manifest.ErrorCodes = errorCatalogFor(manifest.Commands)
+		if !manifest.outputDataOnly {
+			manifest.ErrorCodes = errorCatalogFor(manifest.Commands)
+		}
 	}
 	return writeCapabilities(stdout, stderr, jsonOutput, manifest)
 }

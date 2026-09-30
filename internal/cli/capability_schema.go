@@ -29,8 +29,8 @@ func referenceCapabilitySchemas(commands []commandCapability) error {
 	return nil
 }
 
-// attachOutputSchemas publishes output trees only for an explicit --outputs
-// request, keeping ordinary discovery byte-identical and compact.
+// attachOutputSchemas publishes output trees for an explicit --outputs or
+// --output-schema request, keeping ordinary discovery compact.
 func attachOutputSchemas(commands []commandCapability) error {
 	for i := range commands {
 		command := &commands[i]

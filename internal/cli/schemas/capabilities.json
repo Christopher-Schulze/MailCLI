@@ -28,6 +28,12 @@
       "description": "include schema.output trees and shared $defs; implies inline schemas"
     },
     {
+      "name": "--output-schema",
+      "value_type": "boolean",
+      "takes_value": false,
+      "description": "include selected data output schemas and reachable $defs; requires --for; implies inline schemas"
+    },
+    {
       "name": "--errors",
       "value_type": "string",
       "takes_value": true,
@@ -55,6 +61,26 @@
       "kind": "conditional",
       "flags": ["--schemas", "--for"],
       "description": "--schemas requires --for"
+    },
+    {
+      "kind": "conditional",
+      "flags": ["--output-schema", "--for"],
+      "description": "--output-schema requires --for; --schemas may accompany it but is redundant"
+    },
+    {
+      "kind": "mutually_exclusive",
+      "flags": ["--output-schema", "--outputs"],
+      "description": "--output-schema and --outputs are mutually exclusive"
+    },
+    {
+      "kind": "mutually_exclusive",
+      "flags": ["--output-schema", "--errors"],
+      "description": "--output-schema and --errors are mutually exclusive"
+    },
+    {
+      "kind": "mutually_exclusive",
+      "flags": ["--output-schema", "--limits"],
+      "description": "--output-schema and --limits are mutually exclusive"
     }
   ]
 }
