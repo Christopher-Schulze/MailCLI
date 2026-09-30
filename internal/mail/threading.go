@@ -16,6 +16,7 @@ type ThreadSource struct {
 	From                string
 	FromParseError      error
 	ReplyTo             []Recipient
+	ReplyToParseError   error
 	To                  []Recipient
 	CC                  []Recipient
 	MessageID           string
@@ -147,14 +148,20 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 	out.Subject = subject
 
 	if kind == DraftKindReply {
-		targets, err := replyTargetRecipients(source)
-		if err != nil && !input.ToSet && len(out.To) == 0 {
-			return DraftInput{}, "", "", err
+		deriveTo := !input.ToSet && len(out.To) == 0
+		deriveCC := replyAll && !input.CCSet && len(out.CC) == 0
+		var targets []Recipient
+		if deriveTo || deriveCC {
+			var err error
+			targets, err = replyTargetRecipients(source)
+			if err != nil && deriveTo {
+				return DraftInput{}, "", "", err
+			}
 		}
-		if !input.ToSet && len(out.To) == 0 {
+		if deriveTo {
 			out.To = append([]Recipient(nil), targets...)
 		}
-		if replyAll && !input.CCSet && len(out.CC) == 0 {
+		if deriveCC {
 			if source.RecipientParseError != nil {
 				return DraftInput{}, "", "", &OperationError{
 					Code: "invalid_message_source", Message: "source To or CC header is malformed; automatic reply-all requires complete recipients",
@@ -243,6 +250,11 @@ func promotedReplyAllRecipients(to []Recipient, cc []Recipient, targets []Recipi
 }
 
 func replyTargetRecipients(source ThreadSource) ([]Recipient, error) {
+	if source.ReplyToParseError != nil {
+		return nil, &OperationError{
+			Code: "invalid_message_source", Message: fmt.Sprintf("source Reply-To header is malformed: %v", source.ReplyToParseError),
+		}
+	}
 	if len(source.ReplyTo) > 0 {
 		return append([]Recipient(nil), source.ReplyTo...), nil
 	}

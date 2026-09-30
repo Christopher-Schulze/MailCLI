@@ -63,6 +63,15 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	}
 	out.ReplyToText, _ = firstFormattedAddress(&header, "Reply-To")
 	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
+	replyToFields := 0
+	for _, field := range fields {
+		if strings.EqualFold(field.Name, "Reply-To") {
+			replyToFields++
+		}
+	}
+	if out.ReplyToError == nil && header.Has("Reply-To") && (len(out.ReplyTo) == 0 || replyToFields != 1) {
+		out.ReplyToError = fmt.Errorf("Reply-To must contain one complete, nonempty address list")
+	}
 	out.To, _, out.ToError = headerRecipients(&header, "To")
 	out.CC, _, out.CCError = headerRecipients(&header, "Cc")
 	out.BCC, _, _ = headerRecipients(&header, "Bcc")

@@ -807,12 +807,6 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 			}
 		}
 	}
-	if headers.ReplyToError != nil {
-		return mail.ThreadSource{}, operationError(
-			"invalid_message_source",
-			fmt.Sprintf("source Reply-To header is malformed: %v", headers.ReplyToError),
-		)
-	}
 	if headers.MessageID == "" {
 		return mail.ThreadSource{}, operationError(
 			"invalid_message_source", "source message has no Message-ID header",
@@ -830,6 +824,7 @@ func (c *Client) MessageThreadSource(ctx context.Context, ref string) (mail.Thre
 		From:                headers.From,
 		FromParseError:      headers.FromError,
 		ReplyTo:             headers.ReplyTo,
+		ReplyToParseError:   headers.ReplyToError,
 		To:                  headers.To,
 		CC:                  headers.CC,
 		MessageID:           messageID,

@@ -3294,9 +3294,12 @@ func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
 			"Subject: Malformed Reply-To\r\n"+
 			"Message-ID: <reply-102@example.com>\r\n\r\nBody\r\n",
 	))
-	if _, err := client.MessageThreadSource(context.Background(), ref); err == nil ||
-		errorCodeForTest(err) != "invalid_message_source" {
-		t.Fatalf("malformed Reply-To error = %v", err)
+	source, err = client.MessageThreadSource(context.Background(), ref)
+	if err != nil || source.ReplyToParseError == nil {
+		t.Fatalf("malformed Reply-To evidence lost: source=%+v error=%v", source, err)
+	}
+	if _, _, _, err := mail.DeriveReplyInput(source, mail.DraftKindReply, false, mail.DraftInput{Body: "Reply"}, nil); errorCodeForTest(err) != "invalid_message_source" {
+		t.Fatalf("automatic malformed Reply-To error = %v", err)
 	}
 
 	writeFixtureEMLX(t, store, 102, "imap://"+testAccountID+"/INBOX", []byte(
