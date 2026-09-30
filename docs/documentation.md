@@ -1277,6 +1277,7 @@ Tagged `NO` or `BAD` replies from LOGIN, LIST, SEARCH, UID SEARCH, STATUS, SELEC
 Only `NO [UNAVAILABLE]` permits retry for reads, and `BAD` is never automatically retryable.
 Cancellation, timeout, connection loss and malformed tagged status use `imap_canceled`, `imap_timeout`, `imap_disconnected` and `imap_response_malformed`; reads may retry these, while a possibly dispatched mutation stays observation-required.
 APPEND consumes 100 untagged responses or fewer before continuation within a cumulative 64 KiB wire budget; exceeding either returns `imap_resource_limit_exceeded` without sending message data.
+Generic tagged-completion readers share the flag-response limits: at most 1,024 physical lines and 4 MiB including ignored responses and CRLF. Exhaustion returns `imap_resource_limit_exceeded` and discards the session; retained COPYUID evidence stays bounded and comes only from a leading response code on an untagged status or the matching completion tag, never prose or FETCH text. An invalid tagged status is rejected before completion is reported; APPEND after its terminator and dispatched COPY/MOVE without a valid final reply remain outcome-unknown.
 Local command-line validation writes no bytes; interrupted I/O discards the session.
 
 ### Timeouts and budgets

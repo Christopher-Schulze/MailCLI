@@ -287,23 +287,32 @@ func quotedAt(s string, offset int) bool {
 }
 
 func (c *Client) readFinal(ctx context.Context, sess *session, tag string) (string, string, error) {
-	for {
-		line, err := c.readLine(sess)
+	var responseBytes int64
+	for range maxFlagResponseCount {
+		line, wireBytes, err := c.readLineWithWireByteCount(sess)
 		if err != nil {
 			return "", "", wrapIOError(ctx, err, transport.CodeIMAPAppendFailed, "IMAP read final response")
+		}
+		responseBytes += wireBytes
+		if responseBytes > maxFlagResponseBytes {
+			return "", "", completionResponseLimitExceeded(sess, "command completion response bytes", maxFlagResponseBytes)
 		}
 		if !strings.HasPrefix(line, tag+" ") {
 			continue
 		}
 		rest := strings.TrimPrefix(line, tag+" ")
 		fields := strings.SplitN(rest, " ", 2)
-		status := fields[0]
+		status, statusErr := parseTaggedCompletionStatus(line, tag)
+		if statusErr != nil {
+			return "", "", malformedTaggedCommandResponse(sess, "completion", statusErr)
+		}
 		var text string
 		if len(fields) > 1 {
 			text = fields[1]
 		}
 		return status, text, nil
 	}
+	return "", "", completionResponseLimitExceeded(sess, "command completion response lines", maxFlagResponseCount)
 }
 
 func parseTaggedCompletionStatus(line, tag string) (string, error) {
@@ -424,12 +433,21 @@ func (c *Client) readFinalWithCodes(
 	message string,
 ) (string, string, []string, error) {
 	var responseCodes []string
-	for {
-		line, err := c.readLine(sess)
+	var responseBytes int64
+	for range maxFlagResponseCount {
+		line, wireBytes, err := c.readLineWithWireByteCount(sess)
 		if err != nil {
 			return "", "", responseCodes, wrapIOError(ctx, err, code, message)
 		}
-		if responseCode, ok := bracketedResponseCode(line); ok {
+		responseBytes += wireBytes
+		if responseBytes > maxFlagResponseBytes {
+			return "", "", responseCodes, completionResponseLimitExceeded(sess, "command completion response bytes", maxFlagResponseBytes)
+		}
+		responseCode, codeErr := flagResponseCode(line, tag)
+		if codeErr != nil {
+			return "", "", responseCodes, malformedTaggedCommandResponse(sess, "completion", codeErr)
+		}
+		if responseCode != "" {
 			responseCodes = append(responseCodes, responseCode)
 		}
 		if !strings.HasPrefix(line, tag+" ") {
@@ -437,12 +455,25 @@ func (c *Client) readFinalWithCodes(
 		}
 		rest := strings.TrimPrefix(line, tag+" ")
 		fields := strings.SplitN(rest, " ", 2)
-		status := fields[0]
+		status, statusErr := parseTaggedCompletionStatus(line, tag)
+		if statusErr != nil {
+			return "", "", responseCodes, malformedTaggedCommandResponse(sess, "completion", statusErr)
+		}
 		var text string
 		if len(fields) > 1 {
 			text = fields[1]
 		}
 		return status, text, responseCodes, nil
+	}
+	return "", "", responseCodes, completionResponseLimitExceeded(sess, "command completion response lines", maxFlagResponseCount)
+}
+
+// Generic completions share the existing flag-response byte and line limits.
+func completionResponseLimitExceeded(sess *session, name string, value int64) *transport.TransportError {
+	sess.dirty = true
+	return &transport.TransportError{
+		Code: transport.CodeIMAPResourceLimitExceeded, Message: "IMAP " + name + " budget exhausted",
+		Limit: &transport.ResourceLimit{Name: name, Value: value}, ObservedAtLeast: value,
 	}
 }
 
