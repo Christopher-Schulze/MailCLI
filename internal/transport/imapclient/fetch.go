@@ -108,6 +108,9 @@ func fetchResponseLimit(literalBytes int64) int64 {
 
 // fetchReadError maps a failed FETCH response read to its transport error.
 func fetchReadError(ctx context.Context, err error, maxBytes int64) error {
+	if transport.ErrorCode(err) != "" {
+		return err
+	}
 	var limitErr *literalLimitError
 	if errors.As(err, &limitErr) {
 		return &transport.TransportError{
@@ -158,7 +161,8 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 	bodyReady := false
 	var mismatchedUID uint32
 	mismatchSeen := false
-	for {
+	budget := responseBudget{payloadLimit: maxBytes}
+	for range maxFlagResponseCount {
 		if err := closeFetchSources(pending); err != nil {
 			return nil, err
 		}
@@ -179,7 +183,7 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 					memoryBytes += source.size
 				}
 				return source.data, nil
-			},
+			}, &budget,
 		)
 		if err != nil {
 			return nil, fetchReadError(ctx, err, maxBytes)
@@ -215,6 +219,10 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 						Code:    transport.CodeIMAPMessageNotFound,
 						Message: "message BODY value not returned by IMAP FETCH",
 					}
+				}
+				if payload.size > maxBytes {
+					sess.dirty = true
+					return nil, fetchReadError(ctx, &literalLimitError{size: payload.size, maxLiteral: maxBytes, maxResponse: responseLimit}, maxBytes)
 				}
 				if err := ctx.Err(); err != nil {
 					return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH completion")
@@ -271,6 +279,7 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 			bodyReady = true
 		}
 	}
+	return nil, completionResponseLimitExceeded(sess, "command response lines", maxFlagResponseCount)
 }
 
 func parseFetchUID(line string) (uint32, bool) {

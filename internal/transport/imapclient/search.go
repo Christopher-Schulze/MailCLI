@@ -235,10 +235,14 @@ func (c *Client) readSearchResults(ctx context.Context, sess *session, tag, comm
 	var uids []uint32
 	seenSearch := false
 	seenUIDs := make(map[uint32]struct{})
-	for {
-		line, err := c.readLine(sess)
+	budget := responseBudget{}
+	for range maxFlagResponseCount {
+		line, wireBytes, err := c.readLineWithWireByteCount(sess)
 		if err != nil {
 			return nil, wrapCommandIOError(ctx, err, "IMAP "+command+" read")
+		}
+		if err := budget.consume(sess, wireBytes, false); err != nil {
+			return nil, err
 		}
 		if strings.HasPrefix(line, tag+" ") {
 			status, statusErr := parseTaggedCompletionStatus(line, tag)
@@ -285,6 +289,7 @@ func (c *Client) readSearchResults(ctx context.Context, sess *session, tag, comm
 			}
 		}
 	}
+	return nil, completionResponseLimitExceeded(sess, "command response lines", maxFlagResponseCount)
 }
 
 func malformedSearchResponse(sess *session, message string) error {

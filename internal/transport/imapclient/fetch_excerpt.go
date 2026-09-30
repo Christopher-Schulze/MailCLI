@@ -59,7 +59,7 @@ func (c *Client) FetchMessageExcerpts(
 	}
 	tag := ps.sess.nextTag()
 	cmd := fmt.Sprintf("%s UID FETCH %s (UID %s BODY.PEEK[TEXT]<0.%d>)", tag, strings.Join(set, ","), excerptHeaderFields, maxTextBytes)
-	if err := c.setTransferDeadline(ctx, ps.sess, 2*maxTextBytes*int64(len(set))); err != nil {
+	if err := c.setTransferDeadline(ctx, ps.sess, excerptPayloadLimit(maxTextBytes, len(set))); err != nil {
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPTimeout, "IMAP FETCH deadline")
 	}
 	if err := c.writeLine(ps.sess, cmd); err != nil {
@@ -84,12 +84,13 @@ func (c *Client) readExcerptResponses(
 		}
 		return source.data, nil
 	}
-	for {
+	budget := responseBudget{payloadLimit: excerptPayloadLimit(maxTextBytes, len(requested))}
+	for range maxFlagResponseCount {
 		if err := ctx.Err(); err != nil {
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
 		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(
-			sess, maxTextBytes, fetchResponseLimit(2*maxTextBytes), maxFetchLiteralCount, readLiteral,
+			sess, maxTextBytes, fetchResponseLimit(excerptPayloadLimit(maxTextBytes, 1)), maxFetchLiteralCount, readLiteral, &budget,
 		)
 		if err != nil {
 			return nil, fetchReadError(ctx, err, maxTextBytes)
@@ -131,6 +132,18 @@ func (c *Client) readExcerptResponses(
 		}
 		results[parsed.uid] = source
 	}
+	return nil, completionResponseLimitExceeded(sess, "command response lines", maxFlagResponseCount)
+}
+
+func excerptPayloadLimit(maxTextBytes int64, count int) int64 {
+	if count <= 0 {
+		return 0
+	}
+	const maxBytes = int64(^uint64(0) >> 1)
+	if maxTextBytes > maxBytes/2/int64(count) {
+		return maxBytes
+	}
+	return 2 * maxTextBytes * int64(count)
 }
 
 // excerptSourceFromSections joins the header-fields block and the text prefix
@@ -139,6 +152,9 @@ func excerptSourceFromSections(sections []fetchBodySection, maxTextBytes int64) 
 	var header, text []byte
 	var headerSeen, textSeen bool
 	for _, section := range sections {
+		if int64(len(section.data)) > maxTextBytes {
+			return transport.MessageExcerptSource{}, fmt.Errorf("excerpt section exceeds %d bytes", maxTextBytes)
+		}
 		switch {
 		case section.name == strings.Replace(excerptHeaderFields, "BODY.PEEK[", "BODY[", 1):
 			if headerSeen || section.data == nil {

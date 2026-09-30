@@ -296,7 +296,7 @@ func TestLogicalFlagResponseBudgetCountsTextAndLiteralsTogether(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			const response = "12345678 {6}\r\nabcdef!\r\n"
 			sess := &session{br: bufio.NewReader(strings.NewReader(response))}
-			line, literals, wireBytes, err := (&Client{}).readLogicalLineWithLiteralReaderCounted(sess, 6, test.limit, 1, nil)
+			line, literals, wireBytes, err := (&Client{}).readLogicalLineWithLiteralReaderCounted(sess, 6, test.limit, 1, nil, nil)
 			if (err != nil) != test.wantError {
 				t.Fatalf("response %q / %v, error %v, limit %d", line, literals, err, test.limit)
 			}

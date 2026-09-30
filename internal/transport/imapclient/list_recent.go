@@ -94,7 +94,7 @@ func (c *Client) readRecentResponses(ctx context.Context, sess *session, tag str
 			return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 		}
 		line, literals, wireBytes, err := c.readLogicalLineWithLiteralReaderCounted(
-			sess, maxRecentHeaderBytes, min(responseLimit, remaining), maxFetchLiteralCount, readLiteral,
+			sess, maxRecentHeaderBytes, min(responseLimit, remaining), maxFetchLiteralCount, readLiteral, nil,
 		)
 		if err != nil {
 			readErr := fetchReadError(ctx, err, maxRecentHeaderBytes)

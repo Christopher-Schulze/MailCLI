@@ -363,7 +363,7 @@ func (c *Client) readFlagResult(ctx context.Context, sess *session, tag string, 
 			sess.dirty = true
 			return result, err
 		}
-		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount, nil)
+		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount, nil, nil)
 		if err != nil {
 			return result, wrapIOError(ctx, err, transport.CodeIMAPResponseMalformed, "IMAP flag response read")
 		}

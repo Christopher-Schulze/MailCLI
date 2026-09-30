@@ -37,12 +37,15 @@ func (c *Client) doStatus(ctx context.Context, sess *session, tag, mailbox strin
 	}
 
 	seenStatus := false
-	for {
-		line, literals, _, err := c.readLineWithLiteralCounted(sess)
+	budget := responseBudget{}
+	for range maxFlagResponseCount {
+		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxListLiteralBytes, maxListResponseBytes, maxListLiteralCount, nil, &budget)
 		if err != nil {
 			var malformed *malformedResponseError
-			if errors.As(err, &malformed) {
-				return status, malformedStatusResponse(sess, malformed)
+			var limitErr *literalLimitError
+			var literalErr *literalReadError
+			if errors.As(err, &malformed) || errors.As(err, &limitErr) || errors.As(err, &literalErr) {
+				return status, malformedStatusResponse(sess, err)
 			}
 			return status, wrapCommandIOError(ctx, err, "IMAP STATUS read")
 		}
@@ -76,6 +79,7 @@ func (c *Client) doStatus(ctx context.Context, sess *session, tag, mailbox strin
 			seenStatus = true
 		}
 	}
+	return status, completionResponseLimitExceeded(sess, "command response lines", maxFlagResponseCount)
 }
 
 func malformedStatusResponse(sess *session, err error) error {

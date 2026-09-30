@@ -136,7 +136,7 @@ func listResponseMalformed(err error) *transport.TransportError {
 // raw when the value parser consumes it.
 func (c *Client) readLineWithLiteralCounted(sess *session) (string, [][]byte, int64, error) {
 	line, literals, wireBytes, err := c.readLogicalLineWithLiteralReaderCounted(
-		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount, nil,
+		sess, int64(maxListLiteralBytes), int64(maxListResponseBytes), maxListLiteralCount, nil, nil,
 	)
 	var limitErr *literalLimitError
 	if errors.As(err, &limitErr) {
@@ -179,6 +179,7 @@ func (c *Client) readLogicalLineWithLiteralReaderCounted(
 	maxResponseBytes int64,
 	maxLiteralCount int,
 	readLiteral func(int) ([]byte, error),
+	budget *responseBudget,
 ) (string, [][]byte, int64, error) {
 	var reconstructed strings.Builder
 	var literals [][]byte
@@ -188,6 +189,9 @@ func (c *Client) readLogicalLineWithLiteralReaderCounted(
 		line, lineWireBytes, err := c.readLineWithWireByteCount(sess)
 		wireBytes += lineWireBytes
 		if err != nil {
+			return "", nil, wireBytes, err
+		}
+		if err := budget.consume(sess, lineWireBytes, false); err != nil {
 			return "", nil, wireBytes, err
 		}
 		prefix, size, hasLiteral, err := parseLiteralSuffix(line)
@@ -225,6 +229,9 @@ func (c *Client) readLogicalLineWithLiteralReaderCounted(
 			)}
 		}
 
+		if err := budget.consume(sess, size64, true); err != nil {
+			return "", nil, wireBytes, err
+		}
 		reconstructed.WriteString(prefix)
 		reconstructed.WriteString(imapLiteralMarker)
 		var literal []byte

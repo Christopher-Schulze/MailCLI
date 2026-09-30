@@ -138,10 +138,14 @@ func (c *Client) enableUTF8(ctx context.Context, sess *session) error {
 		return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP ENABLE UTF8 write")
 	}
 	enabled := false
-	for {
-		line, err := c.readLine(sess)
+	budget := responseBudget{}
+	for range maxFlagResponseCount {
+		line, wireBytes, err := c.readLineWithWireByteCount(sess)
 		if err != nil {
 			return wrapIOError(ctx, err, transport.CodeIMAPConnectFailed, "IMAP ENABLE UTF8 read")
+		}
+		if err := budget.consume(sess, wireBytes, false); err != nil {
+			return err
 		}
 		if strings.HasPrefix(strings.ToUpper(line), "* ENABLED ") {
 			for _, capability := range strings.Fields(line[len("* ENABLED "):]) {
@@ -171,6 +175,7 @@ func (c *Client) enableUTF8(ctx context.Context, sess *session) error {
 		}
 		return nil
 	}
+	return completionResponseLimitExceeded(sess, "command response lines", maxFlagResponseCount)
 }
 
 func (c *Client) refreshCapabilities(ctx context.Context, sess *session) error {
@@ -369,7 +374,7 @@ func (c *Client) doSelectInfo(ctx context.Context, sess *session, tag, mbox stri
 	}
 	remaining := int64(maxFlagResponseBytes)
 	for range maxFlagResponseCount {
-		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount, nil)
+		line, literals, _, err := c.readLogicalLineWithLiteralReaderCounted(sess, maxIMAPResponseLineBytes, remaining, maxFetchLiteralCount, nil, nil)
 		if err != nil {
 			return info, wrapCommandIOError(ctx, err, "IMAP SELECT read")
 		}
