@@ -15,9 +15,10 @@ import (
 )
 
 type imapTargetOptions struct {
-	rejectTrash     bool
-	rejectDuplicate bool
-	forMutation     bool
+	rejectTrash          bool
+	rejectDuplicate      bool
+	forMutation          bool
+	readTransferIdentity bool
 	// localUIDWithoutValidity accepts the local server UID of a mailbox whose
 	// local UIDVALIDITY is unknown instead of searching the server by
 	// Message-ID. The target then has uidvalidity 0 and a local Message-ID,
@@ -40,7 +41,7 @@ func (c *Client) resolveImapTargetForMutation(ctx context.Context, messageRef st
 }
 
 func (c *Client) resolveImapTargetForDelete(ctx context.Context, messageRef string) (imapTarget, error) {
-	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectTrash: true, rejectDuplicate: true, forMutation: true})
+	return c.resolveImapTargetWithOptions(ctx, messageRef, imapTargetOptions{rejectTrash: true, rejectDuplicate: true, forMutation: true, readTransferIdentity: true})
 }
 
 func (c *Client) resolveImapTargetWithOptions(
@@ -80,7 +81,7 @@ func (c *Client) resolveImapTargetWithOptions(
 			target.uid, target.duplicateMatches = uid, 1
 		}
 	}
-	if target.messageID == "" && (target.uid == 0 || target.uidvalidity == 0) {
+	if target.messageID == "" && (target.uid == 0 || target.uidvalidity == 0 || options.readTransferIdentity) {
 		target.messageID, localIdentityErr = c.readLocalMessageID(ctx, messageRef)
 		if localIdentityErr != nil && !safeTargetedFallback(localIdentityErr) {
 			return target, fmt.Errorf("resolve IMAP message identity: %w", localIdentityErr)
@@ -173,6 +174,15 @@ func (c *Client) resolveImapTargetWithOptions(
 			Message: "no independently verified IMAP UID and UIDVALIDITY are available; refresh the local Mail catalog or provide a fresh Message-ID-backed reference",
 		})
 	}
+	if options.readTransferIdentity && target.messageID == "" && localIdentityErr != nil {
+		if _, supported := imapOp.(transport.MessageHeaderFetcher); supported {
+			headers, _, err := c.hydrateMessageHeaders(ctx, messageRef)
+			if err != nil {
+				return target, err
+			}
+			target.messageID = headers.MessageID
+		}
+	}
 
 	// Build base summary
 	mailboxRef, _ := mailref.EncodeMailbox(resolved.Reference.AccountID, resolved.Reference.MailboxPath)
@@ -195,7 +205,7 @@ func (c *Client) readLocalMessageID(ctx context.Context, messageRef string) (str
 	if err != nil {
 		return "", fmt.Errorf("open local message source: %w", err)
 	}
-	messageID, readErr := messageIDFromSource(source.Reader())
+	messageID, readErr := messageIDFromSource(mimeContextReader{ctx: ctx, reader: source.Reader()})
 	closeErr := source.Close()
 	if readErr != nil {
 		return "", fmt.Errorf("read IMAP message identity: %w", readErr)

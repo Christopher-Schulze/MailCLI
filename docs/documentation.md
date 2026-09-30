@@ -1008,6 +1008,8 @@ A successful observation describes the state at completion, not a guarantee agai
 
 ### Copy, move and delete
 
+Transfers supplement a verified local UID with the Message-ID from the bounded local header block even when the reference omits it. If that source is unavailable, a supported bounded IMAP header read can supply it without fetching the body. Flag-only mutations retain their direct UID path. A genuinely absent Message-ID still cannot guard COPY or the MOVE fallback; native MOVE without one continues to require verified COPYUID evidence.
+
 COPY records a deterministic operation identity before dispatch with the source account, source and destination UIDVALIDITY and UID, and any strict single-UID `COPYUID` mapping.
 The destination is searched by exact Message-ID on the mutation session while the account's cross-process mutation lock is held. MailCLI peers serialize this check and dispatch; a verified matching destination prevents another COPY and returns `imap_copy_outcome_unknown` with the destination UID, and a failed check also stops dispatch.
 A source without a Message-ID cannot be checked and is refused; with `MAILCLI_IMAP_MUTATION_LOCK=off` only process-local ordering remains.

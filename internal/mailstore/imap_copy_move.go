@@ -22,7 +22,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		}
 	}
 
-	target, err := c.resolveImapTargetForMutation(ctx, request.Ref)
+	target, err := c.resolveImapTargetWithOptions(ctx, request.Ref, imapTargetOptions{rejectDuplicate: true, forMutation: true, readTransferIdentity: true})
 	if err != nil {
 		return mail.MessageSummary{}, err
 	}
@@ -114,7 +114,7 @@ func (c *Client) TransferMessage(ctx context.Context, request mail.TransferMessa
 		if request.Copy {
 			c.forgetCopyAttempt(copyKey)
 		}
-		retried, retryErr := c.resolveImapTargetForMutation(ctx, request.Ref)
+		retried, retryErr := c.resolveImapTargetWithOptions(ctx, request.Ref, imapTargetOptions{rejectDuplicate: true, forMutation: true, readTransferIdentity: true})
 		if retryErr != nil {
 			return mail.MessageSummary{}, retryErr
 		}
