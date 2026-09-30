@@ -1814,6 +1814,7 @@ func beginUnknownClaim(t *testing.T, root string, draft Draft) (string, string) 
 		MessageID:           "<claim@example.com>",
 		EnvelopeFingerprint: fingerprint,
 		MIMEFingerprint:     mimeFingerprint,
+		RecoveryIdentity:    &SendRecoveryIdentity{Host: "imap.mail.me.com", Port: 993, Username: "sender@icloud.com"},
 	}); err != nil {
 		t.Fatalf("beginSendAttempt() error = %v", err)
 	}

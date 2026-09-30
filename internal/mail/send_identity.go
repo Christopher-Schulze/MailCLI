@@ -7,12 +7,78 @@ import (
 	"strings"
 
 	"mailcli/internal/mailref"
+	"mailcli/internal/transport"
 )
 
 type resolvedSendIdentity struct {
 	Sender     string
 	Credential string
 	Binding    *AccountBinding
+}
+
+func cloneSendRecoveryIdentity(value *SendRecoveryIdentity) *SendRecoveryIdentity {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func normalizeSendRecoveryIdentity(value SendRecoveryIdentity) (SendRecoveryIdentity, error) {
+	value.AccountID = strings.ToUpper(strings.TrimSpace(value.AccountID))
+	if strings.ContainsAny(value.AccountID, "\r\n\x00") {
+		return SendRecoveryIdentity{}, fmt.Errorf("invalid send recovery account ID")
+	}
+	var err error
+	value.Host, value.Port, err = normalizeBindingEndpoint("imap", value.Host, value.Port)
+	if err != nil || value.Host == "" {
+		return SendRecoveryIdentity{}, fmt.Errorf("invalid send recovery endpoint")
+	}
+	value.Username, err = normalizeBindingAddress(value.Username)
+	if err != nil {
+		return SendRecoveryIdentity{}, fmt.Errorf("invalid send recovery username: %w", err)
+	}
+	return value, nil
+}
+
+func newSendRecoveryIdentity(identity resolvedSendIdentity, host string, port int) (*SendRecoveryIdentity, error) {
+	value := SendRecoveryIdentity{Host: host, Port: port, Username: identity.Credential}
+	if identity.Binding != nil {
+		value.AccountID = identity.Binding.AccountID
+	}
+	normalized, err := normalizeSendRecoveryIdentity(value)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func (s *Service) resolveSendRecoveryTarget(ctx context.Context, draft Draft, attempt SendAttempt) (resolvedSendIdentity, transport.ImapConfig, error) {
+	if attempt.RecoveryIdentity == nil {
+		return resolvedSendIdentity{}, transport.ImapConfig{}, &OperationError{
+			Code: "send_identity_unverifiable", DraftRef: draft.Ref,
+			Message: "the retained send claim has no original IMAP target; inspect the draft and verify Sent manually; automatic recovery and SMTP replay remain blocked",
+		}
+	}
+	identity, err := s.resolveSendIdentity(ctx, draft)
+	if err != nil {
+		return resolvedSendIdentity{}, transport.ImapConfig{}, err
+	}
+	_, _, host, port, err := ResolveTransportHosts(identity.Sender, identity.Binding)
+	if err != nil {
+		return resolvedSendIdentity{}, transport.ImapConfig{}, err
+	}
+	current, err := newSendRecoveryIdentity(identity, host, port)
+	if err != nil {
+		return resolvedSendIdentity{}, transport.ImapConfig{}, err
+	}
+	if *current != *attempt.RecoveryIdentity {
+		return resolvedSendIdentity{}, transport.ImapConfig{}, &OperationError{
+			Code: "send_identity_unverifiable", DraftRef: draft.Ref,
+			Message: "the configured IMAP account, endpoint or username differs from the original send target; inspect send_attempt.recovery_identity and restore that target before reconciliation; SMTP replay remains blocked",
+		}
+	}
+	return identity, transport.ImapConfig{Host: host, Port: port, Username: identity.Credential}, nil
 }
 
 func resolveTransportIdentity(send SendTransport, draft Draft) (resolvedSendIdentity, error) {

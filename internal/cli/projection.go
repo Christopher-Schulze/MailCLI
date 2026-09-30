@@ -1091,6 +1091,10 @@ func draftSendAttemptProjection(attempt *mail.SendAttempt) *mail.DraftSendAttemp
 		SentStoreObserved: attempt.SentStoreObserved,
 		SentCopyObserved:  attempt.SentStoreObserved, ObservedMessageRef: attempt.ObservedMessageRef,
 	}
+	if attempt.RecoveryIdentity != nil {
+		identity := *attempt.RecoveryIdentity
+		summary.RecoveryIdentity = &identity
+	}
 	if attempt.Transport != nil {
 		transport := *attempt.Transport
 		summary.Transport = &transport

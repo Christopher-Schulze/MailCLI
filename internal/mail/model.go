@@ -315,6 +315,7 @@ type DraftSendAttemptSummary struct {
 	MessageID           string                   `json:"message_id,omitempty"`
 	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
 	MIMEFingerprint     string                   `json:"mime_fingerprint,omitempty"`
+	RecoveryIdentity    *SendRecoveryIdentity    `json:"recovery_identity,omitempty"`
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`
@@ -449,6 +450,15 @@ type AcceptedMessageSpool struct {
 	SHA256 string `json:"sha256"`
 }
 
+// SendRecoveryIdentity pins Sent recovery to the original nonsecret IMAP
+// target. Passwords are deliberately excluded so credential rotation is safe.
+type SendRecoveryIdentity struct {
+	AccountID string `json:"account_id,omitempty"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Username  string `json:"username"`
+}
+
 type SendAttempt struct {
 	ID                  string                   `json:"id"`
 	DraftRevision       string                   `json:"draft_revision,omitempty"`
@@ -458,6 +468,7 @@ type SendAttempt struct {
 	EnvelopeFingerprint string                   `json:"envelope_fingerprint,omitempty"`
 	MIMEFingerprint     string                   `json:"mime_fingerprint,omitempty"`
 	RecoverySpool       *AcceptedMessageSpool    `json:"recovery_spool,omitempty"`
+	RecoveryIdentity    *SendRecoveryIdentity    `json:"recovery_identity,omitempty"`
 	Outcome             SendOutcome              `json:"outcome"`
 	InvocationStarted   bool                     `json:"invocation_started"`
 	AcceptedByMail      bool                     `json:"accepted_by_mail"`

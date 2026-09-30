@@ -122,6 +122,7 @@ func draftSendAttemptSummaryFrom(attempt *SendAttempt) *DraftSendAttemptSummary 
 		MessageID:           attempt.MessageID,
 		EnvelopeFingerprint: attempt.EnvelopeFingerprint,
 		MIMEFingerprint:     attempt.MIMEFingerprint,
+		RecoveryIdentity:    cloneSendRecoveryIdentity(attempt.RecoveryIdentity),
 		Outcome:             attempt.Outcome,
 		InvocationStarted:   attempt.InvocationStarted,
 		AcceptedByMail:      attempt.AcceptedByMail,

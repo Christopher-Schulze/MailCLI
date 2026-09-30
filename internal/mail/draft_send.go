@@ -133,6 +133,10 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 	if err != nil {
 		return SendResult{}, err
 	}
+	recoveryIdentity, err := newSendRecoveryIdentity(identity, imapHost, imapPort)
+	if err != nil {
+		return SendResult{}, err
+	}
 	if err := s.send.CheckMutationLock(ctx, transport.ImapConfig{
 		Host: imapHost, Port: imapPort, Username: identity.Credential,
 	}); err != nil {
@@ -189,6 +193,7 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 		EnvelopeFingerprint: envelopeFingerprint(draft, messageID),
 		MIMEFingerprint:     mimeFingerprint,
 		RecoverySpool:       recoverySpool,
+		RecoveryIdentity:    recoveryIdentity,
 	})
 	if err != nil {
 		cleanupErr := recoverUnclaimedAcceptedMessageSpool(root, ref, storage)
@@ -526,12 +531,7 @@ func (s *Service) reconcileUnknownViaImap(
 			Message: "direct send transport has no IMAP operator; reconciliation over the Sent mailbox is unavailable",
 		}
 	}
-	identity, err := s.resolveSendIdentity(ctx, draft)
-	if err != nil {
-		return resultForReconcile(ref, attempt), err
-	}
-	sender := identity.Sender
-	_, _, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
+	identity, cfg, err := s.resolveSendRecoveryTarget(ctx, draft, attempt)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
@@ -540,9 +540,9 @@ func (s *Service) reconcileUnknownViaImap(
 		return resultForReconcile(ref, attempt), fmt.Errorf("load send credentials: %w", err)
 	}
 	if err != nil || password == "" {
-		return resultForReconcile(ref, attempt), missingCredentialsErrorFor(sender, identity.Credential)
+		return resultForReconcile(ref, attempt), missingCredentialsErrorFor(identity.Sender, identity.Credential)
 	}
-	cfg := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password}
+	cfg.Password = password
 	mailboxes, err := imap.ListMailboxes(ctx, cfg)
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
@@ -648,12 +648,7 @@ func (s *Service) reconcileMirrorPending(
 			Message: "direct SMTP send is unavailable because no send transport is configured",
 		}
 	}
-	identity, err := s.resolveSendIdentity(ctx, draft)
-	if err != nil {
-		return result, err
-	}
-	sender := identity.Sender
-	_, _, imapHost, imapPort, err := ResolveTransportHosts(sender, identity.Binding)
+	identity, sentConfig, err := s.resolveSendRecoveryTarget(ctx, draft, attempt)
 	if err != nil {
 		return result, err
 	}
@@ -662,10 +657,10 @@ func (s *Service) reconcileMirrorPending(
 		return result, fmt.Errorf("load send credentials: %w", err)
 	}
 	if err != nil || password == "" {
-		return result, missingCredentialsErrorFor(sender, identity.Credential)
+		return result, missingCredentialsErrorFor(identity.Sender, identity.Credential)
 	}
 	imap := s.send.ImapClient()
-	sentConfig := transport.ImapConfig{Host: imapHost, Port: imapPort, Username: identity.Credential, Password: password}
+	sentConfig.Password = password
 	sentBox := ""
 	if imap != nil {
 		mailboxes, listErr := imap.ListMailboxes(ctx, sentConfig)

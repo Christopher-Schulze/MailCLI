@@ -52,8 +52,8 @@ func cloneSendObservationBaseline(value *SendObservationBaseline) *SendObservati
 // sendAttemptOptions carries every field a send claim can record at creation.
 // Root and Ref are required; Storage is optional and defaults to storage rooted
 // at Root. DraftRevision, Baseline, MessageID, EnvelopeFingerprint,
-// MIMEFingerprint, and RecoverySpool are optional evidence fields retained
-// verbatim in the claim.
+// MIMEFingerprint, RecoverySpool and RecoveryIdentity are optional evidence
+// fields retained verbatim in the claim.
 type sendAttemptOptions struct {
 	Root                string
 	Ref                 string
@@ -64,6 +64,7 @@ type sendAttemptOptions struct {
 	EnvelopeFingerprint string
 	MIMEFingerprint     string
 	RecoverySpool       *AcceptedMessageSpool
+	RecoveryIdentity    *SendRecoveryIdentity
 }
 
 func beginSendAttempt(options sendAttemptOptions) (SendAttempt, error) {
@@ -79,6 +80,7 @@ func beginSendAttempt(options sendAttemptOptions) (SendAttempt, error) {
 		EnvelopeFingerprint: options.EnvelopeFingerprint,
 		MIMEFingerprint:     options.MIMEFingerprint,
 		RecoverySpool:       cloneAcceptedMessageSpool(options.RecoverySpool),
+		RecoveryIdentity:    cloneSendRecoveryIdentity(options.RecoveryIdentity),
 		ObservationBaseline: cloneSendObservationBaseline(options.Baseline),
 	}
 	state := options.Storage
@@ -189,6 +191,12 @@ func validSendAttempt(stored storedSendAttempt, ref string) bool {
 	}
 	if !validAcceptedMessageSpool(attempt.RecoverySpool) {
 		return false
+	}
+	if attempt.RecoveryIdentity != nil {
+		normalized, err := normalizeSendRecoveryIdentity(*attempt.RecoveryIdentity)
+		if err != nil || normalized != *attempt.RecoveryIdentity {
+			return false
+		}
 	}
 	if !validSendMaterialization(attempt.Materialized) {
 		return false

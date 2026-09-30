@@ -894,6 +894,7 @@ It needs no Full Disk Access or Automation permission; the first Keychain read m
    Other domains fail with `transport_unsupported_provider` before Keychain access or network connection unless both legs resolve to explicit binding hosts.
 3. The app-specific password loads from the Keychain; only a missing item or an empty successfully loaded password returns `smtp_credentials_missing` naming `mailcli send setup`. Other credential read failures retain their code and cause and stop before submission or mirroring.
 4. MailCLI builds the RFC 5322 message with a locally generated Message-ID and atomically retains the composed bytes in a private mode-0600 `<REF>.send-spool`; the send claim records the Message-ID, envelope and versioned MIME fingerprints and the spool's size and SHA-256.
+   Before SMTP submission, `send_attempt.recovery_identity` pins the resolved IMAP account ID (when bound), host, port and credential username; it contains no password.
    Each attachment is read once through SHA-256 during composition; a fingerprint mismatch names the attachment and aborts before SMTP.
 5. The bytes are submitted over SMTP with STARTTLS and appended to the Sent mailbox over IMAP, which always uses implicit TLS on the bound port (993 for Gmail and iCloud); an IMAP server that offers only STARTTLS is unsupported; each consumer reads an independent view pinned to the spool's identity, so path replacement cannot redirect bytes or cleanup.
 
@@ -939,6 +940,7 @@ Only one complete SEARCH response with unique positive 32-bit message identities
 A literal copy, source-length, deadline or flush failure before the terminating CRLF returns `imap_append_incomplete` and discards the session; reconcile searches Sent, then retries only that APPEND.
 After the terminating CRLF, a failed write or unreadable reply returns `imap_append_outcome_unknown`; reconciliation searches and verifies Sent but never retries automatically, and a duplicate or unprovable result stays `send_mirror_outcome_unknown`.
 Missing or changed recovery-spool bytes block APPEND and keep the draft.
+Recovery compares the current target with the retained original identity before credential lookup or IMAP contact. Account, endpoint or username changes return `send_identity_unverifiable`, retaining the claim and spool; inspect `send_attempt.recovery_identity` and restore the original target before reconciliation. Password rotation for an unchanged target remains supported.
 After SMTP acceptance every mirror rejection requires `drafts.reconcile`; never rerun `drafts.send`.
 
 After terminal evidence, MailCLI writes a private `<REF>.send-receipt` before removing the draft, claim and spool.
@@ -949,7 +951,7 @@ Crash recovery closes the submit-to-record window.
 If the process dies after SMTP acceptance but before the claim update, `drafts reconcile` finds `outcome_unknown` with a Message-ID and verifies it against Sent: exactly one match is fetched and checked against Message-ID, sender, recipients, subject, body and complete MIME fingerprint before the claim becomes `sent`, proving a Sent copy, not delivery.
 Sent verification uses an owned streaming FETCH source bounded by the 1 GiB composed spool limit, hashes decoded attachments incrementally within the 512 MiB aggregate and 100-attachment limits, and keeps the existing 16 MiB text-part and 64 MiB header bounds. The source must match its declared length and close successfully before adoption. Legacy byte-only fetchers retain the 64 MiB source cap and fail closed for larger candidates.
 Duplicate matches, an identity mismatch or an unreadable candidate fail closed; absence returns `send_outcome_unverifiable` with manual remediation and never triggers an automatic retry, and a fingerprint mismatch returns `send_fingerprint_mismatch`.
-Legacy claims without a Message-ID stay blocked with `send_reconcile_unavailable`, and claims without a versioned MIME fingerprint with `send_identity_unverifiable`.
+Legacy claims without a Message-ID stay blocked with `send_reconcile_unavailable`, and claims without a versioned MIME fingerprint or original IMAP recovery identity with `send_identity_unverifiable`. The original target is never guessed from current configuration; unresolved legacy claims need manual Sent verification. Historical terminal receipts and store-baseline reconciliation remain readable.
 
 If the process stopped after publishing a spool but before creating its claim, the next send holds the exclusive draft lease, verifies that no claim exists and that the exact spool is a bounded regular mode-0600 file with unchanged identity, removes it and composes afresh.
 An ambiguous or foreign spool is kept and `drafts send` refuses before SMTP with `send_recovery_spool_changed` (`effect_certainty:none`, `retryability:user_input_required`, recovery `drafts.inspect --ref REF --json`).
