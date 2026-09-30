@@ -207,7 +207,7 @@ func projectionTargetForCommand(id string) (projectionTarget, bool) {
 		return projectionTargetRaw, true
 	case "drafts.list":
 		return projectionTargetDraftList, true
-	case "messages.list":
+	case "messages.list", "messages.thread":
 		return projectionTargetListPage, true
 	case "messages.search", "messages.filter":
 		return projectionTargetSearchPage, true

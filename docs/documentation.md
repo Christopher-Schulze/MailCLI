@@ -173,7 +173,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   In human mode a complete local `.emlx` source streams directly to stdout without a second in-memory copy.
 - `messages.state`: read server flags over IMAP `UID FETCH` and compare them with the local index; main flag `--ref`.
   Example: `mailcli messages state --ref MESSAGE_REF --json`. Output: `state`.
-- `messages.thread`: list a message's conversation members chronologically from the local grouping; main flags `--ref`, `--limit`, `--cursor`, `--max-bytes`.
+- `messages.thread`: list a message's conversation members chronologically from the local grouping; main flags `--ref`, `--limit`, `--cursor`, `--fields`, `--max-bytes`.
   Example: `mailcli messages thread --ref MESSAGE_REF --json`. Output: `thread`.
 - `messages.new`: compare the newest server messages of a mailbox with the local store over IMAP and list the ones the store lacks; main flags `--account`, `--mailbox` (default `inbox`), `--limit` (1 to 50, default 20), `--require-complete` (exit 3 for incomplete comparison coverage).
   Example: `mailcli messages new --account ACCOUNT_REF --json`. Output: `new_messages`.
@@ -337,8 +337,9 @@ Combining `--fields` with `--view`, an unknown field, or a view unsupported by t
 Hydration recovery for `messages get` and `drafts open` retains the validated invocation arguments, including projection, link, excerpt, budget and export options; recovery guidance never executes the retry itself.
 Seven target-specific field registries drive validation, embedded schemas and `data.capabilities.limits.output_projection`, including `draft_list_fields`, `list_page_fields` and `search_page_fields`; batch read input uses the message registry.
 
-`messages.list`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `flags_state`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth`, `staleness_note`, `mailbox_ref`, `account` (list only) and the reply-metadata and excerpt keys.
+`messages.list`, `messages.thread`, `messages.filter` and `messages.search` accept `--fields` for `sender`, `subject`, `date_received`, `date_sent`, `message_id`, `read`, `flagged`, `junk`, `deleted`, `flags_state`, `size` and `attachment_count`; filter and search also accept `snippet`, and pages can select `conversation_id`, `server_truth`, `staleness_note`, `mailbox_ref`, `account` (list and thread only) and the reply-metadata and excerpt keys.
 Every projected message keeps `ref` and the named fields (`mailbox_ref` and `account` only when named; reply metadata and excerpts also when `--with-threading` or `--with-excerpt` was given). A nonempty `enrichment_error` remains an evidence peer in narrowed pages. A nonempty `flags_state` accompanies selected `read`, `flagged` or `deleted` as their evidence peer; local-only summaries omit it. Filter and search keep the complete coverage object, and `next_cursor` appears only when continuation is available.
+Thread projection selects fields within `data.thread.messages` while retaining the seed `ref`, `conversation_id`, `truncated` and both available cursors. For example, `messages thread --ref MSG_REF --fields ref,subject --json` returns compact members; omitting `--fields` or selecting `all` keeps complete summaries. Thread field selection adds no header reads, excerpts or RFC threading enrichment.
 Draft JSON lists (`content_diagnostics`, recipients, attachments) and `missing_parts` are `[]` when empty, never `null`.
 Draft-list `--fields` accepts combinations of `age_days`, `created_at` and `updated_at`; the fixed core stays in every healthy summary, `state_error` appears only for corrupt summaries, and capabilities list `draft_list_core_fields` and `draft_list_optional_fields`.
 

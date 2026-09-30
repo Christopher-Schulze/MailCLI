@@ -38,6 +38,14 @@
       "description": "maximum JSON response bytes"
     },
     {
+      "name": "--fields",
+      "value_type": "field_list",
+      "takes_value": true,
+      "value_required": true,
+      "values": ["all"],
+      "description": "comma-separated message fields"
+    },
+    {
       "name": "--json",
       "value_type": "boolean",
       "takes_value": false,
@@ -57,6 +65,13 @@
         "REF"
       ],
       "description": "Supply one non-empty reference; all supplied --ref and REF values must be identical."
+    },
+    {
+      "kind": "conditional",
+      "flags": [
+        "--fields"
+      ],
+      "description": "the all page field cannot be combined with any other page field"
     }
   ]
 }

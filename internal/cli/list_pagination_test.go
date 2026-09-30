@@ -20,6 +20,8 @@ type catalogPagingGateway struct {
 	messageLimit  int
 	searchLimit   int
 	threadRequest mail.MessageThreadRequest
+	thread        *mail.MessageThread
+	threadCalls   int
 }
 
 func (g *catalogPagingGateway) ListAccounts(context.Context) ([]mail.Account, error) {
@@ -51,6 +53,10 @@ func (g *catalogPagingGateway) SearchMessages(_ context.Context, query mail.Prep
 
 func (g *catalogPagingGateway) MessageThread(_ context.Context, request mail.MessageThreadRequest) (mail.MessageThread, error) {
 	g.threadRequest = request
+	g.threadCalls++
+	if g.thread != nil {
+		return *g.thread, nil
+	}
 	return mail.MessageThread{Ref: request.Ref, Messages: []mail.MessageSummary{{Ref: "thread-result"}}}, nil
 }
 
@@ -351,4 +357,146 @@ func mustJSON(t *testing.T, value any) []byte {
 		t.Fatalf("marshal test response: %v", err)
 	}
 	return payload
+}
+
+func TestMessageThreadFieldProjection(t *testing.T) {
+	manifest, outputs := fixtureOutputContracts(t)
+	thread := mail.MessageThread{Ref: "seed", ConversationID: 42, Truncated: true, NextCursor: "newer", PrevCursor: "older",
+		Messages: []mail.MessageSummary{
+			{Ref: "first", Subject: "first subject", Sender: strings.Repeat("sender", 100), FlagsState: "unverified", EnrichmentError: "operation_timeout"},
+			{Ref: "second", Subject: "second subject", Sender: "second sender", Read: true},
+		}}
+	gateway := &catalogPagingGateway{thread: &thread}
+	service := mail.NewService(gateway)
+	base := []string{"messages", "thread", "--ref", thread.Ref, "--cursor", "incoming", "--limit", "2", "--json"}
+	fullBytes := 0
+	for _, selection := range []string{"", "all", " Subject , read "} {
+		t.Run("fields="+selection, func(t *testing.T) {
+			args := append([]string(nil), base...)
+			if selection != "" {
+				args = append(args, "--fields", selection)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run(context.Background(), service, args, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("thread failed: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			validateCommandFixture(t, stdout.Bytes(), manifest, outputs)
+			var response struct {
+				Data struct {
+					Thread     json.RawMessage `json:"thread"`
+					Projection *projectionInfo `json:"projection"`
+				}
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			var projected mail.MessageThread
+			if err := json.Unmarshal(response.Data.Thread, &projected); err != nil {
+				t.Fatal(err)
+			}
+			if projected.Ref != thread.Ref || projected.ConversationID != 42 || !projected.Truncated ||
+				projected.NextCursor != "newer" || projected.PrevCursor != "older" || len(projected.Messages) != 2 ||
+				projected.Messages[0].Ref != "first" || projected.Messages[1].Ref != "second" ||
+				gateway.threadRequest.Cursor != "incoming" || gateway.threadRequest.Limit != 2 {
+				t.Fatalf("thread identity, order or pagination changed: %s", &stdout)
+			}
+			if selection == "" || selection == "all" {
+				if !bytes.Equal(response.Data.Thread, mustJSON(t, thread)) {
+					t.Fatalf("full summaries changed: %s", response.Data.Thread)
+				}
+				if selection == "" {
+					fullBytes = stdout.Len()
+					if response.Data.Projection != nil {
+						t.Fatal("default output gained projection metadata")
+					}
+				}
+				return
+			}
+			var members struct {
+				Messages []map[string]json.RawMessage `json:"messages"`
+			}
+			if err := json.Unmarshal(response.Data.Thread, &members); err != nil {
+				t.Fatal(err)
+			}
+			if len(members.Messages[0]) != 5 || len(members.Messages[1]) != 3 || string(members.Messages[0]["read"]) != "false" ||
+				string(members.Messages[0]["flags_state"]) != `"unverified"` || string(members.Messages[0]["enrichment_error"]) != `"operation_timeout"` ||
+				string(members.Messages[1]["read"]) != "true" || projected.Messages[0].Subject != thread.Messages[0].Subject ||
+				response.Data.Projection == nil || response.Data.Projection.View != "custom" ||
+				strings.Join(response.Data.Projection.Fields, ",") != "read,subject" {
+				t.Fatalf("projection lost selected values/evidence or retained extra fields: %s", &stdout)
+			}
+			if stdout.Len() >= fullBytes {
+				t.Fatalf("narrow fixture grew: full=%d projected=%d", fullBytes, stdout.Len())
+			}
+			t.Logf("thread fixture bytes including newline: default=%d projected=%d", fullBytes, stdout.Len())
+			var finalized bytes.Buffer
+			if code := FinalizeJSON(&finalized, args, stdout.Bytes(), 0, fmt.Errorf("cleanup failed")); code != 1 {
+				t.Fatalf("cleanup code = %d", code)
+			}
+			validateCommandFixture(t, finalized.Bytes(), manifest, outputs)
+			var after struct {
+				Data struct{ Thread json.RawMessage }
+			}
+			if err := json.Unmarshal(finalized.Bytes(), &after); err != nil || !bytes.Equal(after.Data.Thread, response.Data.Thread) {
+				t.Fatalf("cleanup changed projected thread: %v %s", err, &finalized)
+			}
+			for _, budget := range []int{stdout.Len(), stdout.Len() - 1} {
+				boundedArgs := append(append([]string(nil), args...), "--max-bytes", strconv.Itoa(budget))
+				bounded, code := runListJSON(t, service, boundedArgs)
+				if budget == stdout.Len() {
+					if code != 0 || bounded.Data.Thread == nil {
+						t.Fatalf("exact projection budget failed: %+v", bounded)
+					}
+				} else if code != 1 || bounded.Error == nil || bounded.Error.Code != "output_too_large" || bounded.Data.Thread != nil ||
+					bounded.Data.RequiredBytes == nil || *bounded.Data.RequiredBytes != int64(stdout.Len()) || bounded.Data.Measured != "exact" {
+					t.Fatalf("overflow lost exact projected size or leaked rows: %+v", bounded)
+				}
+			}
+		})
+	}
+	fields := schemaFlagsByName(decodeTestCommandSchema(t, schemaForCommand("messages.thread")))["--fields"]
+	if !fields.TakesValue || strings.Join(fields.Values, ",") != strings.Join(projectionFieldNames(projectionTargetListPage), ",") {
+		t.Fatalf("thread schema does not expose the shared field registry: %+v", fields)
+	}
+}
+
+func TestMessageThreadFieldsValidationAndHumanOutput(t *testing.T) {
+	for _, fields := range []string{"", "content", "all,subject", "subject,subject", "--json"} {
+		t.Run(fields, func(t *testing.T) {
+			gateway := newCatalogPagingGateway(0)
+			response, code := runListJSON(t, mail.NewService(gateway), []string{"messages", "thread", "--ref", "seed", "--fields", fields, "--json"})
+			if code != 2 || response.Error == nil || response.Error.Code != "invalid_argument" || gateway.threadCalls != 0 {
+				t.Fatalf("invalid selection reached retrieval: code=%d calls=%d response=%+v", code, gateway.threadCalls, response)
+			}
+		})
+	}
+	service := mail.NewService(newCatalogPagingGateway(0))
+	var original, selected, stderr bytes.Buffer
+	args := []string{"messages", "thread", "--ref", "seed"}
+	if Run(context.Background(), service, args, &original, &stderr) != 0 ||
+		Run(context.Background(), service, append(args, "--fields", "subject"), &selected, &stderr) != 0 ||
+		!bytes.Equal(original.Bytes(), selected.Bytes()) || stderr.Len() != 0 {
+		t.Fatalf("human output changed: before=%s after=%s stderr=%s", &original, &selected, &stderr)
+	}
+}
+
+func TestMessageThreadProjectionPreservesEmptyCollection(t *testing.T) {
+	for _, messages := range [][]mail.MessageSummary{nil, {}} {
+		t.Run(string(mustJSON(t, messages)), func(t *testing.T) {
+			thread := mail.MessageThread{Ref: "seed", Messages: messages}
+			service := mail.NewService(&catalogPagingGateway{thread: &thread})
+			var stdout, stderr bytes.Buffer
+			if code := Run(context.Background(), service, []string{"messages", "thread", "--ref", "seed", "--fields", "ref", "--json"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("empty projection failed: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			var response struct {
+				Data struct {
+					Thread struct{ Messages json.RawMessage }
+				}
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || !bytes.Equal(response.Data.Thread.Messages, mustJSON(t, messages)) {
+				t.Fatalf("empty collection shape changed: %v %s", err, &stdout)
+			}
+		})
+	}
 }

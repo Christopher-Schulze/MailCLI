@@ -367,6 +367,7 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	ref := flags.String("ref", "", "message ref")
 	limit := flags.Int("limit", mail.DefaultPageLimit, "page size (1-200)")
 	cursor := flags.String("cursor", "", "next or previous cursor from this thread")
+	fields := flags.String("fields", "", "comma-separated message fields")
 	maxBytes := flags.Int64("max-bytes", defaultJSONOutputBytes, "maximum JSON response bytes")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
@@ -378,6 +379,10 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 	if err := validateOutputByteLimit(*maxBytes); err != nil {
 		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
 	}
+	selectedFields, projection, projectionErr := pageProjectionOptions(flags, projectionTargetListPage, *fields)
+	if projectionErr != nil {
+		return failCommand("messages.thread", *jsonOutput, projectionErr, stdout, stderr)
+	}
 
 	operationCtx, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
@@ -388,7 +393,11 @@ func runMessageThread(ctx context.Context, service *mail.Service, args []string,
 		return failCommand("messages.thread", *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {
-		return writeBoundedListSuccess(stdout, "messages.thread", responseData{Thread: &thread}, *maxBytes,
+		data := responseData{Thread: &thread, Projection: projection}
+		if projection != nil {
+			data = projectedMessageThreadData(data, thread, selectedFields)
+		}
+		return writeBoundedListSuccess(stdout, "messages.thread", data, *maxBytes,
 			listOutputRecovery("messages.thread"))
 	}
 	writeFormat(stdout, "conversation_id\t%d\ttruncated\t%t\n", thread.ConversationID, thread.Truncated)

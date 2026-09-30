@@ -80,6 +80,7 @@ type serializedProjection struct {
 	attachments *[]attachmentProjection
 	drafts      *[]draftListEntryProjection
 	batch       *batchResultProjection
+	thread      *messageThreadProjection
 	hideRaw     bool
 }
 
@@ -185,6 +186,15 @@ type attachmentProjection struct {
 type messageListPageProjection struct {
 	Messages   []messagePageItemProjection `json:"messages"`
 	NextCursor string                      `json:"next_cursor,omitempty"`
+}
+
+type messageThreadProjection struct {
+	Ref            string                      `json:"ref"`
+	ConversationID int64                       `json:"conversation_id"`
+	Messages       []messagePageItemProjection `json:"messages"`
+	Truncated      bool                        `json:"truncated"`
+	NextCursor     string                      `json:"next_cursor,omitempty"`
+	PrevCursor     string                      `json:"prev_cursor,omitempty"`
 }
 
 type searchPageProjection struct {
@@ -1147,6 +1157,24 @@ func projectedDraftData(data responseData, draft mail.Draft, options outputOptio
 	return data
 }
 
+func projectedMessageThreadData(data responseData, thread mail.MessageThread, fields map[string]struct{}) responseData {
+	if _, all := fields["all"]; all {
+		return data
+	}
+	var messages []messagePageItemProjection
+	if thread.Messages != nil {
+		messages = make([]messagePageItemProjection, len(thread.Messages))
+		for index, message := range thread.Messages {
+			messages[index] = projectMessageSummary(message, fields)
+		}
+	}
+	data.serialization = &serializedProjection{thread: &messageThreadProjection{
+		Ref: thread.Ref, ConversationID: thread.ConversationID, Messages: messages,
+		Truncated: thread.Truncated, NextCursor: thread.NextCursor, PrevCursor: thread.PrevCursor,
+	}}
+	return data
+}
+
 func projectedDraftListData(data responseData, entries []draftListEntry, options outputOptions) responseData {
 	if !options.fieldsProvided {
 		return data
@@ -1490,6 +1518,11 @@ func (data responseData) MarshalJSON() ([]byte, error) {
 			*responseDataAlias
 			BatchResult *batchResultProjection `json:"batch_result,omitempty"`
 		}{&copy, projection.batch})
+	case data.Thread != nil && projection.thread != nil:
+		return marshalCLIJSON(struct {
+			*responseDataAlias
+			Thread *messageThreadProjection `json:"thread,omitempty"`
+		}{&copy, projection.thread})
 	default:
 		return marshalCLIJSON(copy)
 	}

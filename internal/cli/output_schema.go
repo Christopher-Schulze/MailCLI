@@ -296,6 +296,8 @@ func outputFieldType(owner reflect.Type, name string, original reflect.Type) ref
 			return reflect.TypeFor[*[]draftListEntryProjection]()
 		case "batch_result":
 			return reflect.TypeFor[*batchResultProjection]()
+		case "thread":
+			return reflect.TypeFor[*messageThreadProjection]()
 		}
 	}
 	return original
