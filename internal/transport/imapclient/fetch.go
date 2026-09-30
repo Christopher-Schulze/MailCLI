@@ -80,7 +80,7 @@ func (c *Client) fetchMessageSection(
 		return nil, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH write")
 	}
 
-	payload, err := c.readFetchSource(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool)
+	payload, err := c.readFetchSource(ctx, ps.sess, tag, uid, expectedUIDValidity, maxBytes, spool, bodySection)
 	if err != nil {
 		return nil, err
 	}
@@ -130,19 +130,20 @@ func fetchReadError(ctx context.Context, err error, maxBytes int64) error {
 	return wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP FETCH read")
 }
 
-func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64) ([]byte, error) {
-	source, err := c.readFetchSource(ctx, sess, tag, requestedUID, 0, maxBytes, false)
+func (c *Client) readFetchLiteral(ctx context.Context, sess *session, tag string, requestedUID uint32, maxBytes int64, bodySection string) ([]byte, error) {
+	source, err := c.readFetchSource(ctx, sess, tag, requestedUID, 0, maxBytes, false, bodySection)
 	if err != nil {
 		return nil, err
 	}
 	return source.data, nil
 }
 
-func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool) (result *fetchSource, resultErr error) {
+func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string, requestedUID, expectedUIDValidity uint32, maxBytes int64, spool bool, bodySection string) (result *fetchSource, resultErr error) {
 	if err := validateFetchLimit(maxBytes); err != nil {
 		return nil, err
 	}
 	responseLimit := fetchResponseLimit(maxBytes)
+	expectedSection := strings.Replace(strings.ToUpper(bodySection), "BODY.PEEK[", "BODY[", 1)
 	var payload *fetchSource
 	var pending []*fetchSource
 	defer func() {
@@ -251,9 +252,9 @@ func (c *Client) readFetchSource(ctx context.Context, sess *session, tag string,
 				Message: "IMAP FETCH returned duplicate BODY values for the requested UID",
 			}
 		}
-		if len(parsed.sections) > 1 {
+		if len(parsed.sections) != 1 || parsed.sections[0].name != expectedSection {
 			sess.dirty = true
-			return nil, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP FETCH returned more BODY sections than requested"}
+			return nil, &transport.TransportError{Code: transport.CodeIMAPResponseMalformed, Message: "IMAP FETCH did not return the exact requested BODY section"}
 		}
 		found = true
 		if parsed.bodyLiteral {

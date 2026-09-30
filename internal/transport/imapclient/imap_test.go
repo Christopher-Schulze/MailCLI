@@ -1829,7 +1829,7 @@ func TestReadFetchLiteralAcceptsUIDAfterBodyAndUnsolicitedFlags(t *testing.T) {
 		"A001 OK FETCH completed\r\n"
 	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
 
-	payload, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	payload, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024, "BODY[]")
 	if err != nil {
 		t.Fatalf("readFetchLiteral() error = %v", err)
 	}
@@ -1844,7 +1844,7 @@ func TestReadFetchLiteralRejectsDuplicateTargetBodies(t *testing.T) {
 		"A001 OK FETCH completed\r\n"
 	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
 
-	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024, "BODY[]")
 	if code := transport.ErrorCode(err); code != transport.CodeIMAPResponseMalformed {
 		t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
 			code, transport.CodeIMAPResponseMalformed, err)
@@ -1919,7 +1919,7 @@ func TestReadFetchLiteralRejectsInvalidAnnouncedLength(t *testing.T) {
 			response := "* 1 FETCH (UID 42 BODY[] {" + test.length + "}\r\n"
 			sess := &session{br: bufio.NewReader(strings.NewReader(response))}
 			_, err := New().readFetchLiteral(
-				context.Background(), sess, "A001", 42, 1024,
+				context.Background(), sess, "A001", 42, 1024, "BODY[]",
 			)
 			if code := transport.ErrorCode(err); code != transport.CodeIMAPResponseMalformed {
 				t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
@@ -1936,7 +1936,7 @@ func TestReadFetchLiteralRejectsTruncatedPayload(t *testing.T) {
 	response := "* 1 FETCH (UID 42 BODY[] {5}\r\nabc"
 	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
 
-	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024)
+	_, err := New().readFetchLiteral(context.Background(), sess, "A001", 42, 1024, "BODY[]")
 	if code := transport.ErrorCode(err); code != transport.CodeIMAPFetchFailed {
 		t.Fatalf("readFetchLiteral() code = %s, want %s: %v",
 			code, transport.CodeIMAPFetchFailed, err)

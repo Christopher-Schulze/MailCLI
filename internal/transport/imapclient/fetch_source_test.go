@@ -89,7 +89,7 @@ func TestFetchSourceResponses(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sess := &session{br: bufio.NewReader(strings.NewReader(test.response))}
-			source, err := New().readFetchSource(context.Background(), sess, "A001", 42, 12345, 4<<20, true)
+			source, err := New().readFetchSource(context.Background(), sess, "A001", 42, 12345, 4<<20, true, "BODY[]")
 			if test.code != "" {
 				if source != nil || transport.ErrorCode(err) != test.code {
 					t.Fatalf("source=%v error=%v, want %s", source, err, test.code)
@@ -241,7 +241,7 @@ func TestFetchSourceSpoolsAggregateLiteralMemory(t *testing.T) {
 	literal := fmt.Sprintf("{%d}\r\n%s", len(body), body)
 	response := "* 1 FETCH (X " + literal + " BODY[] " + literal + " UID 42)\r\nA001 OK done\r\n"
 	sess := &session{br: bufio.NewReader(strings.NewReader(response))}
-	source, err := New().readFetchSource(context.Background(), sess, "A001", 42, 12345, 4<<20, true)
+	source, err := New().readFetchSource(context.Background(), sess, "A001", 42, 12345, 4<<20, true, "BODY[]")
 	if err != nil {
 		t.Fatal(err)
 	}

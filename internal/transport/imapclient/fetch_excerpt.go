@@ -136,9 +136,15 @@ func excerptSourceFromSections(sections []fetchBodySection, maxTextBytes int64) 
 	var headerSeen, textSeen bool
 	for _, section := range sections {
 		switch {
-		case strings.HasPrefix(section.name, "BODY[HEADER.FIELDS"):
+		case section.name == strings.Replace(excerptHeaderFields, "BODY.PEEK[", "BODY[", 1):
+			if headerSeen || section.data == nil {
+				return transport.MessageExcerptSource{}, fmt.Errorf("excerpt response has duplicate or NIL header fields")
+			}
 			header, headerSeen = section.data, true
 		case section.name == "BODY[TEXT]<0>" || section.name == "BODY[TEXT]":
+			if textSeen || section.data == nil {
+				return transport.MessageExcerptSource{}, fmt.Errorf("excerpt response has duplicate or NIL text")
+			}
 			text, textSeen = section.data, true
 		default:
 			return transport.MessageExcerptSource{}, fmt.Errorf("unexpected BODY section %q", section.name)

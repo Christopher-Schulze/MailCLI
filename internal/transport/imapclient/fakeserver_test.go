@@ -854,7 +854,15 @@ func (s *fakeServer) handle(conn net.Conn) {
 				if responseUID == 0 {
 					responseUID = uint32(uid)
 				}
-				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d BODY[] {%d}", responseUID, len(payload)))
+				section := "BODY[]"
+				if len(args) > 2 {
+					if start := strings.Index(args[2], "BODY.PEEK["); start >= 0 {
+						if end := strings.IndexByte(args[2][start:], ']'); end >= 0 {
+							section = strings.Replace(args[2][start:start+end+1], "BODY.PEEK[", "BODY[", 1)
+						}
+					}
+				}
+				s.writeLine(bw, fmt.Sprintf("* 1 FETCH (UID %d %s {%d}", responseUID, section, len(payload)))
 				if _, err := bw.Write(payload); err != nil {
 					return
 				}

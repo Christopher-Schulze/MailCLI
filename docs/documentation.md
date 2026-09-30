@@ -583,6 +583,7 @@ Complete local reads never contact Gmail, iCloud, IMAP, SMTP, OAuth or account-l
 Incomplete content is hydrated with bounded IMAP `FETCH BODY.PEEK[]` over the account's transport without launching Mail.app.
 The shared 64 MiB message cap binds local raw-source reads and full-message hydration for reads and attachment saving: oversized local sources and remote literals fail with `raw_source_too_large` before buffering. Sent reconciliation uses the separate composed-message limits described below.
 FETCH parses complete logical responses across literal boundaries, accepts UID and BODY in either order, ignores unrelated flag updates, and fails closed on duplicate or contradictory BODY values; an authoritative UIDVALIDITY change during FETCH invalidates the result.
+The returned BODY section must match the requested full source, headers or header fields after case and PEEK normalization; unexpected partial offsets fail closed. Excerpts require the requested header fields and one non-NIL text prefix at offset zero, rejecting conflicting or duplicate sections.
 Large literals spill to private unlinked temporary files instead of the heap, which can add disk I/O latency.
 
 A missing source is recovered through the reference's catalog-to-server UID mapping when it can be checked against the live row and mailbox-local `Info.plist` UIDVALIDITY.

@@ -215,7 +215,7 @@ func (c *Client) checkMessageIDNormalized(
 	if err := c.writeLine(sess, cmd); err != nil {
 		return false, wrapIOError(ctx, err, transport.CodeIMAPFetchFailed, "IMAP Message-ID FETCH write")
 	}
-	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes)
+	raw, err := c.readFetchLiteral(ctx, sess, tag, uid, maxMessageIDHeaderBytes, "BODY[HEADER.FIELDS (MESSAGE-ID)]")
 	if err != nil {
 		return false, err
 	}

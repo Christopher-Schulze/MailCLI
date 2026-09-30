@@ -14,7 +14,7 @@ import (
 const excerptTestHeader = "Content-Type: text/plain\r\n\r\n"
 
 func excerptTestResponse(uid int, section, text string) string {
-	return fmt.Sprintf("* %d FETCH (UID %d BODY[HEADER.FIELDS (MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] {%d}\r\n%s %s {%d}\r\n%s)\r\n",
+	return fmt.Sprintf("* %d FETCH (UID %d BODY[HEADER.FIELDS (MESSAGE-ID MIME-VERSION CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] {%d}\r\n%s %s {%d}\r\n%s)\r\n",
 		uid, uid, len(excerptTestHeader), excerptTestHeader, section, len(text), text)
 }
 
