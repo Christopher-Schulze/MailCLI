@@ -87,7 +87,7 @@ func TestResolveAccountEmailFromCatalog(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := resolveAccountEmailFromCatalog(test.accounts, "TARGET-ACCOUNT", test.credentials)
+			got, err := resolveAccountEmailFromCatalog(context.Background(), test.accounts, "TARGET-ACCOUNT", test.credentials)
 			if got != test.wantEmail {
 				t.Fatalf("email = %q, want %q; error = %v", got, test.wantEmail, err)
 			}
@@ -122,6 +122,7 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 		t.Fatalf("EncodeAccount() error = %v", err)
 	}
 	sender, credential, binding, err := resolveAccountIdentityFromCatalog(
+		context.Background(),
 		[]mail.Account{{Ref: accountRef, State: "ok", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
 		"TARGET-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},
@@ -140,6 +141,7 @@ func TestResolveAccountIdentityBindingUsesConfiguredAliasWithoutHistory(t *testi
 
 func TestResolveAccountIdentityBindingRejectsRemovedAccount(t *testing.T) {
 	_, _, _, err := resolveAccountIdentityFromCatalog(
+		context.Background(),
 		nil,
 		"REMOVED-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},
@@ -159,6 +161,7 @@ func TestResolveAccountIdentityBindingPreservesDegradedAccountState(t *testing.T
 		t.Fatalf("EncodeAccount() error = %v", err)
 	}
 	_, _, _, err = resolveAccountIdentityFromCatalog(
+		context.Background(),
 		[]mail.Account{{Ref: accountRef, State: "degraded", DegradedReason: "mailbox_cache_unreadable", ConfiguredSenderAliases: []string{"alias@icloud.com"}}},
 		"DEGRADED-ACCOUNT",
 		strictCredentials{"login@icloud.com": "secret"},
@@ -374,7 +377,7 @@ func TestMutationAccountResolutionPreservesSentSenderEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAccountBindings() for Sent evidence: %v", err)
 	}
-	wantSender, wantCredential, wantBinding, err := resolveAccountIdentityFromCatalog(accounts, testAccountID, credentials, bindingFile)
+	wantSender, wantCredential, wantBinding, err := resolveAccountIdentityFromCatalog(context.Background(), accounts, testAccountID, credentials, bindingFile)
 	if err != nil || wantSender != "history@gmail.com" || wantCredential != "history@gmail.com" || wantBinding != nil {
 		t.Fatalf("full-catalog identity = sender:%q credential:%q binding:%+v error:%v", wantSender, wantCredential, wantBinding, err)
 	}

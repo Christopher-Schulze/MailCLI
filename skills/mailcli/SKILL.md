@@ -61,6 +61,8 @@ Follow NEXT on lists and filters too. Review only complete content. Inspect a co
 
 For search/filter, retain the AND of `sources_complete` across the same query/scan; a clean final page never erases earlier source loss. NEXT continues that chain, even with changed budgets. Restart or a changed query/index revision starts a new chain. Coverage remains `best_effort`.
 
+A successful page may keep `enrichment_error:operation_timeout` on unfinished optional metadata. Use its refs/cursor and completed evidence; false/empty metadata remains unknown. Parent cancellation/deadline and base-read failures still fail; follow `next.do`.
+
 Sends and destructive commands need the user's authorization and the published confirmation, valid only while scope and content stay unchanged. Save and export only to new absolute paths, then verify size and hash.
 
 ## Error contract

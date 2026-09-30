@@ -39,12 +39,22 @@ const enrichmentPageSourceBytes = int64(8 << 20)
 // one page request. The store charges the excerpt budget with the bytes it
 // reads; rows past it keep their reply metadata and name the budget in
 // enrichment_error.
-func enrichSummaries(ctx context.Context, service *mail.Service, summaries []*mail.MessageSummary, request mail.MessageEnrichmentRequest) error {
+func enrichSummaries(parentCtx, ctx context.Context, service *mail.Service, summaries []*mail.MessageSummary, request mail.MessageEnrichmentRequest) error {
+	if err := parentCtx.Err(); err != nil {
+		return err
+	}
 	if !request.Threading && !request.Excerpt {
 		return nil
 	}
 	if request.Excerpt {
 		request.ExcerptSourceBudget = enrichmentPageSourceBytes
 	}
-	return service.EnrichMessages(ctx, summaries, request)
+	err := service.EnrichMessages(ctx, summaries, request)
+	if parentErr := parentCtx.Err(); parentErr != nil {
+		return parentErr
+	}
+	if err == context.DeadlineExceeded && ctx.Err() == context.DeadlineExceeded {
+		return nil
+	}
+	return err
 }

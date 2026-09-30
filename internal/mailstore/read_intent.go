@@ -203,6 +203,9 @@ func (c *Client) hydrateMessageHeaders(
 		bound := int64(maximumHeaderBytes)
 		fetchCtx, cancelFetch := hydrationFetchContext(ctx, bound)
 		defer cancelFetch()
+		if err := fetchCtx.Err(); err != nil {
+			return sourceHeaders{}, target.summary, err
+		}
 		raw, err := fetcher.FetchMessageHeaders(
 			fetchCtx, target.cfg, target.imapMailbox, target.uid, target.uidvalidity, bound,
 		)

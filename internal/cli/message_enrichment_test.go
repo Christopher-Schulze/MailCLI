@@ -146,7 +146,7 @@ func TestEnrichSummariesKeepsOrderInOnePageRequest(t *testing.T) {
 	gateway := &enrichmentProbeGateway{}
 	rows := enrichmentProbeRows(12, 1024)
 	request := mail.MessageEnrichmentRequest{Threading: true, ExcerptLength: mail.DefaultExcerptLength}
-	if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, request); err != nil {
+	if err := enrichSummaries(context.Background(), context.Background(), mail.NewService(gateway), rows, request); err != nil {
 		t.Fatal(err)
 	}
 	for index, row := range rows {
@@ -172,7 +172,7 @@ func TestEnrichSummariesPassesThePageSourceBudgetAndEveryRow(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			rows := enrichmentProbeRows(40, mail.MaximumExcerptSourceBytes)
 			gateway := &enrichmentProbeGateway{}
-			if err := enrichSummaries(context.Background(), mail.NewService(gateway), rows, test.request); err != nil {
+			if err := enrichSummaries(context.Background(), context.Background(), mail.NewService(gateway), rows, test.request); err != nil {
 				t.Fatal(err)
 			}
 			if gateway.calls != 1 || len(gateway.lastRefs) != len(rows) {

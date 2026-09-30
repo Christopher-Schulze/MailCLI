@@ -78,7 +78,7 @@ func runMessagesQuery(
 	for index := range page.Messages {
 		summaries[index] = &page.Messages[index].Summary
 	}
-	if err := enrichSummaries(operationCtx, service, summaries, *enrichment); err != nil {
+	if err := enrichSummaries(ctx, operationCtx, service, summaries, *enrichment); err != nil {
 		return failCommand(command, *jsonOutput, err, stdout, stderr)
 	}
 	if *jsonOutput {

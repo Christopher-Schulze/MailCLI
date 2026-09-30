@@ -144,6 +144,9 @@ func (c *Client) resolveImapTargetWithOptions(
 	}
 
 	if target.messageID != "" && target.uid == 0 {
+		if err := ctx.Err(); err != nil {
+			return target, err
+		}
 		uid, uidval, matchCount, err := imapOp.SearchUID(ctx, cfg, imapBox, target.messageID)
 		if err != nil {
 			return target, err
@@ -236,6 +239,9 @@ func (c *Client) directIMAPIdentity(
 // without consulting the Apple Events gateway: the provider or bound hosts and
 // the stored password of the account's credential identity.
 func (c *Client) imapConfigForAccountID(ctx context.Context, accountID string) (string, transport.ImapConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return "", transport.ImapConfig{}, err
+	}
 	email, credential, binding, err := c.resolveAccountIdentity(ctx, accountID)
 	if err != nil {
 		var typed interface{ ErrorCode() string }
@@ -258,7 +264,13 @@ func (c *Client) imapConfigForAccountID(ctx context.Context, accountID string) (
 			Message: "credential store is not available",
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return "", transport.ImapConfig{}, err
+	}
 	password, err := credStore.Load(credential)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return "", transport.ImapConfig{}, contextErr
+	}
 	if err != nil || password == "" {
 		return "", transport.ImapConfig{}, &transport.TransportError{
 			Code:    transport.CodeSMTPCredentialsMissing,
@@ -314,6 +326,9 @@ func credentialSetupCommand(sender, credential string) string {
 }
 
 func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (string, string, *mail.AccountBinding, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, err
+	}
 	ctx = c.WithAccountBindingSnapshot(ctx)
 	bindings, err := c.accountBindingsForResolution(ctx)
 	if err != nil {
@@ -338,26 +353,31 @@ func (c *Client) resolveAccountIdentity(ctx context.Context, accountID string) (
 			)
 		}
 	}
-	return resolveAccountIdentityFromCatalog(accounts, accountID, c.send.Credentials, bindings)
+	return resolveAccountIdentityFromCatalog(ctx, accounts, accountID, c.send.Credentials, bindings)
 }
 
 func resolveAccountEmailFromCatalog(
+	ctx context.Context,
 	accounts []mail.Account,
 	accountID string,
 	credentials transport.CredentialStore,
 ) (string, error) {
-	sender, _, _, err := resolveAccountIdentityFromCatalog(accounts, accountID, credentials, mail.AccountBindingFile{
+	sender, _, _, err := resolveAccountIdentityFromCatalog(ctx, accounts, accountID, credentials, mail.AccountBindingFile{
 		Version: mail.AccountBindingVersion, Bindings: []mail.AccountBinding{},
 	})
 	return sender, err
 }
 
 func resolveAccountIdentityFromCatalog(
+	ctx context.Context,
 	accounts []mail.Account,
 	accountID string,
 	credentials transport.CredentialStore,
 	bindings mail.AccountBindingFile,
 ) (string, string, *mail.AccountBinding, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", nil, err
+	}
 	decodeFailures := make([]error, 0)
 	for index, acct := range accounts {
 		acctRef, err := mailref.DecodeAccount(acct.Ref)
@@ -407,7 +427,13 @@ func resolveAccountIdentityFromCatalog(
 					"no credential store configured; run 'mailcli send setup --from "+sender+" --credential-account "+binding.CredentialAccount+"' first",
 				)
 			}
+			if err := ctx.Err(); err != nil {
+				return "", "", nil, err
+			}
 			password, loadErr := credentials.Load(binding.CredentialAccount)
+			if err := ctx.Err(); err != nil {
+				return "", "", nil, err
+			}
 			if loadErr != nil || password == "" {
 				return "", "", nil, operationError(
 					accountIdentityMissingCode,
@@ -441,7 +467,14 @@ func resolveAccountIdentityFromCatalog(
 			)
 		}
 		for _, address := range usableAddresses {
-			if pw, lerr := credentials.Load(address); lerr == nil && pw != "" {
+			if err := ctx.Err(); err != nil {
+				return "", "", nil, err
+			}
+			pw, lerr := credentials.Load(address)
+			if err := ctx.Err(); err != nil {
+				return "", "", nil, err
+			}
+			if lerr == nil && pw != "" {
 				return address, address, nil, nil
 			}
 		}
@@ -522,6 +555,9 @@ func accountReferenceDecodeError(accountID string, failures []error) error {
 }
 
 func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperator, cfg transport.ImapConfig, email string) ([]transport.MailboxInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := mailboxCacheKey(cfg, email)
 	now := time.Now()
 	c.mailboxCacheMu.Lock()
@@ -537,9 +573,15 @@ func (c *Client) getOrLoadMailboxes(ctx context.Context, op transport.ImapOperat
 
 	// Concurrent rows of one page share a single LIST per account.
 	loaded, err, _ := c.mailboxLoads.Do(key, func() (any, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		boxes, err := op.ListMailboxes(ctx, cfg)
 		if err != nil {
 			return boxes, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		c.mailboxCacheMu.Lock()
 		if c.mailboxCache == nil {

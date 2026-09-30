@@ -50,6 +50,8 @@ const EnrichmentBudgetExhausted = "enrichment_page_budget_exhausted"
 
 // MessageEnrichmentGateway enriches a page of refs at once, returning one
 // summary per ref in order, and never falls back to an unrestricted body read.
+// On an expired deadline it may return indexed partial evidence with the exact
+// context.DeadlineExceeded sentinel; each partial summary must name its ref.
 type MessageEnrichmentGateway interface {
 	EnrichMessages(context.Context, []string, MessageEnrichmentRequest) ([]MessageSummary, error)
 }
@@ -73,16 +75,21 @@ func (s *Service) EnrichMessages(ctx context.Context, summaries []*MessageSummar
 		refs[index] = summary.Ref
 	}
 	enriched, err := reader.EnrichMessages(ctx, refs, request)
-	if err != nil {
+	if err != nil && (err != context.DeadlineExceeded || ctx.Err() != context.DeadlineExceeded) {
 		return err
 	}
 	if len(enriched) != len(summaries) {
 		return fmt.Errorf("message enrichment returned %d summaries for %d refs", len(enriched), len(summaries))
 	}
+	for index, metadata := range enriched {
+		if (err != nil || metadata.Ref != "") && metadata.Ref != refs[index] {
+			return fmt.Errorf("message enrichment returned a mismatched ref at index %d", index)
+		}
+	}
 	for index, summary := range summaries {
 		applyEnrichment(summary, enriched[index], request)
 	}
-	return nil
+	return err
 }
 
 func applyEnrichment(summary *MessageSummary, metadata MessageSummary, request MessageEnrichmentRequest) {

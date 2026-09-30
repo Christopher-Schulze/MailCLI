@@ -223,6 +223,7 @@ type messagePageItemProjection struct {
 	Excerpt           *string                      `json:"excerpt,omitempty"`
 	ExcerptComplete   *bool                        `json:"excerpt_complete,omitempty"`
 	ExcerptSource     *mail.ExcerptSource          `json:"excerpt_source,omitempty"`
+	EnrichmentError   string                       `json:"enrichment_error,omitempty"`
 }
 
 type outputSizeMeasurement string
@@ -734,7 +735,7 @@ func projectMessageSummary(message mail.MessageSummary, fields map[string]struct
 		_, include := fields[name]
 		return include
 	}
-	projected := messagePageItemProjection{Ref: message.Ref}
+	projected := messagePageItemProjection{Ref: message.Ref, EnrichmentError: message.EnrichmentError}
 	if message.FlagsState != "" && (selected("flags_state") || selected("read") || selected("flagged") || selected("deleted")) {
 		projected.FlagsState = &message.FlagsState
 	}

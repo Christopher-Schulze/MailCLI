@@ -54,6 +54,10 @@ type remoteExcerptMailbox struct {
 // Failures are reported per row in enrichment_error.
 func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail.MessageEnrichmentRequest) ([]mail.MessageSummary, error) {
 	summaries := make([]mail.MessageSummary, len(refs))
+	finished := make([]bool, len(refs))
+	for index, ref := range refs {
+		summaries[index].Ref = ref
+	}
 	inputs := make([]excerptInput, len(refs))
 	skipped := make([]bool, len(refs))
 	needsRemoteRow := make([]bool, len(refs))
@@ -65,6 +69,9 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 	remaining := request.ExcerptSourceBudget
 	limited := request.Excerpt && remaining > 0
 	for start := 0; start < len(refs); start += enrichmentConcurrency {
+		if ctx.Err() != nil {
+			break
+		}
 		end := min(start+enrichmentConcurrency, len(refs))
 		exhausted := limited && remaining <= 0
 		var rows errgroup.Group
@@ -72,10 +79,17 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 		for index := start; index < end; index++ {
 			ref := refs[index]
 			rows.Go(func() error {
+				if ctx.Err() != nil {
+					return nil
+				}
 				if request.Threading {
 					c.enrichThreading(ctx, ref, &summaries[index])
 				}
 				if !request.Excerpt {
+					finished[index] = true
+					return nil
+				}
+				if ctx.Err() != nil {
 					return nil
 				}
 				if exhausted {
@@ -83,6 +97,7 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 					if summaries[index].EnrichmentError == "" {
 						summaries[index].EnrichmentError = mail.EnrichmentBudgetExhausted
 					}
+					finished[index] = true
 					return nil
 				}
 				input, target, needsRemote := c.localExcerpt(ctx, ref)
@@ -92,6 +107,9 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 					remoteMu.Lock()
 					remote = append(remote, remoteExcerpt{index: index, target: target})
 					remoteMu.Unlock()
+				} else {
+					c.applyExcerpt(ctx, &summaries[index], input, request.ExcerptLength)
+					finished[index] = true
 				}
 				return nil
 			})
@@ -108,12 +126,17 @@ func (c *Client) EnrichMessages(ctx context.Context, refs []string, request mail
 		}
 	}
 	if request.Excerpt {
-		if err := c.fetchRemoteExcerpts(ctx, remote, inputs); err != nil {
+		if err := c.fetchRemoteExcerpts(ctx, remote, inputs, summaries, finished, request.ExcerptLength); err != nil && err != context.DeadlineExceeded {
 			return nil, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
 		for index := range summaries {
-			if !skipped[index] {
-				c.applyExcerpt(ctx, &summaries[index], inputs[index], request.ExcerptLength)
+			if !finished[index] {
+				noteEnrichmentFailure(&summaries[index], err)
+				if request.Excerpt && summaries[index].ExcerptSource == "" {
+					summaries[index].ExcerptSource = mail.ExcerptSourceUnavailable
+				}
 			}
 		}
 	}
@@ -152,9 +175,15 @@ func (c *Client) enrichThreading(ctx context.Context, ref string, summary *mail.
 	case err == nil:
 		summary.MessageID = local.Summary.MessageID
 		mail.ApplyThreadingHeaders(summary, local.Headers)
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		noteEnrichmentFailure(summary, ctx.Err())
 	case !safeTargetedFallback(err):
 		noteEnrichmentFailure(summary, err)
 	default:
+		if ctx.Err() != nil {
+			noteEnrichmentFailure(summary, ctx.Err())
+			return
+		}
 		if _, ok := c.send.ImapClient().(transport.MessageHeaderFetcher); !ok {
 			noteEnrichmentFailure(summary, err)
 		} else if headers, _, remoteErr := c.hydrateMessageHeaders(ctx, ref); remoteErr != nil {
@@ -180,6 +209,9 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 	lookedUp := false
 	lookup := func() (excerptInput, bool) {
 		lookedUp = true
+		if ctx.Err() != nil {
+			return excerptInput{}, false
+		}
 		key, keyErr := c.store.excerptCacheKey(ctx, ref)
 		if keyErr != nil {
 			return excerptInput{}, false
@@ -211,6 +243,10 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 	if !excerptNeedsRemote(err, localPartial) || !remoteCapable {
 		return fallback, imapTarget{}, false
 	}
+	if err := ctx.Err(); err != nil {
+		fallback.err = err
+		return fallback, imapTarget{}, false
+	}
 	if !lookedUp {
 		if cached, hit := lookup(); hit {
 			cached.readBytes = fallback.readBytes
@@ -220,6 +256,9 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 	fallback.cacheKey = cacheKey
 	target, targetErr := c.resolveImapTargetForExcerpt(ctx, ref)
 	if targetErr != nil {
+		if ctx.Err() != nil && errors.Is(targetErr, ctx.Err()) {
+			targetErr = ctx.Err()
+		}
 		fallback.err = targetErr
 		return fallback, imapTarget{}, false
 	}
@@ -229,7 +268,13 @@ func (c *Client) localExcerpt(ctx context.Context, ref string) (excerptInput, im
 // fetchRemoteExcerpts replaces the input of every remote row with its IMAP
 // text prefix, fetching each account mailbox once. A failed fetch keeps the
 // local fallback and records the failure on the affected rows only.
-func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt, inputs []excerptInput) error {
+func (c *Client) fetchRemoteExcerpts(
+	ctx context.Context, remote []remoteExcerpt, inputs []excerptInput,
+	summaries []mail.MessageSummary, finished []bool, length int,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	fetcher, supported := c.send.ImapClient().(transport.MessageExcerptFetcher)
 	if !supported || len(remote) == 0 {
 		return nil
@@ -249,6 +294,9 @@ func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt
 	for _, key := range order {
 		rows := groups[key]
 		mailboxes.Go(func() error {
+			if ctx.Err() != nil {
+				return nil
+			}
 			uids := make([]uint32, len(rows))
 			for index, row := range rows {
 				uids[index] = row.target.uid
@@ -269,11 +317,19 @@ func (c *Client) fetchRemoteExcerpts(ctx context.Context, remote []remoteExcerpt
 				default:
 					inputs[row.index] = excerptInput{data: source.Source, complete: source.Complete, source: mail.ExcerptSourceIMAPPartial, cacheKey: inputs[row.index].cacheKey}
 				}
+				if ctx.Err() != nil {
+					noteEnrichmentFailure(&summaries[row.index], ctx.Err())
+				}
+				c.applyExcerpt(ctx, &summaries[row.index], inputs[row.index], length)
+				finished[row.index] = true
 			}
 			return nil
 		})
 	}
-	return mailboxes.Wait()
+	if err := mailboxes.Wait(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // excerptMatchesMessageID verifies a row fetched by an unverified local UID.
@@ -294,6 +350,9 @@ func (c *Client) applyExcerpt(ctx context.Context, summary *mail.MessageSummary,
 	if !input.cached {
 		text, parsed := excerptText(ctx, input.data)
 		excerpt, complete = mail.BuildExcerpt(text, mail.MaximumExcerptLength), input.complete && parsed
+		if !parsed && ctx.Err() != nil {
+			noteEnrichmentFailure(summary, ctx.Err())
+		}
 		if input.source == mail.ExcerptSourceIMAPPartial && input.err == nil && ctx.Err() == nil {
 			// The cache is best effort; a failed write only costs a later fetch.
 			_ = c.excerpts.store(input.cacheKey, cachedExcerpt{Excerpt: excerpt, Complete: complete})

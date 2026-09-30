@@ -147,6 +147,8 @@ func outputDescription(name string) string {
 		return "Search coverage and consistency evidence; partial or missing sources do not prove absence."
 	case "sources_complete":
 		return "True when every processed candidate on this page had conclusive source or catalog evidence; independent of pagination and budgets. AND across every page of the same query/scan and require a terminal complete page; consistency remains best_effort."
+	case "enrichment_error":
+		return "First optional metadata failure for this row; retained in narrowed page projections. An operation deadline may preserve the successful base page with unfinished metadata qualified by operation_timeout; parent cancellation/deadline still fails."
 	case "data":
 		return "Command payload; fields may retain partial evidence on errors; success requirements and projection variants are declared separately."
 	case "schema":
