@@ -277,8 +277,7 @@ func pruneListedDrafts(ctx context.Context, root string, cutoff time.Time, resul
 			return result, err
 		}
 		if err := pruneDraftOnce(ctx, root, candidate.Ref, cutoff); err != nil {
-			var coded interface{ ErrorCode() string }
-			if errors.As(err, &coded) && coded.ErrorCode() == "draft_operation_canceled" {
+			if ContextErrorCode(err) != "" {
 				return result, err
 			}
 			result.Failed = append(result.Failed, PruneFailure{Ref: candidate.Ref, Error: err.Error()})
@@ -297,8 +296,7 @@ func pruneListedReceipts(ctx context.Context, root string, result PruneDraftsRes
 			return result, err
 		}
 		if err := pruneExpiredSendReceiptOnce(ctx, root, ref, time.Now().UTC()); err != nil {
-			var coded interface{ ErrorCode() string }
-			if errors.As(err, &coded) && coded.ErrorCode() == "draft_operation_canceled" {
+			if ContextErrorCode(err) != "" {
 				return result, err
 			}
 			result.Failed = append(result.Failed, PruneFailure{Ref: ref, Error: err.Error()})
@@ -1025,8 +1023,7 @@ func sweepOrphanDraftArtifacts(ctx context.Context, root string, inventory *draf
 		}
 		sweptRef, err := pruneOrphanDraftArtifactsOnce(ctx, root, ref, group)
 		if err != nil {
-			var operation *OperationError
-			if errors.As(err, &operation) && operation.Code == "draft_operation_canceled" {
+			if ContextErrorCode(err) != "" {
 				return swept, failures, err
 			}
 			failures = append(failures, PruneFailure{Ref: ref, Error: err.Error()})

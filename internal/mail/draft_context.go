@@ -16,13 +16,18 @@ const (
 )
 
 func draftContextError(ctx context.Context, operation string) error {
-	if ctx.Err() == nil {
+	cause := ctx.Err()
+	if cause == nil {
 		return nil
 	}
+	code, status := "draft_operation_canceled", "canceled"
+	if errors.Is(cause, context.DeadlineExceeded) {
+		code, status = "draft_operation_timeout", "timed out"
+	}
 	return &OperationError{
-		Code:    "draft_operation_canceled",
-		Message: fmt.Sprintf("draft %s canceled before completion", operation),
-		Err:     ctx.Err(),
+		Code:    code,
+		Message: fmt.Sprintf("draft %s %s before completion", operation, status),
+		Err:     cause,
 	}
 }
 
@@ -34,17 +39,17 @@ func classifyDraftContextError(ctx context.Context, err error, operation string)
 	if err == nil || ctx.Err() == nil {
 		return err
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return draftContextError(ctx, operation)
-	}
 	var coded interface{ ErrorCode() string }
 	if errors.As(err, &coded) {
 		if coded.ErrorCode() == "draft_busy" {
-			return draftContextError(ctx, operation)
+			return errors.Join(draftContextError(ctx, operation), err)
 		}
 		if coded.ErrorCode() != "" {
 			return err
 		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(draftContextError(ctx, operation), err)
 	}
 	return err
 }

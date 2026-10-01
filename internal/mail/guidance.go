@@ -271,11 +271,11 @@ func GuidanceForError(command string, err error) OperationGuidance {
 			}
 		}
 		return guidanceForUnknown(defaultPhase(command))
-	case code == "operation_canceled" || code == "draft_operation_canceled" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
+	case code == "operation_canceled" || code == "draft_operation_canceled" || code == "draft_operation_timeout" || code == "operation_timeout" || transport.IsTransientTransportFailure(err):
 		if effectfulCommand(command) {
 			return guidanceForUnknown(defaultPhase(command))
 		}
-		if code == "operation_canceled" || code == "draft_operation_canceled" || code == "operation_timeout" || transport.IsTransientReadFailure(err) {
+		if code == "operation_canceled" || code == "draft_operation_canceled" || code == "draft_operation_timeout" || code == "operation_timeout" || transport.IsTransientReadFailure(err) {
 			return guidanceForRead()
 		}
 		return guidanceForUnknownRead()

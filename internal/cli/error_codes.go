@@ -90,6 +90,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"draft_lock_unsafe", "The draft lock path is not a safe regular file.", errorScopeDraft},
 	{"draft_mutation_confirmation_required", "The message is in Drafts; close its editor and repeat with --allow-draft.", []string{"messages.mark", "messages.move", "messages.delete", "batch"}},
 	{"draft_operation_canceled", "The draft command was canceled before completion.", errorScopeDraft},
+	{"draft_operation_timeout", "The draft command exceeded its operation deadline.", errorScopeDraft},
 	{"draft_outcome_unknown", "A historical native save returned no observed draft.", []string{"drafts.reconcile"}},
 	{"draft_postflight_failed", "Verification after a historical native save failed.", []string{"drafts.reconcile"}},
 	{"draft_revision_conflict", "The draft changed since the reviewed revision; review and merge first.", []string{"drafts.update", "drafts.edit", "drafts.send", "drafts.reconcile"}},

@@ -428,7 +428,7 @@ The error catalog lists every code with its meaning and guidance; a group's `rec
 Codes that stay `check_state` without a command are generic or evidence-only: `operation_failed`, `store_profile_unverified`, an untyped `hydration_failed` whose origin stays unknown, and `draft_busy` on commands without a draft reference.
 
 Generic codes: `unknown_command` (unrecognized command), `invalid_argument` (wrong flag or operand, exit `2`), `invalid_input` (malformed structured input, exit `2`), `missing_required` (omitted required flag, exit `2`), `confirmation_required` (the action needs `--confirm` after explicit user authorization) and `operation_failed` (runtime failure in store, IMAP, SMTP or Mail.app, exit `1`).
-`draft_operation_canceled` means a draft command's context was canceled before completion, distinct from a confirmed transport or Mail.app failure.
+`draft_operation_canceled` means the caller canceled a draft command before completion; `draft_operation_timeout` means its operation deadline expired. Both preserve their context cause, and specific transport or outcome errors keep their original classification. A timeout never claims that the caller canceled, and uncertain writes still require observation before replay.
 
 Pre-effect failures:
 identity, binding, store, credential, editor and precondition failures that stop before any external effect (for example `account_disabled`, `keychain_load_failed`, `draft_mutation_confirmation_required`, `message_already_trashed`, `account_binding_stale`) report `effect_certainty:"none"` with `correct` or `inspect` recovery for every command, writes included.
@@ -864,7 +864,7 @@ These checks protect supported operations but are not an atomic compare-and-unli
 ### Draft locks
 
 Every lock-owning draft command takes a two-second BSD `flock` on a per-draft lock opened relative to the pinned private draft directory; the command keeps its own deadline.
-A busy lock returns `draft_busy`, and cancellation returns `draft_operation_canceled`; a waiting command never unlocks another process's lease.
+A busy lock's own two-second budget returns `draft_busy`; caller cancellation returns `draft_operation_canceled`, while expiry of the outer operation deadline returns `draft_operation_timeout`. A waiting command never unlocks another process's lease.
 Each operation keeps a descriptor-backed root tied to the lock's parent identity and performs every draft, claim, spool, receipt, temporary and cleanup operation through it, so renaming or replacing the configured root cannot redirect the operation; a changed identity fails as `draft_lock_unsafe` or `draft_lock_changed`.
 Draft JSON publication holds the exclusive ref lease from before temporary creation until publication or verified cleanup.
 Mark, move and delete reject messages identified as drafts unless `--allow-draft` is explicit; close any Mail editor for that draft first, because Mail can recreate it when the editor later saves.
