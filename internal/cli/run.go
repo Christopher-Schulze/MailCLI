@@ -16,7 +16,7 @@ import (
 
 const (
 	name          = "mailcli"
-	version       = "1.5.2"
+	version       = "1.5.3"
 	schemaVersion = 1
 )
 
