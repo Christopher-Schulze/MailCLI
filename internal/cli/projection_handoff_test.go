@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,13 +16,18 @@ import (
 )
 
 func TestDraftProjectionPreservesRealHandoffEvidence(t *testing.T) {
-	for _, outcome := range []mail.HandoffOutcome{
-		"", mail.HandoffOutcomePrepared, mail.HandoffOutcomeDispatched,
-		mail.HandoffOutcomeUnknown, mail.HandoffOutcomeConfirmedOpened,
-		mail.HandoffOutcomeConfirmedFailed, mail.HandoffOutcomeCanceled,
+	for _, test := range []struct {
+		outcome mail.HandoffOutcome
+		pending bool
+	}{
+		{"", false}, {mail.HandoffOutcomePrepared, false}, {mail.HandoffOutcomeDispatched, false},
+		{mail.HandoffOutcomeUnknown, false}, {mail.HandoffOutcomeConfirmedOpened, false},
+		{mail.HandoffOutcomeConfirmedFailed, false}, {mail.HandoffOutcomeCanceled, false},
+		{mail.HandoffOutcomeConfirmedOpened, true}, {mail.HandoffOutcomeConfirmedFailed, true}, {mail.HandoffOutcomeCanceled, true},
 	} {
-		t.Run(string(outcome), func(t *testing.T) {
-			service, draft := createProjectionHandoffState(t, outcome)
+		outcome := test.outcome
+		t.Run(fmt.Sprintf("%s/pending_%t", outcome, test.pending), func(t *testing.T) {
+			service, draft := createProjectionHandoffState(t, outcome, test.pending)
 			for _, view := range []string{"metadata", "plain", "full", "narrow", "explicit", "fallback", "export"} {
 				t.Run(view, func(t *testing.T) {
 					args := []string{"drafts", "inspect", "--ref", draft.Ref, "--json"}
@@ -75,7 +82,7 @@ func TestDraftProjectionPreservesRealHandoffEvidence(t *testing.T) {
 	}
 }
 
-func createProjectionHandoffState(t *testing.T, outcome mail.HandoffOutcome) (*mail.Service, mail.Draft) {
+func createProjectionHandoffState(t *testing.T, outcome mail.HandoffOutcome, pending bool) (*mail.Service, mail.Draft) {
 	t.Helper()
 	service := mail.NewServiceWithDraftRoot(nil, filepath.Join(t.TempDir(), "drafts"))
 	attachment := filepath.Join(t.TempDir(), "private-attachment.txt")
@@ -101,6 +108,12 @@ func createProjectionHandoffState(t *testing.T, outcome mail.HandoffOutcome) (*m
 			t.Error(err)
 		}
 	})
+	if pending {
+		foreign := filepath.Join(filepath.Dir(session.Preparation().AttachmentPaths[0]), "unrelated")
+		if err := os.WriteFile(foreign, []byte("retained foreign bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if outcome == mail.HandoffOutcomeCanceled {
 		err = session.CancelBeforeDispatch()
 	} else if outcome != mail.HandoffOutcomePrepared {
@@ -109,14 +122,19 @@ func createProjectionHandoffState(t *testing.T, outcome mail.HandoffOutcome) (*m
 			err = session.Finish(outcome)
 		}
 	}
-	if err != nil {
+	if pending {
+		var failure *mail.OperationError
+		if !errors.As(err, &failure) || failure.Code != "handoff_attachment_cleanup_failed" {
+			t.Fatalf("pending cleanup = %v", err)
+		}
+	} else if err != nil {
 		t.Fatal(err)
 	}
 	draft, err = service.GetDraft(draft.Ref)
 	if err != nil {
 		t.Fatal(err)
 	}
-	retained := outcome == mail.HandoffOutcomePrepared || outcome == mail.HandoffOutcomeDispatched || outcome == mail.HandoffOutcomeUnknown
+	retained := pending || outcome == mail.HandoffOutcomePrepared || outcome == mail.HandoffOutcomeDispatched || outcome == mail.HandoffOutcomeUnknown
 	if retained != (draft.HandoffAttempt != nil) {
 		t.Fatalf("unexpected retained state for %s: %+v", outcome, draft.HandoffAttempt)
 	}

@@ -121,11 +121,11 @@ func validHandoffAttempt(stored storedHandoffAttempt, ref string) bool {
 		return false
 	}
 	switch attempt.Outcome {
-	case HandoffOutcomePrepared:
+	case HandoffOutcomePrepared, HandoffOutcomeCanceled:
 		if attempt.DispatchStarted {
 			return false
 		}
-	case HandoffOutcomeDispatched, HandoffOutcomeUnknown:
+	case HandoffOutcomeDispatched, HandoffOutcomeUnknown, HandoffOutcomeConfirmedOpened, HandoffOutcomeConfirmedFailed:
 		if !attempt.DispatchStarted {
 			return false
 		}
@@ -197,16 +197,57 @@ func ensurePrivateDirectoryAt(storage *draftStorage, name string) error {
 	return file.Close()
 }
 
-func removePersistentHandoffSnapshotRoot(
-	ref string,
-	attemptID string,
-	snapshots []HandoffSnapshot,
-	state *draftStorage,
-) error {
-	if !validHandoffAttemptID(attemptID) {
-		return validationError("invalid handoff attempt id")
+func handoffCleanupPending(attempt HandoffAttempt) bool {
+	return attempt.Outcome == HandoffOutcomeConfirmedOpened || attempt.Outcome == HandoffOutcomeConfirmedFailed || attempt.Outcome == HandoffOutcomeCanceled
+}
+
+func cleanupTerminalHandoffAttempt(ctx context.Context, ref string, attempt *HandoffAttempt, state *draftStorage, extraCheck func() error) error {
+	if !handoffCleanupPending(*attempt) {
+		return validationError("handoff cleanup requires a recorded terminal outcome")
 	}
-	return removeHandoffSnapshotAttempt(ref, HandoffAttempt{ID: attemptID}, snapshots, false, state, nil)
+	identity, err := state.lstat(ref + handoffClaimSuffix)
+	if err != nil {
+		return fmt.Errorf("inspect terminal handoff claim: %w", err)
+	}
+	check := func() error {
+		if err := draftContextError(ctx, "handoff cleanup"); err != nil {
+			return err
+		}
+		if extraCheck != nil {
+			if err := extraCheck(); err != nil {
+				return err
+			}
+		}
+		return handoffCleanupClaimCheck(ref, *attempt, identity, state)
+	}
+	if err := removeHandoffSnapshotAttempt(ref, *attempt, attempt.Snapshots, false, state, check); err != nil {
+		return &OperationError{Code: "handoff_attachment_cleanup_failed", Message: fmt.Sprintf("handoff outcome is %s, but snapshot cleanup remains: %v", attempt.Outcome, err), Err: err}
+	}
+	if err := check(); err != nil {
+		attempt.Snapshots, attempt.SnapshotsRetained = nil, false
+		return err
+	}
+	if attempt.SnapshotsRetained {
+		next := *attempt
+		next.Snapshots, next.SnapshotsRetained = nil, false
+		next.UpdatedAt = time.Now().UTC()
+		err := replaceHandoffAttempt(ref, next, state)
+		*attempt = next
+		if err != nil {
+			return &OperationError{Code: "handoff_claim_cleanup_failed", Message: fmt.Sprintf("handoff snapshots were removed, but cleanup state publication failed: %v", err), Err: err}
+		}
+		identity, err = state.lstat(ref + handoffClaimSuffix)
+		if err != nil {
+			return err
+		}
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if err := removeHandoffAttempt(ref, state); err != nil {
+		return &OperationError{Code: "handoff_claim_cleanup_failed", Message: fmt.Sprintf("handoff snapshots were removed, but the retained claim remains: %v", err), Err: err}
+	}
+	return nil
 }
 
 func closeHandoffFile(file *os.File, resultErr *error) {
@@ -280,7 +321,7 @@ func handoffRetryBlockedError(attemptID string) error {
 	return &OperationError{
 		Code: "handoff_retry_blocked",
 		Message: fmt.Sprintf(
-			"draft has unresolved visible compose handoff %s; inspect it and run `mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt %s --outcome opened|failed --confirm` before retrying or cleaning up",
+			"draft has retained visible compose handoff %s; inspect it and run `mailcli drafts handoff-reconcile --ref DRAFT_REF --attempt %s --outcome opened|failed --confirm` before retrying or cleaning up",
 			attemptID, attemptID,
 		),
 	}
@@ -325,6 +366,12 @@ func (s *Service) BeginDraftHandoffContext(ctx context.Context, ref string) (ses
 	defer cancelStaging()
 	if draft.HandoffAttempt != nil && !draft.HandoffAttempt.DispatchStarted && draft.HandoffAttempt.Outcome == HandoffOutcomePrepared {
 		if err := recoverPreparedHandoffStaging(stagingCtx, ref, draft.HandoffAttempt.ID, draft.Attachments, storage); err != nil {
+			return nil, err
+		}
+		draft.HandoffAttempt = nil
+	}
+	if draft.HandoffAttempt != nil && draft.HandoffAttempt.Outcome == HandoffOutcomeCanceled {
+		if err := cleanupTerminalHandoffAttempt(stagingCtx, ref, draft.HandoffAttempt, storage, nil); err != nil {
 			return nil, err
 		}
 		draft.HandoffAttempt = nil
@@ -461,29 +508,14 @@ func (s *DraftHandoffSession) Finish(outcome HandoffOutcome) (resultErr error) {
 	if !s.attempt.DispatchStarted {
 		return validationError("handoff cannot finish before native dispatch")
 	}
-	if outcome == HandoffOutcomeUnknown {
-		s.attempt.Outcome = HandoffOutcomeUnknown
-		s.attempt.DispatchStarted = true
-		s.attempt.SnapshotsRetained = len(s.attempt.Snapshots) > 0
-		s.attempt.UpdatedAt = time.Now().UTC()
-		resultErr = replaceHandoffAttempt(s.ref, s.attempt, s.lease.storage)
-		s.closed = true
-		return errors.Join(resultErr, s.lease.release())
-	}
-	cleanupErr := removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage)
-	if cleanupErr == nil {
-		cleanupErr = removeHandoffAttempt(s.ref, s.lease.storage)
-	}
-	if cleanupErr != nil {
-		resultErr = errors.Join(
-			&OperationError{Code: "handoff_attachment_cleanup_failed", Message: fmt.Sprintf("visible compose outcome is %s, but retained handoff snapshots could not be cleaned: %v", outcome, cleanupErr)},
-			s.lease.release(),
-		)
-		s.closed = true
-		return resultErr
+	s.attempt.Outcome = outcome
+	s.attempt.UpdatedAt = time.Now().UTC()
+	resultErr = replaceHandoffAttempt(s.ref, s.attempt, s.lease.storage)
+	if resultErr == nil && outcome != HandoffOutcomeUnknown {
+		resultErr = cleanupTerminalHandoffAttempt(context.Background(), s.ref, &s.attempt, s.lease.storage, nil)
 	}
 	s.closed = true
-	return s.lease.release()
+	return errors.Join(resultErr, s.lease.release())
 }
 
 func (s *DraftHandoffSession) CancelBeforeDispatch() error {
@@ -493,9 +525,11 @@ func (s *DraftHandoffSession) CancelBeforeDispatch() error {
 	if s.attempt.DispatchStarted {
 		return s.Finish(HandoffOutcomeUnknown)
 	}
-	cleanupErr := removePersistentHandoffSnapshotRoot(s.ref, s.attempt.ID, s.attempt.Snapshots, s.lease.storage)
+	s.attempt.Outcome = HandoffOutcomeCanceled
+	s.attempt.UpdatedAt = time.Now().UTC()
+	cleanupErr := replaceHandoffAttempt(s.ref, s.attempt, s.lease.storage)
 	if cleanupErr == nil {
-		cleanupErr = removeHandoffAttempt(s.ref, s.lease.storage)
+		cleanupErr = cleanupTerminalHandoffAttempt(context.Background(), s.ref, &s.attempt, s.lease.storage, nil)
 	}
 	s.closed = true
 	return errors.Join(cleanupErr, s.lease.release())
@@ -550,20 +584,21 @@ func (s *Service) ReconcileDraftHandoffContext(
 		resultErr = &OperationError{Code: "handoff_not_found", Message: "no retained visible compose handoff exists for this draft"}
 	case attempt.ID != attemptID:
 		resultErr = &OperationError{Code: "handoff_attempt_mismatch", Message: "handoff attempt does not match the retained draft state"}
-	case !attempt.DispatchStarted || (attempt.Outcome != HandoffOutcomeDispatched && attempt.Outcome != HandoffOutcomeUnknown):
+	case handoffCleanupPending(*attempt) && ((attempt.Outcome == HandoffOutcomeConfirmedOpened) != (resolution == HandoffResolutionOpened)):
+		resultErr = validationError("cleanup cannot change a recorded handoff outcome")
+	case !handoffCleanupPending(*attempt) && (!attempt.DispatchStarted || (attempt.Outcome != HandoffOutcomeDispatched && attempt.Outcome != HandoffOutcomeUnknown)):
 		resultErr = &OperationError{Code: "handoff_not_dispatched", Message: "the retained handoff has no unresolved native dispatch to reconcile"}
 	default:
+		if !handoffCleanupPending(*attempt) {
+			attempt.Outcome, attempt.UpdatedAt = mapHandoffResolution(resolution), time.Now().UTC()
+			resultErr = replaceHandoffAttempt(ref, *attempt, storage)
+		}
+		if resultErr == nil {
+			resultErr = cleanupTerminalHandoffAttempt(ctx, ref, attempt, storage, nil)
+		}
 		result = HandoffReconcileResult{
 			DraftRef: ref, AttemptID: attempt.ID,
-			Outcome: mapHandoffResolution(resolution), SnapshotsRetained: attempt.SnapshotsRetained,
-		}
-		if cleanupErr := removePersistentHandoffSnapshotRoot(ref, attempt.ID, attempt.Snapshots, storage); cleanupErr != nil {
-			resultErr = &OperationError{Code: "handoff_attachment_cleanup_failed", Message: fmt.Sprintf("handoff outcome recorded as %s, but snapshots remain: %v", result.Outcome, cleanupErr)}
-		} else if cleanupErr := removeHandoffAttempt(ref, storage); cleanupErr != nil {
-			result.SnapshotsRetained = false
-			resultErr = &OperationError{Code: "handoff_claim_cleanup_failed", Message: fmt.Sprintf("handoff snapshots were removed, but the retained claim remains: %v", cleanupErr)}
-		} else {
-			result.SnapshotsRetained = false
+			Outcome: attempt.Outcome, SnapshotsRetained: attempt.SnapshotsRetained,
 		}
 	}
 	return result, errors.Join(resultErr, lease.release())

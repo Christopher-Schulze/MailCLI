@@ -15,4 +15,4 @@ Historical save_attempt: `mailcli drafts reconcile --ref DRAFT_REF --json` obser
 | Unavailable | outcome_unknown + ID/snapshots | Observe then reconcile |
 | Reconcile | Exact retained attempt + observation | Confirmed opened/failed; snapshots before claim |
 
-Cleanup refusal retains claims/evidence and known acceptance/failure.
+Cleanup refusal retains claims/evidence and the durably recorded acceptance/failure/cancellation. Inspect the attempt, then repeat handoff-reconcile with the same outcome; use failed for canceled_before_dispatch. Never change a recorded outcome or replay the native handoff to repair confirmed cleanup. Snapshot retention can be false while claim cleanup remains pending. Unknown dispatch still requires observation.

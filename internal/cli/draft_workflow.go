@@ -127,7 +127,7 @@ func runDraftHandoffWithDispatch(
 	if dispatchErr != nil {
 		cleanupErr := session.CancelBeforeDispatch()
 		response.Outcome = draftHandoffNotHandedOff
-		response.SnapshotsRetained = cleanupErr != nil && preparation.Attempt.SnapshotsRetained
+		response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(dispatchErr, cleanupErr), stdout, stderr)
 	}
 	if handoffErr != nil {
@@ -136,7 +136,7 @@ func runDraftHandoffWithDispatch(
 			finishErr := session.Finish(mail.HandoffOutcomeConfirmedOpened)
 			response.Outcome, response.Opened, response.MailApplication = draftHandoffHandedOff, result.Opened, result.MailApplication
 			response.DispatchStarted = session.Dispatched()
-			response.SnapshotsRetained = finishErr != nil && preparation.Attempt.SnapshotsRetained
+			response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
 		}
 		if errors.As(handoffErr, &composeErr) && !composeErr.DispatchedToNative() && !composeErr.OutcomeUnknown() {
@@ -147,29 +147,29 @@ func runDraftHandoffWithDispatch(
 				cleanupErr = session.CancelBeforeDispatch()
 			}
 			response.Outcome = draftHandoffNotHandedOff
-			response.SnapshotsRetained = cleanupErr != nil && preparation.Attempt.SnapshotsRetained
+			response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, cleanupErr), stdout, stderr)
 		}
 		if !session.Dispatched() {
 			cleanupErr := session.CancelBeforeDispatch()
 			response.Outcome = draftHandoffNotHandedOff
-			response.SnapshotsRetained = cleanupErr != nil && preparation.Attempt.SnapshotsRetained
+			response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, cleanupErr), stdout, stderr)
 		}
 		if !errors.As(handoffErr, &composeErr) || composeErr.OutcomeUnknown() || composeErr.State != compose.StateConfirmedFailure {
 			finishErr := session.Finish(mail.HandoffOutcomeUnknown)
 			response.Outcome, response.DispatchStarted = draftHandoffUnknown, true
-			response.SnapshotsRetained = preparation.Attempt.SnapshotsRetained
+			response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 			return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
 		}
 		finishErr := session.Finish(mail.HandoffOutcomeConfirmedFailed)
 		response.Outcome, response.DispatchStarted = draftHandoffNotHandedOff, session.Dispatched()
-		response.SnapshotsRetained = finishErr != nil && preparation.Attempt.SnapshotsRetained
+		response.SnapshotsRetained = session.Preparation().Attempt.SnapshotsRetained
 		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, errors.Join(handoffErr, finishErr), stdout, stderr)
 	}
 	finishErr := session.Finish(mail.HandoffOutcomeConfirmedOpened)
 	response.Outcome, response.Opened, response.MailApplication = draftHandoffHandedOff, result.Opened, result.MailApplication
-	response.DispatchStarted, response.SnapshotsRetained = session.Dispatched(), finishErr != nil && preparation.Attempt.SnapshotsRetained
+	response.DispatchStarted, response.SnapshotsRetained = session.Dispatched(), session.Preparation().Attempt.SnapshotsRetained
 	if finishErr != nil {
 		return failCommandWithData("drafts.handoff", *jsonOutput, responseData{DraftHandoff: &response}, finishErr, stdout, stderr)
 	}

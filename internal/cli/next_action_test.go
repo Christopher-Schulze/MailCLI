@@ -389,7 +389,7 @@ func TestNextActionPendingAndFinalization(t *testing.T) {
 }
 
 func TestNextActionRetainedHandoffUsesRunnableInspection(t *testing.T) {
-	service, draft := createProjectionHandoffState(t, mail.HandoffOutcomeUnknown)
+	service, draft := createProjectionHandoffState(t, mail.HandoffOutcomeUnknown, false)
 	var stdout, stderr bytes.Buffer
 	if code := Run(context.Background(), service, []string{"drafts", "inspect", "--ref", draft.Ref, "--fields", "ref", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("inspect exit=%d stderr=%s", code, &stderr)
@@ -416,7 +416,7 @@ func TestNextActionRetainedHandoffUsesRunnableInspection(t *testing.T) {
 }
 
 func TestFinalizationUsesRetainedDraftInspection(t *testing.T) {
-	service, draft := createProjectionHandoffState(t, mail.HandoffOutcomeUnknown)
+	service, draft := createProjectionHandoffState(t, mail.HandoffOutcomeUnknown, false)
 	for _, test := range []struct {
 		name string
 		data responseData

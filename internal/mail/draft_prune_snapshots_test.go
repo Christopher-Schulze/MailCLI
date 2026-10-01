@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -495,5 +496,74 @@ func TestDiscardRemovesEmptyLegacySnapshotParent(t *testing.T) {
 	}
 	if _, err := os.Lstat(parent); !os.IsNotExist(err) {
 		t.Fatalf("legacy parent remains: %v", err)
+	}
+}
+
+func TestPruneResumesTerminalOrphanHandoffCleanup(t *testing.T) {
+	for _, outcome := range []HandoffOutcome{HandoffOutcomeConfirmedOpened, HandoffOutcomeConfirmedFailed, HandoffOutcomeCanceled} {
+		for _, phase := range []string{"intact", "partial", "root removed"} {
+			t.Run(fmt.Sprintf("%s/%s", outcome, phase), func(t *testing.T) {
+				service, draft, session := newHandoffCleanupFixture(t)
+				paths := session.Preparation().AttachmentPaths
+				foreign := filepath.Join(filepath.Dir(paths[0]), "unrelated")
+				if err := os.WriteFile(foreign, []byte("retained"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if outcome == HandoffOutcomeCanceled {
+					err = session.CancelBeforeDispatch()
+				} else {
+					if err := session.MarkDispatched(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+					err = session.Finish(outcome)
+				}
+				if err == nil {
+					t.Fatal("initial cleanup unexpectedly succeeded")
+				}
+				if err := os.Rename(foreign, filepath.Join(t.TempDir(), "foreign")); err != nil {
+					t.Fatal(err)
+				}
+				if phase != "intact" {
+					path := filepath.Dir(paths[1])
+					if phase == "root removed" {
+						path = filepath.Join(service.draftRoot, draft.Ref+handoffSnapshotSuffix)
+					}
+					base, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					ctx := &handoffCleanupBoundaryContext{Context: base, path: path, cancel: cancel}
+					resolution := HandoffResolutionFailed
+					if outcome == HandoffOutcomeConfirmedOpened {
+						resolution = HandoffResolutionOpened
+					}
+					if _, err := service.ReconcileDraftHandoffContext(ctx, draft.Ref, session.AttemptID(), resolution); !ctx.triggered || !errors.Is(err, context.Canceled) {
+						t.Fatalf("orphan cleanup checkpoint triggered=%t error=%v", ctx.triggered, err)
+					}
+				}
+				draftFile := filepath.Join(service.draftRoot, draft.Ref+".json")
+				identity, err := os.Lstat(draftFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload, err := os.ReadFile(draftFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retainedDraft := filepath.Join(t.TempDir(), "retained-draft.json")
+				if err := os.Rename(draftFile, retainedDraft); err != nil {
+					t.Fatal(err)
+				}
+				result, err := service.PruneDrafts(PruneDraftsRequest{OlderThan: 24 * time.Hour, Confirm: true})
+				if err != nil || len(result.Failed) != 0 || len(result.SweptArtifacts) != 1 || result.SweptArtifacts[0] != draft.Ref {
+					t.Fatalf("terminal orphan cleanup = %+v, %v", result, err)
+				}
+				for _, suffix := range []string{handoffClaimSuffix, handoffSnapshotSuffix} {
+					if _, err := os.Lstat(filepath.Join(service.draftRoot, draft.Ref+suffix)); !os.IsNotExist(err) {
+						t.Fatalf("terminal orphan remains: %v", err)
+					}
+				}
+				assertRetainedSnapshotFile(t, retainedDraft, identity, string(payload))
+			})
+		}
 	}
 }

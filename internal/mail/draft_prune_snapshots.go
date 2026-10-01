@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 const orphanSnapshotDirectoryBatchSize = 128
@@ -107,6 +108,9 @@ func removeOrphanHandoffSnapshotTree(ctx context.Context, ref string, storage *d
 	if attempt == nil {
 		return draftLockChangedError("orphan handoff claim disappeared before cleanup")
 	}
+	if handoffCleanupPending(*attempt) {
+		return cleanupTerminalHandoffAttempt(ctx, ref, attempt, storage, checkDraft)
+	}
 	if attempt.DispatchStarted || attempt.Outcome != HandoffOutcomePrepared {
 		return &OperationError{
 			Code:    "prune_state_changed",
@@ -117,7 +121,7 @@ func removeOrphanHandoffSnapshotTree(ctx context.Context, ref string, storage *d
 		if err := checkDraft(); err != nil {
 			return err
 		}
-		return preparedHandoffClaimCheck(ref, *attempt, claimIdentity, storage)
+		return handoffCleanupClaimCheck(ref, *attempt, claimIdentity, storage)
 	}
 	parentName := ref + handoffSnapshotSuffix
 	parentIdentity, parentErr := storage.lstat(parentName)
@@ -148,10 +152,14 @@ func removeOrphanHandoffSnapshotTree(ctx context.Context, ref string, storage *d
 			return draftLockChangedError("claimed orphan handoff attempt directory is missing")
 		}
 	}
-	if err := removeHandoffSnapshotAttempt(ref, *attempt, attempt.Snapshots, false, storage, checkClaim); err != nil {
+	if err := checkClaim(); err != nil {
 		return err
 	}
-	return removePreparedHandoffAttempt(ref, *attempt, claimIdentity, storage)
+	attempt.Outcome, attempt.UpdatedAt = HandoffOutcomeCanceled, time.Now().UTC()
+	if err := replaceHandoffAttempt(ref, *attempt, storage); err != nil {
+		return err
+	}
+	return cleanupTerminalHandoffAttempt(ctx, ref, attempt, storage, checkDraft)
 }
 
 type handoffSnapshotIndex struct {
@@ -180,28 +188,28 @@ func sameHandoffAttempt(left, right HandoffAttempt) bool {
 		left.SnapshotsRetained == right.SnapshotsRetained && sameHandoffSnapshots(left.Snapshots, right.Snapshots)
 }
 
-func preparedHandoffClaimCheck(ref string, expected HandoffAttempt, identity os.FileInfo, storage *draftStorage) error {
+func handoffCleanupClaimCheck(ref string, expected HandoffAttempt, identity os.FileInfo, storage *draftStorage) error {
 	name := ref + handoffClaimSuffix
 	current, err := storage.lstat(name)
 	if err != nil || !current.Mode().IsRegular() || !os.SameFile(identity, current) {
-		return draftLockChangedError("prepared handoff claim changed before snapshot cleanup")
+		return draftLockChangedError("handoff cleanup claim changed before snapshot cleanup")
 	}
 	attempt, err := readHandoffAttempt(ref, storage)
 	if err != nil {
-		return fmt.Errorf("recheck prepared handoff claim: %w", err)
+		return fmt.Errorf("recheck handoff cleanup claim: %w", err)
 	}
-	if attempt == nil || !sameHandoffAttempt(expected, *attempt) || attempt.DispatchStarted || attempt.Outcome != HandoffOutcomePrepared {
-		return draftLockChangedError("prepared handoff attempt changed before snapshot cleanup")
+	if attempt == nil || !sameHandoffAttempt(expected, *attempt) || (!handoffCleanupPending(*attempt) && (attempt.DispatchStarted || attempt.Outcome != HandoffOutcomePrepared)) {
+		return draftLockChangedError("handoff attempt changed before snapshot cleanup")
 	}
 	current, err = storage.lstat(name)
 	if err != nil || !current.Mode().IsRegular() || !os.SameFile(identity, current) {
-		return draftLockChangedError("prepared handoff claim changed while being checked")
+		return draftLockChangedError("handoff cleanup claim changed while being checked")
 	}
 	return nil
 }
 
 func removePreparedHandoffAttempt(ref string, attempt HandoffAttempt, identity os.FileInfo, storage *draftStorage) error {
-	if err := preparedHandoffClaimCheck(ref, attempt, identity, storage); err != nil {
+	if err := handoffCleanupClaimCheck(ref, attempt, identity, storage); err != nil {
 		return err
 	}
 	return removeDraftStorageFile(storage, ref+handoffClaimSuffix, identity, "handoff claim")
@@ -230,14 +238,24 @@ func recoverPreparedHandoffStaging(ctx context.Context, ref string, attemptID st
 	if len(attempt.Snapshots) > 0 && !sameHandoffSnapshots(attempt.Snapshots, expected) {
 		return draftLockChangedError("prepared handoff snapshot list differs from the draft")
 	}
+	if len(attempt.Snapshots) > 0 {
+		attempt.Outcome, attempt.UpdatedAt = HandoffOutcomeCanceled, time.Now().UTC()
+		if err := replaceHandoffAttempt(ref, *attempt, storage); err != nil {
+			return err
+		}
+		return cleanupTerminalHandoffAttempt(ctx, ref, attempt, storage, nil)
+	}
 	check := func() error {
 		if err := draftContextError(ctx, "handoff"); err != nil {
 			return err
 		}
-		return preparedHandoffClaimCheck(ref, *attempt, claimIdentity, storage)
+		return handoffCleanupClaimCheck(ref, *attempt, claimIdentity, storage)
 	}
 	allowPartial := len(attempt.Snapshots) == 0
 	if err := removeHandoffSnapshotAttempt(ref, *attempt, expected, allowPartial, storage, check); err != nil {
+		return err
+	}
+	if err := check(); err != nil {
 		return err
 	}
 	return removePreparedHandoffAttempt(ref, *attempt, claimIdentity, storage)
@@ -303,7 +321,7 @@ func removeHandoffSnapshotAttempt(
 	parentName := ref + handoffSnapshotSuffix
 	parentIdentity, err := storage.lstat(parentName)
 	if os.IsNotExist(err) {
-		if !allowPartial && len(expected) > 0 {
+		if !allowPartial && !handoffCleanupPending(attempt) && len(expected) > 0 {
 			return draftLockChangedError("handoff snapshot parent disappeared before cleanup")
 		}
 		return nil
@@ -321,7 +339,7 @@ func removeHandoffSnapshotAttempt(
 	defer func() { resultErr = errors.Join(resultErr, parentDirectory.root.Close()) }()
 	attemptIdentity, err := parentDirectory.root.Lstat(attempt.ID)
 	if os.IsNotExist(err) {
-		if !allowPartial && len(expected) > 0 {
+		if !allowPartial && !handoffCleanupPending(attempt) && len(expected) > 0 {
 			return draftLockChangedError("handoff snapshot attempt disappeared before cleanup")
 		}
 		return removeEmptyOrphanSnapshotParent(storage, parentName, parentIdentity, check)
@@ -422,7 +440,10 @@ func removeHandoffSnapshotAttempt(
 	if err := check(); err != nil {
 		return err
 	}
-	for _, index := range indexes {
+	// Remove the suffix first so interrupted prepared cleanup remains a valid
+	// staging prefix, with at most its final index empty.
+	for position := len(indexes) - 1; position >= 0; position-- {
+		index := indexes[position]
 		if index.fileInfo != nil {
 			if err := removeOrphanSnapshotFile(index.directory, index.fileName, index.fileInfo); err != nil {
 				return err
