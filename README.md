@@ -10,7 +10,7 @@ Local Apple Mail access for the shell and coding agents.
 
 ### Latest release
 
-If you trust GitHub HTTPS, install the latest release on macOS Apple silicon. No Go toolchain or Homebrew is needed:
+If you trust GitHub HTTPS, install the latest release on macOS Apple silicon.
 
 ```bash
 /bin/bash -o pipefail -c 'curl -fsSL --proto-redir =https https://raw.githubusercontent.com/Christopher-Schulze/MailCLI/main/scripts/release/install-latest.sh | bash'
