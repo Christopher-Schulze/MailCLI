@@ -86,16 +86,23 @@ func ShortenLinks(text string, mode LinkMode) string {
 // brackets from a matched URL.
 func splitLinkTail(matched string) (string, string) {
 	end := len(matched)
+	var balances [3]int
+	var counted [3]bool
 	for end > 0 {
 		switch character := matched[end-1]; character {
 		case '.', ',', ';', ':', '!', '?', '\'':
 			end--
 			continue
 		case ')', ']', '}':
-			opening := map[byte]byte{')': '(', ']': '[', '}': '{'}[character]
-			if strings.Count(matched[:end], string(opening)) >= strings.Count(matched[:end], string(character)) {
+			index := strings.IndexByte(")]}", character)
+			if !counted[index] {
+				balances[index] = strings.Count(matched[:end], string("([{"[index])) - strings.Count(matched[:end], string(character))
+				counted[index] = true
+			}
+			if balances[index] >= 0 {
 				return matched[:end], matched[end:]
 			}
+			balances[index]++
 			end--
 			continue
 		}

@@ -83,3 +83,54 @@ func TestParseLinkMode(t *testing.T) {
 		t.Fatal("ParseLinkMode(short) error = nil")
 	}
 }
+
+func TestSplitLinkTailBracketBalances(t *testing.T) {
+	const base = "https://example.com/path"
+	for _, test := range []struct {
+		name, suffix, addressSuffix, tail string
+	}{
+		{"no tail", "", "", ""},
+		{"punctuation", ".,;:!?'", "", ".,;:!?'"},
+		{"balanced parentheses", "(a)", "(a)", ""},
+		{"excess parentheses", "((a)))))", "((a))", ")))"},
+		{"balanced square brackets", "[a]", "[a]", ""},
+		{"excess square brackets", "[[a]]]]]", "[[a]]", "]]]"},
+		{"balanced braces", "{a}", "{a}", ""},
+		{"excess braces", "{{a}}}}}", "{{a}}", "}}}"},
+		{"mixed balances", "([a])}].)", "([a])", "}].)"},
+		{"interleaved punctuation", "),].;)}!'", "", "),].;)}!'"},
+		{"unbalanced long tail", strings.Repeat(")]}", 4096), "", strings.Repeat(")]}", 4096)},
+		{"balanced long tail", strings.Repeat("(", 4096) + "a" + strings.Repeat(")", 4096), strings.Repeat("(", 4096) + "a" + strings.Repeat(")", 4096), ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			address, tail := splitLinkTail(base + test.suffix)
+			if address != base+test.addressSuffix || tail != test.tail {
+				t.Fatalf("address=%q tail=%q, want %q and %q", address, tail, base+test.addressSuffix, test.tail)
+			}
+			if got := ShortenLinks(base+test.suffix, LinkModeNone); got != test.tail {
+				t.Fatalf("shortened link retained %q, want tail %q", got, test.tail)
+			}
+		})
+	}
+}
+
+func BenchmarkSplitLinkTailUnbalancedClosings(b *testing.B) {
+	const base = "https://example.com/path"
+	for _, fixture := range []struct {
+		name  string
+		count int
+	}{{"ordinary", 1}, {"1024", 1024}, {"4096", 4096}, {"16384", 16384}} {
+		b.Run(fixture.name, func(b *testing.B) {
+			tail := strings.Repeat(")", fixture.count)
+			text := base + tail
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				address, gotTail := splitLinkTail(text)
+				if address != base || gotTail != tail {
+					b.Fatalf("tail parsing changed: address=%q tail bytes=%d", address, len(gotTail))
+				}
+			}
+		})
+	}
+}
