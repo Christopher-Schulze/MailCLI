@@ -18,7 +18,25 @@ type nextAction struct {
 // merely because a recovery command or retained reference exists.
 func envelopeNextAction(value envelope) *nextAction {
 	if value.Data.Finalization != nil {
-		return &nextAction{Do: "check_state", Why: "Cleanup failed; inspect retained operation evidence before taking further action."}
+		next := &nextAction{Do: "check_state", Why: "Cleanup failed; inspect retained operation evidence before taking further action."}
+		ref := ""
+		switch {
+		case value.Data.Draft != nil && value.Data.Draft.Ref != "":
+			ref = value.Data.Draft.Ref
+		case value.Data.SendResult != nil && value.Data.SendResult.DraftRef != "":
+			ref = value.Data.SendResult.DraftRef
+		case value.Data.SendReceipt != nil && value.Data.SendReceipt.DraftRef != "":
+			ref = value.Data.SendReceipt.DraftRef
+		case value.Data.DraftHandoff != nil && value.Data.DraftHandoff.DraftRef != "":
+			ref = value.Data.DraftHandoff.DraftRef
+		case value.Data.HandoffReconcile != nil && value.Data.HandoffReconcile.DraftRef != "":
+			ref = value.Data.HandoffReconcile.DraftRef
+		}
+		if ref != "" {
+			attachNextRecovery(next, draftInspectRecovery(ref, false))
+			next.Why = "Cleanup failed; inspect the retained draft before further action. Do not repeat the original write."
+		}
+		return next
 	}
 	if value.OK {
 		return pendingNextAction(value.Data)
@@ -190,14 +208,19 @@ func pendingNextAction(data responseData) *nextAction {
 	if check := data.SyncCheck; check != nil && !check.Complete {
 		return &nextAction{Do: "ask_user", Why: "Synchronization coverage is incomplete; resolve the reported inaccessible or unresolved identities."}
 	} else if check != nil && !check.CountsMatch {
-		return &nextAction{Do: "check_state", Why: "Local and server counts differ; Mail.app has not synced every mailbox yet. Check again after it synced."}
+		next := &nextAction{Do: "check_state", Command: "sync", Args: []string{"--check"}, Why: "Local and server counts differ; the cause is unverified. Observe counts again before further action."}
+		if check.AccountRef != "" {
+			next.Args = append(next.Args, "--account", check.AccountRef)
+		}
+		next.Args = append(next.Args, "--json")
+		return next
 	}
 	if result := data.NewMessages; result != nil {
 		switch {
 		case !result.Complete:
 			return &nextAction{Do: "ask_user", Why: "Discovery is incomplete; inspect failures and mailbox reasons for account, credential, network or generation problems."}
 		case result.NewCount > 0:
-			return &nextAction{Do: "check_state", Why: "The local store lacks these server messages; run sync to have Mail.app fetch them."}
+			return &nextAction{Do: "check_state", Why: "Read the returned server refs directly; sync is only needed to obtain local refs."}
 		}
 	}
 	if data.Complete != nil && !*data.Complete {

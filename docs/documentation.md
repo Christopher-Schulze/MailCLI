@@ -403,6 +403,7 @@ Commands and arguments come only from supported recovery builders; absent argume
 Transient or busy safe retries carry `wait_seconds:1`; `search_index_changed` can retry immediately.
 Cancellation never produces an automatic retry, and unknown or partial writes always require observation before repair or replay.
 A pending send uses the retained `drafts.reconcile` route; a native handoff first uses `drafts.inspect` because its reconciliation needs a human-observed outcome; interactive update recovery needs reviewed stdin and is never emitted as an executable command.
+Cleanup failure with a retained draft ref recommends read-only `drafts.inspect`; absent identity keeps generic observation guidance and never permits replay.
 A batch's next action never permits replaying successful or uncertain siblings.
 
 Failed envelopes add `error.guidance` with `phase`, `effect_certainty`, `retryability`, `replay_allowed` and `recovery`.
@@ -701,7 +702,7 @@ Matched entries carry both counts only when the local count is available; a zero
 A failed server LIST or an empty selectable server catalog makes coverage incomplete; `complete:false` and typed `failures` identify every uncovered identity.
 Failure entries distinguish caller cancellation (`operation_canceled`) from elapsed comparison deadlines (`sync_check_timeout`); the caller's cause takes precedence over a stale server error.
 Nothing to compare is not a failure: a local account without an address (`local_account`) and a mailbox with no local count that is empty on the server (`empty_without_local_count`) are listed under `skipped` and keep `complete:true`; a mailbox with no local count but server messages stays an `unresolved` failure.
-`counts_match` is true when the check is complete and every compared mailbox has equal local and server counts, and `mismatched_mailboxes` counts the others (equal counts do not prove equal mail); when counts differ on a complete check `next` is `check_state` without a command, because the differences close once Mail.app has synced.
+`counts_match` is true when the check is complete and every compared mailbox has equal local and server counts, and `mismatched_mailboxes` counts the others (equal counts do not prove equal mail); differing counts do not establish their cause. A complete check with differences recommends read-only `sync --check --json`, retaining the selected `--account` scope when present.
 `sync_check_policy` reports that incomplete checks are successful results with exit `0` by default; automation that requires exhaustive coverage uses `--require-complete` (complete exit `0`, incomplete exit `3` with the same `ok:true` payload, runtime failure exit `1`, invalid flags exit `2`).
 `--require-complete` without `--check` is invalid.
 The check reports counts without downloading content or refreshing Mail's index.
@@ -727,7 +728,7 @@ Caller cancellation or deadline expiry during optional flag observation returns 
 `summary.local_ref` appears once the local counterpart is verified; from then on the local ref gives the full command set. A local ref shown through a label resolves its IMAP UID in that label's mailbox by Message-ID, never by the physical All Mail UID.
 Batch `read` and `attachment_save` items accept a server ref like the commands they mirror; every other command (`mark`, `move`, `copy`, `delete`, `reply`, `forward`, `state`, `thread`, drafts and batch mutation items) rejects a server ref with `invalid_reference`, and nothing converts a server ref into a local one.
 An account without credentials, without network or in a degraded state is listed under `failures` and keeps the call successful with `complete:false`; local accounts are listed under `skipped`.
-Incomplete comparison takes precedence in `next`: `ask_user` points to failures and unresolved mailbox reasons even when valid new messages were found. On a complete comparison with new messages, `next` is `check_state` without a command; `sync` asks Mail.app to fetch them into the local store and does not repair inaccessible accounts.
+Incomplete comparison takes precedence in `next`: `ask_user` points to failures and unresolved mailbox reasons even when valid new messages were found. On a complete comparison with new messages, `next` is `check_state` without a command and identifies direct server-ref reads; optional `sync` asks Mail.app to fetch them into the local store for local refs and does not repair inaccessible accounts.
 
 ### Mailbox resolution
 

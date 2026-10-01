@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -94,7 +95,8 @@ func TestSyncCheckNextActionFollowsTheVerdict(t *testing.T) {
 		want  string
 	}{
 		{"failures need the user", mail.SyncCheckResult{Complete: false}, "ask_user"},
-		{"differing counts wait for Mail", mail.SyncCheckResult{Complete: true, MismatchedMailboxes: 2}, "check_state"},
+		{"differing counts need observation", mail.SyncCheckResult{Complete: true, MismatchedMailboxes: 2}, "check_state"},
+		{"scoped counts need observation", mail.SyncCheckResult{AccountRef: "acct_scope", Complete: true, MismatchedMailboxes: 1}, "check_state"},
 		{"agreeing counts need nothing", mail.SyncCheckResult{Complete: true, CountsMatch: true}, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -103,8 +105,26 @@ func TestSyncCheckNextActionFollowsTheVerdict(t *testing.T) {
 			switch {
 			case test.want == "" && next != nil:
 				t.Fatalf("next = %+v, want none", next)
-			case test.want != "" && (next == nil || next.Do != test.want || next.Command != ""):
-				t.Fatalf("next = %+v, want %s without a command", next, test.want)
+			case test.want == "ask_user" && (next == nil || next.Do != test.want || next.Command != ""):
+				t.Fatalf("next = %+v, want ask_user without a command", next)
+			case test.want == "check_state":
+				args := []string{"--check"}
+				if check.AccountRef != "" {
+					args = append(args, "--account", check.AccountRef)
+				}
+				args = append(args, "--json")
+				if next == nil || next.Do != test.want || next.Command != "sync" || !slices.Equal(next.Args, args) || strings.Contains(next.Why, "has not synced") {
+					t.Fatalf("next = %+v, want neutral read-only sync observation with %v", next, args)
+				}
+				var stdout, stderr bytes.Buffer
+				service := mail.NewService(syncCheckGateway{result: check})
+				if code := Run(context.Background(), service, append([]string{next.Command}, next.Args...), &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+					t.Fatalf("observation not runnable: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+				}
+				var observed envelope
+				if err := json.Unmarshal(stdout.Bytes(), &observed); err != nil || observed.Data.SyncCheck == nil || observed.Data.SyncResult != nil || observed.Data.SyncCheck.MismatchedMailboxes != check.MismatchedMailboxes {
+					t.Fatalf("command did not perform the check: err=%v output=%s", err, &stdout)
+				}
 			}
 		})
 	}
@@ -392,5 +412,80 @@ func TestNextActionRetainedHandoffUsesRunnableInspection(t *testing.T) {
 	}
 	if !value.OK || value.Data.Draft == nil || value.Data.Draft.HandoffAttempt == nil || value.Data.Draft.HandoffAttempt.ID != draft.HandoffAttempt.ID || value.Data.Draft.HandoffAttempt.Outcome != mail.HandoffOutcomeUnknown {
 		t.Fatalf("inspection lost or changed the retained claim: %s", &stdout)
+	}
+}
+
+func TestFinalizationUsesRetainedDraftInspection(t *testing.T) {
+	service, draft := createProjectionHandoffState(t, mail.HandoffOutcomeUnknown)
+	for _, test := range []struct {
+		name string
+		data responseData
+	}{
+		{"draft", responseData{Draft: &draft}},
+		{"send", responseData{SendResult: &mail.SendResult{DraftRef: draft.Ref, Outcome: mail.SendOutcomeUnknown}}},
+		{"receipt", responseData{SendReceipt: &mail.SendReceipt{DraftRef: draft.Ref, Outcome: mail.SendOutcomeSent}}},
+		{"handoff", responseData{DraftHandoff: &draftHandoffResult{DraftRef: draft.Ref, Outcome: draftHandoffUnknown}}},
+		{"reconcile", responseData{HandoffReconcile: &mail.HandoffReconcileResult{DraftRef: draft.Ref}}},
+		{"unknown", responseData{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := marshalEnvelope(envelope{SchemaVersion: schemaVersion, OK: true, Command: "drafts.inspect", Data: test.data})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			if code := FinalizeJSON(&output, []string{"drafts", "inspect", "--json"}, payload, 0, errors.New("cleanup")); code != 1 {
+				t.Fatalf("finalization exit %d", code)
+			}
+			var value envelope
+			if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+				t.Fatal(err)
+			}
+			assertNextContract(t, value.Next)
+			if value.OK || value.Data.Finalization == nil || value.Next.Do != "check_state" {
+				t.Fatalf("cleanup evidence lost: %s", &output)
+			}
+			if test.name == "unknown" {
+				if value.Next.Command != "" {
+					t.Fatalf("invented identity: %+v", value.Next)
+				}
+				return
+			}
+			if value.Next.Command != "drafts.inspect" || !slices.Equal(value.Next.Args, []string{"--ref", draft.Ref, "--json"}) {
+				t.Fatalf("missing safe draft inspection: %+v", value.Next)
+			}
+			output.Reset()
+			var stderr bytes.Buffer
+			args := append(strings.Split(value.Next.Command, "."), value.Next.Args...)
+			if code := Run(context.Background(), service, args, &output, &stderr); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("inspection not runnable: code=%d stdout=%s stderr=%s", code, &output, &stderr)
+			}
+			if err := json.Unmarshal(output.Bytes(), &value); err != nil {
+				t.Fatal(err)
+			}
+			if value.Data.Draft == nil || value.Data.Draft.Revision != draft.Revision || value.Data.Draft.HandoffAttempt == nil || value.Data.Draft.HandoffAttempt.ID != draft.HandoffAttempt.ID || value.Data.Draft.HandoffAttempt.Outcome != mail.HandoffOutcomeUnknown {
+				t.Fatalf("inspection changed retained claim: %s", &output)
+			}
+		})
+	}
+}
+
+func TestDiscoveryNextNamesDirectServerReads(t *testing.T) {
+	for _, complete := range []bool{true, false} {
+		t.Run(fmt.Sprintf("complete=%t", complete), func(t *testing.T) {
+			code, output, stderr := runNewMessages(t, &newMessagesTestGateway{result: sampleNewMessagesResult(complete, 1)}, "--json")
+			var value envelope
+			if err := json.Unmarshal([]byte(output), &value); code != 0 || err != nil || stderr != "" {
+				t.Fatalf("discovery failed: code=%d err=%v output=%s stderr=%s", code, err, output, stderr)
+			}
+			assertNextContract(t, value.Next)
+			if !complete {
+				if value.Next.Do != "ask_user" || value.Next.Command != "" {
+					t.Fatalf("mixed failures automatically retried: %+v", value.Next)
+				}
+			} else if value.Next.Do != "check_state" || value.Next.Command != "" || !strings.Contains(value.Next.Why, "server refs directly") || strings.Contains(value.Next.Why, "run sync") {
+				t.Fatalf("discovery falsely requires sync: %+v", value.Next)
+			}
+		})
 	}
 }
