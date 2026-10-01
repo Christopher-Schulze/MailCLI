@@ -3,7 +3,6 @@ package mail
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestShortenLinks(t *testing.T) {
@@ -44,30 +43,31 @@ func TestShortenLinks(t *testing.T) {
 	}
 }
 
-// Removing wrapped links must not rewrite the text seen so far: every removal
-// used to copy the whole output again, so four times the links took about
-// sixteen times as long. The test compares the cost of two sizes instead of a
-// wall-clock limit, so a slow or instrumented machine cannot fail it.
-func TestShortenLinksStaysLinearForManyWrappedLinks(t *testing.T) {
+// Removing wrapped links must not copy the accumulated output again. Measure
+// allocated bytes rather than elapsed time: shared-runner scheduling and GC
+// can distort timing ratios even when the production pass stays linear.
+func TestShortenLinksDoesNotCopyAccumulatedOutput(t *testing.T) {
 	const unit = "Click <https://example.com/a?x=1> now (https://example.com/b?y=2) ok.\n"
-	best := func(repeat int) time.Duration {
+	allocated := func(repeat int) int64 {
 		text := strings.Repeat(unit, repeat)
-		shortest := time.Duration(1 << 62)
-		for range 3 {
-			start := time.Now()
-			got := ShortenLinks(text, LinkModeNone)
-			if elapsed := time.Since(start); elapsed < shortest {
-				shortest = elapsed
+		want := strings.Repeat("Click  now ok.\n", repeat)
+		result := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			var got string
+			for range b.N {
+				got = ShortenLinks(text, LinkModeNone)
 			}
-			if want := strings.Repeat("Click  now ok.\n", repeat); strings.ReplaceAll(got, "\n\n", "\n") != want {
-				t.Fatalf("unexpected result prefix %q", got[:min(len(got), 80)])
+			b.StopTimer()
+			if strings.ReplaceAll(got, "\n\n", "\n") != want {
+				b.Fatalf("unexpected result prefix %q", got[:min(len(got), 80)])
 			}
-		}
-		return shortest
+		})
+		return result.AllocedBytesPerOp()
 	}
-	small, large := best(10000), best(40000)
-	if ratio := float64(large) / float64(max(small, time.Microsecond)); ratio > 8 {
-		t.Fatalf("four times the links took %.1f times as long (%v versus %v); linear work is about 4, quadratic about 16", ratio, small, large)
+	small, large := allocated(1024), allocated(4096)
+	t.Logf("wrapped-link allocated bytes: small=%d large=%d", small, large)
+	if small <= 0 || large > 8*small {
+		t.Fatalf("four times the links allocated %d versus %d bytes; repeated whole-output copies must be refused", large, small)
 	}
 }
 
