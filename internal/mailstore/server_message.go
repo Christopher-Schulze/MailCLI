@@ -76,7 +76,8 @@ func (c *Client) getServerMessageWithIntent(ctx context.Context, ref string, int
 		if err != nil {
 			return mail.Message{}, err
 		}
-		return c.finishServerMessage(ctx, ref, messageFromHeaders(mail.Message{}, summary, headers)), nil
+		message := c.finishServerMessage(ctx, ref, messageFromHeaders(mail.Message{}, summary, headers))
+		return message, ctx.Err()
 	default:
 		return mail.Message{}, &mail.ValidationError{
 			Code: "invalid_reference", Message: "a server ref has no local index row; use a local ref once Mail.app has synced the message",
@@ -109,7 +110,7 @@ func (c *Client) parseServerSource(ctx context.Context, ref string, intent mail.
 	if intent == mail.MessageReadIntentAttachments {
 		message.Headers = ""
 	}
-	return message, nil
+	return message, ctx.Err()
 }
 
 func serverMessageNotFound() error {

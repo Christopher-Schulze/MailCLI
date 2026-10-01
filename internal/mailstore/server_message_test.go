@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"mime"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"mailcli/internal/mail"
@@ -393,5 +395,64 @@ func TestServerRefFailuresKeepTheirTypedCodes(t *testing.T) {
 	operator.raw = []byte(serverMessageRaw)
 	if _, err := client.GetMessage(context.Background(), serverRefFor(t, 5003)); err == nil {
 		t.Fatal("a server ref was read without stored credentials")
+	}
+}
+
+type cancelingServerFlags struct {
+	*stubImapOperator
+	cancel   context.CancelFunc
+	deadline bool
+	failure  bool
+}
+
+func (o *cancelingServerFlags) FetchFlags(ctx context.Context, cfg transport.ImapConfig, mailbox string, uid, validity uint32) (transport.FlagState, error) {
+	if o.deadline {
+		<-ctx.Done()
+	} else {
+		o.cancel()
+	}
+	state, err := o.stubImapOperator.FetchFlags(ctx, cfg, mailbox, uid, validity)
+	if o.failure {
+		return state, ctx.Err()
+	}
+	return state, err
+}
+
+func TestOptionalServerFlagsRetainCallerCancellation(t *testing.T) {
+	for _, intent := range []mail.MessageReadIntent{mail.MessageReadIntentFull, mail.MessageReadIntentHeaders, mail.MessageReadIntentAttachments} {
+		for _, deadline := range []bool{false, true} {
+			for _, failure := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/deadline=%t/failure=%t", intent, deadline, failure), func(t *testing.T) {
+					client, operator := serverReadFixture(t, "srv-cancel@gmail.com")
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					client.send.Imap = &cancelingServerFlags{stubImapOperator: operator, cancel: cancel, deadline: deadline, failure: failure}
+					message, err := client.GetMessageWithIntent(ctx, serverRefFor(t, 5003), intent)
+					want := context.Canceled
+					if deadline {
+						want = context.DeadlineExceeded
+					}
+					if !errors.Is(err, want) || operator.fetchFlagsCalls != 1 || message.Summary.Subject != "Überraschung" {
+						t.Fatalf("message=%+v flags=%d error=%v; want %v", message, operator.fetchFlagsCalls, err, want)
+					}
+					if intent == mail.MessageReadIntentFull && (message.Content != "Fresh from the server" || !message.ContentComplete) {
+						t.Fatalf("caller abort discarded validated content: %+v", message)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOptionalServerFlagTimeoutDoesNotCancelLiveCaller(t *testing.T) {
+	for _, intent := range []mail.MessageReadIntent{mail.MessageReadIntentFull, mail.MessageReadIntentHeaders, mail.MessageReadIntentAttachments} {
+		t.Run(string(intent), func(t *testing.T) {
+			client, operator := serverReadFixture(t, "srv-child-timeout@gmail.com")
+			operator.flagStateErr = context.DeadlineExceeded
+			message, err := client.GetMessageWithIntent(context.Background(), serverRefFor(t, 5003), intent)
+			if err != nil || message.Summary.FlagsState != mail.MessageServerStateUnverified || operator.fetchFlagsCalls != 1 || message.Summary.Subject != "Überraschung" {
+				t.Fatalf("optional timeout became caller failure: message=%+v flags=%d error=%v", message, operator.fetchFlagsCalls, err)
+			}
+		})
 	}
 }
