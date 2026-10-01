@@ -204,6 +204,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"prune_candidate_limit_exceeded", "Prune classification exceeded its 64 MiB metadata bound; nothing was removed.", []string{"drafts.prune"}},
 	{"prune_failed", "One or more prune candidates could not be removed.", []string{"drafts.prune"}},
 	{"prune_state_changed", "The draft directory changed before cleanup; nothing was removed.", []string{"drafts.prune"}},
+	{"raw_source_invalid_utf8", "Raw source cannot round-trip through a JSON string; export or stream its exact bytes.", []string{"messages.raw"}},
 	{"raw_source_partial", "Only a partial local source exists; exact raw source needs a complete one.", []string{"messages.raw", "messages.get", "batch"}},
 	{"raw_source_too_large", "The raw message source exceeds 64 MiB.", errorScopeDetail},
 	{"safe_mailbox_listing_unavailable", "Mailbox listing needs the supported local store; no Apple Events scan is used.", []string{"mailboxes.list", "mailboxes.resolve"}},

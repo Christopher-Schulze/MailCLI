@@ -332,6 +332,7 @@ Attachments and content state (`attachments`, `content_source`, `content_complet
 `drafts inspect` defaults to its `metadata` view, which keeps identity and operation-state evidence while omitting bodies.
 `drafts create`, `drafts update`, `drafts edit`, `messages reply` and `messages forward` default to the canonical plain draft body; `--view plain` omits draft source and HTML variants, and `--view full` includes every stored representation.
 `attachments list` defaults to attachment metadata; `messages raw` has only its `full` view.
+Raw JSON strings require valid UTF-8 and round-trip the exact RFC source bytes, including literal U+FFFD. Invalid encoding returns `raw_source_invalid_utf8` without repaired source data; use `messages raw --export /absolute/new/path --json` or stream without `--json` for arbitrary bytes. Local and server refs follow the same rule.
 `--fields` selects exact JSON field names; `all` selects the complete target registry and stands alone.
 Combining `--fields` with `--view`, an unknown field, or a view unsupported by the target fails with `invalid_argument` before retrieval or mutation.
 Hydration recovery for `messages get` and `drafts open` retains the validated invocation arguments, including projection, link, excerpt, budget and export options; recovery guidance never executes the retry itself.

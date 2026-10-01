@@ -1,6 +1,7 @@
 # Output and recovery details
 
 Human output sanitizes control characters and keeps body line feeds and tabs. JSON keeps decoded values; body exports are normalized and raw exports are the exact MIME. Exports go to new absolute 0600 files, are created exclusively, verified for size and SHA-256, and never truncated.
+Raw JSON requires valid UTF-8; `raw_source_invalid_utf8` means use `messages raw --ref REF --export /absolute/new/path --json` or stream without `--json` to preserve the original bytes. Never repair or transcode an exact raw source.
 
 ## Batch input
 

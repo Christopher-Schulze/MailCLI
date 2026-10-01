@@ -470,6 +470,8 @@ func guidanceForReadSourceError(code string) (string, bool) {
 		return "Correct the mailbox or message reference, then retry this read.", true
 	case "message_source_missing":
 		return "Open Mail once and allow it to download this message, then retry the read.", true
+	case "raw_source_invalid_utf8":
+		return "Use messages raw --export /absolute/new/path --json or stream without --json to preserve the exact RFC source bytes; do not repair or transcode the source.", true
 	case "raw_source_partial":
 		return "Make a complete source available in Mail.app or through the configured targeted IMAP read, then retry; use only a verified complete source.", true
 	case transport.CodeIMAPMessageUIDUnknown:

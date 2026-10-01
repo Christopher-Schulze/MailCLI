@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/transport"
@@ -621,6 +622,11 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 		raw, err := service.GetRawSource(operationCtx, *ref)
 		if err != nil {
 			return failProjectedEmpty("messages.raw", true, output, err, stdout, stderr)
+		}
+		if !utf8.ValidString(raw) {
+			return failProjectedEmpty("messages.raw", true, output, &commandError{
+				code: "raw_source_invalid_utf8", message: "raw source is not valid UTF-8; use --export /absolute/new/path or stream without --json to preserve its exact bytes",
+			}, stdout, stderr)
 		}
 		return writeProjectedSuccess(stdout, "messages.raw", responseData{RawSource: &raw}, output)
 	}
