@@ -142,6 +142,22 @@ for CASE in tracked-file tracked-child target-link nested-link wrong-type wrong-
   esac
 done
 
+new_repository 'CaseCheckout'
+CASE_ALIAS="${TEST_ROOT}/casecheckout"
+# Alternate spelling denotes this directory only on a case-insensitive filesystem.
+if [[ "${CASE_ALIAS}" -ef "${FIXTURE}" ]]; then
+  mkdir "${FIXTURE}/bin"
+  printf 'generated binary\n' >"${FIXTURE}/bin/mailcli"
+  printf 'retained state\n' >"${FIXTURE}/retained.txt"
+  CASE_PROTECTED_BEFORE="$(shasum -a 256 "${FIXTURE}/cleanup.sh" "${FIXTURE}/retained.txt" "${FIXTURE}/.git/config")"
+  (cd "${CASE_ALIAS}" && ./cleanup.sh) >"${TEST_ROOT}/case-alias.log"
+  [[ ! -e "${FIXTURE}/bin" ]] || fail 'alternate-case root invocation did not clean its own checkout'
+  [[ "$(shasum -a 256 "${FIXTURE}/cleanup.sh" "${FIXTURE}/retained.txt" "${FIXTURE}/.git/config")" == "${CASE_PROTECTED_BEFORE}" ]] ||
+    fail 'alternate-case root invocation changed protected state'
+  grep -Fq '/casecheckout/bin/mailcli' "${TEST_ROOT}/case-alias.log" || fail 'alternate-case deletion was not reported'
+  printf 'alternate_case_cleanup=passed\n'
+fi
+
 new_repository 'empty output directories'
 mkdir "${FIXTURE}/bin" "${FIXTURE}/dist" "${FIXTURE}/graphify-out" "${FIXTURE}/.coverage"
 "${FIXTURE}/cleanup.sh" >"${TEST_ROOT}/empty.log"

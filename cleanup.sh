@@ -8,7 +8,7 @@ fail() { printf 'Cleanup refused: %s\n' "$1" >&2; exit 1; }
 ROOT="$(CDPATH= cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for VARIABLE in $(git rev-parse --local-env-vars); do unset "${VARIABLE}"; done
 GIT_ROOT="$(git -C "${ROOT}" rev-parse --show-toplevel)" || fail 'a Git checkout is required'
-[[ "${GIT_ROOT}" == "${ROOT}" ]] || fail 'the script must be at the checkout root'
+[[ "${GIT_ROOT}" -ef "${ROOT}" ]] || fail 'the script must be at the checkout root'
 GIT_DIRECTORY="$(git -C "${ROOT}" rev-parse --absolute-git-dir)"
 [[ ! -e "${GIT_DIRECTORY}/mailcli-write-lease" && ! -L "${GIT_DIRECTORY}/mailcli-write-lease" ]] ||
   fail 'a writer lease is active'
