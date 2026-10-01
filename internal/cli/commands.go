@@ -95,6 +95,9 @@ func runAccountsList(ctx context.Context, service *mail.Service, args []string, 
 	if writeTerminalTable(stdout, []string{"REF", "ACCOUNT", "EMAIL ADDRESSES", "IDENTITY COVERAGE", "DIRECT OPS"}, rows) {
 		writeAccountCatalogStatus(stdout, complete, identityCoverageComplete)
 		writeAccountCatalogWarnings(stdout, accounts)
+		if nextCursor != "" {
+			writeFormat(stdout, "\nNext cursor: %s\n", nextCursor)
+		}
 		return 0
 	}
 	for _, account := range accounts {
@@ -110,6 +113,9 @@ func runAccountsList(ctx context.Context, service *mail.Service, args []string, 
 	}
 	writeAccountCatalogStatus(stdout, complete, identityCoverageComplete)
 	writeAccountCatalogWarnings(stdout, accounts)
+	if nextCursor != "" {
+		writeFormat(stdout, "next_cursor\t%s\n", nextCursor)
+	}
 	return 0
 }
 
@@ -248,10 +254,16 @@ func runMailboxesList(ctx context.Context, service *mail.Service, args []string,
 		rows = append(rows, []string{mailbox.Ref, strings.Join(mailbox.Path, "/"), fmt.Sprint(mailbox.UnreadCount)})
 	}
 	if writeTerminalTable(stdout, []string{"REF", "MAILBOX", "UNREAD"}, rows) {
+		if nextCursor != "" {
+			writeFormat(stdout, "\nNext cursor: %s\n", nextCursor)
+		}
 		return 0
 	}
 	for _, mailbox := range mailboxes {
 		writeFormat(stdout, "%s\t%s\t%d\n", mailbox.Ref, strings.Join(mailbox.Path, "/"), mailbox.UnreadCount)
+	}
+	if nextCursor != "" {
+		writeFormat(stdout, "next_cursor\t%s\n", nextCursor)
 	}
 	return 0
 }

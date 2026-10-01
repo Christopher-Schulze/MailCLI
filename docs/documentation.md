@@ -546,6 +546,7 @@ Mailbox paths are account-relative arrays internally and escaped display strings
 
 Message-list cursors remain store/mailbox-bound, filter and search cursors remain store/query-bound, draft cursors remain directory-revision-bound, and thread cursors retain their conversation binding under `data.thread`.
 The account, mailbox, and attachment catalog cursors are versioned and bind the command, scope, and ordered stable identities.
+Human account and mailbox lists show available continuation as `Next cursor:` in terminal tables or a `next_cursor` tab-separated line in pipes; use its exact value with `--cursor`. Terminal pages omit it.
 List and search cursors bind the store UUID, query or mailbox fingerprint, sort anchor, row ID and nullable received-date state; page size is excluded, so a continuation may use a different `--limit`.
 Cursors cannot be reused after a store replacement or with different filters.
 Pagination is best-effort keyset pagination across invocations, not a persistent snapshot.
