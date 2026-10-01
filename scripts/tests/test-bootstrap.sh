@@ -190,7 +190,7 @@ for required_text in \
   '/releases/latest' \
   "--proto-redir '=https'" \
   'shasum -a 256 -c archive.SHA256SUMS' \
-  'tar -tvzf' \
+  'tar -tvf -' \
   'tar -xzf'; do
   if ! grep -Fq -- "${required_text}" "${MAILCLI_ROOT}/scripts/release/install-latest.sh"; then
     printf 'Latest-release bootstrap is missing: %s\n' "${required_text}" >&2

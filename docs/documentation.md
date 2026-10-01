@@ -1213,6 +1213,7 @@ The repository has no publication script or release workflow.
 ### Installer
 
 The first-install bootstrap in the README needs only macOS system tools. It trusts GitHub HTTPS for the script, manifest and archive, and does not independently verify the Ed25519 signature. The `SHA256SUMS` check detects a mismatched download but cannot authenticate the publisher when both files come from the same host. The bootstrap checks the one expected archive entry, safe layout and embedded binary version before running `install.sh`; subsequent `mailcli update` calls verify the signature in Go.
+Latest-release resolution uses HEAD, at most 10 HTTPS redirects, a 10-second connection deadline and a 30-second transfer deadline. Checksums are bounded to 1 MiB and 30 seconds, the archive to 64 MiB and 120 seconds; curl configuration files are disabled. Before extraction, a bounded decompression stream and regular-file/directory listing enforce 192 MiB of expanded data and at most 256 entries, with unambiguous package paths. These checks also bound downloads without Content-Length on older system curl.
 
 The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/mailcli`; `MAILCLI_BINARY_DESTINATION` and `MAILCLI_SKILL_DESTINATION` select other safe absolute paths.
 It rejects unsafe parent or destination symlinks and pre-existing backup paths.
