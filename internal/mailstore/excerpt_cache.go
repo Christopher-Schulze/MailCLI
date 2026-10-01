@@ -36,7 +36,7 @@ type excerptCache struct {
 
 // excerptCacheVersion marks entries written by this layout; entries without it
 // or with another value are ignored and overwritten.
-const excerptCacheVersion = 1
+const excerptCacheVersion = 2
 
 type cachedExcerpt struct {
 	Version  int    `json:"v"`

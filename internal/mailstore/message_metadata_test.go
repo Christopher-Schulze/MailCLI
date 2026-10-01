@@ -28,10 +28,10 @@ func TestExcerptMIMEFixtures(t *testing.T) {
 		{"iso-8859-1", "Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nGr=FC=DFe aus M=FCnchen\r\n", "Grüße aus München", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			text, complete := excerptText(context.Background(), []byte(test.source))
+			text, complete, err := excerptText(context.Background(), []byte(test.source))
 			got := mail.BuildExcerpt(text, 240)
-			if got != test.want || complete != test.complete {
-				t.Fatalf("excerpt=%q complete=%t", got, complete)
+			if got != test.want || complete != test.complete || err != nil {
+				t.Fatalf("excerpt=%q complete=%t error=%v", got, complete, err)
 			}
 		})
 	}
@@ -425,7 +425,7 @@ func TestExcerptCacheRejectsForeignAndUnversionedEntries(t *testing.T) {
 	for name, content := range map[string]string{
 		"empty object":  `{}`,
 		"unversioned":   `{"excerpt":"legacy text","complete":true}`,
-		"other version": `{"v":2,"excerpt":"future text","complete":true}`,
+		"other version": `{"v":999,"excerpt":"future text","complete":true}`,
 	} {
 		if err := os.WriteFile(cache.path(name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -606,8 +606,102 @@ func TestEnrichmentReportsTheFailureInsteadOfHidingIt(t *testing.T) {
 }
 
 func TestExcerptDecodedTextCap(t *testing.T) {
-	text, complete := excerptText(context.Background(), []byte("Content-Type: text/plain\r\n\r\n"+strings.Repeat("x", int(mail.MaximumExcerptSourceBytes))))
-	if complete || int64(len(text)) > mail.MaximumExcerptSourceBytes {
-		t.Fatalf("text bytes=%d complete=%t", len(text), complete)
+	text, complete, err := excerptText(context.Background(), []byte("Content-Type: text/plain\r\n\r\n"+strings.Repeat("x", int(mail.MaximumExcerptSourceBytes))))
+	if complete || int64(len(text)) > mail.MaximumExcerptSourceBytes || err != nil {
+		t.Fatalf("text bytes=%d complete=%t error=%v", len(text), complete, err)
+	}
+}
+
+func TestEnrichMessagesHTMLConversionEvidenceAndCache(t *testing.T) {
+	deep := strings.Repeat("<div>", 600)
+	expanding := strings.Repeat("<ul><li>", 160) + strings.Repeat("<li>x</li>", 1200) + strings.Repeat("</li></ul>", 160)
+	for _, test := range []struct {
+		name, source, want string
+		failed, complete   bool
+	}{
+		{"deep HTML", "Content-Type: text/html\r\n\r\n" + deep, "", true, false},
+		{"expanding HTML", "Content-Type: text/html\r\n\r\n" + expanding, "", true, false},
+		{"empty HTML", "Content-Type: text/html\r\n\r\n<p></p>", "", false, true},
+		{"repaired HTML", "Content-Type: text/html\r\n\r\n<p>Hello <b>world", "Hello world", false, true},
+		{"plain precedes failed HTML", "Content-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\n\r\n" + deep + "\r\n--x\r\nContent-Type: text/plain\r\n\r\nPlain\r\n--x--\r\n", "Plain", false, true},
+		{"valid partial MIME", "Content-Type: multipart/alternative; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nPartial", "Partial", false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			operator := &excerptBatchOperator{sources: map[uint32]string{
+				202: "Message-ID: <local-102@example.com>\r\n" + test.source,
+			}}
+			client, refs := newLocalUIDExcerptFixture(t, operator)
+			client.excerpts = excerptCache{dir: t.TempDir()}
+			key, err := client.store.excerptCacheKey(context.Background(), refs[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				summaries, err := client.EnrichMessages(context.Background(), refs[:1], mail.MessageEnrichmentRequest{Excerpt: true, ExcerptLength: 240})
+				if err != nil {
+					t.Fatal(err)
+				}
+				row := summaries[0]
+				if row.Excerpt != test.want || row.ExcerptComplete != test.complete || (row.EnrichmentError != "") != test.failed || row.ExcerptSource != mail.ExcerptSourceIMAPPartial {
+					t.Fatalf("row = %+v", row)
+				}
+				if _, hit := client.excerpts.load(key); hit == test.failed {
+					t.Fatalf("cache hit=%t, failed conversion=%t", hit, test.failed)
+				}
+			}
+			wantFetches := 1
+			if test.failed {
+				wantFetches = 2
+			}
+			if len(operator.fetchUIDs) != wantFetches {
+				t.Fatalf("fetches=%v, want %d", operator.fetchUIDs, wantFetches)
+			}
+		})
+	}
+}
+
+type excerptCancellationContext struct {
+	context.Context
+	checks, trigger int
+	cancel          context.CancelFunc
+}
+
+func (ctx *excerptCancellationContext) Err() error {
+	ctx.checks++
+	if ctx.checks == ctx.trigger {
+		ctx.cancel()
+	}
+	return ctx.Context.Err()
+}
+
+func TestHTMLExcerptCancellationCannotPublishSuccess(t *testing.T) {
+	for _, trigger := range []int{1, 20, 2500} {
+		t.Run(fmt.Sprint(trigger), func(t *testing.T) {
+			base, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx := &excerptCancellationContext{Context: base, trigger: trigger, cancel: cancel}
+			client := &Client{excerpts: excerptCache{dir: t.TempDir()}}
+			var summary mail.MessageSummary
+			client.applyExcerpt(ctx, &summary, excerptInput{
+				data:     []byte("Content-Type: text/html\r\n\r\n" + strings.Repeat("<b>x</b>", 1024)),
+				complete: true, source: mail.ExcerptSourceIMAPPartial, cacheKey: "canceled",
+			}, 240)
+			if ctx.checks < trigger || base.Err() != context.Canceled || summary.ExcerptComplete || summary.Excerpt != "" || summary.EnrichmentError != "operation_canceled" {
+				t.Fatalf("checks=%d context=%v row=%+v", ctx.checks, base.Err(), summary)
+			}
+			if _, hit := client.excerpts.load("canceled"); hit {
+				t.Fatal("canceled HTML was cached as success")
+			}
+		})
+	}
+}
+
+func TestExcerptCacheIgnoresLegacyFalseCompleteHTML(t *testing.T) {
+	cache := excerptCache{dir: t.TempDir()}
+	if err := os.WriteFile(cache.path("legacy"), []byte(`{"v":1,"excerpt":"","complete":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if entry, hit := cache.load("legacy"); hit {
+		t.Fatalf("legacy potentially failed HTML conversion was served: %+v", entry)
 	}
 }

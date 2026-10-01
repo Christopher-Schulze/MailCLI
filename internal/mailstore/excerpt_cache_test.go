@@ -16,19 +16,19 @@ func TestExcerptCacheRequiresTypedFieldsAndRuneBound(t *testing.T) {
 		name, payload string
 		want          bool
 	}{
-		{"version only", `{"v":1}`, false},
-		{"missing excerpt", `{"v":1,"complete":true}`, false},
-		{"missing complete", `{"v":1,"excerpt":"x"}`, false},
-		{"null excerpt", `{"v":1,"excerpt":null,"complete":true}`, false},
-		{"null complete", `{"v":1,"excerpt":"x","complete":null}`, false},
-		{"number excerpt", `{"v":1,"excerpt":12,"complete":true}`, false},
-		{"string complete", `{"v":1,"excerpt":"x","complete":"false"}`, false},
-		{"array excerpt", `{"v":1,"excerpt":[],"complete":true}`, false},
-		{"empty incomplete", `{"v":1,"excerpt":"","complete":false}`, true},
-		{"empty complete", `{"v":1,"excerpt":"","complete":true}`, true},
-		{"exact Unicode bound", `{"v":1,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength) + `","complete":false}`, true},
-		{"over Unicode bound", `{"v":1,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
-		{"over ASCII bound", `{"v":1,"excerpt":"` + strings.Repeat("x", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
+		{"version only", `{"v":2}`, false},
+		{"missing excerpt", `{"v":2,"complete":true}`, false},
+		{"missing complete", `{"v":2,"excerpt":"x"}`, false},
+		{"null excerpt", `{"v":2,"excerpt":null,"complete":true}`, false},
+		{"null complete", `{"v":2,"excerpt":"x","complete":null}`, false},
+		{"number excerpt", `{"v":2,"excerpt":12,"complete":true}`, false},
+		{"string complete", `{"v":2,"excerpt":"x","complete":"false"}`, false},
+		{"array excerpt", `{"v":2,"excerpt":[],"complete":true}`, false},
+		{"empty incomplete", `{"v":2,"excerpt":"","complete":false}`, true},
+		{"empty complete", `{"v":2,"excerpt":"","complete":true}`, true},
+		{"exact Unicode bound", `{"v":2,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength) + `","complete":false}`, true},
+		{"over Unicode bound", `{"v":2,"excerpt":"` + strings.Repeat("界", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
+		{"over ASCII bound", `{"v":2,"excerpt":"` + strings.Repeat("x", mail.MaximumExcerptLength+1) + `","complete":true}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cache := excerptCache{dir: t.TempDir()}
@@ -48,7 +48,7 @@ func TestExcerptCacheRequiresTypedFieldsAndRuneBound(t *testing.T) {
 
 func TestExcerptCacheRequiresOneBoundedDocument(t *testing.T) {
 	t.Parallel()
-	const valid = `{"v":1,"excerpt":"hello","complete":true}`
+	const valid = `{"v":2,"excerpt":"hello","complete":true}`
 	for _, test := range []struct {
 		name, payload string
 		want          bool
@@ -59,7 +59,7 @@ func TestExcerptCacheRequiresOneBoundedDocument(t *testing.T) {
 		{name: "trailing garbage", payload: valid + "garbage"},
 		{name: "second document", payload: valid + `{}`},
 		{name: "missing version", payload: `{}`},
-		{name: "unsupported version", payload: `{"v":2,"excerpt":"hello","complete":true}`},
+		{name: "unsupported version", payload: `{"v":999,"excerpt":"hello","complete":true}`},
 		{name: "oversized", payload: valid + strings.Repeat(" ", maximumExcerptCacheEntryBytes)},
 		{name: "expired", payload: valid, expired: true},
 	} {
@@ -87,7 +87,7 @@ func TestExcerptCacheRejectsSymlink(t *testing.T) {
 	t.Parallel()
 	cache := excerptCache{dir: t.TempDir()}
 	target := filepath.Join(t.TempDir(), "outside.json")
-	const payload = `{"v":1,"excerpt":"outside","complete":true}`
+	const payload = `{"v":2,"excerpt":"outside","complete":true}`
 	if err := os.WriteFile(target, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}

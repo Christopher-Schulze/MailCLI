@@ -348,12 +348,10 @@ func (c *Client) applyExcerpt(ctx context.Context, summary *mail.MessageSummary,
 	}
 	excerpt, complete := input.excerpt, input.complete
 	if !input.cached {
-		text, parsed := excerptText(ctx, input.data)
+		text, parsed, conversionErr := excerptText(ctx, input.data)
 		excerpt, complete = mail.BuildExcerpt(text, mail.MaximumExcerptLength), input.complete && parsed
-		if !parsed && ctx.Err() != nil {
-			noteEnrichmentFailure(summary, ctx.Err())
-		}
-		if input.source == mail.ExcerptSourceIMAPPartial && input.err == nil && ctx.Err() == nil {
+		noteEnrichmentFailure(summary, conversionErr)
+		if input.source == mail.ExcerptSourceIMAPPartial && input.err == nil && conversionErr == nil && ctx.Err() == nil {
 			// The cache is best effort; a failed write only costs a later fetch.
 			_ = c.excerpts.store(input.cacheKey, cachedExcerpt{Excerpt: excerpt, Complete: complete})
 		}
@@ -399,23 +397,23 @@ func (s *Store) readExcerptSourceUnless(
 
 // Input, decoded text and part count are independently bounded. Parsing uses
 // original decoded text so the exact signature delimiter is not normalized away.
-func excerptText(ctx context.Context, data []byte) (string, bool) {
+func excerptText(ctx context.Context, data []byte) (string, bool, error) {
 	reader, err := messageMail.CreateReader(bytes.NewReader(data))
 	if err != nil || reader == nil {
-		return "", false
+		return "", false, ctx.Err()
 	}
 	var plain, html strings.Builder
 	remaining := mail.MaximumExcerptSourceBytes
 	for count := 0; count < 64; count++ {
 		if ctx.Err() != nil {
-			return preferredExcerptText(plain.String(), html.String()), false
+			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
 		part, partErr := reader.NextPart()
 		if errors.Is(partErr, io.EOF) {
-			return preferredExcerptText(plain.String(), html.String()), true
+			return preferredExcerptText(ctx, plain.String(), html.String(), true)
 		}
 		if partErr != nil || part == nil {
-			return preferredExcerptText(plain.String(), html.String()), false
+			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
 		header, inline := part.Header.(*messageMail.InlineHeader)
 		if !inline {
@@ -423,7 +421,7 @@ func excerptText(ctx context.Context, data []byte) (string, bool) {
 		}
 		kind, _, typeErr := header.ContentType()
 		if typeErr != nil {
-			return preferredExcerptText(plain.String(), html.String()), false
+			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
 		if kind != "text/plain" && kind != "text/html" {
 			continue
@@ -436,15 +434,19 @@ func excerptText(ctx context.Context, data []byte) (string, bool) {
 			html.Write(text)
 		}
 		if readErr != nil || remaining == 0 {
-			return preferredExcerptText(plain.String(), html.String()), false
+			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
 	}
-	return preferredExcerptText(plain.String(), html.String()), false
+	return preferredExcerptText(ctx, plain.String(), html.String(), false)
 }
 
-func preferredExcerptText(plain, html string) string {
-	if plain != "" {
-		return plain
+func preferredExcerptText(ctx context.Context, plain, html string, parsed bool) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return plain, false, err
 	}
-	return mail.HTMLToPlainText([]byte(html))
+	if plain != "" {
+		return plain, parsed, nil
+	}
+	text, err := mail.HTMLToPlainTextContext(ctx, []byte(html), int(mail.MaximumExcerptSourceBytes))
+	return text, parsed && err == nil, err
 }
