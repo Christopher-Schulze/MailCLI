@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"unicode/utf8"
 )
 
 type inputJSONShape uint8
@@ -72,6 +74,9 @@ func inputJSONFields(shape inputJSONShape) []inputJSONField {
 // values or a second object graph. Only active objects' finite key sets live
 // across tokens; the returned root set preserves omission versus explicit empty.
 func validateInputJSON(payload []byte, shape inputJSONShape) (map[string]bool, error) {
+	if err := validateInputJSONUnicode(payload); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	token, err := inputJSONToken(decoder, "$")
@@ -89,6 +94,46 @@ func validateInputJSON(payload []byte, shape inputJSONShape) (map[string]bool, e
 		return nil, invalidDraftInput("input must contain exactly one JSON object")
 	}
 	return fields, nil
+}
+
+// Check only the encoding that encoding/json would otherwise repair. Syntax
+// and schema validation remain the token walk's responsibility.
+func validateInputJSONUnicode(payload []byte) error {
+	if !utf8.Valid(payload) {
+		return invalidDraftInput("invalid UTF-8 in JSON input at $")
+	}
+	insideString := false
+	for index := 0; index < len(payload); index++ {
+		if payload[index] == '"' {
+			insideString = !insideString
+			continue
+		}
+		if !insideString || payload[index] != '\\' {
+			continue
+		}
+		unit, escaped := inputJSONCodeUnit(payload, index)
+		if !escaped {
+			index++ // Skip escaped quotes/backslashes; the decoder rejects bad escapes.
+			continue
+		}
+		if unit >= 0xd800 && unit <= 0xdfff {
+			low, paired := inputJSONCodeUnit(payload, index+6)
+			if unit >= 0xdc00 || !paired || low < 0xdc00 || low > 0xdfff {
+				return invalidDraftInput(fmt.Sprintf("unpaired JSON Unicode surrogate at $ near byte %d", index))
+			}
+			index += 6
+		}
+		index += 5
+	}
+	return nil
+}
+
+func inputJSONCodeUnit(payload []byte, offset int) (uint64, bool) {
+	if len(payload)-offset < 6 || payload[offset] != '\\' || payload[offset+1] != 'u' {
+		return 0, false
+	}
+	unit, err := strconv.ParseUint(string(payload[offset+2:offset+6]), 16, 16)
+	return unit, err == nil
 }
 
 func readInputJSONObject(decoder *json.Decoder, shape inputJSONShape, path string) (map[string]bool, error) {

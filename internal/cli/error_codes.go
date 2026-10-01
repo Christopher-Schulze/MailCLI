@@ -160,7 +160,7 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"invalid_editor", "The editor command is invalid.", errorScopeEditor},
 	{"invalid_emlx", "A local .emlx source has invalid framing.", errorScopeDetail},
 	{"invalid_imap_value", "A Message-ID or IMAP value is malformed.", errorScopeIMAP},
-	{"invalid_input", "Structured JSON input is malformed or has unknown, duplicate or invalid fields.", []string{"drafts.create", "drafts.update", "messages.reply", "messages.forward", "drafts.edit", "batch"}},
+	{"invalid_input", "Structured JSON input is malformed or has invalid Unicode, unknown, duplicate or invalid fields.", []string{"drafts.create", "drafts.update", "messages.reply", "messages.forward", "drafts.edit", "batch"}},
 	{"invalid_mailbox_cache", "A mailbox cache file cannot be inspected.", errorScopeStoreRead},
 	{"invalid_message_source", "The source message has invalid structure, headers or no reply target.", []string{"messages.reply", "messages.forward", "messages.get", "attachments.list", "attachments.save", "drafts.send"}},
 	{"invalid_path_segment", "A mailbox path contains an unsafe segment.", errorScopeStoreRead},

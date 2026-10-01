@@ -751,6 +751,7 @@ Direct transport covers Gmail and iCloud domains; other domains fail with `trans
 
 Draft creation accepts either a typed JSON document or terminal-native `--from`, repeatable recipient and attachment flags, subject, `--body`/`--body-file` and `--format plain|markdown|html`.
 JSON and native modes are mutually exclusive; the JSON `body` key is mandatory even when intentionally empty.
+Draft and batch JSON must use valid UTF-8, with every escaped high Unicode surrogate immediately paired with a low surrogate and no isolated low surrogate. Invalid encoding returns `invalid_input` before publication or dispatch; valid pairs, literal U+FFFD and escaped literal backslash-u text keep their decoded meaning. Editor JSON uses the same boundary, and diagnostics never echo rejected values.
 Recipient fields are arrays of `{name, address}` objects, and the same normalized address cannot occur more than once across To, CC and BCC.
 `address` values must be valid mailbox syntax, including required local-part quoting such as `"A B"@example.com`; `name` affects presentation only.
 Mailbox identity and case survive composition, SMTP envelopes, reply targets, sender identities and bindings; malformed unquoted values are rejected rather than repaired, and every role, including BCC, rejects prohibited controls and invalid UTF-8 before SMTP.
