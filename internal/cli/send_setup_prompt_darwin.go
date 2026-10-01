@@ -3,10 +3,10 @@
 package cli
 
 import (
-	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -22,15 +22,19 @@ const (
 // terminal it disables echo via termios and always restores the original
 // settings; on a pipe it reads a plain line so scripts and tests can supply
 // the secret. The prompt goes to stderr so stdout stays machine-readable.
-func readPasswordLine(prompt string) (string, error) {
-	fd := int(osStdin.Fd())
-	if !isTerminal(fd) {
-		fmt.Fprint(os.Stderr, prompt)
-		line, err := bufio.NewReader(sendSetupStdin).ReadString('\n')
-		if err != nil && line == "" {
-			return "", err
+func readPasswordLine(ctx context.Context, prompt string) (password string, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fd, err := sendPasswordInputDescriptor(sendSetupStdin)
+	if err != nil {
+		return "", err
+	}
+	if fd < 0 || !isTerminal(fd) {
+		if _, err := fmt.Fprint(os.Stderr, prompt); err != nil {
+			return "", fmt.Errorf("write password prompt: %w", err)
 		}
-		return strings.TrimRight(line, "\r\n"), nil
+		return readSendPasswordLine(ctx, sendSetupStdin)
 	}
 	var original syscall.Termios
 	if _, _, errno := syscall.Syscall(
@@ -47,17 +51,23 @@ func readPasswordLine(prompt string) (string, error) {
 		return "", errno
 	}
 	defer func() {
-		_, _, _ = syscall.Syscall(
+		_, _, errno := syscall.Syscall(
 			syscall.SYS_IOCTL, uintptr(fd), uintptr(ioctlWriteTermios), uintptr(unsafe.Pointer(&original)),
 		)
+		if errno != 0 {
+			password = ""
+			resultErr = errors.Join(resultErr, fmt.Errorf("restore password terminal settings: %w", errno))
+		}
 	}()
-	fmt.Fprint(os.Stderr, prompt)
-	line, err := bufio.NewReader(sendSetupStdin).ReadString('\n')
-	fmt.Fprintln(os.Stderr)
-	if err != nil && line == "" {
-		return "", err
+	if _, err := fmt.Fprint(os.Stderr, prompt); err != nil {
+		return "", fmt.Errorf("write password prompt: %w", err)
 	}
-	return strings.TrimRight(line, "\r\n"), nil
+	password, resultErr = readSendPasswordLine(ctx, sendSetupStdin)
+	if _, err := fmt.Fprintln(os.Stderr); err != nil {
+		password = ""
+		resultErr = errors.Join(resultErr, fmt.Errorf("finish password prompt: %w", err))
+	}
+	return password, resultErr
 }
 
 func isTerminal(fd int) bool {

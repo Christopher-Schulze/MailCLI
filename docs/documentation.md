@@ -1081,6 +1081,7 @@ Each host-port pair must be complete, ports must be in 1–65535, and hosts must
 Explicit endpoints skip the provider check per leg: a fully explicit binding covers both SMTP and IMAP, while a single explicit leg falls back to the provider table for the other.
 Rerunning setup for a binding keeps its endpoints and credential identity unless host flags or `--credential-account` are supplied again; any host flag replaces all four fields together, and host flags without `--account` are rejected.
 `--remove` deletes the selected Keychain credential and keeps the binding for reconfiguration.
+Before prompting or storing a password, setup validates the complete planned binding against the observed document, including provider-family, alias and binding-count limits. The final locked merge still checks concurrent changes. Password input is one line bounded to 4096 bytes including CRLF; EOF with data is allowed, other read failures abort without exposing or storing partial input. SIGINT/SIGTERM and caller cancellation stop input waits and prevent new Keychain writes; terminal settings are restored on controlled exits and restoration failures are reported. Native Keychain calls keep their synchronous behavior once started.
 Send-time validation skips the Sent-history scan for bound accounts because permitted senders come from the configured aliases.
 An alias shared by several bindings returns `account_binding_ambiguous` until an explicit account ref is supplied; a binding whose account is no longer enabled returns `account_binding_stale`.
 

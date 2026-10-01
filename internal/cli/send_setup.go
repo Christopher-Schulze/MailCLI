@@ -119,6 +119,9 @@ func runSendSetup(
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
+	if err := ctx.Err(); err != nil {
+		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+	}
 	hostFlags, credentialFlag := false, false
 	flags.Visit(func(value *flag.Flag) {
 		switch value.Name {
@@ -158,10 +161,11 @@ func runSendSetup(
 		}
 	}
 	var existingBinding mail.AccountBinding
+	var bindingDocument mail.AccountBindingFile
 	bindingFound := false
 	if stableAccountID != "" {
 		var err error
-		existingBinding, bindingFound, err = loadSendBinding(bindings, stableAccountID)
+		bindingDocument, existingBinding, bindingFound, err = loadSendBinding(bindings, stableAccountID)
 		if err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
@@ -191,8 +195,28 @@ func runSendSetup(
 	if stableAccountID == "" && !strings.EqualFold(account, credential) {
 		return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "--credential-account requires --account so the alias binding is explicit"}, stdout, stderr)
 	}
+	var hosts *bindingHosts
+	if hostFlags {
+		hosts = &bindingHosts{smtpHost: *smtpHost, smtpPort: *smtpPort, imapHost: *imapHost, imapPort: *imapPort}
+	}
+	decision := sendBindingDecision{snapshot: existingBinding, found: bindingFound, credentialExplicit: credentialFlag}
+	if stableAccountID != "" && !*remove {
+		// Validate the exact planned document without changing the observed
+		// snapshot. Publication still repeats the merge under its owning lock.
+		bindingDocument.Bindings = append([]mail.AccountBinding(nil), bindingDocument.Bindings...)
+		planned, err := mergeSendBinding(bindingDocument, stableAccountID, account, credential, hosts, decision)
+		if err == nil {
+			_, _, err = mail.FindAccountBinding(planned, stableAccountID)
+		}
+		if err != nil {
+			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+		}
+	}
 	credentials := sendSetupCredentials()
 	if *remove {
+		if err := ctx.Err(); err != nil {
+			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+		}
 		if err := credentials.Delete(credential); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
@@ -203,7 +227,7 @@ func runSendSetup(
 			Account: account, AccountRef: *accountRef, CredentialAccount: credential, Action: "removed",
 		})
 	}
-	password, err := readPasswordLine(transport.ProviderSupportDescription() + "\nApp-specific password for " + account + ": ")
+	password, err := readPasswordLine(ctx, transport.ProviderSupportDescription()+"\nApp-specific password for "+account+": ")
 	if err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}
@@ -214,6 +238,9 @@ func runSendSetup(
 			stdout, stderr,
 		)
 	}
+	if err := ctx.Err(); err != nil {
+		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+	}
 	if err := credentials.Store(credential, password); err != nil {
 		return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 	}
@@ -221,14 +248,9 @@ func runSendSetup(
 		invalidateCredentials(credential)
 	}
 	if stableAccountID != "" {
-		var hosts *bindingHosts
-		if hostFlags {
-			hosts = &bindingHosts{
-				smtpHost: *smtpHost, smtpPort: *smtpPort,
-				imapHost: *imapHost, imapPort: *imapPort,
-			}
+		if err := ctx.Err(); err != nil {
+			return failSendSetupBindingUpdate(*jsonOutput, err, mail.AccountBindingPublicationNone, stdout, stderr)
 		}
-		decision := sendBindingDecision{snapshot: existingBinding, found: bindingFound, credentialExplicit: credentialFlag}
 		if err := upsertSendBinding(ctx, bindings, stableAccountID, account, credential, hosts, decision); err != nil {
 			return failSendSetupBindingUpdate(
 				*jsonOutput, err, sendSetupBindingPublicationStatus(err), stdout, stderr,
@@ -374,15 +396,16 @@ func failSendSetupBindingUpdate(
 	return commandExitCodeFor("send.setup", err, true)
 }
 
-func loadSendBinding(store mail.AccountBindingStore, accountID string) (mail.AccountBinding, bool, error) {
+func loadSendBinding(store mail.AccountBindingStore, accountID string) (mail.AccountBindingFile, mail.AccountBinding, bool, error) {
 	if store == nil {
-		return mail.AccountBinding{}, false, &commandError{code: "account_binding_unavailable", message: "account binding store is unavailable"}
+		return mail.AccountBindingFile{}, mail.AccountBinding{}, false, &commandError{code: "account_binding_unavailable", message: "account binding store is unavailable"}
 	}
 	document, err := store.LoadAccountBindings()
 	if err != nil {
-		return mail.AccountBinding{}, false, err
+		return mail.AccountBindingFile{}, mail.AccountBinding{}, false, err
 	}
-	return mail.FindAccountBinding(document, accountID)
+	binding, found, err := mail.FindAccountBinding(document, accountID)
+	return document, binding, found, err
 }
 
 func writeSendSetupResult(stdout io.Writer, command string, jsonOutput bool, result sendSetupResult) int {

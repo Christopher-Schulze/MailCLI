@@ -428,6 +428,7 @@ var commandContracts = []commandContract{
 		resultStates:    []string{"stored", "removed"},
 		mailService:     mailServiceNotRequired,
 		published:       true,
+		requiresSignal:  true,
 	},
 	{
 		ID: "drafts.reconcile", handler: runDraftReconcile,
