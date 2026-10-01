@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1286,7 +1287,7 @@ func failProjectedEmpty(
 	return writeProjectedFailure(stdout, command, responseData{}, options, err, false)
 }
 
-func exportMessageBody(message mail.Message, path string) (mail.ContentExport, error) {
+func exportMessageBody(ctx context.Context, message mail.Message, path string) (mail.ContentExport, error) {
 	if !message.ContentComplete {
 		return mail.ContentExport{}, &commandError{
 			code: "content_incomplete", message: "message content is incomplete; export requires content_complete:true",
@@ -1297,7 +1298,7 @@ func exportMessageBody(message mail.Message, path string) (mail.ContentExport, e
 			code: "content_export_too_large", message: "message content exceeds the 64 MiB export limit",
 		}
 	}
-	return mail.WriteExclusiveContent(path, func(writer io.Writer) error {
+	return mail.WriteExclusiveContent(ctx, path, func(writer io.Writer) error {
 		_, err := io.WriteString(writer, message.Content)
 		return err
 	})
@@ -1371,7 +1372,7 @@ func writeProjectedFailure(stdout io.Writer, command string, data responseData, 
 	if code := writeEnvelopeBytes(stdout, payload); code != 0 {
 		return code
 	}
-	return commandExitCodeFor(command, err, len(data.PartialEffects) > 0 || data.draftMutationCompleted)
+	return commandExitCodeFor(command, err, len(data.PartialEffects) > 0 || data.draftMutationCompleted || data.ContentExport != nil)
 }
 
 func errorCode(err error) string {

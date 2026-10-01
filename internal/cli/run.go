@@ -214,6 +214,11 @@ func draftInspectRecovery(ref string, includeFullView bool) mail.RecoveryGuidanc
 
 func guidanceForResponse(command string, data responseData, err error) mail.OperationGuidance {
 	guidance := mail.GuidanceForError(command, err)
+	if data.ContentExport != nil {
+		guidance.Phase, guidance.EffectCertainty = mail.OperationPhaseExecution, mail.EffectComplete
+		guidance.Retryability, guidance.ReplayAllowed = mail.RetryObserveRequired, false
+		guidance.Recovery = mail.RecoveryGuidance{Action: mail.RecoveryObserve, Instruction: "The export is complete. Verify data.content_export.path, size and SHA-256; do not replay the export."}
+	}
 	var interactive *draftInteractiveRequiredError
 	if errors.As(err, &interactive) {
 		guidance = mail.OperationGuidance{
@@ -776,8 +781,8 @@ func runUpdateCommand(ctx context.Context, _ *mail.Service, args []string, stdou
 	return runUpdate(ctx, args, stdout, stderr)
 }
 
-func runDraftInspectCommand(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
-	return runDraftInspect(service, args, stdout, stderr)
+func runDraftInspectCommand(ctx context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {
+	return runDraftInspect(ctx, service, args, stdout, stderr)
 }
 
 func runDraftPreviewCommand(_ context.Context, service *mail.Service, args []string, stdout, stderr io.Writer) int {

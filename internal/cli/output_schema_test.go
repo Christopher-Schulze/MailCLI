@@ -343,7 +343,7 @@ func TestPublishedOutputContractsRemainingFixtures(t *testing.T) {
 		t.Fatalf("real editor update: %+v %v", edited, err)
 	}
 	var editorOutput bytes.Buffer
-	if code := writeDraftResponse(&editorOutput, "drafts.edit", edited, true, outputOptions{target: projectionTargetDraft, view: defaultDraftOutputView, maxBytes: defaultJSONOutputBytes}); code != 0 {
+	if code := writeDraftResponse(context.Background(), &editorOutput, "drafts.edit", edited, true, outputOptions{target: projectionTargetDraft, view: defaultDraftOutputView, maxBytes: defaultJSONOutputBytes}); code != 0 {
 		t.Fatalf("editor output exit=%d", code)
 	}
 	validate(editorOutput.Bytes())

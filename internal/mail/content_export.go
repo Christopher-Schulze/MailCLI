@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -20,10 +21,22 @@ type ContentExport struct {
 	SHA256 string `json:"sha256"`
 }
 
+// ContentExportOutcomeError retains filesystem effects when cleanup fails.
+type ContentExportOutcomeError struct {
+	Cause           error
+	EffectCertainty EffectCertainty
+}
+
+func (e *ContentExportOutcomeError) Error() string { return e.Cause.Error() }
+func (e *ContentExportOutcomeError) Unwrap() error { return e.Cause }
+
 // WriteExclusiveContent writes one content stream to an absolute path that
 // must not exist. The callback receives the owned file descriptor, and the
 // path is removed on failure only while it still names the file created here.
-func WriteExclusiveContent(path string, write func(io.Writer) error) (result ContentExport, resultErr error) {
+func WriteExclusiveContent(ctx context.Context, path string, write func(io.Writer) error) (result ContentExport, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return ContentExport{}, err
+	}
 	if path == "" || !filepath.IsAbs(path) {
 		return ContentExport{}, validationError("content export path must be absolute")
 	}
@@ -52,9 +65,14 @@ func WriteExclusiveContent(path string, write func(io.Writer) error) (result Con
 			resultErr = errors.Join(resultErr, file.Close())
 		}
 		if owned && !retained {
-			resultErr = errors.Join(resultErr, removeOwnedExport(root, parentPath, parentIdentity, name, createdIdentity))
+			if cleanupErr := removeOwnedExport(root, parentPath, parentIdentity, name, createdIdentity); cleanupErr != nil {
+				resultErr = &ContentExportOutcomeError{Cause: errors.Join(resultErr, cleanupErr), EffectCertainty: EffectUnknown}
+			}
 		}
 		resultErr = errors.Join(resultErr, root.Close())
+		if retained && resultErr != nil {
+			resultErr = &ContentExportOutcomeError{Cause: resultErr, EffectCertainty: EffectComplete}
+		}
 	}()
 	if err := verifyExportParent(root, parentPath, parentIdentity); err != nil {
 		return ContentExport{}, err
@@ -78,13 +96,16 @@ func WriteExclusiveContent(path string, write func(io.Writer) error) (result Con
 		return ContentExport{}, exportChangedError("content export is not a private regular file")
 	}
 	hash := sha256.New()
-	count := &exportCountingWriter{writer: io.MultiWriter(file, hash)}
+	count := &exportCountingWriter{ctx: ctx, writer: io.MultiWriter(file, hash)}
 	writeErr := write(count)
 	if count.limitErr != nil {
 		return ContentExport{}, count.limitErr
 	}
 	if writeErr != nil {
 		return ContentExport{}, fmt.Errorf("write content export: %w", writeErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return ContentExport{}, err
 	}
 	if err := file.Sync(); err != nil {
 		return ContentExport{}, fmt.Errorf("sync content export: %w", err)
@@ -98,12 +119,22 @@ func WriteExclusiveContent(path string, write func(io.Writer) error) (result Con
 		return ContentExport{}, fmt.Errorf("close content export: %w", err)
 	}
 	file = nil
-	verifiedSize, verifiedDigest, err := verifyExportBytes(root, name, identity)
+	verifiedSize, verifiedDigest, err := verifyExportBytes(ctx, root, name, identity)
 	if err != nil {
 		return ContentExport{}, err
 	}
 	if verifiedSize != count.written || verifiedDigest != writtenDigest {
 		return ContentExport{}, exportChangedError("content export bytes changed after writing")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return ContentExport{}, fmt.Errorf("open pinned content export directory for sync: %w", err)
+	}
+	if err := errors.Join(directory.Sync(), directory.Close()); err != nil {
+		return ContentExport{}, fmt.Errorf("sync content export directory: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return ContentExport{}, err
 	}
 	if err := verifyExportParent(root, parentPath, parentIdentity); err != nil {
 		return ContentExport{}, err
@@ -114,12 +145,16 @@ func WriteExclusiveContent(path string, write func(io.Writer) error) (result Con
 }
 
 type exportCountingWriter struct {
+	ctx      context.Context
 	writer   io.Writer
 	written  int64
 	limitErr error
 }
 
 func (w *exportCountingWriter) Write(payload []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
 	if w.limitErr != nil {
 		return 0, w.limitErr
 	}
@@ -184,7 +219,10 @@ func verifyExportFile(root *os.Root, name string, file *os.File, expected os.Fil
 	return nil
 }
 
-func verifyExportBytes(root *os.Root, name string, expected os.FileInfo) (size int64, digest string, resultErr error) {
+func verifyExportBytes(ctx context.Context, root *os.Root, name string, expected os.FileInfo) (size int64, digest string, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 	file, err := root.Open(name)
 	if err != nil {
 		return 0, "", fmt.Errorf("open content export for verification: %w", err)
@@ -201,12 +239,15 @@ func verifyExportBytes(root *os.Root, name string, expected os.FileInfo) (size i
 		return 0, "", exportChangedError("content export exceeds its byte limit")
 	}
 	hash := sha256.New()
-	writtenSize, err := io.Copy(hash, io.LimitReader(file, MaximumRawSourceBytes+1))
+	writtenSize, err := io.Copy(hash, io.LimitReader(contextReader{ctx: ctx, reader: file}, MaximumRawSourceBytes+1))
 	if err != nil {
 		return 0, "", fmt.Errorf("hash content export: %w", err)
 	}
 	if writtenSize > MaximumRawSourceBytes {
 		return 0, "", exportChangedError("content export exceeds its byte limit")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
 	}
 	current, err := root.Lstat(name)
 	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||

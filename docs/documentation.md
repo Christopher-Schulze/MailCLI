@@ -358,6 +358,7 @@ The budget applies to JSON only, not human summaries, and is not a whole-process
 
 `messages get`, `messages raw` and `drafts inspect` accept `--export /absolute/new/path`.
 The exporter creates a mode-0600 file exclusively, writes the complete normalized body or raw RFC 5322 bytes, verifies path identity, size and SHA-256, and reports only `data.content_export` metadata.
+Publication syncs the file and pinned containing directory; copying and digest verification observe caller cancellation between IO steps. A completed export keeps its metadata and `effect_certainty:complete`, `observe_required`, `replay_allowed:false` when output or finalization fails. Failed cleanup that cannot prove removal reports an unknown effect and forbids replay; inspect the destination without deleting a replacement.
 A relative, existing or symlinked destination or a non-directory parent fails before retrieval, incomplete normalized content fails without creating an export, and failed hydration keeps `data.message.hydration` while retaining recovered content only when it was not redirected to an export.
 
 ### Capability discovery

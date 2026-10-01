@@ -59,7 +59,7 @@ func (s *Store) GetRawSource(ctx context.Context, ref string) (result string, re
 	}
 	var output strings.Builder
 	output.Grow(int(source.length))
-	if err := writeRawMessageSource(&output, source); err != nil {
+	if err := writeRawMessageSource(ctx, &output, source); err != nil {
 		return "", err
 	}
 	return output.String(), nil
@@ -90,15 +90,15 @@ func (s *Store) WriteRawSource(ctx context.Context, ref string, writer io.Writer
 	if err != nil {
 		return err
 	}
-	return writeRawMessageSource(writer, source)
+	return writeRawMessageSource(ctx, writer, source)
 }
 
-func writeRawMessageSource(writer io.Writer, source *emlxSource) (resultErr error) {
+func writeRawMessageSource(ctx context.Context, writer io.Writer, source *emlxSource) (resultErr error) {
 	defer joinCloseError(&resultErr, source, "raw message source")
-	if _, err := io.CopyN(writer, source.Reader(), source.length); err != nil {
+	if _, err := io.CopyN(writer, mimeContextReader{ctx: ctx, reader: source.Reader()}, source.length); err != nil {
 		return fmt.Errorf("stream RFC message source: %w", err)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func sourceKind(partial bool) string {

@@ -177,7 +177,7 @@ func runDraftAdopt(ctx context.Context, service *mail.Service, args []string, st
 		return failProjectedEmpty("drafts.adopt", *jsonOutput, output, err, stdout, stderr)
 	}
 	output.draftMutationCompleted = true
-	return writeDraftResponse(stdout, "drafts.adopt", draft, *jsonOutput, output)
+	return writeDraftResponse(ctx, stdout, "drafts.adopt", draft, *jsonOutput, output)
 }
 
 func runDraftCreateContext(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -202,7 +202,7 @@ func runDraftCreateContext(ctx context.Context, service *mail.Service, args []st
 		return failProjectedEmpty("drafts.create", *jsonOutput, output, err, stdout, stderr)
 	}
 	output.draftMutationCompleted = true
-	return writeDraftResponse(stdout, "drafts.create", draft, *jsonOutput, output)
+	return writeDraftResponse(ctx, stdout, "drafts.create", draft, *jsonOutput, output)
 }
 
 type draftListEntry struct {
@@ -409,7 +409,7 @@ func writeDraftPruneResult(stdout io.Writer, result mail.PruneDraftsResult, comp
 	}
 }
 
-func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
+func runDraftInspect(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := newFlagSet("drafts inspect", stderr)
 	ref := flags.String("ref", "", "draft ref")
 	jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -449,7 +449,7 @@ func runDraftInspect(service *mail.Service, args []string, stdout io.Writer, std
 		}
 		return failProjectedEmpty("drafts.inspect", *jsonOutput, output, err, stdout, stderr)
 	}
-	return writeDraftResponse(stdout, "drafts.inspect", draft, *jsonOutput, output)
+	return writeDraftResponse(ctx, stdout, "drafts.inspect", draft, *jsonOutput, output)
 }
 
 func writeSendReceiptResponse(stdout io.Writer, command string, receipt mail.SendReceipt, jsonOutput bool) int {
@@ -518,7 +518,7 @@ func runDraftUpdate(ctx context.Context, service *mail.Service, args []string, s
 		return failProjectedEmpty("drafts.update", *jsonOutput, output, err, stdout, stderr)
 	}
 	output.draftMutationCompleted = true
-	return writeDraftResponse(stdout, "drafts.update", draft, *jsonOutput, output)
+	return writeDraftResponse(ctx, stdout, "drafts.update", draft, *jsonOutput, output)
 }
 
 func runDraftSend(ctx context.Context, service *mail.Service, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -644,10 +644,10 @@ func runDerivedDraft(ctx context.Context, service *mail.Service, kind mail.Draft
 		return failProjectedEmpty("messages."+string(kind), *jsonOutput, output, err, stdout, stderr)
 	}
 	output.draftMutationCompleted = true
-	return writeDraftResponse(stdout, "messages."+string(kind), draft, *jsonOutput, output)
+	return writeDraftResponse(ctx, stdout, "messages."+string(kind), draft, *jsonOutput, output)
 }
 
-func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, jsonOutput bool, options ...outputOptions) int {
+func writeDraftResponse(ctx context.Context, stdout io.Writer, command string, draft mail.Draft, jsonOutput bool, options ...outputOptions) int {
 	output := outputOptions{target: projectionTargetDraft, view: defaultDraftOutputView, maxBytes: defaultJSONOutputBytes}
 	if len(options) > 0 {
 		output = options[0]
@@ -661,11 +661,14 @@ func writeDraftResponse(stdout io.Writer, command string, draft mail.Draft, json
 			return failProjectedDraft(command, jsonOutput, draft, output,
 				&commandError{code: "content_export_too_large", message: "draft body exceeds the 64 MiB export limit"}, stdout, output.stderr)
 		}
-		value, err := mail.WriteExclusiveContent(output.exportPath, func(writer io.Writer) error {
+		value, err := mail.WriteExclusiveContent(ctx, output.exportPath, func(writer io.Writer) error {
 			_, writeErr := io.WriteString(writer, draft.Body)
 			return writeErr
 		})
 		if err != nil {
+			if jsonOutput && value.Path != "" {
+				return writeProjectedFailure(stdout, command, responseData{Draft: &draft, ContentExport: &value, draftMutationCompleted: output.draftMutationCompleted}, output, err, true)
+			}
 			return failProjectedDraft(command, jsonOutput, draft, output, err, stdout, output.stderr)
 		}
 		exported = &value

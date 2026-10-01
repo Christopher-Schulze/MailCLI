@@ -471,8 +471,11 @@ func runMessagesGet(ctx context.Context, service *mail.Service, args []string, s
 	}
 	var exported *mail.ContentExport
 	if output.exportPath != "" {
-		value, exportErr := exportMessageBody(message, output.exportPath)
+		value, exportErr := exportMessageBody(operationCtx, message, output.exportPath)
 		if exportErr != nil {
+			if *jsonOutput && value.Path != "" {
+				return writeProjectedFailure(stdout, "messages.get", responseData{Message: &message, ContentExport: &value}, output, exportErr, true)
+			}
 			return failProjectedMessage("messages.get", *jsonOutput, message, output, exportErr, stdout, stderr)
 		}
 		exported = &value
@@ -602,11 +605,14 @@ func runMessagesRaw(ctx context.Context, service *mail.Service, args []string, s
 	operationCtx, cancel := hydrationReadContext(ctx)
 	defer cancel()
 	if output.exportPath != "" {
-		exported, exportErr := mail.WriteExclusiveContent(output.exportPath, func(writer io.Writer) error {
+		exported, exportErr := mail.WriteExclusiveContent(operationCtx, output.exportPath, func(writer io.Writer) error {
 			return service.WriteRawSource(operationCtx, *ref, writer)
 		})
 		if exportErr != nil {
 			if *jsonOutput {
+				if exported.Path != "" {
+					return writeProjectedFailure(stdout, "messages.raw", responseData{ContentExport: &exported}, output, exportErr, true)
+				}
 				return failProjectedEmpty("messages.raw", true, output, exportErr, stdout, stderr)
 			}
 			return failCommand("messages.raw", false, exportErr, stdout, stderr)

@@ -780,7 +780,7 @@ func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if code := runDraftInspect(service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr); code != 0 {
+	if code := runDraftInspect(context.Background(), service, []string{"--ref", draft.Ref, "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("runDraftInspect() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"send_receipt"`) ||
@@ -791,7 +791,7 @@ func TestDraftInspectReturnsConsumedSendReceipt(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runDraftInspect(service, []string{"--ref", draft.Ref}, &stdout, &stderr); code != 0 {
+	if code := runDraftInspect(context.Background(), service, []string{"--ref", draft.Ref}, &stdout, &stderr); code != 0 {
 		t.Fatalf("human runDraftInspect() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "SMTP submission accepted: true") ||

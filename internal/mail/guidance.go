@@ -83,6 +83,14 @@ type OperationGuidance struct {
 // command and operation identity after this base classification.
 func GuidanceForError(command string, err error) OperationGuidance {
 	code := guidanceErrorCode(err)
+	var exportOutcome *ContentExportOutcomeError
+	if errors.As(err, &exportOutcome) {
+		return OperationGuidance{
+			Phase: OperationPhaseExecution, EffectCertainty: exportOutcome.EffectCertainty,
+			Retryability: RetryObserveRequired, ReplayAllowed: false,
+			Recovery: RecoveryGuidance{Action: RecoveryObserve, Instruction: "Inspect the export path and retained filesystem evidence before taking further action; do not replay this export."},
+		}
+	}
 	if command == "drafts.adopt" {
 		var adoption *DraftAdoptionError
 		if errors.As(err, &adoption) {

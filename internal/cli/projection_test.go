@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -516,7 +517,7 @@ func TestDraftProjectionViewsAndExport(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := runDraftInspect(service, test.args, &stdout, &stderr)
+			code := runDraftInspect(context.Background(), service, test.args, &stdout, &stderr)
 			if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), test.want) {
 				t.Fatalf("code = %d, stderr = %q, output = %q", code, stderr.String(), stdout.String())
 			}
@@ -529,7 +530,7 @@ func TestDraftProjectionViewsAndExport(t *testing.T) {
 	}
 	exportPath := filepath.Join(t.TempDir(), "draft-body.txt")
 	var stdout, stderr bytes.Buffer
-	code := runDraftInspect(service, []string{"--ref", draft.Ref, "--view", "full", "--export", exportPath, "--json"}, &stdout, &stderr)
+	code := runDraftInspect(context.Background(), service, []string{"--ref", draft.Ref, "--view", "full", "--export", exportPath, "--json"}, &stdout, &stderr)
 	if code != 0 || stderr.Len() != 0 || strings.Contains(stdout.String(), `"body":`) || !strings.Contains(stdout.String(), `"content_export"`) {
 		t.Fatalf("export code = %d, stderr = %q, output = %q", code, stderr.String(), stdout.String())
 	}
@@ -559,4 +560,80 @@ func assertExportFile(t *testing.T, path string, want []byte, output string) {
 
 func itoa(value int) string {
 	return fmt.Sprintf("%d", value)
+}
+
+type cancelRawCopyWriter struct {
+	buffer bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (w *cancelRawCopyWriter) Write(payload []byte) (int, error) {
+	written, err := w.buffer.Write(payload)
+	w.cancel()
+	return written, err
+}
+
+func TestLocalRawCopyRetainsCancellationAfterLastWrite(t *testing.T) {
+	service := mail.NewService(goldenWorkflowStore(t))
+	page, err := service.ListMessages(context.Background(), mail.ListMessagesRequest{Limit: 1})
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("fixture page=%+v error=%v", page, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelRawCopyWriter{cancel: cancel}
+	err = service.WriteRawSource(ctx, page.Messages[0].Ref, writer)
+	if !errors.Is(err, context.Canceled) || writer.buffer.Len() == 0 {
+		t.Fatalf("copy bytes=%d error=%v", writer.buffer.Len(), err)
+	}
+}
+
+func TestCompletedExportSurvivesOutputAndFinalizationFailures(t *testing.T) {
+	for _, command := range []string{"get", "raw", "drafts"} {
+		for _, overflow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/overflow=%t", command, overflow), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "export.txt")
+				gateway := &projectionGateway{message: projectionMessage(), raw: "raw bytes\r\n"}
+				service := mail.NewServiceWithDraftRoot(gateway, t.TempDir())
+				args := []string{"messages", command, "--ref", "msg_ref", "--view", "full", "--export", path, "--json"}
+				want := []byte(gateway.message.Content)
+				switch command {
+				case "raw":
+					want = []byte(gateway.raw)
+				case "drafts":
+					draft, err := service.CreateDraft(mail.CreateDraftRequest{Input: mail.DraftInput{To: []mail.Recipient{{Address: "recipient@example.com"}}, Body: "draft body"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					args = []string{"drafts", "inspect", "--ref", draft.Ref, "--view", "full", "--export", path, "--json"}
+					want = []byte(draft.Body)
+				}
+				if overflow {
+					args = append(args, "--max-bytes", "1")
+				}
+				var execution, stderr, finalized bytes.Buffer
+				code := Run(context.Background(), service, args, &execution, &stderr)
+				if overflow {
+					if code != 1 {
+						t.Fatalf("overflow exit=%d output=%s", code, &execution)
+					}
+				} else if code != 0 {
+					t.Fatalf("export exit=%d output=%s stderr=%s", code, &execution, &stderr)
+				}
+				if code := FinalizeJSON(&finalized, args, execution.Bytes(), code, fmt.Errorf("fixture close failure")); code != 1 {
+					t.Fatalf("finalization exit=%d", code)
+				}
+				assertExportFile(t, path, want, finalized.String())
+				var result envelope
+				if err := json.Unmarshal(finalized.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Data.ContentExport == nil || result.Error == nil || result.Error.Guidance == nil ||
+					result.Error.Guidance.EffectCertainty != mail.EffectComplete || result.Error.Guidance.ReplayAllowed ||
+					result.Error.Guidance.Retryability != mail.RetryObserveRequired {
+					t.Fatalf("completed export lost its outcome: %s", &finalized)
+				}
+			})
+		}
+	}
 }
