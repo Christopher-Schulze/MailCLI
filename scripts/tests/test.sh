@@ -6,6 +6,7 @@ SCRIPT_BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAILCLI_ROOT="${MAILCLI_ROOT:-${SCRIPT_BASE}}"
 export MAILCLI_ROOT
 SHELL_TESTS=(
+  scripts/tests/test-cleanup.sh
   scripts/tests/test-preflight-cache.sh
   scripts/tests/test-bootstrap.sh
   scripts/tests/test-benchmark-summary.sh
@@ -186,6 +187,7 @@ run_shell_lane() {
   set -euo pipefail
   # This background lane is non-live; preserve the parent's later live flags.
   unset MAILCLI_LIVE_TESTS MAILCLI_KEYCHAIN_LIVE MAILCLI_LIVE_RESPONSIVENESS
+  run_shell_test scripts/tests/test-cleanup.sh
   run_shell_test scripts/tests/test-preflight-cache.sh
   run_shell_test scripts/tests/test-bootstrap.sh
   run_shell_test scripts/tests/test-benchmark-summary.sh

@@ -212,6 +212,8 @@ func routePath(path string, plan *checkPlan, checks map[string]bool) {
 
 func routeTooling(path string, plan *checkPlan, checks map[string]bool) {
 	switch {
+	case path == "cleanup.sh":
+		checks["scripts/tests/test-cleanup.sh"] = true
 	case path == "scripts/utils/manage-write-lease.sh":
 		checks["scripts/tests/test-write-coordination.sh"] = true
 		fallthrough

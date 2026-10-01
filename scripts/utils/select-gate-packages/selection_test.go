@@ -100,6 +100,7 @@ func TestDocumentationAndToolingRoutes(t *testing.T) {
 		check string
 	}{
 		{path: "README.md", docs: true, check: "scripts/tests/test-bootstrap.sh"},
+		{path: "cleanup.sh", check: "scripts/tests/test-cleanup.sh"},
 		{path: "docs/documentation.md", docs: true},
 		{path: "skills/mailcli/SKILL.md", docs: true, check: "scripts/tests/test-skill-drift.sh"},
 		{path: ".github/workflows/ci.yml", docs: true, check: "scripts/tests/test-verification-policy.sh"},

@@ -370,6 +370,8 @@ MAILCLI_LIVE_TESTS=1 ./scripts/tests/test.sh --full-checks
 
 `test.sh` checks only the staged change: formatting, lint, the changed packages with their reverse dependencies, and the affected documentation and shell checks. `--full` runs the complete non-live suite with coverage, lint, `govulncheck`, and the isolated release, install, and skill gates; it never touches your Mail store, Keychain, or installed skill. Live Mail, Keychain, and responsiveness checks are opt-in through environment flags, and the race detector runs only manually. `test-release.sh` builds, signs, packages, installs, and rolls back a release in a temporary directory without publishing anything. The benchmark runner uses generated fixtures and loopback servers only. See [development](docs/documentation.md#development).
 
+Run `./cleanup.sh` after an iteration to remove generated checkout artifacts: `bin/`, `dist/`, `graphify-out/`, `.coverage/`, and root-level `coverage*.out`, `*.test`, `*.prof`, `*.pprof`, `*.trace` files. It reports allocated repository size before/after, each removed target and net space reclaimed. Cleanup validates every target before deleting anything and refuses tracked content, symlinks and active writer leases.
+
 ## License
 
 MailCLI is available under the [MIT License](LICENSE). Copyright 2026 Christopher Schulze.
