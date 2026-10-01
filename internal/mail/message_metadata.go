@@ -160,6 +160,7 @@ func ParseHeaderFields(raw string) ([]HeaderField, bool) {
 	fields := []HeaderField{}
 	complete := false
 	valid := true
+	var unfolded strings.Builder
 	lines := strings.SplitAfter(raw, "\n")
 	for _, physical := range lines {
 		if physical == "" {
@@ -176,7 +177,11 @@ func ParseHeaderFields(raw string) ([]HeaderField, bool) {
 				valid = false
 				continue
 			}
-			fields[len(fields)-1].Value += " " + strings.TrimSpace(line)
+			if unfolded.Len() == 0 {
+				unfolded.WriteString(fields[len(fields)-1].Value)
+			}
+			unfolded.WriteByte(' ')
+			unfolded.WriteString(strings.TrimSpace(line))
 			continue
 		}
 		name, value, found := strings.Cut(line, ":")
@@ -184,7 +189,14 @@ func ParseHeaderFields(raw string) ([]HeaderField, bool) {
 			valid = false
 			continue
 		}
+		if unfolded.Len() > 0 {
+			fields[len(fields)-1].Value = unfolded.String()
+			unfolded.Reset()
+		}
 		fields = append(fields, HeaderField{Name: name, Value: strings.TrimSpace(value)})
+	}
+	if unfolded.Len() > 0 {
+		fields[len(fields)-1].Value = unfolded.String()
 	}
 	return fields, complete && valid
 }

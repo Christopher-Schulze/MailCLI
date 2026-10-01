@@ -190,3 +190,68 @@ func TestUnrequestedEnrichmentAndEmptyMessageIDStayOutOfTheJSON(t *testing.T) {
 		t.Fatalf("threading-only summary = %s", payload)
 	}
 }
+
+func TestHeaderUnfoldingPreservesFieldBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name, raw string
+		want      []HeaderField
+		complete  bool
+	}{
+		{"LF duplicates", "x-MiXeD: one\n \ttwo \nX-Mixed: next\n\tlast\n\nbody", []HeaderField{{"x-MiXeD", "one two"}, {"X-Mixed", "next last"}}, true},
+		{"CRLF duplicates", "X: one\r\n two\r\nX: next\r\n last\r\n\r\n", []HeaderField{{"X", "one two"}, {"X", "next last"}}, true},
+		{"empty folds", "X: \n \n\tx\n \n\n", []HeaderField{{"X", "  x "}}, true},
+		{"orphan fold", " orphan\nX: one\n two\n\n", []HeaderField{{"X", "one two"}}, false},
+		{"invalid line between folds", "X: one\n two\ninvalid\n three\nY: next\n\n", []HeaderField{{"X", "one two three"}, {"Y", "next"}}, false},
+		{"invalid field name", "X: one\n two\nBad Name: lost\n three\n\n", []HeaderField{{"X", "one two three"}}, false},
+		{"missing separator", "X: one\n two", []HeaderField{{"X", "one two"}}, false},
+		{"empty block", "\nbody", []HeaderField{}, true},
+		{"empty source", "", []HeaderField{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fields, complete := ParseHeaderFields(test.raw)
+			if !reflect.DeepEqual(fields, test.want) || complete != test.complete {
+				t.Fatalf("fields=%+v complete=%t, want %+v %t", fields, complete, test.want, test.complete)
+			}
+		})
+	}
+}
+
+func TestHeaderUnfoldingLargeInputHasBoundedAllocations(t *testing.T) {
+	const folds = 4096
+	raw := "X-Fold: initial\r\n" + strings.Repeat("\tx\r\n", folds) + "X-Fold: second\r\n third\r\n\r\nbody"
+	var fields []HeaderField
+	var complete bool
+	allocations := testing.AllocsPerRun(3, func() { fields, complete = ParseHeaderFields(raw) })
+	want := []HeaderField{{"X-Fold", "initial" + strings.Repeat(" x", folds)}, {"X-Fold", "second third"}}
+	if !complete || !reflect.DeepEqual(fields, want) {
+		t.Fatalf("large folded fields differ, complete=%t", complete)
+	}
+	// A bounded header must not allocate one progressively larger string per
+	// physical continuation. Leave ample room for slice and builder growth.
+	if allocations > 128 {
+		t.Fatalf("%d folds in %d source bytes allocated %.0f times; want at most 128", folds, len(raw), allocations)
+	}
+}
+
+func BenchmarkHeaderUnfolding(b *testing.B) {
+	for _, test := range []struct {
+		name, raw string
+		fields    int
+	}{
+		{"ordinary", "From: a@example.com\r\nTo: b@example.com\r\nSubject: hello\r\nMessage-ID: <a@b>\r\n\r\n", 4},
+		{"folds_256", "X: initial\r\n" + strings.Repeat("\tx\r\n", 256) + "\r\n", 1},
+		{"folds_1024", "X: initial\r\n" + strings.Repeat("\tx\r\n", 1024) + "\r\n", 1},
+		{"folds_4096", "X: initial\r\n" + strings.Repeat("\tx\r\n", 4096) + "\r\n", 1},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(test.raw)))
+			for b.Loop() {
+				fields, complete := ParseHeaderFields(test.raw)
+				if !complete || len(fields) != test.fields || fields[0].Value == "" {
+					b.Fatal("parser lost header evidence")
+				}
+			}
+		})
+	}
+}
