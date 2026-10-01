@@ -23,10 +23,10 @@ func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (upd
 	}
 	var release updateRelease
 	if err := json.Unmarshal(payload, &release); err != nil {
-		return updateRelease{}, nil, updateFailure("update_check_failed", "decode latest GitHub release: %v", err)
+		return updateRelease{}, nil, contextualUpdateFailure("update_package_invalid", "decode latest GitHub release", err)
 	}
 	if release.TagName == "" || release.HTMLURL == "" {
-		return updateRelease{}, nil, updateFailure("update_check_failed", "latest GitHub release metadata is incomplete")
+		return updateRelease{}, nil, updateFailure("update_package_invalid", "latest GitHub release metadata is incomplete")
 	}
 	if err := environment.urlPolicy.validate(release.HTMLURL); err != nil {
 		return updateRelease{}, nil, contextualUpdateFailure("update_check_failed", "invalid release page URL", err)
@@ -37,11 +37,11 @@ func fetchLatestRelease(ctx context.Context, environment updateEnvironment) (upd
 func compareReleaseVersions(current string, releaseTag string) (string, int, error) {
 	currentParts, _, err := parseReleaseVersion(current)
 	if err != nil {
-		return "", 0, updateFailure("update_check_failed", "installed version is invalid: %v", err)
+		return "", 0, contextualUpdateFailure("update_package_invalid", "installed version is invalid", err)
 	}
 	releaseParts, normalizedRelease, err := parseReleaseVersion(releaseTag)
 	if err != nil {
-		return "", 0, updateFailure("update_check_failed", "latest release version is invalid: %v", err)
+		return "", 0, contextualUpdateFailure("update_package_invalid", "latest release version is invalid", err)
 	}
 	for index := range currentParts {
 		if currentParts[index] > releaseParts[index] {
@@ -118,7 +118,7 @@ func downloadUpdateResource(
 ) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, sanitizeUpdateRequestError(err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "MailCLI/"+version)
@@ -132,15 +132,15 @@ func downloadUpdateResource(
 	}
 	if response.ContentLength > maximumBytes {
 		closeErr := response.Body.Close()
-		return nil, errors.Join(fmt.Errorf("response exceeds %d bytes", maximumBytes), closeErr)
+		return nil, errors.Join(updateFailure("update_package_invalid", "response exceeds %d bytes", maximumBytes), closeErr)
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
-		return nil, errors.Join(readErr, closeErr)
+		return nil, sanitizeUpdateRequestError(errors.Join(readErr, closeErr))
 	}
 	if int64(len(payload)) > maximumBytes {
-		return nil, fmt.Errorf("response exceeds %d bytes", maximumBytes)
+		return nil, updateFailure("update_package_invalid", "response exceeds %d bytes", maximumBytes)
 	}
 	return payload, nil
 }

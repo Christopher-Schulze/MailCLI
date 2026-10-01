@@ -21,7 +21,7 @@ func TestReleaseVersionRejectsNonnumericComponents(t *testing.T) {
 			}
 			for _, pair := range [][2]string{{value, "1.2.3"}, {"1.2.3", value}} {
 				_, _, err := compareReleaseVersions(pair[0], pair[1])
-				if err == nil || errorCode(err) != "update_check_failed" {
+				if err == nil || errorCode(err) != "update_package_invalid" {
 					t.Errorf("comparison accepted invalid component: pair=%q error=%v", pair, err)
 				}
 			}

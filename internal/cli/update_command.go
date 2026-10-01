@@ -120,6 +120,7 @@ type updateEnvironment struct {
 type updateError struct {
 	code    string
 	message string
+	cause   error
 }
 
 func (e *updateError) Error() string {
@@ -128,6 +129,10 @@ func (e *updateError) Error() string {
 
 func (e *updateError) ErrorCode() string {
 	return e.code
+}
+
+func (e *updateError) Unwrap() error {
+	return e.cause
 }
 
 func runUpdate(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer) int {
@@ -196,18 +201,18 @@ func failUpdateWithResult(result updateResult, err error, stderr io.Writer) int 
 func defaultUpdateEnvironment() (updateEnvironment, error) {
 	publicKey, err := parseReleasePublicKey(releaseauth.PublicKeyBase64)
 	if err != nil {
-		return updateEnvironment{}, updateFailure("update_signature_invalid", "decode pinned release key: %v", err)
+		return updateEnvironment{}, contextualUpdateFailure("update_signature_invalid", "decode pinned release key", err)
 	}
 	executablePath, err := os.Executable()
 	if err != nil {
-		return updateEnvironment{}, updateFailure("update_install_failed", "resolve installed MailCLI binary: %v", err)
+		return updateEnvironment{}, contextualUpdateFailure("update_install_failed", "resolve installed MailCLI binary", err)
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(executablePath); resolveErr == nil {
 		executablePath = resolved
 	}
 	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
-		return updateEnvironment{}, updateFailure("update_install_failed", "resolve user home directory: %v", err)
+		return updateEnvironment{}, contextualUpdateFailure("update_install_failed", "resolve user home directory", err)
 	}
 	return updateEnvironment{
 		client: &http.Client{
@@ -326,7 +331,7 @@ func installUpdateWithLock(
 ) (updateResult, error) {
 	installedVersion, err := environment.readInstalledVersion(ctx, environment.executablePath)
 	if err != nil {
-		return updateResult{}, updateFailure("update_install_failed", "read installed version: %v", err)
+		return updateResult{}, contextualUpdateFailure("update_install_failed", "read installed version", errors.Join(ctx.Err(), err))
 	}
 	result.CurrentVersion = installedVersion
 	_, installedComparison, err := compareReleaseVersions(installedVersion, result.LatestVersion)
@@ -488,25 +493,29 @@ func validateUpdateURL(value string, allowInsecure bool) error {
 }
 
 func contextualUpdateFailure(fallbackCode string, context string, err error) error {
+	code, message := fallbackCode, err.Error()
 	var typed *updateError
 	if errors.As(err, &typed) {
-		return updateFailure(typed.code, "%s: %s", context, typed.message)
+		if typed.code != "" {
+			code = typed.code
+		}
+		message = typed.message
 	}
-	return updateFailure(fallbackCode, "%s: %v", context, err)
+	return &updateError{code: code, message: fmt.Sprintf("%s: %s", context, message), cause: err}
 }
 
 func sanitizeUpdateRequestError(err error) error {
 	var typed *updateError
 	if errors.As(err, &typed) {
-		return typed
+		return &updateError{code: typed.code, message: typed.message, cause: err}
 	}
+	message := "release request failed"
 	if errors.Is(err, context.Canceled) {
-		return context.Canceled
+		message = context.Canceled.Error()
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		message = context.DeadlineExceeded.Error()
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
-	}
-	return errors.New("release request failed")
+	return &updateError{message: message, cause: err}
 }
 
 func updateFailure(code string, format string, values ...any) error {

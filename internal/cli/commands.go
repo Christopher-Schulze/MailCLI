@@ -567,6 +567,10 @@ func hydrationCommandError(diagnostic *mail.HydrationDiagnostic, fallback error)
 }
 
 func publicFailureMessage(err error) string {
+	var update *updateError
+	if errors.As(err, &update) {
+		return update.Error()
+	}
 	if transport.IsTLSVerificationFailure(err) {
 		return "IMAP TLS certificate verification failed; correct certificate trust or the configured hostname before retrying"
 	}

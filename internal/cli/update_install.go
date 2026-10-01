@@ -25,11 +25,11 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (*os.File, err
 	}
 	resolvedHome, err := filepath.EvalSymlinks(homeDirectory)
 	if err != nil {
-		return nil, updateFailure("update_lock_failed", "resolve home directory: %v", err)
+		return nil, contextualUpdateFailure("update_lock_failed", "resolve home directory", err)
 	}
 	stateRoot := filepath.Join(resolvedHome, "Library", "Application Support", "MailCLI")
 	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
-		return nil, updateFailure("update_lock_failed", "create update state directory: %v", err)
+		return nil, contextualUpdateFailure("update_lock_failed", "create update state directory", err)
 	}
 	resolvedStateRoot, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil || resolvedStateRoot != stateRoot {
@@ -40,12 +40,12 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (*os.File, err
 		return nil, updateFailure("update_lock_failed", "update state path is not a real directory")
 	}
 	if err := os.Chmod(stateRoot, 0o700); err != nil {
-		return nil, updateFailure("update_lock_failed", "secure update state directory: %v", err)
+		return nil, contextualUpdateFailure("update_lock_failed", "secure update state directory", err)
 	}
 	lockPath := filepath.Join(stateRoot, "update.lock")
 	fileDescriptor, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
-		return nil, updateFailure("update_lock_failed", "open update lock: %v", err)
+		return nil, contextualUpdateFailure("update_lock_failed", "open update lock", err)
 	}
 	file := os.NewFile(uintptr(fileDescriptor), lockPath)
 	if file == nil {
@@ -56,7 +56,7 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (*os.File, err
 		return nil, errors.Join(err, file.Close())
 	}
 	if err := file.Chmod(0o600); err != nil {
-		return nil, errors.Join(updateFailure("update_lock_failed", "secure update lock: %v", err), file.Close())
+		return nil, errors.Join(contextualUpdateFailure("update_lock_failed", "secure update lock", err), file.Close())
 	}
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -76,7 +76,7 @@ func acquireUpdateLock(ctx context.Context, homeDirectory string) (*os.File, err
 			return file, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errors.Join(updateFailure("update_lock_failed", "lock update state: %v", err), file.Close())
+			return nil, errors.Join(contextualUpdateFailure("update_lock_failed", "lock update state", err), file.Close())
 		}
 		select {
 		case <-ctx.Done():
@@ -138,7 +138,7 @@ func installVerifiedArchive(
 ) (outcome updateInstallOutcome, resultErr error) {
 	temporaryRoot, err := os.MkdirTemp("", "mailcli-update-*")
 	if err != nil {
-		return updateInstallOutcome{}, updateFailure("update_install_failed", "create private update directory: %v", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_install_failed", "create private update directory", err)
 	}
 	defer func() {
 		if cleanupErr := removeUpdatePackageRoot(environment, temporaryRoot); cleanupErr != nil {
@@ -147,7 +147,7 @@ func installVerifiedArchive(
 			}
 			resultErr = errors.Join(
 				resultErr,
-				updateFailure("update_install_failed", "remove private update directory: %v", cleanupErr),
+				contextualUpdateFailure("update_install_failed", "remove private update directory", cleanupErr),
 			)
 		}
 	}()
@@ -157,7 +157,7 @@ func installVerifiedArchive(
 	}
 	packageBinary := filepath.Join(packageRoot, "bin", "mailcli")
 	if err := environment.verifyPackage(ctx, packageBinary, latestVersion); err != nil {
-		return updateInstallOutcome{}, updateFailure("update_package_invalid", "verify release binary: %v", err)
+		return updateInstallOutcome{}, contextualUpdateFailure("update_package_invalid", "verify release binary", errors.Join(ctx.Err(), err))
 	}
 	installerPath := filepath.Join(packageRoot, "install.sh")
 	if err := reporter.step("Installing mailcli "+latestVersion, func() error {
@@ -165,14 +165,14 @@ func installVerifiedArchive(
 		return environment.installPackage(ctx, installerPath, environment.executablePath, environment.homeDirectory, installationLock)
 	}); err != nil {
 		if !outcome.attempted {
-			return updateInstallOutcome{}, updateFailure("update_install_failed", "start release install: %v", err)
+			return updateInstallOutcome{}, contextualUpdateFailure("update_install_failed", "start release install", errors.Join(ctx.Err(), err))
 		}
 		outcome.failedPhase = updatePhaseInstaller
-		return outcome, updateFailure("update_install_failed", "install release: %v", err)
+		return outcome, contextualUpdateFailure("update_install_failed", "install release", errors.Join(ctx.Err(), err))
 	}
 	outcome.failedPhase = updatePhaseVerification
 	if err := environment.verifyInstallation(ctx, environment.executablePath, latestVersion); err != nil {
-		return outcome, updateFailure("update_install_failed", "verify installed release: %v", err)
+		return outcome, contextualUpdateFailure("update_install_failed", "verify installed release", errors.Join(ctx.Err(), err))
 	}
 	outcome.failedPhase = ""
 	outcome.verified = true
@@ -203,11 +203,11 @@ func closeUpdateLockForEnvironment(environment updateEnvironment, lock *os.File)
 func extractReleaseArchive(archive []byte, destination string, expectedRoot string) (resultErr error) {
 	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return updateFailure("update_package_invalid", "open release archive: %v", err)
+		return contextualUpdateFailure("update_package_invalid", "open release archive", err)
 	}
 	defer func() {
 		if err := gzipReader.Close(); err != nil {
-			resultErr = errors.Join(resultErr, updateFailure("update_package_invalid", "close release archive: %v", err))
+			resultErr = errors.Join(resultErr, contextualUpdateFailure("update_package_invalid", "close release archive", err))
 		}
 	}()
 	tarReader := tar.NewReader(io.LimitReader(gzipReader, maximumExtractedPackage+1))
@@ -219,7 +219,7 @@ func extractReleaseArchive(archive []byte, destination string, expectedRoot stri
 			break
 		}
 		if nextErr != nil {
-			return updateFailure("update_package_invalid", "read release archive: %v", nextErr)
+			return contextualUpdateFailure("update_package_invalid", "read release archive", nextErr)
 		}
 		fileCount++
 		if fileCount > maximumExtractedFileCount || header.Size < 0 {
@@ -256,7 +256,7 @@ func extractReleaseEntry(
 	switch header.Typeflag {
 	case tar.TypeDir:
 		if err := os.MkdirAll(target, 0o755); err != nil {
-			return updateFailure("update_install_failed", "create release directory: %v", err)
+			return contextualUpdateFailure("update_install_failed", "create release directory", err)
 		}
 		return nil
 	case tar.TypeReg:
@@ -276,7 +276,7 @@ func pathInsideDirectory(directory string, target string) bool {
 
 func extractReleaseFile(tarReader *tar.Reader, header *tar.Header, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return updateFailure("update_install_failed", "create release file directory: %v", err)
+		return contextualUpdateFailure("update_install_failed", "create release file directory", err)
 	}
 	mode := os.FileMode(header.Mode) & 0o755
 	if mode&0o600 != 0o600 {
@@ -284,12 +284,12 @@ func extractReleaseFile(tarReader *tar.Reader, header *tar.Header, target string
 	}
 	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
-		return updateFailure("update_package_invalid", "create extracted release file: %v", err)
+		return contextualUpdateFailure("update_package_invalid", "create extracted release file", err)
 	}
 	_, copyErr := io.CopyN(file, tarReader, header.Size)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
-		return updateFailure("update_package_invalid", "extract release file: %v", errors.Join(copyErr, closeErr))
+		return contextualUpdateFailure("update_package_invalid", "extract release file", errors.Join(copyErr, closeErr))
 	}
 	return nil
 }

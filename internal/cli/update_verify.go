@@ -16,7 +16,7 @@ import (
 func verifyReleaseChecksum(archiveName string, archive []byte, checksums []byte) error {
 	expected, err := checksumForArchive(archiveName, string(checksums))
 	if err != nil {
-		return updateFailure("update_checksum_invalid", "%v", err)
+		return contextualUpdateFailure("update_checksum_invalid", "verify release checksums", err)
 	}
 	actual := sha256.Sum256(archive)
 	if !bytes.Equal(actual[:], expected) {
