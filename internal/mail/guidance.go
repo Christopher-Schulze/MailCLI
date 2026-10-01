@@ -622,11 +622,10 @@ func effectfulCommand(command string) bool {
 	case "batch", "update", "attachments.save", "attachment_save", "send.setup", "sync",
 		"drafts.create", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.adopt",
 		"drafts.send", "drafts.reconcile", "drafts.handoff-reconcile", "drafts.discard", "drafts.prune",
-		"messages.reply", "messages.forward", "messages.mark", "messages.move",
-		"messages.copy", "messages.delete":
+		"messages.reply", "messages.forward":
 		return true
 	default:
-		return false
+		return isMailboxMutationCommand(command)
 	}
 }
 
@@ -648,7 +647,7 @@ func defaultPhase(command string) OperationPhase {
 		return OperationPhaseMirror
 	case command == "drafts.handoff-reconcile":
 		return OperationPhaseCleanup
-	case strings.HasPrefix(command, "messages."):
+	case isMailboxMutationCommand(command) || strings.HasPrefix(command, "messages."):
 		return OperationPhaseMutation
 	default:
 		return OperationPhaseExecution

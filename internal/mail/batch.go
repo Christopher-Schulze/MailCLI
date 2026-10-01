@@ -423,10 +423,10 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 				result.MessageState = &state
 			}
 			result.Error = run.itemError(err)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-				(run.ctx.Err() != nil && transport.IsTimeout(err)) ||
-				state.ServerTruth.OutcomeUnknown() ||
-				transport.IsMutationOutcomeUnknown(err) {
+			if state.ServerTruth.OutcomeUnknown() ||
+				(result.Error.Guidance.EffectCertainty != EffectNone &&
+					(ContextErrorCode(err) != "" || (run.ctx.Err() != nil && transport.IsTimeout(err)) ||
+						transport.IsMutationOutcomeUnknown(err))) {
 				result.State = BatchItemUncertain
 			}
 			return result
@@ -445,10 +445,10 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 				result.MessageState = &state
 			}
 			result.Error = run.itemError(err)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-				(run.ctx.Err() != nil && transport.IsTimeout(err)) ||
-				state.ServerTruth.OutcomeUnknown() ||
-				transport.IsMutationOutcomeUnknown(err) {
+			if state.ServerTruth.OutcomeUnknown() ||
+				(result.Error.Guidance.EffectCertainty != EffectNone &&
+					(ContextErrorCode(err) != "" || (run.ctx.Err() != nil && transport.IsTimeout(err)) ||
+						transport.IsMutationOutcomeUnknown(err))) {
 				result.State = BatchItemUncertain
 			}
 			return result
@@ -465,10 +465,10 @@ func (run *batchExecution) execute(item BatchItem) BatchItemResult {
 				result.DeleteResult = &deleted
 			}
 			result.Error = run.itemError(err)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-				(run.ctx.Err() != nil && transport.IsTimeout(err)) ||
-				deleted.ServerTruth.OutcomeUnknown() ||
-				transport.IsMutationOutcomeUnknown(err) {
+			if deleted.ServerTruth.OutcomeUnknown() ||
+				(result.Error.Guidance.EffectCertainty != EffectNone &&
+					(ContextErrorCode(err) != "" || (run.ctx.Err() != nil && transport.IsTimeout(err)) ||
+						transport.IsMutationOutcomeUnknown(err))) {
 				result.State = BatchItemUncertain
 			}
 			return result

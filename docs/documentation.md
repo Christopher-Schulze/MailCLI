@@ -1043,7 +1043,7 @@ Before dispatch, every item, duplicate ID, attachment destination and operation-
 Items then run on the invocation's single store and transport graph through the same single-operation paths.
 
 Results keep input order under `data.batch_result`; each item has `state` (`completed`, `failed`, `skipped`, `skipped_budget` or `uncertain`) and, when applicable, `error.code`, `error.message`, `retryable` and the same guidance, and mutation items carry the same `message_state` or `delete_result` evidence as single commands.
-`batch_canceled` marks an item that never started, while an active mutation canceled by its context is `uncertain` and must not be replayed.
+`batch_canceled` marks an item that never started. An active canceled mutation is `failed` when transport evidence proves `not_started` or `rejected` with no completed effects; missing, partial or unknown dispatch evidence remains `uncertain` and must not be replayed. Mutation aliases use the same effect guidance as their single-command counterparts.
 There is no automatic retry: submit again only failed items whose error says `retryable:true`, never successful or uncertain mutations.
 A failed attachment save keeps verified `saved_attachment` evidence, and its `retryable` value follows `error.guidance.replay_allowed`.
 
