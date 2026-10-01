@@ -1219,6 +1219,7 @@ The packaged installer defaults to `~/.local/bin/mailcli` and `~/.agents/skills/
 It rejects unsafe parent or destination symlinks and pre-existing backup paths.
 Both payloads are staged in their target parents, snapshotted, byte-compared and recorded in a mode-0600 transaction manifest before any live rename.
 A restart rolls back an incomplete transaction through snapshot- and identity-checked paths; a committed transaction removes only its own backups after both artifacts verify, and replaced artifacts are preserved.
+Stage identities are journaled immediately after allocation, before copying. If a prepared transaction was interrupted before an identity was recorded, recovery preserves and reports the unverified stage instead of adopting or deleting it; original destinations are still checked and restored. Terminal cleanup is journaled before snapshot removal and resumes without repeating live effects; an owned empty transaction directory left after the final manifest unlink is removed only with `rmdir`. Ambiguous nonempty or unsafe transaction paths remain refused.
 The installer never executes staged content, never deletes unrelated paths and never changes Full Disk Access, Automation consent, quarantine attributes or Gatekeeper settings.
 
 Self-update, release installation and local source installation share the mode-0600 lock file `~/Library/Application Support/MailCLI/update.lock`.

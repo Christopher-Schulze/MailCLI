@@ -337,7 +337,8 @@ validate_transaction() {
     "${TRANSACTION_STATE}" == "skill_install_pending" ||
     "${TRANSACTION_STATE}" == "skill_installed" ||
     "${TRANSACTION_STATE}" == "verified" ||
-    "${TRANSACTION_STATE}" == "committed" ]] || return 1
+    "${TRANSACTION_STATE}" == "committed" ||
+    "${TRANSACTION_STATE}" == "cleanup_pending" ]] || return 1
   [[ "${BINARY_HAD_DESTINATION}" == 0 || "${BINARY_HAD_DESTINATION}" == 1 ]] || return 1
   [[ "${SKILL_HAD_DESTINATION}" == 0 || "${SKILL_HAD_DESTINATION}" == 1 ]] || return 1
   [[ -z "${BINARY_ORIGINAL_IDENTITY}" || "${BINARY_ORIGINAL_IDENTITY}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
@@ -359,12 +360,12 @@ validate_transaction() {
   [[ "${BINARY_STAGE}" == "${binary_parent}/.mailcli-binary-stage.${transaction_name}" ]] || return 1
   [[ "${SKILL_STAGE}" == "${skill_parent}/.mailcli-skill-stage.${transaction_name}" ]] || return 1
   if [[ -z "${BINARY_STAGE_IDENTITY}" ]]; then
-    [[ "${TRANSACTION_STATE}" == "prepared" && ! -e "${BINARY_STAGE}" && ! -L "${BINARY_STAGE}" ]] || return 1
+    [[ "${TRANSACTION_STATE}" == "prepared" || "${TRANSACTION_STATE}" == "cleanup_pending" ]] || return 1
   else
     [[ "${BINARY_STAGE_IDENTITY}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   fi
   if [[ -z "${SKILL_STAGE_IDENTITY}" ]]; then
-    [[ "${TRANSACTION_STATE}" == "prepared" && ! -e "${SKILL_STAGE}" && ! -L "${SKILL_STAGE}" ]] || return 1
+    [[ "${TRANSACTION_STATE}" == "prepared" || "${TRANSACTION_STATE}" == "cleanup_pending" ]] || return 1
   else
     [[ "${SKILL_STAGE_IDENTITY}" =~ ^[0-9]+:[0-9]+$ ]] || return 1
   fi
@@ -417,9 +418,9 @@ remove_component_destination() {
   local component="$1"
   verify_install_lock || return 1
   if [[ "${component}" == "binary" ]]; then
-    rm -f "${BINARY_DESTINATION}"
+    rm -f "${BINARY_DESTINATION}" || return 1
   else
-    rm -rf "${SKILL_DESTINATION}"
+    rm -rf "${SKILL_DESTINATION}" || return 1
   fi
   sync_filesystem
 }
@@ -432,18 +433,26 @@ remove_component_stage() {
     stage="${BINARY_STAGE}"
     if path_present "${stage}"; then
       [[ -f "${stage}" && ! -L "${stage}" ]] || return 1
+      if [[ -z "${BINARY_STAGE_IDENTITY}" && "${TRANSACTION_STATE}" == "prepared" ]]; then
+        printf 'Retaining unverified binary stage; ownership was not recorded: %s\n' "${stage}" >&2
+        return 0
+      fi
       [[ -n "${BINARY_STAGE_IDENTITY}" && "$(path_identity "${stage}")" == "${BINARY_STAGE_IDENTITY}" ]] || return 1
-      rm -f "${stage}"
+      rm -f "${stage}" || return 1
     fi
   else
     stage="${SKILL_STAGE}"
     if path_present "${stage}"; then
       [[ -d "${stage}" && ! -L "${stage}" ]] || return 1
+      if [[ -z "${SKILL_STAGE_IDENTITY}" && "${TRANSACTION_STATE}" == "prepared" ]]; then
+        printf 'Retaining unverified skill stage; ownership was not recorded: %s\n' "${stage}" >&2
+        return 0
+      fi
       [[ -n "${SKILL_STAGE_IDENTITY}" && "$(path_identity "${stage}")" == "${SKILL_STAGE_IDENTITY}" ]] || return 1
       if find "${stage}" -type l -print -quit | grep -q .; then
         return 1
       fi
-      rm -rf "${stage}"
+      rm -rf "${stage}" || return 1
     fi
   fi
   sync_filesystem
@@ -469,7 +478,7 @@ restore_component_backup() {
   if [[ "${component}" == "binary" ]]; then
     backup="${BINARY_BACKUP}"
     component_original_matches binary "${backup}" || return 1
-    mv "${backup}" "${BINARY_DESTINATION}"
+    mv "${backup}" "${BINARY_DESTINATION}" || return 1
     [[ -f "${BINARY_DESTINATION}" && ! -L "${BINARY_DESTINATION}" ]] || return 1
   else
     backup="${SKILL_BACKUP}"
@@ -477,7 +486,7 @@ restore_component_backup() {
     if find "${backup}" -type l -print -quit | grep -q .; then
       return 1
     fi
-    mv "${backup}" "${SKILL_DESTINATION}"
+    mv "${backup}" "${SKILL_DESTINATION}" || return 1
     [[ -d "${SKILL_DESTINATION}" && ! -L "${SKILL_DESTINATION}" ]] || return 1
   fi
   sync_filesystem
@@ -519,16 +528,23 @@ rollback_component() {
 
 cleanup_transaction_directory() {
   verify_install_lock || return 1
-  rm -f "${TRANSACTION_DIRECTORY}/manifest" "${TRANSACTION_DIRECTORY}/manifest.tmp" \
-    "${BINARY_SNAPSHOT}"
+  # Effects and component cleanup are final before snapshots may disappear.
+  if [[ "${TRANSACTION_STATE}" != "cleanup_pending" ]]; then
+    manifest_write cleanup_pending || return 1
+  fi
+  if path_present "${BINARY_SNAPSHOT}"; then
+    [[ -f "${BINARY_SNAPSHOT}" && ! -L "${BINARY_SNAPSHOT}" ]] || return 1
+    rm -f "${BINARY_SNAPSHOT}" || return 1
+  fi
   if path_present "${SKILL_SNAPSHOT}"; then
     [[ -d "${SKILL_SNAPSHOT}" && ! -L "${SKILL_SNAPSHOT}" ]] || return 1
     if find "${SKILL_SNAPSHOT}" -type l -print -quit | grep -q .; then
       return 1
     fi
-    rm -rf "${SKILL_SNAPSHOT}"
+    rm -rf "${SKILL_SNAPSHOT}" || return 1
   fi
-  rmdir "${TRANSACTION_DIRECTORY}"
+  rm -f "${TRANSACTION_DIRECTORY}/manifest.tmp" "${TRANSACTION_DIRECTORY}/manifest" || return 1
+  rmdir "${TRANSACTION_DIRECTORY}" || return 1
   sync_filesystem
 }
 
@@ -558,14 +574,14 @@ finalize_committed_transaction() {
   fi
   if path_present "${BINARY_BACKUP}"; then
     [[ -f "${BINARY_BACKUP}" && ! -L "${BINARY_BACKUP}" ]] || return 1
-    rm -f "${BINARY_BACKUP}"
+    rm -f "${BINARY_BACKUP}" || return 1
   fi
   if path_present "${SKILL_BACKUP}"; then
     [[ -d "${SKILL_BACKUP}" && ! -L "${SKILL_BACKUP}" ]] || return 1
     if find "${SKILL_BACKUP}" -type l -print -quit | grep -q .; then
       return 1
     fi
-    rm -rf "${SKILL_BACKUP}"
+    rm -rf "${SKILL_BACKUP}" || return 1
   fi
   sync_filesystem
   remove_component_stage binary || return 1
@@ -576,11 +592,20 @@ finalize_committed_transaction() {
 recover_transaction() {
   local transaction="$1"
   verify_install_lock || return 1
+  # A crash after the final manifest unlink may leave only an owned empty dir.
+  # rmdir cannot remove any ambiguous file, temporary journal or other evidence.
+  if [[ ! -e "${transaction}/manifest" && ! -L "${transaction}/manifest" && -O "${transaction}" ]] &&
+    rmdir "${transaction}" 2>/dev/null; then
+    sync_filesystem
+    return 0
+  fi
   if ! read_manifest "${transaction}" || ! validate_transaction; then
     printf 'Refusing unsafe or invalid installer transaction: %s\n' "${transaction}" >&2
     return 1
   fi
-  if [[ "${TRANSACTION_STATE}" == "committed" ]]; then
+  if [[ "${TRANSACTION_STATE}" == "cleanup_pending" ]]; then
+    cleanup_transaction_directory
+  elif [[ "${TRANSACTION_STATE}" == "committed" ]]; then
     finalize_committed_transaction
   else
     rollback_transaction
@@ -738,7 +763,10 @@ rollback_install() {
   fi
   if [[ "${INSTALL_COMPLETE}" -ne 1 && -n "${TRANSACTION_DIRECTORY}" &&
     -f "${TRANSACTION_MANIFEST}" ]]; then
-    if [[ "${TRANSACTION_STATE}" == "committed" ]]; then
+    if [[ "${TRANSACTION_STATE}" == "cleanup_pending" ]]; then
+      cleanup_transaction_directory ||
+        printf 'Installer terminal cleanup remains pending: %s\n' "${TRANSACTION_DIRECTORY}" >&2
+    elif [[ "${TRANSACTION_STATE}" == "committed" ]]; then
       finalize_committed_transaction ||
         printf 'Installer committed state cleanup remains pending: %s\n' "${TRANSACTION_DIRECTORY}" >&2
     else
@@ -746,13 +774,8 @@ rollback_install() {
         printf 'Installer rollback remains pending: %s\n' "${TRANSACTION_DIRECTORY}" >&2
     fi
   elif [[ -n "${TRANSACTION_DIRECTORY}" && -d "${TRANSACTION_DIRECTORY}" ]]; then
-    if [[ -n "${BINARY_STAGE}" && -f "${BINARY_STAGE}" && ! -L "${BINARY_STAGE}" ]]; then
-      rm -f "${BINARY_STAGE}"
-    fi
-    if [[ -n "${SKILL_STAGE}" && -d "${SKILL_STAGE}" && ! -L "${SKILL_STAGE}" ]]; then
-      rm -rf "${SKILL_STAGE}"
-    fi
-    rmdir "${TRANSACTION_DIRECTORY}" 2>/dev/null || true
+    rmdir "${TRANSACTION_DIRECTORY}" 2>/dev/null ||
+      printf 'Retaining nonempty installer transaction without a manifest: %s\n' "${TRANSACTION_DIRECTORY}" >&2
   fi
   exit "${status}"
 }
@@ -766,6 +789,8 @@ if path_present "${BINARY_STAGE}" || ! (set -C; : >"${BINARY_STAGE}"); then
   printf 'Could not create exclusive binary staging path\n' >&2
   exit 1
 fi
+BINARY_STAGE_IDENTITY="$(path_identity "${BINARY_STAGE}")"
+manifest_write prepared
 chmod 0755 "${BINARY_STAGE}"
 cp "${SOURCE_BINARY}" "${BINARY_STAGE}"
 chmod 0755 "${BINARY_STAGE}"
@@ -773,18 +798,26 @@ chmod 0755 "${BINARY_STAGE}"
   printf 'Binary staging content differs from the verified release binary\n' >&2
   exit 1
 }
-BINARY_STAGE_IDENTITY="$(path_identity "${BINARY_STAGE}")"
+[[ "$(path_identity "${BINARY_STAGE}")" == "${BINARY_STAGE_IDENTITY}" ]] || {
+  printf 'Binary staging identity changed\n' >&2
+  exit 1
+}
 if path_present "${SKILL_STAGE}" || ! mkdir -m 0700 "${SKILL_STAGE}"; then
   printf 'Could not create exclusive skill staging path\n' >&2
   exit 1
 fi
+SKILL_STAGE_IDENTITY="$(path_identity "${SKILL_STAGE}")"
+manifest_write prepared
 cp -R "${SOURCE_SKILL}/." "${SKILL_STAGE}/"
 [[ "$(tree_digest "${SKILL_STAGE}")" == "${SOURCE_SKILL_DIGEST}" ]] || {
   printf 'Skill staging content differs from the verified release skill\n' >&2
   exit 1
 }
 diff -qr "${SOURCE_SKILL}" "${SKILL_STAGE}" >/dev/null
-SKILL_STAGE_IDENTITY="$(path_identity "${SKILL_STAGE}")"
+[[ "$(path_identity "${SKILL_STAGE}")" == "${SKILL_STAGE_IDENTITY}" ]] || {
+  printf 'Skill staging identity changed\n' >&2
+  exit 1
+}
 cp "${SOURCE_BINARY}" "${BINARY_SNAPSHOT}"
 chmod 0755 "${BINARY_SNAPSHOT}"
 mkdir -m 0700 "${SKILL_SNAPSHOT}"

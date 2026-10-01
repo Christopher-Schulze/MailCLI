@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -499,4 +500,255 @@ func TestInstallerPreservesByteIdenticalReplacement(t *testing.T) {
 		t.Fatalf("byte-identical replacement identity changed: %v", err)
 	}
 	installerTestManifest(t, fixture)
+}
+
+func pauseInstallerRecoveryBoundary(t *testing.T, fixture installerFixture, phase string) (*installerTestProcess, int) {
+	t.Helper()
+	root := t.TempDir()
+	ready := filepath.Join(root, "ready")
+	script := filepath.Join(root, "boundary.sh")
+	writeExecutableTestScript(t, script, `
+pause_boundary() {
+  printf '%s\n' "$$" > "$MAILCLI_TEST_READY"
+  while :; do /bin/sleep 0.02; done
+}
+stat() {
+  for argument in "$@"; do
+    case "$MAILCLI_TEST_BOUNDARY:$argument" in
+      binary-allocation:*/.mailcli-binary-stage.*|skill-allocation:*/.mailcli-skill-stage.*) pause_boundary ;;
+    esac
+  done
+  command stat "$@"
+}
+mv() {
+  if [[ "${1:-}" == -f && "${3:-}" == */manifest ]]; then
+    case "$MAILCLI_TEST_BOUNDARY" in
+      binary-journal)
+        if grep -Eq '^binary_stage_identity[[:space:]]+[0-9]+:' "$2"; then pause_boundary; fi ;;
+      skill-journal)
+        if grep -Eq '^skill_stage_identity[[:space:]]+[0-9]+:' "$2"; then pause_boundary; fi ;;
+    esac
+  fi
+  command mv "$@" || return
+  if [[ "$MAILCLI_TEST_BOUNDARY" == staged-journal && "${3:-}" == */manifest ]] &&
+    grep -Eq '^skill_stage_identity[[:space:]]+[0-9]+:' "$3"; then pause_boundary; fi
+}
+diff() {
+  if [[ "$MAILCLI_TEST_BOUNDARY" == rollback-* && "${3:-}" == */skill.snapshot ]]; then return 1; fi
+  command diff "$@"
+}
+rm() {
+  command rm "$@" || return
+  for argument in "$@"; do
+    case "$MAILCLI_TEST_BOUNDARY:$argument" in
+      *-binary-snapshot:*/binary.snapshot|*-skill-snapshot:*/skill.snapshot|*-manifest:*/manifest) pause_boundary ;;
+    esac
+  done
+}
+`)
+	process := startInstallerTestProcess(t, fixture, "BASH_ENV="+script, "MAILCLI_TEST_READY="+ready, "MAILCLI_TEST_BOUNDARY="+phase)
+	ids := waitForInstallerTestReady(t, process, ready)
+	return process, ids[0]
+}
+
+func TestInstallerRecoveryAtStagingAndCleanupBoundaries(t *testing.T) {
+	for _, phase := range []string{
+		"binary-allocation", "binary-journal", "skill-allocation", "skill-journal",
+		"committed-binary-snapshot", "committed-skill-snapshot", "committed-manifest",
+		"rollback-binary-snapshot", "rollback-skill-snapshot", "rollback-manifest",
+	} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			fixture := newInstallerFixture(t)
+			settings := filepath.Join(fixture.environment.homeDirectory, "settings.fixture")
+			if err := os.WriteFile(settings, []byte("unchanged settings"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			owner, processID := pauseInstallerRecoveryBoundary(t, fixture, phase)
+			if err := syscall.Kill(processID, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			finishInstallerTestProcess(t, owner, false)
+			source := filepath.Join(fixture.packageRoot, "bin", "mailcli")
+			if err := os.Rename(source, source+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			recovery := startInstallerTestProcess(t, fixture)
+			finishInstallerTestProcess(t, recovery, false)
+			if !strings.Contains(recovery.output.String(), "Release binary is missing") {
+				t.Fatalf("recovery never reached source validation: %s", recovery.output.String())
+			}
+			version, skill := "1.0.4", "old skill\n"
+			if strings.HasPrefix(phase, "committed-") {
+				version, skill = "1.0.5", "new skill\n"
+			}
+			if err := verifyBinaryVersion(context.Background(), fixture.environment.executablePath, version); err != nil {
+				t.Fatalf("incorrect recovered binary: %v", err)
+			}
+			content, err := os.ReadFile(filepath.Join(fixture.environment.homeDirectory, ".agents", "skills", "mailcli", "SKILL.md"))
+			if err != nil || string(content) != skill {
+				t.Fatalf("incorrect recovered skill: %q, %v", content, err)
+			}
+			entries, err := os.ReadDir(fixture.stateRoot)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("transaction cleanup did not finish: %v, %v", entries, err)
+			}
+			if err := os.Rename(source+".saved", source); err != nil {
+				t.Fatal(err)
+			}
+			finishInstallerTestProcess(t, startInstallerTestProcess(t, fixture), true)
+			if err := verifyBinaryVersion(context.Background(), fixture.environment.executablePath, "1.0.5"); err != nil {
+				t.Fatal(err)
+			}
+			content, err = os.ReadFile(settings)
+			if err != nil || string(content) != "unchanged settings" {
+				t.Fatalf("settings changed: %q, %v", content, err)
+			}
+		})
+	}
+}
+
+func TestInstallerPreparedStageReplacementEvidence(t *testing.T) {
+	for _, component := range []string{"binary", "skill"} {
+		for _, recorded := range []bool{false, true} {
+			for _, symlink := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/recorded=%t/symlink=%t", component, recorded, symlink), func(t *testing.T) {
+					t.Parallel()
+					fixture := newInstallerFixture(t)
+					phase := component + "-allocation"
+					if recorded {
+						phase = "staged-journal"
+					}
+					owner, processID := pauseInstallerRecoveryBoundary(t, fixture, phase)
+					if err := syscall.Kill(processID, syscall.SIGKILL); err != nil {
+						t.Fatal(err)
+					}
+					finishInstallerTestProcess(t, owner, false)
+					_, manifest := installerTestManifest(t, fixture)
+					stage := ""
+					for _, line := range strings.Split(string(manifest), "\n") {
+						if value, found := strings.CutPrefix(line, component+"_stage\t"); found {
+							stage = value
+						}
+					}
+					if stage == "" {
+						t.Fatal("stage path not journaled")
+					}
+					if err := os.Rename(stage, stage+".original"); err != nil {
+						t.Fatal(err)
+					}
+					if symlink {
+						if err := os.Symlink(stage+".original", stage); err != nil {
+							t.Fatal(err)
+						}
+					} else if component == "binary" {
+						content := []byte("unrelated stage replacement")
+						if recorded {
+							var err error
+							content, err = os.ReadFile(stage + ".original")
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+						if err := os.WriteFile(stage, content, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					} else if err := os.Mkdir(stage, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					evidencePath := stage
+					if component == "skill" && !symlink && !recorded {
+						evidencePath = filepath.Join(stage, "unrelated")
+						if err := os.WriteFile(evidencePath, []byte("unrelated contents"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var evidence []byte
+					if !symlink && (component == "binary" || !recorded) {
+						var err error
+						evidence, err = os.ReadFile(evidencePath)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					before, err := os.Lstat(stage)
+					if err != nil {
+						t.Fatal(err)
+					}
+					recovery := startInstallerTestProcess(t, fixture)
+					finishInstallerTestProcess(t, recovery, !recorded && !symlink)
+					after, err := os.Lstat(stage)
+					if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+						t.Fatalf("replacement was adopted, removed or changed: %v", err)
+					}
+					if evidence != nil {
+						content, err := os.ReadFile(evidencePath)
+						if err != nil || !bytes.Equal(content, evidence) {
+							t.Fatalf("replacement contents changed: %q, %v", content, err)
+						}
+					}
+					if !recorded && !symlink && !strings.Contains(recovery.output.String(), "Retaining unverified "+component+" stage") {
+						t.Fatalf("unknown stage was not reported: %s", recovery.output.String())
+					}
+					if recorded || symlink {
+						installerTestManifest(t, fixture)
+						if err := verifyBinaryVersion(context.Background(), fixture.environment.executablePath, "1.0.4"); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestInstallerRetainsCleanupFailuresForRetry(t *testing.T) {
+	for _, suffix := range []string{"binary.snapshot", "skill.snapshot", "bin/mailcli.mailcli-backup", "skills/mailcli.mailcli-backup"} {
+		t.Run(suffix, func(t *testing.T) {
+			t.Parallel()
+			fixture := newInstallerFixture(t)
+			script := filepath.Join(t.TempDir(), "cleanup-failure.sh")
+			writeExecutableTestScript(t, script, `
+rm() {
+  for argument in "$@"; do
+    if [[ "$argument" == *"/$MAILCLI_TEST_FAIL_SUFFIX" ]]; then return 1; fi
+  done
+  command rm "$@"
+}
+`)
+			failure := startInstallerTestProcess(t, fixture, "BASH_ENV="+script, "MAILCLI_TEST_FAIL_SUFFIX="+suffix)
+			finishInstallerTestProcess(t, failure, false)
+			installerTestManifest(t, fixture)
+			if err := verifyBinaryVersion(context.Background(), fixture.environment.executablePath, "1.0.5"); err != nil {
+				t.Fatalf("cleanup failure rolled back the committed binary: %v", err)
+			}
+			finishInstallerTestProcess(t, startInstallerTestProcess(t, fixture), true)
+			entries, err := os.ReadDir(fixture.stateRoot)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("cleanup retry failed: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestInstallerPreservesNonemptyManifestlessTransaction(t *testing.T) {
+	fixture := newInstallerFixture(t)
+	transaction := filepath.Join(fixture.stateRoot, "txn.foreign")
+	if err := os.MkdirAll(transaction, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(transaction, "unrelated")
+	if err := os.WriteFile(path, []byte("keep this evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishInstallerTestProcess(t, startInstallerTestProcess(t, fixture), false)
+	content, err := os.ReadFile(path)
+	after, statErr := os.Stat(path)
+	if err != nil || statErr != nil || !os.SameFile(before, after) || string(content) != "keep this evidence" {
+		t.Fatalf("ambiguous transaction removed: %q, %v, %v", content, err, statErr)
+	}
 }
