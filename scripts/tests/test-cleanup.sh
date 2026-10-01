@@ -3,6 +3,7 @@ set -euo pipefail
 
 PRODUCT_ROOT="${MAILCLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)}"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mailcli-cleanup-test.XXXXXX")"
+TEST_ROOT="$(CDPATH= cd -P "${TEST_ROOT}" && pwd)"
 FIXTURE=''
 cleanup_test_root() {
   [[ -z "${FIXTURE}" || ! -d "${FIXTURE}" ]] || chmod u+w "${FIXTURE}"
@@ -52,6 +53,8 @@ for FILE in dist/package graphify-out/graph.json .coverage/report coverage.out c
   mailstore.test cpu.prof heap.pprof runtime.trace 'space profile.prof'; do
   printf 'generated output\n' >"${FIXTURE}/${FILE}"
 done
+mkdir "${FIXTURE}/dist/nested"
+printf 'generated output\n' >"${FIXTURE}/dist/nested/file with spaces"
 for FILE in docs/tasks/private.md internal/source.go internal/fixture.prof drafts/claim.json \
   .env evidence.log retained.backup; do
   printf 'retained state\n' >"${FIXTURE}/${FILE}"
@@ -71,6 +74,11 @@ for FILE in bin dist graphify-out .coverage coverage.out coverage-unit.out mails
   [[ ! -e "${FIXTURE}/${FILE}" ]] || fail "generated target remains: ${FILE}"
 done
 [[ "$(grep -c '^Deleted:' "${TEST_ROOT}/success.log")" == 11 ]] || fail 'deleted-target report is incomplete'
+for ENTRY in bin/mailcli bin dist/package dist/nested/'file with spaces' dist/nested dist \
+  graphify-out/graph.json graphify-out .coverage/report .coverage coverage.out coverage-unit.out \
+  mailstore.test cpu.prof heap.pprof runtime.trace 'space profile.prof'; do
+  grep -Fq "${FIXTURE}/${ENTRY}" "${TEST_ROOT}/success.log" || fail "removed entry was not reported: ${ENTRY}"
+done
 for LABEL in 'Repository before:' 'Repository after:' 'Freed in repository:'; do
   case "${LABEL}" in
     'Repository before:') EXPECTED="${BEFORE}" ;;
@@ -166,6 +174,8 @@ chmod u+w "${FIXTURE}"
 [[ "${STATUS}" == 1 ]] || fail 'actual permission failure was not propagated'
 grep -Fq 'Cleanup failed: bin/' "${TEST_ROOT}/failure.log" || fail 'failed deletion is missing'
 grep -q '^Repository after:' "${TEST_ROOT}/failure.log" || fail 'partial cleanup omitted final size'
+[[ ! -e "${FIXTURE}/bin/sentinel" ]] || fail 'the permission fixture did not partially remove its target'
+grep -Fq "${FIXTURE}/bin/sentinel" "${TEST_ROOT}/failure.log" || fail 'partial successful removal was not reported'
 [[ -d "${FIXTURE}/bin" && -f "${FIXTURE}/dist/preserved" ]] || fail 'cleanup continued after deletion failure'
 if grep -q '^Deleted:' "${TEST_ROOT}/failure.log"; then fail 'partial removal was reported as complete'; fi
 printf 'cleanup_test=passed\n'

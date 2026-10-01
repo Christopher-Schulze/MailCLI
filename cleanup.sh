@@ -74,7 +74,7 @@ STATUS=0
 for ((INDEX = 0; INDEX < ${#TARGETS[@]}; INDEX++)); do
   TARGET="${TARGETS[INDEX]}"
   if ! validate_target "${TARGET}"; then STATUS=1; break; fi
-  if rm -rf -- "${TARGET}" && [[ ! -e "${TARGET}" && ! -L "${TARGET}" ]]; then
+  if rm -rfv -- "${TARGET}" && [[ ! -e "${TARGET}" && ! -L "${TARGET}" ]]; then
     printf 'Deleted: %q (%s)\n' "${NAMES[INDEX]}" "$(format_size "${SIZES[INDEX]}")"
   else
     printf 'Cleanup failed: %q\n' "${NAMES[INDEX]}" >&2
