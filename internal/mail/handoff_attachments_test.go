@@ -10,19 +10,30 @@ import (
 	"testing"
 )
 
-func TestStageDraftAttachmentsPreservesApprovedBytesAndCleansUp(t *testing.T) {
+func TestPersistentHandoffPreservesApprovedBytesAndCleansUp(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "report.pdf")
 	content := []byte("approved attachment bytes")
 	if err := os.WriteFile(source, content, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{
-		draftAttachmentFingerprint(source, content),
-	})
+	service := NewServiceWithDraftRoot(nil, t.TempDir())
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body", Attachments: []string{source},
+	}})
 	if err != nil {
-		t.Fatalf("StageDraftAttachments() error = %v", err)
+		t.Fatal(err)
 	}
+	session, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	paths := session.Preparation().AttachmentPaths
 	if len(paths) != 1 || paths[0] == source {
 		t.Fatalf("staged paths = %v, want one private path distinct from source", paths)
 	}
@@ -33,15 +44,18 @@ func TestStageDraftAttachmentsPreservesApprovedBytesAndCleansUp(t *testing.T) {
 	if string(staged) != string(content) {
 		t.Fatalf("staged bytes = %q, want %q", staged, content)
 	}
-	if err := cleanup(); err != nil {
-		t.Fatalf("cleanup() error = %v", err)
+	if info, err := os.Stat(paths[0]); err != nil || info.Mode().Perm() != 0o400 {
+		t.Fatalf("snapshot mode = %v, %v", info, err)
+	}
+	if err := session.CancelBeforeDispatch(); err != nil {
+		t.Fatalf("CancelBeforeDispatch() error = %v", err)
 	}
 	if _, err := os.Stat(paths[0]); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staged path still exists: %v", err)
 	}
 }
 
-func TestStageDraftAttachmentsRejectsSameSizeReplacement(t *testing.T) {
+func TestPersistentHandoffRejectsSameSizeReplacement(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "report.pdf")
 	original := []byte("original bytes")
 	replacement := []byte("replaced bytes")
@@ -53,19 +67,16 @@ func TestStageDraftAttachmentsRejectsSameSizeReplacement(t *testing.T) {
 		t.Fatalf("WriteFile(replacement) error = %v", err)
 	}
 
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{expected})
-	if cleanup != nil {
-		t.Cleanup(func() { _ = cleanup() })
-	}
+	staged, err := stagePersistentAttachmentFixture(t, context.Background(), expected)
 	if errorCode(err) != "handoff_attachment_changed" {
-		t.Fatalf("StageDraftAttachments() error = %v, want handoff_attachment_changed", err)
+		t.Fatalf("stageDraftAttachmentAt() error = %v, want handoff_attachment_changed", err)
 	}
-	if len(paths) != 0 {
-		t.Fatalf("staged paths = %v, want none", paths)
+	if staged != "" {
+		t.Fatalf("staged path = %q, want none", staged)
 	}
 }
 
-func TestStageDraftAttachmentsRejectsReplacementDuringSingleCopy(t *testing.T) {
+func TestPersistentHandoffRejectsReplacementDuringSingleCopy(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "report.pdf")
 	original := []byte("original bytes that span the staged read")
@@ -92,19 +103,16 @@ func TestStageDraftAttachmentsRejectsReplacementDuringSingleCopy(t *testing.T) {
 	}
 	t.Cleanup(func() { handoffAttachmentReadHook = previous })
 
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{expected})
-	if cleanup != nil {
-		t.Cleanup(func() { _ = cleanup() })
-	}
+	staged, err := stagePersistentAttachmentFixture(t, context.Background(), expected)
 	if errorCode(err) != "handoff_attachment_changed" {
-		t.Fatalf("StageDraftAttachments() error = %v, want handoff_attachment_changed", err)
+		t.Fatalf("stageDraftAttachmentAt() error = %v, want handoff_attachment_changed", err)
 	}
-	if len(paths) != 0 {
-		t.Fatalf("staged paths = %v, want none", paths)
+	if staged != "" {
+		t.Fatalf("staged path = %q, want none", staged)
 	}
 }
 
-func TestStageDraftAttachmentsUsesOneAuthoritativeReadAfterPreflight(t *testing.T) {
+func TestPersistentHandoffUsesOneAuthoritativeReadAfterPreflight(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "drafts")
 	source := filepath.Join(t.TempDir(), "report.pdf")
 	content := []byte("one authoritative handoff read")
@@ -123,23 +131,22 @@ func TestStageDraftAttachmentsUsesOneAuthoritativeReadAfterPreflight(t *testing.
 	previous := handoffAttachmentReadHook
 	handoffAttachmentReadHook = func(read int) { readBytes += read }
 	t.Cleanup(func() { handoffAttachmentReadHook = previous })
-	prepared, err := service.PrepareDraftHandoffContext(context.Background(), draft.Ref)
+	session, err := service.BeginDraftHandoffContext(context.Background(), draft.Ref)
 	if err != nil {
-		t.Fatalf("PrepareDraftHandoffContext() error = %v", err)
+		t.Fatalf("BeginDraftHandoffContext() error = %v", err)
 	}
-	paths, cleanup, err := StageDraftAttachments(context.Background(), prepared.Attachments)
-	if cleanup != nil {
-		t.Cleanup(func() { _ = cleanup() })
-	}
-	if err != nil {
-		t.Fatalf("StageDraftAttachments() error = %v", err)
-	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	paths := session.Preparation().AttachmentPaths
 	if len(paths) != 1 || readBytes != len(content) {
 		t.Fatalf("staged paths = %v, read bytes = %d, want one path and %d bytes", paths, readBytes, len(content))
 	}
 }
 
-func TestStageDraftAttachmentsRejectsSymlinkReplacement(t *testing.T) {
+func TestPersistentHandoffRejectsSymlinkReplacement(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "report.pdf")
 	target := filepath.Join(directory, "replacement.pdf")
@@ -158,19 +165,16 @@ func TestStageDraftAttachmentsRejectsSymlinkReplacement(t *testing.T) {
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{expected})
-	if cleanup != nil {
-		t.Cleanup(func() { _ = cleanup() })
-	}
+	staged, err := stagePersistentAttachmentFixture(t, context.Background(), expected)
 	if errorCode(err) != "handoff_attachment_unreadable" {
-		t.Fatalf("StageDraftAttachments() error = %v, want handoff_attachment_unreadable", err)
+		t.Fatalf("stageDraftAttachmentAt() error = %v, want handoff_attachment_unreadable", err)
 	}
-	if len(paths) != 0 {
-		t.Fatalf("staged paths = %v, want none", paths)
+	if staged != "" {
+		t.Fatalf("staged path = %q, want none", staged)
 	}
 }
 
-func TestStageDraftAttachmentsRejectsDeletion(t *testing.T) {
+func TestPersistentHandoffRejectsDeletion(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "report.pdf")
 	content := []byte("attachment bytes")
 	if err := os.WriteFile(source, content, 0o600); err != nil {
@@ -181,51 +185,101 @@ func TestStageDraftAttachmentsRejectsDeletion(t *testing.T) {
 		t.Fatalf("Remove() error = %v", err)
 	}
 
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{expected})
-	if cleanup != nil {
-		t.Cleanup(func() { _ = cleanup() })
-	}
+	staged, err := stagePersistentAttachmentFixture(t, context.Background(), expected)
 	if errorCode(err) != "handoff_attachment_missing" {
-		t.Fatalf("StageDraftAttachments() error = %v, want handoff_attachment_missing", err)
+		t.Fatalf("stageDraftAttachmentAt() error = %v, want handoff_attachment_missing", err)
 	}
-	if len(paths) != 0 {
-		t.Fatalf("staged paths = %v, want none", paths)
+	if staged != "" {
+		t.Fatalf("staged path = %q, want none", staged)
 	}
 }
 
-func TestStageDraftAttachmentsReportsCleanupFailure(t *testing.T) {
+func TestPersistentHandoffReportsCleanupFailure(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "report.pdf")
 	content := []byte("attachment bytes")
 	if err := os.WriteFile(source, content, 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	originalRemove := removeHandoffSnapshotRoot
-	t.Cleanup(func() { removeHandoffSnapshotRoot = originalRemove })
-	var root string
-	cleanupFailure := errors.New("injected cleanup failure")
-	removeHandoffSnapshotRoot = func(path string) error {
-		root = path
-		return cleanupFailure
-	}
-
-	paths, cleanup, err := StageDraftAttachments(context.Background(), []DraftAttachment{
-		draftAttachmentFingerprint(source, content),
-	})
+	service := NewServiceWithDraftRoot(nil, t.TempDir())
+	draft, err := service.CreateDraft(CreateDraftRequest{Input: DraftInput{
+		To: []Recipient{{Address: "recipient@example.com"}}, Body: "Body", Attachments: []string{source},
+	}})
 	if err != nil {
-		t.Fatalf("StageDraftAttachments() error = %v", err)
+		t.Fatal(err)
 	}
-	if len(paths) != 1 {
-		t.Fatalf("staged paths = %v, want one path", paths)
+	session, err := service.BeginDraftHandoff(draft.Ref)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := cleanup(); err == nil || !errors.Is(err, cleanupFailure) {
-		t.Fatalf("cleanup() error = %v, want injected failure", err)
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	path := session.Preparation().AttachmentPaths[0]
+	foreign := filepath.Join(filepath.Dir(path), "unrelated")
+	if err := os.WriteFile(foreign, []byte("foreign bytes"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if root == "" {
-		t.Fatal("cleanup root was not captured")
+	if err := session.CancelBeforeDispatch(); err == nil {
+		t.Fatal("cleanup silently removed an unrelated file")
 	}
-	removeHandoffSnapshotRoot = os.RemoveAll
-	if err := os.RemoveAll(root); err != nil {
-		t.Fatalf("remove injected cleanup root: %v", err)
+	for retainedPath, want := range map[string]string{path: string(content), foreign: "foreign bytes"} {
+		if got, err := os.ReadFile(retainedPath); err != nil || string(got) != want {
+			t.Fatalf("retained file = %q, %v", got, err)
+		}
+	}
+	retained, err := service.GetDraft(draft.Ref)
+	if err != nil || retained.HandoffAttempt == nil || retained.HandoffAttempt.ID != session.AttemptID() {
+		t.Fatalf("cleanup lost owning claim: %+v, %v", retained.HandoffAttempt, err)
+	}
+}
+
+func stagePersistentAttachmentFixture(t *testing.T, ctx context.Context, expected DraftAttachment) (string, error) {
+	t.Helper()
+	const ref = "draft_000000000000000000000000"
+	lease, err := acquireDraftLease(context.Background(), t.TempDir(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.release(); err != nil {
+			t.Error(err)
+		}
+	})
+	name := filepath.Join(ref+handoffSnapshotSuffix, "handoff_123456789012345678901234")
+	for _, directory := range []string{filepath.Dir(name), name} {
+		if err := ensurePrivateDirectoryAt(lease.storage, directory); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stageDraftAttachmentAt(ctx, lease.storage, name, 0, expected)
+}
+
+func TestPersistentHandoffPreservesStagingCancellation(t *testing.T) {
+	for _, duringRead := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before copy", true: "during copy"}[duringRead], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "attachment")
+			content := []byte("verified attachment bytes")
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			previous := handoffAttachmentReadHook
+			handoffAttachmentReadHook = func(int) { cancel() }
+			t.Cleanup(func() { handoffAttachmentReadHook = previous })
+			if !duringRead {
+				cancel()
+			}
+			staged, err := stagePersistentAttachmentFixture(t, ctx, draftAttachmentFingerprint(path, content))
+			if staged != "" || !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled staging = %q, %v", staged, err)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != string(content) {
+				t.Fatalf("source changed = %q, %v", got, err)
+			}
+		})
 	}
 }
 
