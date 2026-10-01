@@ -300,6 +300,14 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 	if c.store == nil {
 		return result, c.safeWriteUnavailableError()
 	}
+	selectedAccountID := ""
+	if accountRef != "" {
+		account, err := mailref.DecodeAccount(accountRef)
+		if err != nil {
+			return result, fmt.Errorf("decode selected account ref: %w", err)
+		}
+		selectedAccountID = account.AccountID
+	}
 
 	accounts, err := c.store.ListAccounts(ctx)
 	if err != nil {
@@ -323,7 +331,11 @@ func (c *Client) SyncCheck(ctx context.Context, accountRef string) (mail.SyncChe
 	var targetAccounts []mail.Account
 	if accountRef != "" {
 		for _, acct := range accounts {
-			if acct.Ref == accountRef {
+			reference, err := mailref.DecodeAccount(acct.Ref)
+			if err != nil {
+				return result, fmt.Errorf("decode catalog account ref: %w", err)
+			}
+			if strings.EqualFold(reference.AccountID, selectedAccountID) {
 				targetAccounts = append(targetAccounts, acct)
 				break
 			}

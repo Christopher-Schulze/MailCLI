@@ -458,7 +458,11 @@ func TestNewMessagesWithoutCredentialsReportsThemAndStaysSuccessful(t *testing.T
 
 func TestNewMessagesRejectsAnUnknownAccountAndAnOperatorWithoutTheLister(t *testing.T) {
 	client, _ := newMessagesFixture(t, "new-account@gmail.com", nil)
-	if _, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{AccountRef: "acct_missing", Limit: 5}); err == nil ||
+	unknown, err := mailref.EncodeAccount("FFFFFFFF-BBBB-4CCC-8DDD-EEEEEEEEEEEE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.NewMessages(context.Background(), mail.NewMessagesRequest{AccountRef: unknown, Limit: 5}); err == nil ||
 		!strings.Contains(err.Error(), "account ref not found") {
 		t.Fatalf("unknown account error = %v", err)
 	}

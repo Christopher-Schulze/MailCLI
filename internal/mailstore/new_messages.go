@@ -31,25 +31,23 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 	if c.store == nil {
 		return result, c.safeWriteUnavailableError()
 	}
+	selectedAccountID := ""
+	if request.AccountRef != "" {
+		account, err := mailref.DecodeAccount(request.AccountRef)
+		if err != nil {
+			return result, fmt.Errorf("decode selected account ref: %w", err)
+		}
+		selectedAccountID = account.AccountID
+	}
 	if strings.HasPrefix(request.MailboxRef, "mbx_") {
 		mailbox, err := mailref.DecodeMailbox(request.MailboxRef)
 		if err != nil {
 			return result, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid mailbox ref: %v", err)}
 		}
-		if request.AccountRef != "" {
-			account, err := mailref.DecodeAccount(request.AccountRef)
-			if err != nil {
-				return result, &mail.ValidationError{Code: "invalid_reference", Message: fmt.Sprintf("invalid account ref: %v", err)}
-			}
-			if !strings.EqualFold(account.AccountID, mailbox.AccountID) {
-				return result, &mail.ValidationError{Code: "invalid_argument", Message: "mailbox ref does not belong to the selected account"}
-			}
+		if selectedAccountID != "" && !strings.EqualFold(selectedAccountID, mailbox.AccountID) {
+			return result, &mail.ValidationError{Code: "invalid_argument", Message: "mailbox ref does not belong to the selected account"}
 		}
-		accountRef, err := mailref.EncodeAccount(strings.ToUpper(mailbox.AccountID))
-		if err != nil {
-			return result, err
-		}
-		request.AccountRef = accountRef
+		selectedAccountID = mailbox.AccountID
 	}
 	lister, ok := c.send.ImapClient().(transport.RecentMessageLister)
 	if !ok {
@@ -66,15 +64,19 @@ func (c *Client) NewMessages(ctx context.Context, request mail.NewMessagesReques
 		return result, err
 	}
 	targets := accounts
-	if request.AccountRef != "" {
+	if selectedAccountID != "" {
 		targets = nil
 		for _, account := range accounts {
-			if account.Ref == request.AccountRef {
+			reference, err := mailref.DecodeAccount(account.Ref)
+			if err != nil {
+				return result, fmt.Errorf("decode catalog account ref: %w", err)
+			}
+			if strings.EqualFold(reference.AccountID, selectedAccountID) {
 				targets = append(targets, account)
 			}
 		}
 		if len(targets) == 0 {
-			return result, operationError("account_not_found", "account ref not found: "+request.AccountRef)
+			return result, operationError("account_not_found", "account ref not found for selected account ID: "+selectedAccountID)
 		}
 	}
 	bindings, err := c.loadAccountBindings()
