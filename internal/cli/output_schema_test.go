@@ -414,7 +414,7 @@ func TestPublishedOutputContractsRemainingFixtures(t *testing.T) {
 	sendSetupStdin = strings.NewReader("fixture-password\n")
 	t.Cleanup(func() { sendSetupCredentials = previousCredentials; sendSetupStdin = previousInput })
 	var setupOutput, setupError bytes.Buffer
-	code = runSendSetup(context.Background(), []string{"--from", "sender@icloud.com", "--json"}, &setupOutput, &setupError, nil, mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "bindings.json")))
+	code = runSendSetup(context.Background(), []string{"--from", "sender@icloud.com", "--json"}, &setupOutput, &setupError, nil, mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "bindings.json")), setupAccountLister(t, "sender@icloud.com"))
 	if code != 0 || setupError.Len() != 0 {
 		t.Fatalf("setup code=%d output=%s error=%s", code, &setupOutput, &setupError)
 	}

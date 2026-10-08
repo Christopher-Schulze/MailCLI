@@ -185,7 +185,7 @@ func TestCapabilityCommandInventory(t *testing.T) {
 	}
 	setup := manifest.Commands[slices.Index(got, "send.setup")]
 	if setup.EffectClass != "keychain-write" || setup.Confirmation != "none" ||
-		setup.StoreDependency != "none" ||
+		setup.StoreDependency != "mail-store-if-no-account" ||
 		!slices.Equal(setup.ResultStates, []string{"stored", "removed"}) {
 		t.Fatalf("send.setup capability = %+v", setup)
 	}

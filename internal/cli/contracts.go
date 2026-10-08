@@ -40,6 +40,7 @@ const (
 	mailServiceAlwaysRequired
 	mailServiceForArguments
 	mailServiceForReconcile
+	mailServiceForSendSetup
 )
 
 func commandRequiresMailService(contract commandContract, args []string) bool {
@@ -50,6 +51,8 @@ func commandRequiresMailService(contract commandContract, args []string) bool {
 		return len(args) > 0 && !helpOnly(args)
 	case mailServiceForReconcile:
 		return draftReconcileCommandRequired(args)
+	case mailServiceForSendSetup:
+		return sendSetupCommandRequired(args)
 	default:
 		return false
 	}
@@ -423,10 +426,10 @@ var commandContracts = []commandContract{
 		ID: "send.setup", handler: runSendSetupCommand, helpDescription: "Store or remove app-specific SMTP send credentials",
 		limitRefs:   []string{"supported_providers", "unsupported_provider_code", "provider_support_description"},
 		effectClass: "keychain-write", confirmation: "none",
-		storeDependency: "none",
+		storeDependency: "mail-store-if-no-account",
 		dependencies:    []commandDependency{{Kind: dependencyKindCredential, Target: dependencyTargetKeychain, Condition: dependencyConditionAlways}},
 		resultStates:    []string{"stored", "removed"},
-		mailService:     mailServiceNotRequired,
+		mailService:     mailServiceForSendSetup,
 		published:       true,
 		requiresSignal:  true,
 	},

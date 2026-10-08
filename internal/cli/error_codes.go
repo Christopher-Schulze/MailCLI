@@ -27,7 +27,7 @@ var (
 	errorScopeEditor    = []string{"drafts.edit"}
 	errorScopeUpdate    = []string{"update"}
 	// errorScopeMailStore lists the commands that open Mail's store.
-	errorScopeMailStore = []string{"messages.new", "doctor", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "drafts.reconcile", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
+	errorScopeMailStore = []string{"messages.new", "doctor", "batch", "send.setup", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.open", "drafts.adopt", "drafts.reconcile", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync"}
 	// errorScopeRefs lists the commands that take a message, draft, account,
 	// mailbox or cursor reference.
 	errorScopeRefs = []string{"messages.new", "batch", "accounts.list", "mailboxes.list", "mailboxes.resolve", "messages.list", "messages.filter", "messages.search", "messages.get", "messages.raw", "messages.state", "messages.thread", "attachments.list", "attachments.save", "drafts.create", "drafts.list", "drafts.inspect", "drafts.preview", "drafts.edit", "drafts.handoff", "drafts.update", "drafts.open", "drafts.adopt", "drafts.send", "send.setup", "drafts.reconcile", "drafts.discard", "messages.reply", "messages.forward", "messages.mark", "messages.move", "messages.copy", "messages.delete", "sync", "drafts.handoff-reconcile"}
@@ -57,14 +57,14 @@ var errorCodeDefinitions = []errorCodeDefinition{
 	{"account_binding_unavailable", "The account-binding store cannot be read or written.", errorScopeBinding},
 	{"account_binding_unsafe", "The binding file or its lock is not a safe regular file.", errorScopeBinding},
 	{"account_binding_version_unsupported", "The binding file uses a version this build cannot read.", errorScopeBinding},
-	{"account_catalog_incomplete", "The local account catalog could not be read completely.", append([]string{"accounts.list"}, errorScopeIdentity...)},
+	{"account_catalog_incomplete", "The local account catalog could not be read completely.", append([]string{"accounts.list", "send.setup"}, errorScopeIdentity...)},
 	{"account_degraded", "The target account is degraded in the local catalog; see its degraded_reason.", errorScopeIdentity},
 	{"account_disabled", "The target account is disabled in Mail.app.", errorScopeIdentity},
-	{"account_identity_missing", "The account has no provable sender identity or credential binding.", errorScopeIdentity},
+	{"account_identity_missing", "The account has no provable sender identity or credential binding.", append([]string{"send.setup"}, errorScopeIdentity...)},
 	{"account_no_email", "The account has no email address to resolve provider endpoints.", []string{"sync"}},
 	{"account_not_found", "The requested account ref does not exist in the local catalog.", []string{"sync", "mailboxes.list", "messages.list", "messages.new"}},
 	{"account_reference_corrupt", "A stored account reference is corrupt.", errorScopeIdentity},
-	{"account_reference_invalid", "An account reference is malformed or mixes incompatible forms.", errorScopeIdentity},
+	{"account_reference_invalid", "An account reference is malformed or mixes incompatible forms.", append([]string{"send.setup"}, errorScopeIdentity...)},
 	{"account_reference_version_unsupported", "An account reference uses a version this build cannot decode.", errorScopeIdentity},
 	{"adopt_source_incomplete", "The store draft is not fully downloaded; open it in Mail.app first.", []string{"drafts.adopt"}},
 	{"ambiguous_attachment", "The attachment identifier matches more than one part.", []string{"attachments.save", "batch"}},

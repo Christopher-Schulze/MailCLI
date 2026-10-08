@@ -74,7 +74,7 @@ func TestSendSetupValidatesBindingBeforePasswordIO(t *testing.T) {
 				args = append(args, "--credential-account", "login@gmail.com")
 			}
 			var stdout, stderr bytes.Buffer
-			code := runSendSetup(context.Background(), args, &stdout, &stderr, nil, store)
+			code := runSendSetup(context.Background(), args, &stdout, &stderr, nil, store, nil)
 			if code == 0 || reader.reads != 0 || len(credentials.stored) != 0 {
 				t.Fatalf("invalid plan touched password IO: code=%d reads=%d stored=%d output=%s", code, reader.reads, len(credentials.stored), &stdout)
 			}
@@ -98,7 +98,7 @@ func TestSendSetupRejectsPasswordReadFailureAndOversize(t *testing.T) {
 			sendSetupStdin = &setupObservedReader{Reader: strings.NewReader(test.input), err: test.err}
 			t.Cleanup(func() { sendSetupCredentials, sendSetupStdin = previousCredentials, previousStdin })
 			var stdout, stderr bytes.Buffer
-			code := runSendSetup(context.Background(), []string{"--from", "alice@icloud.com", "--json"}, &stdout, &stderr, nil, nil)
+			code := runSendSetup(context.Background(), []string{"--from", "alice@icloud.com", "--json"}, &stdout, &stderr, nil, setupTestBindings(t), setupAccountLister(t, "alice@icloud.com"))
 			if code == 0 || len(credentials.stored) != 0 || strings.Contains(stdout.String()+stderr.String(), "PRIVATE_PASSWORD") {
 				t.Fatalf("invalid password input was stored or exposed: code=%d stored=%d output=%s", code, len(credentials.stored), &stdout)
 			}
@@ -129,7 +129,7 @@ func TestSendSetupCancellationPreventsCredentialMutation(t *testing.T) {
 				args = append(args, "--remove")
 			}
 			var stdout, stderr bytes.Buffer
-			code := runSendSetup(ctx, args, &stdout, &stderr, nil, nil)
+			code := runSendSetup(ctx, args, &stdout, &stderr, nil, setupTestBindings(t), setupAccountLister(t, "alice@icloud.com"))
 			var response envelope
 			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.Error == nil || response.Error.Code != "operation_canceled" || credentials.stored["alice@icloud.com"] != "original" {
 				t.Fatalf("canceled setup = code %d, error %v, response %s, credential changed %t", code, err, &stdout, credentials.stored["alice@icloud.com"] != "original")
@@ -175,7 +175,7 @@ func TestSendSetupPipeCancellationPreservesBorrowedInput(t *testing.T) {
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	started := time.Now()
-	code := runSendSetup(ctx, []string{"--from", "alice@icloud.com", "--json"}, &stdout, &stderr, nil, nil)
+	code := runSendSetup(ctx, []string{"--from", "alice@icloud.com", "--json"}, &stdout, &stderr, nil, setupTestBindings(t), setupAccountLister(t, "alice@icloud.com"))
 	var response envelope
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil || code != 1 || response.Error == nil || response.Error.Code != "operation_timeout" || len(credentials.stored) != 0 {
 		t.Fatalf("pipe cancellation = code %d, error %v, response %s", code, err, &stdout)
@@ -235,7 +235,7 @@ func TestSendSetupCancellationAfterStoreRetainsPartialEffect(t *testing.T) {
 	sendSetupStdin = strings.NewReader("secret\n")
 	t.Cleanup(func() { sendSetupCredentials, sendSetupStdin = previousCredentials, previousStdin })
 	var stdout, stderr bytes.Buffer
-	code := runSendSetup(ctx, []string{"--from", "alice@icloud.com", "--account", ref, "--json"}, &stdout, &stderr, func(string) { cancel() }, store)
+	code := runSendSetup(ctx, []string{"--from", "alice@icloud.com", "--account", ref, "--json"}, &stdout, &stderr, func(string) { cancel() }, store, nil)
 	var response struct {
 		Data struct {
 			PartialEffects []sendSetupPartialEffect `json:"partial_effects"`

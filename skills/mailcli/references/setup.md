@@ -8,7 +8,7 @@ Obey conditional dependencies; an empty list means none. Run `mailcli doctor --j
 
 Codex ~/.agents/skills/mailcli; Claude Code ~/.claude/skills/mailcli can link verified default. Create only if absent; inspect existing/dangling entries. Links follow updates; copies use original installer/same MAILCLI_SKILL_DESTINATION, ignored by self-update. Other hosts/cloud: documented paths.
 
-Gmail/iCloud: `mailcli send setup --from ALIAS [--account REF] --json`. Other domains add account + SMTP/IMAP host/port; --credential-account LOGIN selects login. Resolve account/alias via accounts list, obey schema; validate public endpoints before password entry. Never guess hosts; never ask the user to paste account passwords in chat.
+Gmail/iCloud: `mailcli send setup --from ALIAS [--account REF] --json`; without REF it binds the one account owning ALIAS (store read) or fails before the prompt, and doctor `send-bindings` warn lists unbound accounts with their command. Other domains add account + SMTP/IMAP host/port; --credential-account LOGIN selects login. Resolve account/alias via accounts list, obey schema; validate public endpoints before password entry. Never guess hosts; never ask the user to paste account passwords in chat.
 
 Built-in app passwords, no Google/Apple OAuth; both require two-factor auth. Google organization/Advanced Protection policy may disallow app passwords.
 

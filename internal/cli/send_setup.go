@@ -26,6 +26,11 @@ var sendSetupBindings = mail.DefaultAccountBindingStore
 // from a pipe instead of the terminal.
 var sendSetupStdin io.Reader = osStdin
 
+// sendSetupAccounts lists the Mail account catalog when setup runs without a
+// Mail service; it is nil in production, where the service provides it, and
+// overridable in tests.
+var sendSetupAccounts func(context.Context) ([]mail.Account, error)
+
 // sendSetupResult reports one keychain mutation for the send.setup command.
 type sendSetupResult struct {
 	Account           string `json:"account"`
@@ -74,7 +79,7 @@ func runSendWithBindingsContext(
 		if bindings == nil {
 			bindings = sendSetupBindings()
 		}
-		return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings)
+		return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings, sendSetupAccounts)
 	}
 	return runCommandFamily(ctx, nil, "send", args, stdout, stderr, handler)
 }
@@ -88,14 +93,51 @@ func runSendSetupCommand(
 ) int {
 	var invalidateCredentials func(string)
 	var bindings mail.AccountBindingStore
+	listAccounts := sendSetupAccounts
 	if service != nil {
 		invalidateCredentials = service.InvalidateCredentials
 		bindings = service.AccountBindingStore()
+		listAccounts = service.ListAccounts
 	}
 	if bindings == nil {
 		bindings = sendSetupBindings()
 	}
-	return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings)
+	return runSendSetup(ctx, args, stdout, stderr, invalidateCredentials, bindings, listAccounts)
+}
+
+type sendSetupOptions struct {
+	from, accountRef, credentialAccount, smtpHost, imapHost *string
+	smtpPort, imapPort                                      *int
+	remove, jsonOutput                                      *bool
+}
+
+func newSendSetupFlags(stderr io.Writer) (*flag.FlagSet, sendSetupOptions) {
+	flags := newFlagSet("send setup", stderr)
+	return flags, sendSetupOptions{
+		from:              flags.String("from", "", "sender email address"),
+		accountRef:        flags.String("account", "", "account ref to bind to the sender"),
+		credentialAccount: flags.String("credential-account", "", "keychain account used for this sender"),
+		smtpHost:          flags.String("smtp-host", "", "explicit SMTP submission host for the account binding"),
+		smtpPort:          flags.Int("smtp-port", 0, "explicit SMTP submission port for the account binding"),
+		imapHost:          flags.String("imap-host", "", "explicit IMAP host for the account binding"),
+		imapPort:          flags.Int("imap-port", 0, "explicit IMAP port for the account binding"),
+		remove:            flags.Bool("remove", false, "remove the stored app-specific password"),
+		jsonOutput:        flags.Bool("json", false, "emit JSON"),
+	}
+}
+
+// sendSetupCommandRequired reports whether setup must open the Mail service:
+// storing a password without --account resolves the owning account from the
+// catalog. Unparseable arguments open nothing and fail in the handler.
+func sendSetupCommandRequired(args []string) bool {
+	if len(args) == 0 || helpOnly(args) {
+		return false
+	}
+	flags, options := newSendSetupFlags(io.Discard)
+	if err := flags.Parse(args); err != nil {
+		return false
+	}
+	return strings.TrimSpace(*options.accountRef) == "" && !*options.remove && strings.TrimSpace(*options.from) != ""
 }
 
 func runSendSetup(
@@ -105,17 +147,12 @@ func runSendSetup(
 	stderr io.Writer,
 	invalidateCredentials func(string),
 	bindings mail.AccountBindingStore,
+	listAccounts func(context.Context) ([]mail.Account, error),
 ) int {
-	flags := newFlagSet("send setup", stderr)
-	from := flags.String("from", "", "sender email address")
-	accountRef := flags.String("account", "", "account ref to bind to the sender")
-	credentialAccount := flags.String("credential-account", "", "keychain account used for this sender")
-	smtpHost := flags.String("smtp-host", "", "explicit SMTP submission host for the account binding")
-	smtpPort := flags.Int("smtp-port", 0, "explicit SMTP submission port for the account binding")
-	imapHost := flags.String("imap-host", "", "explicit IMAP host for the account binding")
-	imapPort := flags.Int("imap-port", 0, "explicit IMAP port for the account binding")
-	remove := flags.Bool("remove", false, "remove the stored app-specific password")
-	jsonOutput := flags.Bool("json", false, "emit JSON")
+	flags, options := newSendSetupFlags(stderr)
+	from, accountRef, credentialAccount := options.from, options.accountRef, options.credentialAccount
+	smtpHost, smtpPort, imapHost, imapPort := options.smtpHost, options.smtpPort, options.imapHost, options.imapPort
+	remove, jsonOutput := options.remove, options.jsonOutput
 	if code := parseFlags(flags, args, stdout, stderr); code >= 0 {
 		return code
 	}
@@ -141,7 +178,8 @@ func runSendSetup(
 	}
 	account := mail.MailboxAddrSpec(parsed.Address)
 	stableAccountID := ""
-	if strings.TrimSpace(*accountRef) != "" {
+	explicitAccount := strings.TrimSpace(*accountRef) != ""
+	if explicitAccount {
 		ref, err := mailref.DecodeAccount(strings.TrimSpace(*accountRef))
 		if err != nil {
 			return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "send setup requires a valid --account ref: " + err.Error()}, stdout, stderr)
@@ -159,6 +197,13 @@ func runSendSetup(
 		if err := mail.ValidateBindingHosts(*smtpHost, *smtpPort, *imapHost, *imapPort); err != nil {
 			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
 		}
+	}
+	if !explicitAccount && !*remove {
+		resolvedID, resolvedRef, err := resolveSendSetupAccount(ctx, listAccounts, account)
+		if err != nil {
+			return failCommand("send.setup", *jsonOutput, err, stdout, stderr)
+		}
+		stableAccountID, *accountRef = resolvedID, resolvedRef
 	}
 	var existingBinding mail.AccountBinding
 	var bindingDocument mail.AccountBindingFile
@@ -192,7 +237,7 @@ func runSendSetup(
 			}
 		}
 	}
-	if stableAccountID == "" && !strings.EqualFold(account, credential) {
+	if !explicitAccount && !strings.EqualFold(account, credential) {
 		return failCommand("send.setup", *jsonOutput, &commandError{code: "invalid_argument", message: "--credential-account requires --account so the alias binding is explicit"}, stdout, stderr)
 	}
 	var hosts *bindingHosts
@@ -260,6 +305,52 @@ func runSendSetup(
 	return writeSendSetupResult(stdout, "send.setup", *jsonOutput, sendSetupResult{
 		Account: account, AccountRef: *accountRef, CredentialAccount: credential, Action: "stored",
 	})
+}
+
+// resolveSendSetupAccount selects the one Mail account that owns sender when
+// setup runs without --account, so setup always publishes the binding that
+// reply and account-scoped drafts require before they can be sent.
+func resolveSendSetupAccount(
+	ctx context.Context,
+	listAccounts func(context.Context) ([]mail.Account, error),
+	sender string,
+) (string, string, error) {
+	const remediation = "; pass --account ACCOUNT_REF from 'mailcli accounts list --json'"
+	if listAccounts == nil {
+		return "", "", &commandError{code: "account_catalog_incomplete", message: "the Mail account catalog is unavailable to bind " + sender + remediation}
+	}
+	accounts, err := listAccounts(ctx)
+	if err != nil {
+		return "", "", &commandError{code: "account_catalog_incomplete", message: "cannot read the Mail account catalog to bind " + sender + ": " + err.Error() + remediation, cause: err}
+	}
+	var refs []string
+	accountID := ""
+	for _, candidate := range accounts {
+		owned := false
+		for _, address := range candidate.EmailAddresses {
+			if strings.EqualFold(mail.MailboxAddrSpec(address), sender) {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			continue
+		}
+		ref, err := mailref.DecodeAccount(candidate.Ref)
+		if err != nil {
+			return "", "", &commandError{code: "account_reference_invalid", message: "account ref " + candidate.Ref + " cannot be decoded: " + err.Error(), cause: err}
+		}
+		refs = append(refs, candidate.Ref)
+		accountID = ref.AccountID
+	}
+	switch len(refs) {
+	case 1:
+		return accountID, refs[0], nil
+	case 0:
+		return "", "", &commandError{code: "account_identity_missing", message: "no Mail account has a provable sender identity " + sender + remediation}
+	default:
+		return "", "", &commandError{code: "account_binding_ambiguous", message: "sender " + sender + " belongs to several Mail accounts (" + strings.Join(refs, ", ") + ")" + remediation}
+	}
 }
 
 // bindingHosts carries the optional explicit endpoint flags. A nil value

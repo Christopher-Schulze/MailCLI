@@ -3,8 +3,10 @@ package mailstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mattn/go-sqlite3"
@@ -143,6 +145,58 @@ func TestListAccountCatalogResolvesExplicitBindingWithoutSentHistory(t *testing.
 	if !account.DirectOpsSupported || account.DirectOpsReason != mail.DirectOpsReasonProviderSupported {
 		t.Fatalf("direct ops annotation = %t,%s want true,provider_supported",
 			account.DirectOpsSupported, account.DirectOpsReason)
+	}
+}
+
+func TestProbeReportsIMAPAccountsWithoutSendBinding(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound %t", bound), func(t *testing.T) {
+			store, _ := newSearchFixture(t)
+			defer closeTestResource(t, store, "test store")
+			accountRoot := filepath.Join(store.versionRoot, testAccountID)
+			if err := os.MkdirAll(accountRoot, 0o700); err != nil {
+				t.Fatalf("MkdirAll(account root) error = %v", err)
+			}
+			cache := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>mboxes</key><dict><key>INBOX</key><dict>
+<key>MailboxPathComponent</key><string>INBOX</string>
+<key>IMAPMailboxChildren</key><dict/>
+</dict></dict></dict></plist>`)
+			if err := os.WriteFile(filepath.Join(accountRoot, ".mboxCache.plist"), cache, 0o600); err != nil {
+				t.Fatalf("WriteFile(mailbox cache) error = %v", err)
+			}
+			bindingStore := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+			if bound {
+				if err := bindingStore.UpsertAccountBinding(mail.AccountBinding{
+					AccountID: testAccountID, SenderAliases: []string{"alias@gmail.com"}, CredentialAccount: "alias@gmail.com",
+				}); err != nil {
+					t.Fatalf("UpsertAccountBinding() error = %v", err)
+				}
+			}
+			store.accountBindings = bindingStore
+			client := &Client{store: store, send: mail.SendTransport{AccountBindings: bindingStore}}
+			report := client.Probe(context.Background(), false)
+			if !mail.IsHealthy(report) {
+				t.Fatalf("send-binding check made doctor unhealthy: %+v", report.Checks)
+			}
+			ref, err := mailref.EncodeAccount(testAccountID)
+			if err != nil {
+				t.Fatalf("EncodeAccount() error = %v", err)
+			}
+			for _, check := range report.Checks {
+				if check.Name != "send-bindings" {
+					continue
+				}
+				if bound && (check.Status != "pass" || check.Detail != "1 IMAP account(s) bound for sending") {
+					t.Fatalf("bound check = %+v", check)
+				}
+				if !bound && (check.Status != "warn" || !strings.Contains(check.Detail, "mailcli send setup --from ADDRESS --account "+ref)) {
+					t.Fatalf("unbound check = %+v", check)
+				}
+				return
+			}
+			t.Fatalf("send-bindings check missing: %+v", report.Checks)
+		})
 	}
 }
 

@@ -3313,9 +3313,17 @@ func TestClientMessageThreadSourceReadsHeaderBlock(t *testing.T) {
 }
 
 func TestClientStoreProfileAndProbeCheck(t *testing.T) {
-	unverified := &Client{store: &Store{capability: schemaCapability{
+	// Probe also reads the account catalog, so the profile cases use a real
+	// fixture store with an overridden capability.
+	fixtureStore := func(capability schemaCapability) *Store {
+		store, _ := newSearchFixture(t)
+		t.Cleanup(func() { closeTestResource(t, store, "test store") })
+		store.capability = capability
+		return store
+	}
+	unverified := &Client{store: fixtureStore(schemaCapability{
 		FrameworkVersion: "9999.1",
-	}}}
+	})}
 	profile, known := unverified.StoreProfile()
 	if !known || !profile.Unverified() || profile.Code != mail.StoreProfileUnverifiedCode ||
 		profile.FrameworkVersion != "9999.1" || profile.SupportedFrameworkVersion != supportedFrameworkVersion {
@@ -3334,9 +3342,9 @@ func TestClientStoreProfileAndProbeCheck(t *testing.T) {
 		t.Fatalf("mail-store-profile check = %+v", profileCheck)
 	}
 
-	verified := &Client{store: &Store{capability: schemaCapability{
+	verified := &Client{store: fixtureStore(schemaCapability{
 		FrameworkVersion: supportedFrameworkVersion, ProfileVerified: true,
-	}}}
+	})}
 	profile, known = verified.StoreProfile()
 	if !known || profile.Unverified() || profile.Code != "" {
 		t.Fatalf("verified StoreProfile() = %#v, %v", profile, known)

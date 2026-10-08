@@ -88,6 +88,7 @@ The installer creates missing binary and skill directories, including `~/.agents
 2. Run `mailcli accounts list --json`, then `mailcli mailboxes list --account ACCOUNT_REF --json` to discover opaque refs.
 3. For direct sending, IMAP mutations and hydration, run `mailcli send setup --from me@example.com` locally once.
    It stores an app-specific password in the macOS Keychain at a no-echo prompt; MailCLI never asks for passwords in chat.
+   It also binds the one account whose sender identity is that address; no or several matches fail before the prompt with `account_identity_missing` or `account_binding_ambiguous`, and `--account ACCOUNT_REF` selects the account explicitly.
    For an alias use `--account ACCOUNT_REF --from ALIAS` and, when needed, `--credential-account LOGIN`.
    Gmail and iCloud domains have built-in endpoints; other domains need an account binding with validated explicit SMTP and IMAP endpoints (see [Accounts and bindings](#accounts-and-bindings)).
    Unsupported providers fail before network access or credential storage.
@@ -116,7 +117,7 @@ All commands share the [Output contract](#output-contract); the selected capabil
   Output: `capabilities`.
 - `version`: inspect installed identity; main flag `--json`.
   Example: `mailcli version --json`. Output: `name`, `version`, `contract_sha256`.
-- `doctor`: inspect platform, Mail store, permissions and optional live Mail access; main flags `--live`, `--diagnostics`.
+- `doctor`: inspect platform, Mail store, send bindings, permissions and optional live Mail access; main flags `--live`, `--diagnostics`.
   Example: `mailcli doctor --json`. Output: `checks`, `timings`.
 - `update`: verify a pinned Ed25519 release signature and checksum, then install binary and skill with rollback; main flags `--check` (read-only: report `update_available`, `updated` stays false), `--json`.
   Example: `mailcli update --check --json`. Output: `update_result`.
@@ -1084,6 +1085,7 @@ A disabled account returns `account_disabled`; an account without a provable cre
 Explicit bindings live in a private versioned JSON file in the MailCLI application-support directory and hold only the stable account ID, permitted sender aliases, the credential lookup identity and optional explicit SMTP and IMAP host-port endpoints; passwords stay in the Keychain.
 
 Configure a supported account with `mailcli send setup --account ACCOUNT_REF --from ALIAS [--credential-account LOGIN]`.
+Without `--account` (and without `--remove`), setup reads the account catalog like `accounts list` and binds the single account whose sender identities contain `--from`; a missing catalog returns `account_catalog_incomplete`, no owner `account_identity_missing` and several owners `account_binding_ambiguous`, all before the password prompt. Every stored password therefore has the binding that reply and account-scoped drafts need, which otherwise fail with `account_binding_missing`.
 The command checks that all aliases and the credential identity resolve to the same supported provider, stores the password under the credential identity, and atomically upserts the alias binding.
 Accounts on other domains add `--smtp-host HOST --smtp-port PORT --imap-host HOST --imap-port PORT` together with `--account`.
 Each host-port pair must be complete, ports must be in 1–65535, and hosts must be fully qualified public DNS names or public IP literals; loopback, private, link-local, multicast, unspecified addresses and reserved names (`localhost`, `.localhost`, `.local`, `.internal`, `.home.arpa`, `.lan`, `.corp`) fail with `account_binding_host_invalid` before the password prompt.
@@ -1123,7 +1125,7 @@ The bridge resolves accounts at most once per invocation, validates the fallback
 The fallback gateway is read-only (account listing, message listing, probing and sync).
 Production clients reject scripted draft save and outbound attachment insertion with `compose_automation_unsupported` before acquiring the gate.
 `sync` without `--check` triggers Mail's refresh; it does not prove completion.
-`doctor` checks the read store without Apple Events; `doctor --live` verifies the Mail process identity and asks for the Mail version through one read-only Apple Event and never creates, saves or sends a message.
+`doctor` checks the read store without Apple Events and adds a `send-bindings` check: `warn` lists every IMAP account without a send binding with its `send setup --account` command, `pass` counts bound accounts, and neither makes doctor unhealthy. `doctor --live` verifies the Mail process identity and asks for the Mail version through one read-only Apple Event and never creates, saves or sends a message.
 `doctor --diagnostics` reports only named phase durations in milliseconds, without message content, addresses, attachment data or paths.
 
 ## Security

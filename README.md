@@ -123,10 +123,10 @@ MailCLI uses the permissions of the terminal or agent host that launches it (**S
 
 | Permission | Required for |
 |---|---|
-| Full Disk Access | Accounts, mailboxes, messages, searches, raw source, and downloaded attachments |
+| Full Disk Access | Accounts, mailboxes, messages, searches, raw source, downloaded attachments, and `send setup` without `--account` |
 | Automation access to Mail | `doctor --live`, `sync` without `--check`, and fallback listing when the store cannot open |
 | No Automation permission | Mutations (`mark`, `move`, `copy`, `delete`) and `sync --check` use IMAP, but still read the local store for account and message identity |
-| No Mail-store or Automation permission | `send setup`, `drafts send`, and transport-claim reconciliation use Keychain credentials and SMTP/IMAP; macOS may ask once for Keychain access |
+| No Mail-store or Automation permission | `send setup --account`, `drafts send`, and transport-claim reconciliation use Keychain credentials and SMTP/IMAP; macOS may ask once for Keychain access |
 
 ```bash
 mailcli doctor --json        # read path, no Apple Events
@@ -230,7 +230,7 @@ mailcli drafts send --ref DRAFT_REF --expected-revision REVIEWED_REVISION --conf
 mailcli drafts reconcile --ref DRAFT_REF --json
 ```
 
-`send setup` prompts once for an app-specific password without echo and stores it in the Keychain; aliases and non-Gmail/iCloud domains use `--account ACCOUNT_REF` with explicit, validated SMTP and IMAP hosts. Sending bypasses Mail.app: MailCLI composes the message, retains the exact bytes in a private recovery spool, submits over SMTP with STARTTLS, and appends a copy to Sent over IMAP.
+`send setup` prompts once for an app-specific password without echo and stores it in the Keychain. Without `--account` it binds the one Mail account whose sender identity is that address and fails before the prompt when none or several match; aliases and non-Gmail/iCloud domains use `--account ACCOUNT_REF` with explicit, validated SMTP and IMAP hosts. Sending bypasses Mail.app: MailCLI composes the message, retains the exact bytes in a private recovery spool, submits over SMTP with STARTTLS, and appends a copy to Sent over IMAP.
 
 | Outcome | Meaning |
 |---|---|

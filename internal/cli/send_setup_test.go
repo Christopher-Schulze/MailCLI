@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,40 @@ func (c *stubSetupCredentials) Delete(account string) error {
 	return nil
 }
 
+// stubSendSetupCatalog lets setup without --account resolve the given
+// addresses to one catalog account and publish into a private binding file.
+func stubSendSetupCatalog(t *testing.T, accounts ...mail.Account) mail.AccountBindingStore {
+	t.Helper()
+	bindings := mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+	previousAccounts, previousBindings := sendSetupAccounts, sendSetupBindings
+	sendSetupAccounts = func(context.Context) ([]mail.Account, error) { return accounts, nil }
+	sendSetupBindings = func() mail.AccountBindingStore { return bindings }
+	t.Cleanup(func() { sendSetupAccounts, sendSetupBindings = previousAccounts, previousBindings })
+	return bindings
+}
+
+func setupCatalogAccount(t *testing.T, accountID string, addresses ...string) mail.Account {
+	t.Helper()
+	ref, err := mailref.EncodeAccount(accountID)
+	if err != nil {
+		t.Fatalf("EncodeAccount() error = %v", err)
+	}
+	return mail.Account{Ref: ref, Type: mail.AccountTypeIMAP, EmailAddresses: addresses, State: "ok"}
+}
+
+// setupAccountLister returns a catalog of one account owning addresses for
+// direct runSendSetup calls.
+func setupAccountLister(t *testing.T, addresses ...string) func(context.Context) ([]mail.Account, error) {
+	t.Helper()
+	account := setupCatalogAccount(t, "ACCOUNT-1", addresses...)
+	return func(context.Context) ([]mail.Account, error) { return []mail.Account{account}, nil }
+}
+
+func setupTestBindings(t *testing.T) mail.AccountBindingStore {
+	t.Helper()
+	return mail.NewAccountBindingStore(filepath.Join(t.TempDir(), "account-bindings.json"))
+}
+
 func runSendSetupWithStub(
 	t *testing.T,
 	credentials *stubSetupCredentials,
@@ -117,6 +152,9 @@ func runSendSetupWithStub(
 	args []string,
 ) (int, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	if !slices.Contains(args, "--account") {
+		stubSendSetupCatalog(t, setupCatalogAccount(t, "ACCOUNT-1", "alice@icloud.com", "alice@unknown.example"))
+	}
 	previousCredentials := sendSetupCredentials
 	previousStdin := sendSetupStdin
 	sendSetupCredentials = func() transport.CredentialStore { return credentials }
@@ -186,6 +224,94 @@ func TestSendSetupPersistsExplicitAccountBinding(t *testing.T) {
 	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
 	if err != nil || !found || binding.CredentialAccount != "login@icloud.com" || len(binding.SenderAliases) != 1 || binding.SenderAliases[0] != "alias@icloud.com" {
 		t.Fatalf("binding = %+v, found=%t, error=%v", binding, found, err)
+	}
+}
+
+func TestSendSetupWithoutAccountBindsOwningAccount(t *testing.T) {
+	account := setupCatalogAccount(t, "ACCOUNT-1", "alice@icloud.com")
+	bindings := stubSendSetupCatalog(t, setupCatalogAccount(t, "ACCOUNT-2", "other@icloud.com"), account)
+	credentials := newStubSetupCredentials()
+	previousCredentials, previousStdin := sendSetupCredentials, sendSetupStdin
+	sendSetupCredentials = func() transport.CredentialStore { return credentials }
+	sendSetupStdin = strings.NewReader("secret\n")
+	t.Cleanup(func() { sendSetupCredentials, sendSetupStdin = previousCredentials, previousStdin })
+	var stdout, stderr bytes.Buffer
+	code := runSend([]string{"setup", "--from", "Alice@iCloud.com", "--json"}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"account_ref":"`+account.Ref+`"`) {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	document, err := bindings.LoadAccountBindings()
+	if err != nil {
+		t.Fatalf("LoadAccountBindings() error = %v", err)
+	}
+	binding, found, err := mail.FindAccountBinding(document, "ACCOUNT-1")
+	if err != nil || !found || len(document.Bindings) != 1 || binding.CredentialAccount != "Alice@iCloud.com" ||
+		!slices.Equal(binding.SenderAliases, []string{"Alice@iCloud.com"}) || credentials.stored["Alice@iCloud.com"] != "secret" {
+		t.Fatalf("binding = %+v, found=%t, error=%v, stored=%#v", binding, found, err, credentials.stored)
+	}
+	resolved, found, err := mail.ResolveAccountBinding(document, "alice@icloud.com", "ACCOUNT-1")
+	if err != nil || !found || resolved.AccountID != "ACCOUNT-1" {
+		t.Fatalf("send resolution = %+v, found=%t, error=%v", resolved, found, err)
+	}
+}
+
+func TestSendSetupWithoutResolvableAccountFailsBeforeEffects(t *testing.T) {
+	catalogErr := errors.New("store unreadable")
+	tests := []struct {
+		name     string
+		accounts func(context.Context) ([]mail.Account, error)
+		wantCode string
+	}{
+		{name: "catalog unavailable", wantCode: "account_catalog_incomplete"},
+		{name: "catalog error", accounts: func(context.Context) ([]mail.Account, error) { return nil, catalogErr }, wantCode: "account_catalog_incomplete"},
+		{name: "no owner", accounts: setupAccountLister(t, "other@icloud.com"), wantCode: "account_identity_missing"},
+		{name: "several owners", accounts: func(context.Context) ([]mail.Account, error) {
+			return []mail.Account{setupCatalogAccount(t, "ACCOUNT-1", "alice@icloud.com"), setupCatalogAccount(t, "ACCOUNT-2", "alice@icloud.com")}, nil
+		}, wantCode: "account_binding_ambiguous"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "account-bindings.json")
+			reader := &setupObservedReader{Reader: strings.NewReader("secret\n")}
+			credentials := newStubSetupCredentials()
+			previousCredentials, previousStdin := sendSetupCredentials, sendSetupStdin
+			sendSetupCredentials = func() transport.CredentialStore { return credentials }
+			sendSetupStdin = reader
+			t.Cleanup(func() { sendSetupCredentials, sendSetupStdin = previousCredentials, previousStdin })
+			var stdout, stderr bytes.Buffer
+			code := runSendSetup(context.Background(), []string{"--from", "alice@icloud.com", "--json"}, &stdout, &stderr, nil, mail.NewAccountBindingStore(path), test.accounts)
+			if code == 0 || !strings.Contains(stdout.String(), `"code":"`+test.wantCode+`"`) || !strings.Contains(stdout.String(), "--account ACCOUNT_REF") {
+				t.Fatalf("code = %d, stdout = %q", code, stdout.String())
+			}
+			if reader.reads != 0 || len(credentials.stored) != 0 {
+				t.Fatalf("unresolved account touched password IO: reads=%d stored=%#v", reader.reads, credentials.stored)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("binding file created: %v", err)
+			}
+		})
+	}
+}
+
+func TestSendSetupCommandRequiredOnlyForAccountResolution(t *testing.T) {
+	tests := []struct {
+		args []string
+		want bool
+	}{
+		{args: []string{"--from", "alice@icloud.com", "--json"}, want: true},
+		{args: []string{"--from=alice@icloud.com", "--credential-account", "alice@icloud.com"}, want: true},
+		{args: []string{"--from", "alice@icloud.com", "--account", "acct"}},
+		{args: []string{"--from", "alice@icloud.com", "--account=acct"}},
+		{args: []string{"--from", "alice@icloud.com", "--remove"}},
+		{args: []string{"--json"}},
+		{args: []string{"--help"}},
+		{args: []string{"--from"}},
+		{},
+	}
+	for _, test := range tests {
+		if got := sendSetupCommandRequired(test.args); got != test.want {
+			t.Fatalf("sendSetupCommandRequired(%q) = %t, want %t", test.args, got, test.want)
+		}
 	}
 }
 
@@ -495,6 +621,7 @@ func TestSendSetupRejectsInvalidInput(t *testing.T) {
 }
 
 func TestSendSetupRejectsUnsupportedProviderBeforeCredentialStore(t *testing.T) {
+	stubSendSetupCatalog(t, setupCatalogAccount(t, "ACCOUNT-1", "alice@unknown.example"))
 	previous := sendSetupCredentials
 	credentialFactoryCalls := 0
 	sendSetupCredentials = func() transport.CredentialStore {
@@ -539,6 +666,7 @@ func TestSendSetupInvalidatesImapCredentialsAfterSuccessfulChange(t *testing.T) 
 			if test.setup != nil {
 				test.setup(credentials)
 			}
+			stubSendSetupCatalog(t, setupCatalogAccount(t, "ACCOUNT-1", "alice@icloud.com"))
 			previousCredentials := sendSetupCredentials
 			previousStdin := sendSetupStdin
 			sendSetupCredentials = func() transport.CredentialStore { return credentials }

@@ -161,7 +161,43 @@ func (c *Client) ProbeWithDiagnostics(
 			Name: "mail-store-profile", Status: "pass", Detail: storeProfileDetail(profile),
 		})
 	}
+	checks = append(checks, c.sendBindingCheck(ctx))
 	return mail.DiagnosticReport{Checks: checks}, timings
+}
+
+// sendBindingCheck warns about IMAP accounts without a send binding: their
+// replies and account-scoped drafts fail with account_binding_missing. It
+// never fails doctor, because reading mail needs no binding.
+func (c *Client) sendBindingCheck(ctx context.Context) mail.Check {
+	check := mail.Check{Name: "send-bindings", Status: "pass"}
+	catalog, err := c.store.ListAccountCatalog(ctx)
+	if err != nil {
+		check.Status, check.Detail = "not-run", "account catalog unavailable: "+err.Error()
+		return check
+	}
+	bound := 0
+	var commands []string
+	for _, account := range catalog.Accounts {
+		if account.Type != mail.AccountTypeIMAP {
+			continue
+		}
+		if account.IdentityCoverage.Source == mail.SenderIdentityCoverageSourceAccountBinding {
+			bound++
+			continue
+		}
+		address := "ADDRESS"
+		if len(account.EmailAddresses) > 0 {
+			address = account.EmailAddresses[0]
+		}
+		commands = append(commands, "mailcli send setup --from "+address+" --account "+account.Ref)
+	}
+	if len(commands) == 0 {
+		check.Detail = fmt.Sprintf("%d IMAP account(s) bound for sending", bound)
+		return check
+	}
+	check.Status = "warn"
+	check.Detail = fmt.Sprintf("%d IMAP account(s) cannot send until bound; run: %s", len(commands), strings.Join(commands, "; "))
+	return check
 }
 
 // StoreProfile reports whether the opened Envelope Index carries the exact
