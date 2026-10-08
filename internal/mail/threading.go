@@ -22,7 +22,6 @@ type ThreadSource struct {
 	MessageID           string
 	References          string
 	InReplyTo           string
-	InReplyToPresent    bool
 	RecipientParseError error
 }
 
@@ -173,10 +172,10 @@ func DeriveReplyInput(source ThreadSource, kind DraftKind, replyAll bool, input 
 		}
 	}
 
-	// An empty References header carries no ancestry; applicant-tracking
-	// systems send one, so it is treated like an absent header.
+	// Empty References and In-Reply-To headers carry no ancestry;
+	// applicant-tracking systems send them, so they are treated as absent.
 	references := source.References
-	if references == "" && (source.InReplyToPresent || source.InReplyTo != "") {
+	if references == "" && source.InReplyTo != "" {
 		ancestors, complete := scanMessageIDs(source.InReplyTo)
 		if !complete || len(ancestors) == 0 {
 			return DraftInput{}, "", "", invalidThreadMessageID("source In-Reply-To header is malformed")

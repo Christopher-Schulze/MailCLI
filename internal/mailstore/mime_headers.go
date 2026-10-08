@@ -16,22 +16,21 @@ import (
 // sourceHeaders carries the header-block values reply/forward derivation and
 // mutation targeting need, without parsing the MIME body.
 type sourceHeaders struct {
-	MessageID        string
-	References       string
-	InReplyTo        string
-	InReplyToPresent bool
-	Subject          string
-	From             string
-	FromError        error
-	ReplyToText      string
-	ReplyTo          []mail.Recipient
-	ReplyToError     error
-	To               []mail.Recipient
-	ToError          error
-	CC               []mail.Recipient
-	CCError          error
-	BCC              []mail.Recipient
-	Raw              string
+	MessageID    string
+	References   string
+	InReplyTo    string
+	Subject      string
+	From         string
+	FromError    error
+	ReplyToText  string
+	ReplyTo      []mail.Recipient
+	ReplyToError error
+	To           []mail.Recipient
+	ToError      error
+	CC           []mail.Recipient
+	CCError      error
+	BCC          []mail.Recipient
+	Raw          string
 }
 
 // sourceHeadersFromReader reads only the header block of a raw RFC 5322
@@ -76,7 +75,6 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	out.BCC, _, _ = headerRecipients(&header, "Bcc")
 	out.References = strings.TrimSpace(header.Get("References"))
 	out.InReplyTo = strings.TrimSpace(header.Get("In-Reply-To"))
-	out.InReplyToPresent = header.Has("In-Reply-To")
 	return out, nil
 }
 
