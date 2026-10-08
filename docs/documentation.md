@@ -96,7 +96,7 @@ The installer creates missing binary and skill directories, including `~/.agents
    macOS may show a one-time consent prompt when one of them first sends an Apple Event.
 5. Visible handoff needs Mail.app as the default email application and a human check of the resulting compose window; it never sends.
 
-Sending and direct transport-claim reconciliation need no Mail-store or Automation permission; the first Keychain read may show one macOS consent prompt.
+Sending and direct transport-claim reconciliation need no Mail-store or Automation permission; the first Keychain read of each installed binary, so again after an update or rebuild, shows a macOS consent prompt, and Always Allow keeps the approval for that binary. A command waiting on the prompt ends with `operation_canceled` or `operation_timeout` on Ctrl-C, SIGTERM or its deadline.
 Accessibility and Screen Recording are never required.
 When a permission is missing, `doctor` returns the exact System Settings remediation.
 
@@ -896,7 +896,7 @@ Signatures without a delimiter, re-wrapped text and HTML differences can remain 
 ## Sending
 
 `drafts send --ref REF --expected-revision REVISION --confirm` bypasses Mail.app entirely.
-It needs no Full Disk Access or Automation permission; the first Keychain read may show one macOS consent prompt.
+It needs no Full Disk Access or Automation permission; the first Keychain read of each installed binary shows a macOS consent prompt (see [Setup](#setup)).
 
 1. Before provider or credential resolution, composition, claim creation or any network contact, a historical `save_attempt` returns `draft_save_retry_blocked`; the draft and save claim stay byte-identical for `drafts reconcile` or explicit discard.
 2. Endpoints resolve from the sender's account binding first: explicit binding hosts take precedence over the provider table for Gmail (`gmail.com`, `googlemail.com`) and iCloud (`icloud.com`, `me.com`, `mac.com`).

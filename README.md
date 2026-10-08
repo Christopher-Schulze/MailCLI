@@ -126,7 +126,7 @@ MailCLI uses the permissions of the terminal or agent host that launches it (**S
 | Full Disk Access | Accounts, mailboxes, messages, searches, raw source, downloaded attachments, and `send setup` without `--account` |
 | Automation access to Mail | `doctor --live`, `sync` without `--check`, and fallback listing when the store cannot open |
 | No Automation permission | Mutations (`mark`, `move`, `copy`, `delete`) and `sync --check` use IMAP, but still read the local store for account and message identity |
-| No Mail-store or Automation permission | `send setup --account`, `drafts send`, and transport-claim reconciliation use Keychain credentials and SMTP/IMAP; macOS may ask once for Keychain access |
+| No Mail-store or Automation permission | `send setup --account`, `drafts send`, and transport-claim reconciliation use Keychain credentials and SMTP/IMAP; macOS asks for Keychain access once per installed binary, so again after an update or rebuild: choose Always Allow |
 
 ```bash
 mailcli doctor --json        # read path, no Apple Events
