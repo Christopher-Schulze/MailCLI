@@ -1200,7 +1200,7 @@ The signature covers the exact checksum-manifest bytes with Ed25519; the public 
 The archive contains `bin/mailcli`, the complete `skills/mailcli` package, `install.sh`, `README.md` and `LICENSE`.
 The version requested from `build-release.sh`, the embedded CLI version, archive root, Git tag and GitHub release title must agree.
 
-Builds disable Go VCS stamping, use read-only module resolution, keep `-trimpath`, strip symbols and DWARF with `-s -w`, and dead-strip native stubs with `-extldflags=-dead_strip`, so identical source and toolchain produce byte-identical binaries; `build.sh` removes a previous output before linking, so a binary that `install-local.sh` re-signed never enters a release package.
+Builds disable Go VCS stamping, use read-only module resolution, keep `-trimpath`, strip symbols and DWARF with `-s -w`, and dead-strip native stubs with `-extldflags=-dead_strip`, so identical source and toolchain produce byte-identical binaries; `build.sh` removes a previous output before linking, so a binary that `install-local.sh` re-signed never enters a release package, and `build-release.sh` refuses a binary without the ad-hoc signature before staging.
 Stripping keeps the Go-derived Mach-O `LC_UUID` that macOS 26 needs to launch the binary.
 Normal compiler inlining stays enabled for hot paths; the release gate reports `release_binary_bytes` without a cap.
 Dynamic SQLite linking, executable packing, more aggressive C optimization and delegating HTTPS to external tools are deliberately excluded because the size gain does not justify weaker diagnostics, host-dependent behaviour or less reliable updates.

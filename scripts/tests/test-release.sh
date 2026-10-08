@@ -299,6 +299,28 @@ if MAILCLI_RELEASE_DIRECTORY="${VERSION_MISMATCH_DIRECTORY}" \
   exit 1
 fi
 assert_no_release_assets "${VERSION_MISMATCH_DIRECTORY}" "0.1.0"
+SIGNATURE_FAILURE_DIRECTORY="${TEST_ROOT}/signature-failure"
+SIGNATURE_FAILURE_BIN="${TEST_ROOT}/signature-failure-bin"
+mkdir -p "${SIGNATURE_FAILURE_BIN}"
+cat >"${SIGNATURE_FAILURE_BIN}/codesign" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == -d ]]; then
+  printf 'Identifier=mailcli\nSignature size=2033\nAuthority=MailCLI Local Signing\n' >&2
+  exit 0
+fi
+exec "${MAILCLI_TEST_REAL_CODESIGN}" "$@"
+EOF
+chmod 0755 "${SIGNATURE_FAILURE_BIN}/codesign"
+SIGNATURE_FAILURE_LOG="${TEST_ROOT}/signature-failure.log"
+if run_test_release_builder "${SIGNATURE_FAILURE_DIRECTORY}" \
+  "PATH=${SIGNATURE_FAILURE_BIN}:${PATH}" \
+  "MAILCLI_TEST_REAL_CODESIGN=$(command -v codesign)" >"${SIGNATURE_FAILURE_LOG}" 2>&1; then
+  printf 'Release builder packaged a binary without the ad-hoc signature\n' >&2
+  exit 1
+fi
+grep -Fq 'Release binary is not ad-hoc signed' "${SIGNATURE_FAILURE_LOG}"
+assert_no_release_assets "${SIGNATURE_FAILURE_DIRECTORY}" "${TEST_VERSION}"
 run_test_release_builder "${RELEASE_DIRECTORY}"
 
 ARCHIVE="${RELEASE_DIRECTORY}/mailcli_${TEST_VERSION}_darwin_arm64.tar.gz"
