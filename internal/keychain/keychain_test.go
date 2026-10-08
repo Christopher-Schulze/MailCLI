@@ -423,6 +423,40 @@ func TestLoadContext(t *testing.T) {
 	}
 }
 
+func TestLoadContextAnnouncesPendingApprovalOnce(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		delay   time.Duration
+		blocked time.Duration
+		notices int
+	}{
+		{name: "fast read stays silent", delay: time.Hour, notices: 0},
+		{name: "blocked read announces once", delay: time.Millisecond, blocked: 50 * time.Millisecond, notices: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousDelay, previousOutput := keychainWaitNotice, keychainNoticeOutput
+			t.Cleanup(func() { keychainWaitNotice, keychainNoticeOutput = previousDelay, previousOutput })
+			var notices strings.Builder
+			keychainWaitNotice, keychainNoticeOutput = test.delay, &notices
+			backend := &promptStore{fakeStore: newFakeStore(), started: make(chan struct{}), release: make(chan struct{})}
+			backend.items["user@icloud.com"] = "secret"
+			go func() {
+				<-backend.started
+				time.Sleep(test.blocked)
+				close(backend.release)
+			}()
+			password, err := LoadContext(context.Background(), newForTest(backend), "user@icloud.com")
+			if password != "secret" || err != nil {
+				t.Fatalf("LoadContext() = %q, %v", password, err)
+			}
+			text := notices.String()
+			if strings.Count(text, "waiting for macOS Keychain approval") != test.notices || test.notices > 0 && !strings.Contains(text, "user@icloud.com") {
+				t.Fatalf("notices = %q; want %d naming the account", text, test.notices)
+			}
+		})
+	}
+}
+
 func TestLoadContextEndedBeforeReadSkipsBackend(t *testing.T) {
 	backend := &promptStore{fakeStore: newFakeStore(), started: make(chan struct{}), release: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())

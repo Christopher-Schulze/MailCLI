@@ -10,7 +10,7 @@ Codex ~/.agents/skills/mailcli; Claude Code ~/.claude/skills/mailcli can link ve
 
 Gmail/iCloud: `mailcli send setup --from ALIAS [--account REF] --json`; without REF it binds the one account owning ALIAS (store read) or fails before the prompt, and doctor `send-bindings` warn lists unbound accounts with their command. Other domains add account + SMTP/IMAP host/port; --credential-account LOGIN selects login. Resolve account/alias via accounts list, obey schema; validate public endpoints before password entry. Never guess hosts; never ask the user to paste account passwords in chat.
 
-The first Keychain read of each installed binary, so again after `mailcli update` or a rebuild, shows a macOS prompt that a command waits on; tell the user to approve it with Always Allow. A wait ended by Ctrl-C or the deadline returns operation_canceled/operation_timeout with no transport effect; rerun after approval.
+The first Keychain read of each installed binary, so again after `mailcli update` or a rebuild, shows a macOS prompt that a command waits on; after 2 s stderr says `mailcli: waiting for macOS Keychain approval ...`; tell the user to approve it with Always Allow. A wait ended by Ctrl-C or the deadline returns operation_canceled/operation_timeout with no transport effect; rerun after approval.
 
 Built-in app passwords, no Google/Apple OAuth; both require two-factor auth. Google organization/Advanced Protection policy may disallow app passwords.
 

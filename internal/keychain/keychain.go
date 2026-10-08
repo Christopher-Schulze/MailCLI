@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
+	"time"
 
 	"mailcli/internal/transport"
 )
@@ -107,6 +110,14 @@ func validateIdentifier(value string) error {
 	return nil
 }
 
+// keychainWaitNotice is how long a Keychain read may block before MailCLI
+// tells the user that a macOS approval prompt is waiting. The notice goes to
+// keychainNoticeOutput, so stdout and JSON envelopes stay unchanged.
+var (
+	keychainWaitNotice             = 2 * time.Second
+	keychainNoticeOutput io.Writer = os.Stderr
+)
+
 // LoadContext reads one stored password and returns as soon as ctx ends.
 // A Keychain read blocks while macOS shows its approval prompt and ignores
 // cancellation, so the read runs in its own goroutine; an abandoned read
@@ -124,11 +135,18 @@ func LoadContext(ctx context.Context, credentials transport.CredentialStore, acc
 		password, err := credentials.Load(account)
 		result <- loaded{password: password, err: err}
 	}()
-	select {
-	case value := <-result:
-		return value.password, value.err
-	case <-ctx.Done():
-		return "", fmt.Errorf("macOS Keychain access to %s was not granted before the command ended; approve the Keychain prompt with Always Allow and rerun: %w", account, ctx.Err())
+	notice := time.NewTimer(keychainWaitNotice)
+	defer notice.Stop()
+	for {
+		select {
+		case value := <-result:
+			return value.password, value.err
+		case <-notice.C:
+			// The notice is advisory; a failed stderr write must not fail the read.
+			_, _ = fmt.Fprintf(keychainNoticeOutput, "mailcli: waiting for macOS Keychain approval to read the password for %s; approve the Keychain prompt with Always Allow\n", account)
+		case <-ctx.Done():
+			return "", fmt.Errorf("macOS Keychain access to %s was not granted before the command ended; approve the Keychain prompt with Always Allow and rerun: %w", account, ctx.Err())
+		}
 	}
 }
 
