@@ -123,6 +123,9 @@ func (s *Store) mailboxIDsWithAttribute(ctx context.Context, attribute int) ([]i
 	for accountID, scheme := range accountSchemes {
 		cached, err := s.loadMailboxCache(ctx, accountID)
 		if err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return nil, contextErr
+			}
 			continue
 		}
 		if err := collectMailboxIDs(cached.Mailboxes, nil, accountID, scheme, attribute, byPath, unique, 1); err != nil {

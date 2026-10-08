@@ -76,6 +76,28 @@ func TestListMailboxesRejectsIncompleteCatalog(t *testing.T) {
 	}
 }
 
+// An expired context reaching the per-account cache read is the cause, not an
+// incomplete catalog; the memoized catalog lets the second call reach it.
+func TestMailboxCatalogReportsExpiredContext(t *testing.T) {
+	store, _ := newSearchFixture(t)
+	defer closeTestResource(t, store, "test store")
+	path := filepath.Join(store.versionRoot, testAccountID, ".mboxCache.plist")
+	if err := os.WriteFile(path, []byte(nestedMailboxCacheXML(1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListMailboxes(context.Background(), mail.ListMailboxesRequest{}); err != nil {
+		t.Fatalf("warm catalog: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.ListMailboxes(ctx, mail.ListMailboxesRequest{}); err != context.Canceled {
+		t.Fatalf("ListMailboxes() error = %v, want context.Canceled", err)
+	}
+	if identifiers, err := store.mailboxIDsWithAttribute(ctx, mailboxAttributeSent); err != context.Canceled || len(identifiers) != 0 {
+		t.Fatalf("mailboxIDsWithAttribute() = %v, %v; want context.Canceled", identifiers, err)
+	}
+}
+
 func TestLoadMailboxCacheBoundsUseTypedMalformedError(t *testing.T) {
 	store, _ := newSearchFixture(t)
 	defer closeTestResource(t, store, "test store")

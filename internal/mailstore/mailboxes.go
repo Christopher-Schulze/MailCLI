@@ -62,6 +62,9 @@ func (s *Store) ListMailboxes(ctx context.Context, request mail.ListMailboxesReq
 	for candidateAccountID, scheme := range accountSchemes {
 		cached, err := s.loadMailboxCache(ctx, candidateAccountID)
 		if err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return nil, contextErr
+			}
 			return nil, operationErrorWithCause(
 				"mailbox_catalog_incomplete",
 				fmt.Sprintf("cannot prove the complete mailbox catalog for account %s; inspect the cache or correct access permissions", candidateAccountID), err,
