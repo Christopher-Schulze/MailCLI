@@ -47,13 +47,20 @@ func TestThreadHeaderParserAndComposerAgree(t *testing.T) {
 	}
 }
 
-func TestThreadHeaderPresentEmptyValuesAreIncomplete(t *testing.T) {
+func TestThreadHeaderEmptyValuesAreAbsent(t *testing.T) {
 	for _, name := range []string{"References", "In-Reply-To"} {
-		for _, value := range []string{"", "(comment only)"} {
+		for _, test := range []struct {
+			value    string
+			complete bool
+		}{
+			{value: "", complete: true},
+			{value: " \t", complete: true},
+			{value: "(comment only)", complete: false},
+		} {
 			var summary MessageSummary
-			ApplyThreadingHeaders(&summary, name+": "+value+"\r\n\r\n")
-			if summary.ThreadingComplete {
-				t.Fatalf("present %s without an ID became complete", name)
+			ApplyThreadingHeaders(&summary, name+": "+test.value+"\r\n\r\n")
+			if summary.ThreadingComplete != test.complete || len(summary.InReplyTo)+len(summary.References) != 0 {
+				t.Fatalf("%s %q: complete=%t ids=%v/%v; want complete=%t", name, test.value, summary.ThreadingComplete, summary.InReplyTo, summary.References, test.complete)
 			}
 		}
 	}

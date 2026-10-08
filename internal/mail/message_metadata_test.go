@@ -17,6 +17,8 @@ func TestReplyMetadataHeaders(t *testing.T) {
 	}{
 		{"folded and comments", "From: =?UTF-8?Q?J=C3=B6rg?= <Local@EXAMPLE.COM>\r\nIn-Reply-To: <a@b>, (ignore <bad@id>) <c@d>\r\nReferences: <first@x>\r\n\t(second (nested)) <next@x>, <last@x>\r\n\r\n", []string{"<a@b>", "<c@d>"}, []string{"<first@x>", "<next@x>", "<last@x>"}, Recipient{Name: "Jörg", Address: "Local@example.com"}, true},
 		{"missing", "From: person@example.com\n\n", []string{}, []string{}, Recipient{Address: "person@example.com"}, true},
+		{"empty fields", "From: person@example.com\r\nReferences:\r\nIn-Reply-To: \t\r\n\r\n", []string{}, []string{}, Recipient{Address: "person@example.com"}, true},
+		{"empty field beside valid IDs", "References:\r\nIn-Reply-To: <a@b>\r\n\r\n", []string{"<a@b>"}, []string{}, Recipient{}, true},
 		// Malformed values make threading incomplete instead of claiming "no reply".
 		{"malformed ID", "In-Reply-To: <broken\r\nReferences: (unclosed <x@y>\r\n\r\n", []string{}, []string{}, Recipient{}, false},
 		{"valid IDs kept beside broken ones", "In-Reply-To: <a@b> <nodomain>\r\nReferences: <x@example.com> <broken@example.com\r\n\r\n", []string{"<a@b>"}, []string{"<x@example.com>"}, Recipient{}, false},
@@ -77,9 +79,9 @@ func TestThreadingIDsAccountForEveryInputSpan(t *testing.T) {
 				t.Fatalf("IDs = %#v, complete = %t; want %#v, %t", ids, complete, test.ids, test.complete)
 			}
 			metadataComplete := test.complete
-			// Empty optional parser input is valid; a present threading field
-			// requires at least one msg-id under RFC 5322 section 3.6.4.
-			if test.name == "empty optional" || test.name == "comments only" {
+			// An empty field counts as absent; a comment-only field is present
+			// without the msg-id RFC 5322 section 3.6.4 requires.
+			if test.name == "comments only" {
 				metadataComplete = false
 			}
 			for _, field := range []string{"In-Reply-To", "References"} {

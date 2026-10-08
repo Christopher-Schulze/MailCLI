@@ -223,6 +223,11 @@ func ApplyThreadingHeaders(summary *MessageSummary, raw string) {
 	for _, field := range fields {
 		switch strings.ToLower(field.Name) {
 		case "in-reply-to", "references":
+			// An empty field carries no ancestry; applicant-tracking systems
+			// send one, so it is treated like an absent field.
+			if strings.TrimSpace(field.Value) == "" {
+				continue
+			}
 			ids, valid := scanMessageIDs(field.Value)
 			if !valid || len(ids) == 0 {
 				summary.ThreadingComplete = false
