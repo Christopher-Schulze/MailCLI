@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,9 @@ func TestIMAPCancellationWrappersPreserveCauses(t *testing.T) {
 			{"deadline wins over inner cancellation", expired, context.Canceled, transport.CodeIMAPTimeout},
 			{"wrapped cancellation", context.Background(), fmt.Errorf("inner: %w", context.Canceled), transport.CodeIMAPCanceled},
 			{"wrapped deadline", context.Background(), fmt.Errorf("inner: %w", context.DeadlineExceeded), transport.CodeIMAPTimeout},
+			{"own deadline", expired, context.DeadlineExceeded, transport.CodeIMAPTimeout},
+			{"own cancellation", canceled, context.Canceled, transport.CodeIMAPCanceled},
+			{"wrapped own deadline", expired, fmt.Errorf("acquire: %w", context.DeadlineExceeded), transport.CodeIMAPTimeout},
 		} {
 			t.Run(wrapper.name+"/"+test.name, func(t *testing.T) {
 				err := wrapper.wrap(test.ctx, test.err)
@@ -48,6 +52,9 @@ func TestIMAPCancellationWrappersPreserveCauses(t *testing.T) {
 				}
 				if cause := test.ctx.Err(); cause != nil && !errors.Is(err, cause) {
 					t.Fatalf("caller cause %v lost: %v", cause, err)
+				}
+				if cause := test.ctx.Err(); cause != nil && strings.Count(err.Error(), cause.Error()) != 1 {
+					t.Fatalf("caller cause %v repeated: %q", cause, err.Error())
 				}
 			})
 		}

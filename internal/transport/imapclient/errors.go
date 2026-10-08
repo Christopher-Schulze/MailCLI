@@ -11,7 +11,7 @@ import (
 
 func wrapDialError(ctx context.Context, err error) error {
 	contextErr := ctx.Err()
-	if contextErr != nil {
+	if contextErr != nil && !errors.Is(err, contextErr) {
 		err = errors.Join(err, contextErr)
 	}
 	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
@@ -40,7 +40,7 @@ func wrapIOError(ctx context.Context, err error, code, message string) error {
 		return nil
 	}
 	contextErr := ctx.Err()
-	if contextErr != nil {
+	if contextErr != nil && !errors.Is(err, contextErr) {
 		err = errors.Join(err, contextErr)
 	}
 	if contextErr == context.Canceled || contextErr == nil && errors.Is(err, context.Canceled) {
@@ -69,7 +69,7 @@ func wrapCommandIOError(ctx context.Context, err error, message string) error {
 		return nil
 	}
 	contextErr := ctx.Err()
-	if contextErr != nil {
+	if contextErr != nil && !errors.Is(err, contextErr) {
 		err = errors.Join(err, contextErr)
 	}
 	if transport.ErrorCode(err) != "" {
