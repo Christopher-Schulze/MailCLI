@@ -377,8 +377,8 @@ if [[ "${STAGING_READY}" -eq 0 ]]; then
     exit 1
   fi
   codesign --verify --strict "${BINARY}"
-  # A release ships the reproducible ad-hoc linker signature, never a local
-  # signing identity that install-local.sh applies.
+  # A release ships the reproducible ad-hoc linker signature, never a
+  # certificate signature applied after the build.
   SIGNATURE_DETAILS="$(codesign -d --verbose=2 "${BINARY}" 2>&1)"
   if ! grep -qx 'Signature=adhoc' <<<"${SIGNATURE_DETAILS}"; then
     printf 'Release binary is not ad-hoc signed\n' >&2

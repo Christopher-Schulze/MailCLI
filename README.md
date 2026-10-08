@@ -28,7 +28,7 @@ cd MailCLI
 ./scripts/build/install-local.sh
 ```
 
-The source installer uses the same rollback-safe transaction; a first argument or `MAILCLI_SKILL_DESTINATION` selects other destinations. Run `./scripts/utils/create-local-signing-identity.sh` once so every source build carries the same local signature and macOS keeps your Keychain approval across rebuilds. The release binary is ad-hoc signed, not notarized; if Gatekeeper blocks the verified binary, remove only its quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`.
+The source installer uses the same rollback-safe transaction; a first argument or `MAILCLI_SKILL_DESTINATION` selects other destinations. Every new binary, from a source build or an update, asks once for Keychain access; choose Always Allow. The release binary is ad-hoc signed, not notarized; if Gatekeeper blocks the verified binary, remove only its quarantine attribute with `xattr -d com.apple.quarantine ~/.local/bin/mailcli`.
 
 ## First commands
 

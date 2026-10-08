@@ -66,7 +66,7 @@ fi
 # the reproducibility reference for the packaged binary.
 REFERENCE_BUILD="${TEST_ROOT}/reference-build"
 cp "${BUILD_OUTPUT}" "${REFERENCE_BUILD}"
-# install-local.sh re-signs the build output; a rebuild must not reuse it.
+# A re-signed previous build output must not survive a rebuild.
 codesign --force --sign - --identifier mailcli-resigned-fixture "${BUILD_OUTPUT}" >/dev/null 2>&1
 "${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
 if ! cmp -s "${BUILD_OUTPUT}" "${REFERENCE_BUILD}"; then
@@ -306,7 +306,7 @@ cat >"${SIGNATURE_FAILURE_BIN}/codesign" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 if [[ "${1:-}" == -d ]]; then
-  printf 'Identifier=mailcli\nSignature size=2033\nAuthority=MailCLI Local Signing\n' >&2
+  printf 'Identifier=mailcli\nSignature size=2033\nAuthority=Example Signing Certificate\n' >&2
   exit 0
 fi
 exec "${MAILCLI_TEST_REAL_CODESIGN}" "$@"
