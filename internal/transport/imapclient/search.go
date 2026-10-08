@@ -231,6 +231,9 @@ func (c *Client) doUIDSearchCriteria(ctx context.Context, sess *session, tag, cr
 	return c.readSearchResults(ctx, sess, tag, "UID SEARCH")
 }
 
+// readSearchResults accepts at most one untagged SEARCH response. A tagged OK
+// without one is an empty result: RFC 3501 requires the response, but iCloud
+// omits it when nothing matches. Repeated or malformed responses stay errors.
 func (c *Client) readSearchResults(ctx context.Context, sess *session, tag, command string) ([]uint32, error) {
 	var uids []uint32
 	seenSearch := false
@@ -250,9 +253,6 @@ func (c *Client) readSearchResults(ctx context.Context, sess *session, tag, comm
 				return nil, malformedTaggedCommandResponse(sess, command, statusErr)
 			}
 			if status == "OK" {
-				if !seenSearch {
-					return nil, malformedSearchResponse(sess, "IMAP "+command+" completed without a SEARCH response")
-				}
 				return uids, nil
 			}
 			return nil, rejectedTaggedCompletion(line, tag, command, status)

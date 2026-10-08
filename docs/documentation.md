@@ -606,7 +606,7 @@ Successful hydration updates the returned reference with the verified UID and UI
 
 Message-ID resolution treats UID SEARCH as candidate discovery, then fetches each candidate's `BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]` and counts only exact normalized headers.
 Substring candidates are discarded; missing, duplicate or malformed Message-ID headers fail closed, and duplicate matches return `imap_ambiguous_message_id` before any UID becomes a target.
-Malformed, zero, overflowing or duplicate UIDs, or more than one SEARCH response, return `imap_response_malformed` and discard the session.
+Malformed, zero, overflowing or duplicate UIDs, or more than one SEARCH response, return `imap_response_malformed` and discard the session; a tagged OK without a SEARCH response is an empty result.
 Message-ID inputs are normalized once: a bare identifier receives angle brackets, while partially bracketed, empty, whitespace-containing, control-containing or unbalanced input returns `invalid_imap_value` before connecting.
 
 When hydration fails, reads keep parseable local content.
@@ -945,7 +945,7 @@ A confirmed result keeps compatibility outcome `sent` and exposes `submission_ac
 
 If SMTP accepted the message but the Sent mirror failed, the outcome is `sent_mirror_pending`; MailCLI never resubmits, and `drafts reconcile` searches and verifies Sent before retrying a known failed APPEND from the retained exact bytes, even when the original attachment paths changed or vanished.
 Every Sent APPEND is preceded by a durable mirror-attempt marker with a unique attempt ID; a known pre-APPEND failure may retry only after a fresh Sent search and a new marker.
-Only one complete SEARCH response with unique positive 32-bit message identities proves absence or candidates; missing, repeated or malformed SEARCH evidence blocks APPEND. Malformed post-APPEND evidence retains `imap_append_outcome_unknown` and its underlying cause, never authorization to repeat the write.
+Only one complete SEARCH response with unique positive 32-bit message identities, or a tagged OK without any SEARCH response (iCloud omits an empty one), proves absence or candidates; repeated or malformed SEARCH evidence blocks APPEND. Malformed post-APPEND evidence retains `imap_append_outcome_unknown` and its underlying cause, never authorization to repeat the write.
 A literal copy, source-length, deadline or flush failure before the terminating CRLF returns `imap_append_incomplete` and discards the session; reconcile searches Sent, then retries only that APPEND.
 After the terminating CRLF, a failed write or unreadable reply returns `imap_append_outcome_unknown`; reconciliation searches and verifies Sent but never retries automatically, and a duplicate or unprovable result stays `send_mirror_outcome_unknown`.
 Missing or changed recovery-spool bytes block APPEND and keep the draft.

@@ -17,7 +17,6 @@ func TestSentAppendRequiresValidSearchEvidence(t *testing.T) {
 		name  string
 		lines []string
 	}{
-		{name: "missing"},
 		{name: "zero", lines: []string{"* SEARCH 0"}},
 		{name: "negative", lines: []string{"* SEARCH -1"}},
 		{name: "overflow", lines: []string{"* SEARCH 4294967296"}},
@@ -83,18 +82,20 @@ func TestSentAppendValidSearchEvidence(t *testing.T) {
 	message := []byte("Message-ID: " + messageID + "\r\n\r\nBody\r\n")
 	for _, test := range []struct {
 		name     string
-		response string
+		lines    []string
 		existing bool
 		appended bool
 		code     string
 	}{
-		{name: "empty", response: "* SEARCH", appended: true},
-		{name: "one verified", response: "* SEARCH 1", existing: true},
-		{name: "multiple", response: "* SEARCH 1 2", existing: true, code: transport.CodeIMAPAmbiguousMessageID},
+		{name: "empty", lines: []string{"* SEARCH"}, appended: true},
+		{name: "omitted empty", appended: true},
+		{name: "one verified", lines: []string{"* SEARCH 1"}, existing: true},
+		{name: "multiple", lines: []string{"* SEARCH 1 2"}, existing: true, code: transport.CodeIMAPAmbiguousMessageID},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			lines := append(append([]string(nil), test.lines...), "<tag> OK SEARCH completed")
 			cfg := fakeServerConfig{authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
-				searchResponses: [][]string{{test.response, "<tag> OK SEARCH completed"}}}
+				searchResponses: [][]string{lines}}
 			if test.existing {
 				cfg.searchMatchID = messageID
 			}
@@ -117,5 +118,31 @@ func TestSentAppendValidSearchEvidence(t *testing.T) {
 				t.Fatalf("Sent evidence = %+v, data=%q", evidence, data)
 			}
 		})
+	}
+}
+
+func TestSentAppendOmittedSearchAfterAppendStaysUnknown(t *testing.T) {
+	messageID := "<search-proof@example.com>"
+	message := []byte("Message-ID: " + messageID + "\r\n\r\nBody\r\n")
+	srv := newFakeServer(t, fakeServerConfig{authOK: true, sentMboxes: []string{"Sent"}, appendOK: true,
+		searchResponses: [][]string{nil, {"<tag> OK SEARCH completed"}}})
+	client, cfg := newFakeClient(t, srv)
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	evidence, err := client.AppendToSent(context.Background(), cfg, message, messageID)
+	if transport.ErrorCode(err) != transport.CodeIMAPAppendOutcomeUnknown || evidence != (transport.AppendEvidence{}) {
+		t.Fatalf("APPEND = %+v, %v; want %s", evidence, err, transport.CodeIMAPAppendOutcomeUnknown)
+	}
+	appendCommands := 0
+	for _, command := range srv.Commands() {
+		if command == "APPEND" {
+			appendCommands++
+		}
+	}
+	if called, _, _, data := srv.AppendRecord(); !called || appendCommands != 1 || !bytes.Equal(data, message) {
+		t.Fatalf("APPEND committed=%t dispatched %d times", called, appendCommands)
 	}
 }

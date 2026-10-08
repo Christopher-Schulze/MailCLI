@@ -1433,10 +1433,9 @@ func TestSearchUIDRejectsMalformedResponses(t *testing.T) {
 			dirty:    true,
 		},
 		{
-			name:     "missing SEARCH response",
+			name:     "omitted empty SEARCH response",
 			response: []string{"<tag> OK completed"},
-			wantCode: transport.CodeIMAPResponseMalformed,
-			dirty:    true,
+			wantCode: transport.CodeIMAPMessageNotFound,
 		},
 		{
 			name:     "tagged failure",
