@@ -25,7 +25,9 @@ func TestDerivedReplyPreservesFallbackAncestry(t *testing.T) {
 		{name: "References precedence", headers: "References: <root@id>\r\nIn-Reply-To: malformed\r\n", chain: "<root@id> <102@example.com>"},
 		{name: "malformed fallback", headers: "In-Reply-To: <bad@@id>\r\n", invalid: true},
 		{name: "empty present fallback", headers: "In-Reply-To:\r\n", invalid: true},
-		{name: "empty present References", headers: "References:\r\nIn-Reply-To: <ancestor@id>\r\n", invalid: true},
+		{name: "empty References with fallback", headers: "References:\r\nIn-Reply-To: <ancestor@id>\r\n", chain: "<ancestor@id> <102@example.com>"},
+		{name: "empty References only", headers: "References: \r\n", chain: "<102@example.com>"},
+		{name: "References without Message-ID", headers: "References: garbage\r\n", invalid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, inbox := newSearchFixture(t)
