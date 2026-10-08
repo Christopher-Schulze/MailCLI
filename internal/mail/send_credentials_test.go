@@ -23,6 +23,65 @@ func (o *credentialBoundaryIMAP) ListMailboxes(ctx context.Context, cfg transpor
 	return o.reconcileImapStub.ListMailboxes(ctx, cfg)
 }
 
+func TestSendCredentialWaitEndsWithCommandContext(t *testing.T) {
+	for _, boundary := range []string{"send", "delivery", "unknown reconcile", "mirror reconcile"} {
+		t.Run(boundary, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "drafts")
+			submitter, mirror := sendTransportStubs()
+			credentials := &stubCredentials{password: "secret"}
+			service := newTransportService(root, submitter, mirror, credentials)
+			draft := createTransportDraft(t, service)
+			operator := &credentialBoundaryIMAP{reconcileImapStub: &reconcileImapStub{}}
+			if boundary == "unknown reconcile" {
+				beginUnknownClaim(t, root, draft)
+				service.send.Imap = operator
+			}
+			if boundary == "mirror reconcile" {
+				mirror.err = &transport.TransportError{Code: transport.CodeIMAPAppendFailed, Message: "mirror rejected"}
+				if result, err := service.SendDraft(context.Background(), SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision}); err == nil || result.Outcome != SendOutcomeMirrorPending {
+					t.Fatalf("prepare accepted submission: result=%+v error=%v", result, err)
+				}
+				service.send.Imap = operator
+			}
+			before, err := service.GetDraft(draft.Ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previousSubmits, previousMirrors := submitter.calls, mirror.calls
+			started, release := make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			credentials.loadHook = func() {
+				close(started)
+				<-release
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				<-started
+				cancel()
+			}()
+			switch boundary {
+			case "send":
+				_, err = service.SendDraft(ctx, SendDraftRequest{Ref: draft.Ref, ExpectedRevision: draft.Revision})
+			case "delivery":
+				_, err = DeliverViaTransport(ctx, service.send, draft)
+			default:
+				_, err = service.ReconcileDraft(ctx, draft.Ref)
+			}
+			if !errors.Is(err, context.Canceled) || ContextErrorCode(err) != "operation_canceled" || !strings.Contains(err.Error(), "approve the Keychain prompt") {
+				t.Fatalf("pending Keychain approval error=%v; want canceled with approval guidance", err)
+			}
+			if submitter.calls != previousSubmits || mirror.calls != previousMirrors || operator.lists != 0 || operator.searchCalls != 0 || operator.fetchCalls != 0 {
+				t.Fatalf("canceled credential wait dispatched transport: submits=%d mirrors=%d IMAP=%+v", submitter.calls, mirror.calls, operator)
+			}
+			after, err := service.GetDraft(draft.Ref)
+			if err != nil || !reflect.DeepEqual(after.SendAttempt, before.SendAttempt) {
+				t.Fatalf("canceled credential wait changed claim: before=%+v after=%+v error=%v", before.SendAttempt, after.SendAttempt, err)
+			}
+		})
+	}
+}
+
 func TestSendCredentialErrorsPreserveCauseAndClaims(t *testing.T) {
 	cause := errors.New("credential backend unavailable")
 	for _, test := range []struct {

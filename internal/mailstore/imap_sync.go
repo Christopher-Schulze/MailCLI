@@ -58,10 +58,7 @@ func syncIdentityWithBindings(
 					"no credential store configured; run '"+credentialSetupCommand(candidates[0], binding.CredentialAccount)+"'",
 				)
 			}
-			if err := ctx.Err(); err != nil {
-				return "", "", 0, "", err
-			}
-			password, loadErr := credentials.Load(binding.CredentialAccount)
+			password, loadErr := keychain.LoadContext(ctx, credentials, binding.CredentialAccount)
 			if err := ctx.Err(); err != nil {
 				return "", "", 0, "", err
 			}
@@ -94,10 +91,7 @@ func syncIdentityWithBindings(
 		if credentials == nil {
 			return "", "", 0, "", operationError("imap_credentials_missing", "no credential store configured; run 'mailcli send setup --from "+candidate+"'")
 		}
-		if err := ctx.Err(); err != nil {
-			return "", "", 0, "", err
-		}
-		password, err := credentials.Load(candidate)
+		password, err := keychain.LoadContext(ctx, credentials, candidate)
 		if contextErr := ctx.Err(); contextErr != nil {
 			return "", "", 0, "", contextErr
 		}

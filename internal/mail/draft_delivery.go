@@ -164,7 +164,7 @@ func DeliverViaTransport(ctx context.Context, send SendTransport, draft Draft) (
 	}); err != nil {
 		return TransportEvidence{}, err
 	}
-	password, err := send.Credentials.Load(identity.Credential)
+	password, err := keychain.LoadContext(ctx, send.Credentials, identity.Credential)
 	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
 		return TransportEvidence{}, fmt.Errorf("load send credentials: %w", err)
 	}

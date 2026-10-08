@@ -159,7 +159,7 @@ func (s *Service) SendDraft(ctx context.Context, request SendDraftRequest) (resu
 			resultErr = errors.Join(resultErr, err)
 		}
 	}()
-	password, err := s.send.Credentials.Load(identity.Credential)
+	password, err := keychain.LoadContext(ctx, s.send.Credentials, identity.Credential)
 	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
 		return SendResult{}, fmt.Errorf("load send credentials: %w", err)
 	}
@@ -535,7 +535,7 @@ func (s *Service) reconcileUnknownViaImap(
 	if err != nil {
 		return resultForReconcile(ref, attempt), err
 	}
-	password, err := s.send.Credentials.Load(identity.Credential)
+	password, err := keychain.LoadContext(ctx, s.send.Credentials, identity.Credential)
 	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
 		return resultForReconcile(ref, attempt), fmt.Errorf("load send credentials: %w", err)
 	}
@@ -652,7 +652,7 @@ func (s *Service) reconcileMirrorPending(
 	if err != nil {
 		return result, err
 	}
-	password, err := s.send.Credentials.Load(identity.Credential)
+	password, err := keychain.LoadContext(ctx, s.send.Credentials, identity.Credential)
 	if err != nil && transport.ErrorCode(err) != keychain.CodeNotFound {
 		return result, fmt.Errorf("load send credentials: %w", err)
 	}

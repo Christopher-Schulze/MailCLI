@@ -1,6 +1,7 @@
 package keychain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -104,6 +105,31 @@ func validateIdentifier(value string) error {
 		}
 	}
 	return nil
+}
+
+// LoadContext reads one stored password and returns as soon as ctx ends.
+// A Keychain read blocks while macOS shows its approval prompt and ignores
+// cancellation, so the read runs in its own goroutine; an abandoned read
+// finishes there and its result is dropped.
+func LoadContext(ctx context.Context, credentials transport.CredentialStore, account string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	type loaded struct {
+		password string
+		err      error
+	}
+	result := make(chan loaded, 1)
+	go func() {
+		password, err := credentials.Load(account)
+		result <- loaded{password: password, err: err}
+	}()
+	select {
+	case value := <-result:
+		return value.password, value.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("macOS Keychain access to %s was not granted before the command ended; approve the Keychain prompt with Always Allow and rerun: %w", account, ctx.Err())
+	}
 }
 
 // New returns a transport.CredentialStore backed by the platform keychain.

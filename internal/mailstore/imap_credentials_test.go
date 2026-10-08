@@ -120,6 +120,57 @@ func TestIMAPCredentialResolutionBoundary(t *testing.T) {
 	}
 }
 
+// promptCredentials blocks every Load until release closes, like a Keychain
+// read waiting on the macOS approval prompt.
+type promptCredentials struct {
+	strictCredentials
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *promptCredentials) Load(account string) (string, error) {
+	close(p.started)
+	<-p.release
+	return p.strictCredentials.Load(account)
+}
+
+func TestIMAPCredentialWaitEndsWithCommandContext(t *testing.T) {
+	accountRef, err := mailref.EncodeAccount(testAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, route := range []string{"targeted", "sync/discovery"} {
+		for _, bound := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/bound=%t", route, bound), func(t *testing.T) {
+				credentials := &promptCredentials{strictCredentials: strictCredentials{"alpha@icloud.com": "generated-password"}, started: make(chan struct{}), release: make(chan struct{})}
+				t.Cleanup(func() { close(credentials.release) })
+				account := mail.Account{Ref: accountRef, State: "ok", EmailAddresses: []string{"alpha@icloud.com"}}
+				bindings := mail.AccountBindingFile{Version: mail.AccountBindingVersion}
+				if bound {
+					bindings.Bindings = []mail.AccountBinding{{AccountID: testAccountID, SenderAliases: []string{"alpha@icloud.com"}, CredentialAccount: "alpha@icloud.com"}}
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				go func() {
+					<-credentials.started
+					cancel()
+				}()
+				var cfg transport.ImapConfig
+				if route == "targeted" {
+					_, cfg, _, err = resolveAccountIdentityFromCatalog(ctx, []mail.Account{account}, testAccountID, credentials, bindings)
+				} else {
+					_, cfg, err = imapConfigForAccount(ctx, account, credentials, bindings)
+				}
+				// The bare context error keeps enrichment budgets degrading rows
+				// instead of failing the command.
+				if err != context.Canceled || cfg.Password != "" {
+					t.Fatalf("pending Keychain approval: password set=%t error=%v; want context.Canceled", cfg.Password != "", err)
+				}
+			})
+		}
+	}
+}
+
 func TestIMAPCredentialFailureStopsNetworkDispatch(t *testing.T) {
 	for _, route := range []string{"targeted", "sync", "discovery"} {
 		t.Run(route, func(t *testing.T) {

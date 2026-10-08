@@ -1,9 +1,12 @@
 package keychain
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,6 +357,83 @@ func TestLiveKeychain(t *testing.T) {
 		t.Fatal("Load() after Delete error = nil, want not-found")
 	} else if code := transport.ErrorCode(err); code != CodeNotFound {
 		t.Fatalf("Load() after Delete error code = %q, want %q", code, CodeNotFound)
+	}
+}
+
+// promptStore blocks every find until release closes, like a Keychain read
+// waiting on the macOS approval prompt.
+type promptStore struct {
+	*fakeStore
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *promptStore) find(account string) (string, error) {
+	close(p.started)
+	<-p.release
+	return p.fakeStore.find(account)
+}
+
+func TestLoadContext(t *testing.T) {
+	missing := &KeychainError{Code: CodeNotFound, Message: "item not found"}
+	for _, test := range []struct {
+		name     string
+		stored   bool
+		end      func(context.Context) (context.Context, context.CancelFunc)
+		blocked  bool
+		password string
+		want     error
+	}{
+		{name: "completed read", stored: true, password: "secret"},
+		{name: "completed missing item", want: missing},
+		{name: "canceled while prompt is open", stored: true, blocked: true, end: context.WithCancel, want: context.Canceled},
+		{name: "deadline while prompt is open", stored: true, blocked: true, end: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, 20*time.Millisecond)
+		}, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := &promptStore{fakeStore: newFakeStore(), started: make(chan struct{}), release: make(chan struct{})}
+			if test.stored {
+				backend.items["user@icloud.com"] = "secret"
+			}
+			if !test.blocked {
+				close(backend.release)
+			} else {
+				t.Cleanup(func() { close(backend.release) })
+			}
+			ctx, cancel := context.Background(), context.CancelFunc(func() {})
+			if test.end != nil {
+				ctx, cancel = test.end(ctx)
+			}
+			defer cancel()
+			if test.want == context.Canceled {
+				go func() {
+					<-backend.started
+					cancel()
+				}()
+			}
+			password, err := LoadContext(ctx, newForTest(backend), "user@icloud.com")
+			if password != test.password || !errors.Is(err, test.want) || test.want == nil && err != nil {
+				t.Fatalf("LoadContext() = %q, %v; want %q, %v", password, err, test.password, test.want)
+			}
+			if test.blocked && !strings.Contains(err.Error(), "approve the Keychain prompt") {
+				t.Fatalf("pending prompt error lacks approval guidance: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadContextEndedBeforeReadSkipsBackend(t *testing.T) {
+	backend := &promptStore{fakeStore: newFakeStore(), started: make(chan struct{}), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := LoadContext(ctx, newForTest(backend), "user@icloud.com"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("LoadContext() error = %v; want context.Canceled", err)
+	}
+	select {
+	case <-backend.started:
+		t.Fatal("ended context still opened a Keychain read")
+	default:
 	}
 }
 
