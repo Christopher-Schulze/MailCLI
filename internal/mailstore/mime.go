@@ -148,7 +148,7 @@ func parseMIMEDocumentWithLimitsAndRetention(
 		}
 	}
 	var replyToComplete bool
-	document.ReplyTo, replyToComplete = firstFormattedAddress(&header, "Reply-To")
+	document.ReplyTo, replyToComplete = firstDisplayAddress(&header, "Reply-To")
 	if document.ReplyTo != "" && !document.retainMetadata(int64(len(document.ReplyTo))) {
 		document.ReplyTo = ""
 	}

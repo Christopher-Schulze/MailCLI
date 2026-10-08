@@ -59,7 +59,7 @@ func sourceHeadersFromReader(reader io.Reader) (sourceHeaders, error) {
 	if _, authorComplete := mail.ParseHeaderAuthor(fields); !complete || !authorComplete {
 		out.FromError = fmt.Errorf("source From header is malformed or identifies incompatible authors")
 	}
-	out.ReplyToText, _ = firstFormattedAddress(&header, "Reply-To")
+	out.ReplyToText, _ = firstDisplayAddress(&header, "Reply-To")
 	out.ReplyTo, _, out.ReplyToError = headerRecipients(&header, "Reply-To")
 	replyToFields := 0
 	for _, field := range fields {
@@ -160,6 +160,20 @@ func headerRecipients(header *messageMail.Header, key string) ([]mail.Recipient,
 		recipients = append(recipients, mail.Recipient{Name: address.Name, Address: mail.MailboxAddrSpec(address.Address)})
 	}
 	return recipients, true, nil
+}
+
+// firstDisplayAddress formats the first address of key as read-output text
+// with the decoded name; firstFormattedAddress keeps the header-safe form
+// that reply derivation parses again.
+func firstDisplayAddress(header *messageMail.Header, key string) (string, bool) {
+	if strings.TrimSpace(header.Get(key)) == "" {
+		return "", true
+	}
+	addresses, err := header.AddressList(key)
+	if err != nil || len(addresses) == 0 {
+		return "", false
+	}
+	return formatSender(addresses[0].Name, addresses[0].Address), true
 }
 
 func firstFormattedAddress(header *messageMail.Header, key string) (string, bool) {

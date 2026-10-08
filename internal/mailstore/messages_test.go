@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	stdmail "net/mail"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,40 @@ import (
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
 )
+
+func TestSenderDisplayKeepsDecodedNames(t *testing.T) {
+	for _, test := range []struct {
+		name, address, want string
+	}{
+		{name: "🇮🇹 Dolci Lusso", address: "support@dolcilusso.de", want: `"🇮🇹 Dolci Lusso" <support@dolcilusso.de>`},
+		{name: "Jörg Müller", address: "j@example.com", want: `"Jörg Müller" <j@example.com>`},
+		{name: "Support", address: "support@openai.com", want: `"Support" <support@openai.com>`},
+		{name: `Quote "Q" \ Back`, address: "q@example.com", want: `"Quote \"Q\" \\ Back" <q@example.com>`},
+		// Control characters keep the net/mail RFC 2047 form.
+		{name: "Jörg \x1b[2J", address: "c@example.com", want: (&stdmail.Address{Name: "Jörg \x1b[2J", Address: "c@example.com"}).String()},
+		{address: "plain@example.com", want: "plain@example.com"},
+	} {
+		got := formatSender(test.name, test.address)
+		if got != test.want {
+			t.Fatalf("formatSender(%q, %q) = %q, want %q", test.name, test.address, got, test.want)
+		}
+		if test.name == "" {
+			continue
+		}
+		if parsed, err := stdmail.ParseAddress(got); err != nil || parsed.Name != test.name || parsed.Address != test.address {
+			t.Fatalf("formatSender(%q) = %q is not exact: %+v, %v", test.name, got, parsed, err)
+		}
+	}
+	headers, err := sourceHeadersFromReader(strings.NewReader(
+		"From: =?utf-8?q?J=C3=B6rg?= <j@example.com>\r\nReply-To: =?utf-8?q?J=C3=B6rg_M=C3=BCller?= <reply@example.com>\r\n\r\nbody"))
+	if err != nil || headers.ReplyToText != `"Jörg Müller" <reply@example.com>` {
+		t.Fatalf("Reply-To display = %q, error = %v", headers.ReplyToText, err)
+	}
+	// Reply derivation re-parses From, so it keeps its header-safe form.
+	if headers.From != "=?utf-8?q?J=C3=B6rg?= <j@example.com>" {
+		t.Fatalf("From changed: %q", headers.From)
+	}
+}
 
 func TestStoreReadsNullableMessageIdentity(t *testing.T) {
 	t.Parallel()

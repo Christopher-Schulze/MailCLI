@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"mailcli/internal/mail"
 	"mailcli/internal/mailref"
@@ -359,11 +361,28 @@ func encodeMessageReference(
 	return mailref.EncodeMessage(ref)
 }
 
+// formatSender builds an exact, parseable address. net/mail encodes every
+// non-ASCII name as RFC 2047 words; a name without control characters stays
+// readable UTF-8 in a quoted string (RFC 6532) instead.
 func formatSender(name string, address string) string {
 	if name == "" {
 		return address
 	}
-	return (&stdmail.Address{Name: name, Address: address}).String()
+	formatted := (&stdmail.Address{Name: name, Address: address}).String()
+	if !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+		return formatted
+	}
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for _, character := range name {
+		if character == '"' || character == '\\' {
+			quoted.WriteByte('\\')
+		}
+		quoted.WriteRune(character)
+	}
+	quoted.WriteString(`" `)
+	quoted.WriteString((&stdmail.Address{Address: address}).String())
+	return quoted.String()
 }
 
 func formatUnixTime(value int64, isNull bool) string {

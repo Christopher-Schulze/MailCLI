@@ -559,6 +559,7 @@ Pagination is best-effort keyset pagination across invocations, not a persistent
 `messages list --json` defaults to the unified inbox across active accounts.
 One SQL statement selects physical and label membership, deduplicates rows and orders received dates descending with row ID as tie breaker; NULL dates come last.
 Each item carries its account ref as `account` and its resolved `mailbox_ref`, also under projections.
+`sender`, like `reply_to` in message detail, is an exact, parseable address: a name without control characters stays readable UTF-8 in a quoted string (`"Jörg Müller" <j@example.com>`, RFC 6532), a name with control characters keeps RFC 2047 words, and a sender without a name is the bare address.
 `--account REF` narrows the inbox or mailbox selection.
 `--mailbox` accepts an opaque ref, a case-insensitive role (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`) or an exact slash-separated path; roles use proven Sent/Drafts cache attributes and localized role names, never guessed attribute bits, and ambiguity returns `ambiguous_mailbox` with candidate refs.
 `messages filter` and `messages search` accept the same selectors; without `--account` a role or path covers the matching mailbox of every account (`filter --mailbox inbox --read false` is the unread inbox of all accounts), with `--account` it covers that account, and two matches inside one account stay ambiguous.
