@@ -66,6 +66,13 @@ fi
 # the reproducibility reference for the packaged binary.
 REFERENCE_BUILD="${TEST_ROOT}/reference-build"
 cp "${BUILD_OUTPUT}" "${REFERENCE_BUILD}"
+# install-local.sh re-signs the build output; a rebuild must not reuse it.
+codesign --force --sign - --identifier mailcli-resigned-fixture "${BUILD_OUTPUT}" >/dev/null 2>&1
+"${MAILCLI_ROOT}/scripts/build/build.sh" >/dev/null
+if ! cmp -s "${BUILD_OUTPUT}" "${REFERENCE_BUILD}"; then
+  printf 'Rebuild reused a re-signed previous binary instead of linking a fresh one\n' >&2
+  exit 1
+fi
 TEST_VERSION="$(MAILCLI_OUTPUT=human "${BUILD_OUTPUT}" version)"
 TEST_VERSION="${TEST_VERSION#mailcli }"
 if [[ ! "${TEST_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

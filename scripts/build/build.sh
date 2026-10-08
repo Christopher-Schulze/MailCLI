@@ -7,6 +7,9 @@ check_go_toolchain "${MAILCLI_ROOT}"
 MAILCLI_BINARY_OUTPUT="${MAILCLI_BUILD_OUTPUT:-${MAILCLI_ROOT}/bin/mailcli}"
 
 mkdir -p "$(dirname "${MAILCLI_BINARY_OUTPUT}")"
+# go build leaves an up-to-date output untouched, which would keep a binary
+# that install-local.sh re-signed; always link a fresh one.
+rm -f "${MAILCLI_BINARY_OUTPUT}"
 # Retain compiler inlining for hot paths; stripping and native dead-code removal
 # keep the executable small.
 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go -C "${MAILCLI_ROOT}" build \
