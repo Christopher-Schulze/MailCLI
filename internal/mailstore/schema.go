@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	supportedStoreVersion     = "4"
-	supportedMinorVersion     = "74003"
-	supportedFrameworkVersion = "3826.700.81"
+	supportedStoreVersion      = "4"
+	supportedMinorVersion      = "74003"
+	supportedFrameworkVersion  = "3826.700.81"
+	compatibleMinorVersion     = "90006"
+	compatibleFrameworkVersion = "3901.200.71.1.16"
 )
 
 type schemaCapability struct {
@@ -73,24 +75,27 @@ func validateSchema(
 	if err != nil {
 		return schemaCapability{}, err
 	}
-	// The format generation (version/minor_version) and store UUID stay exact
-	// pins: a different generation can change column semantics even when every
-	// probed capability happens to match. Only the writer's build stamp
-	// (last_write_framework_version) degrades to an unverified profile because
-	// point updates bump it without touching the required capabilities.
+	// Keep generation pins and the UUID check after the capability checks.
+	// The reported compatible generation is admitted only with its exact writer
+	// stamp and remains unverified: matching columns do not prove unchanged
+	// semantics. Legacy writer-only updates retain their existing degraded path.
+	legacyGeneration := capability.MinorVersion == supportedMinorVersion
+	compatibleProfile := capability.MinorVersion == compatibleMinorVersion &&
+		capability.FrameworkVersion == compatibleFrameworkVersion
 	if capability.StoreVersion != supportedStoreVersion ||
-		capability.MinorVersion != supportedMinorVersion ||
+		(!legacyGeneration && !compatibleProfile) ||
 		!validUUID(capability.StoreUUID) {
 		return schemaCapability{}, operationError(
 			"unsupported_mail_store_schema",
 			fmt.Sprintf(
-				"Envelope Index profile %s/%s/%s is unsupported; supported profile is %s/%s/%s",
+				"Envelope Index profile %s/%s/%s is unsupported; supported profile is %s/%s/%s; compatible unverified profile is %s/%s/%s",
 				capability.StoreVersion, capability.MinorVersion, capability.FrameworkVersion,
 				supportedStoreVersion, supportedMinorVersion, supportedFrameworkVersion,
+				supportedStoreVersion, compatibleMinorVersion, compatibleFrameworkVersion,
 			),
 		)
 	}
-	capability.ProfileVerified = capability.FrameworkVersion == supportedFrameworkVersion
+	capability.ProfileVerified = legacyGeneration && capability.FrameworkVersion == supportedFrameworkVersion
 	facts = append(facts,
 		"store_version:"+capability.StoreVersion,
 		"minor_version:"+capability.MinorVersion,

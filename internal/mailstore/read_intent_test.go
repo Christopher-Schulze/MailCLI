@@ -26,6 +26,14 @@ type legacyReadIntentGateway struct {
 	mail.Gateway
 }
 
+func (g legacyReadIntentGateway) StoreProfile() (mail.StoreProfile, bool) {
+	profiler, supported := g.Gateway.(mail.StoreProfiler)
+	if !supported {
+		return mail.StoreProfile{}, false
+	}
+	return profiler.StoreProfile()
+}
+
 func (s *countingReadIntentIMAP) FetchMessage(
 	ctx context.Context,
 	cfg transport.ImapConfig,

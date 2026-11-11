@@ -1415,6 +1415,11 @@ func dataForProjection(data responseData, options outputOptions, failed bool) re
 }
 
 func marshalEnvelope(value envelope) ([]byte, error) {
+	validationFailure := value.Error != nil && value.Error.Guidance != nil &&
+		value.Error.Guidance.Phase == mail.OperationPhaseValidation
+	if value.Data.StoreProfile == nil && invocationStoreProfile != nil && !validationFailure {
+		value.Data.StoreProfile = invocationStoreProfile
+	}
 	value.Next = envelopeNextAction(value)
 	if value.Error != nil && value.Error.outputSize != nil {
 		requiredBytes := value.Error.outputSize.requiredBytes

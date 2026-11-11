@@ -529,9 +529,10 @@ Only Mail's binary account-ordering preference needs one `plutil` extraction, an
 Directory enumeration is never authoritative because Mail can keep stale or partial files: store rows select candidates, safe mailbox mapping resolves sources, and every result reports whether its local content is complete.
 Spotlight is not required.
 
-The supported Envelope Index profile is store version `4`, minor version `74003`, WAL journal mode and a valid store UUID, with `3826.700.81` as the verified `last_write_framework_version`.
+The verified Envelope Index profile is store version `4`, minor version `74003`, WAL journal mode and a valid store UUID, with `3826.700.81` as the verified `last_write_framework_version`.
 Required schema properties must be unique and readable, and every required table column and index is capability-checked before the profile is accepted; duplicate, malformed, missing or unsupported values fail closed with `unsupported_mail_store_schema` before message queries, while unknown property keys are ignored.
-Only a differing framework stamp degrades instead of failing: reads continue with the profile marked `unverified`.
+Within minor version `74003`, a differing framework stamp degrades instead of failing: reads continue with the profile marked `unverified`.
+The exact reported profile `4/90006/3901.200.71.1.16` is also accepted after these capability checks, always as `unverified`; other writer stamps for minor version `90006` and all unknown generations remain refused. This compatibility admission is covered by generated SQLite/EMLX adapter tests, not a real-host test on the reported newer Mail build; it does not certify unchanged data semantics.
 Whenever a store profile is open, every JSON envelope carries `data.store_profile` with `state`, `framework_version` and `supported_framework_version`; the unverified state adds `code:"store_profile_unverified"`, human output prints one warning, and `doctor` reports the `mail-store-profile` check.
 The degraded state grants no write access, no mutation relaxation and no trust in unverified layout details.
 
