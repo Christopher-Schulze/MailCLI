@@ -195,7 +195,10 @@ func TestDraftTemporaryPublicationLeaseProtectsActualWriter(t *testing.T) {
 					resume()
 					if !joined {
 						select {
-						case <-finished:
+						case err := <-finished:
+							if err != nil && !errors.Is(err, context.Canceled) {
+								t.Errorf("draft writer cleanup: %v", err)
+							}
 						case <-time.After(5 * time.Second):
 							t.Error("writer did not terminate")
 						}

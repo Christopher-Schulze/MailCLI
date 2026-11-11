@@ -274,7 +274,10 @@ func TestAccountBindingTemporaryOwnerPreservesPausedOtherWriter(t *testing.T) {
 		}
 		if !finished {
 			select {
-			case <-result:
+			case err := <-result:
+				if err != nil {
+					t.Errorf("paused writer cleanup: %v", err)
+				}
 			case <-time.After(30 * time.Second):
 				t.Error("paused writer did not stop during cleanup")
 			}
