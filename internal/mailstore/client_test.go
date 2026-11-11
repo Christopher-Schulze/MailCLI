@@ -543,7 +543,7 @@ func TestClientNeverFallsBackToRecursiveMailboxScan(t *testing.T) {
 	spy := &fallbackSpy{}
 	client := &Client{storeErr: operationError("unsupported_mail_store_schema", "unsupported"), fallback: spy}
 	_, err := client.ListMailboxes(context.Background(), mail.ListMailboxesRequest{})
-	if errorCodeForTest(err) != "safe_mailbox_listing_unavailable" || spy.mailboxCalls != 0 {
+	if errorCodeForTest(err) != "unsupported_mail_store_schema" || spy.mailboxCalls != 0 {
 		t.Fatalf("ListMailboxes() error = %v, fallback calls = %d", err, spy.mailboxCalls)
 	}
 }

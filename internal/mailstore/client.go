@@ -254,7 +254,8 @@ func (c *Client) ListMailboxes(
 	if c.store != nil {
 		return c.store.ListMailboxes(ctx, request)
 	}
-	if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+	switch nestedErrorCode(c.storeErr) {
+	case "mail_store_not_initialized", "unsupported_mail_store_schema":
 		return nil, c.storeErr
 	}
 	return nil, operationError(
@@ -274,6 +275,9 @@ func (c *Client) ListMessages(
 		return mail.MessagePage{}, c.storeErr
 	}
 	if !strings.HasPrefix(request.MailboxRef, "mbx_") || request.AccountRef != "" {
+		if nestedErrorCode(c.storeErr) == "unsupported_mail_store_schema" {
+			return mail.MessagePage{}, c.storeErr
+		}
 		return mail.MessagePage{}, operationErrorWithCause("safe_message_listing_unavailable",
 			"unified inbox and mailbox selectors require the supported local Mail store; no Apple Events global scan was attempted", c.readUnavailableError())
 	}
@@ -288,7 +292,8 @@ func (c *Client) SearchMessages(
 	query mail.PreparedQuery,
 ) (mail.SearchPage, error) {
 	if c.store == nil {
-		if nestedErrorCode(c.storeErr) == "mail_store_not_initialized" {
+		switch nestedErrorCode(c.storeErr) {
+		case "mail_store_not_initialized", "unsupported_mail_store_schema":
 			return mail.SearchPage{}, c.storeErr
 		}
 		return mail.SearchPage{}, operationError(

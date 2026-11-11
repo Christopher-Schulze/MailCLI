@@ -103,7 +103,12 @@ func TestDraftEditorTerminalIOAndRestoration(t *testing.T) {
 				<-drained
 				cancel()
 				if !waited {
-					<-done
+					if err := <-done; err != nil {
+						var exit *exec.ExitError
+						if !errors.As(err, &exit) {
+							t.Errorf("wait for canceled terminal helper: %v", err)
+						}
+					}
 				}
 			}()
 			// Keep draining until the process exits: macOS terminal teardown

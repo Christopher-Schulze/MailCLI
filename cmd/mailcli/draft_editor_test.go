@@ -268,7 +268,12 @@ func TestDraftEditorCLICancellationKeepsJSONAndCandidate(t *testing.T) {
 		if err := command.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			t.Error(err)
 		}
-		<-done
+		if err := <-done; err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Errorf("wait for canceled editor CLI: %v", err)
+			}
+		}
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

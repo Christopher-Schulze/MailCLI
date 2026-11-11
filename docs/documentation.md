@@ -445,6 +445,7 @@ Deterministic refusals before any effect (untrusted or invalid release artifacts
 Reads:
 read failures are replayable only for explicitly classified transient errors; unknown read failures use `retryability:"observe_required"` with `recovery.action:"inspect"`.
 Known Mail-store, account and Mail.app permission or readiness failures set `recovery.action:"correct"` and name the action in `recovery.instruction` (Full Disk Access, account or binding correction, Automation permission, safe Mail.app recovery); no instruction ever directs deleting or replacing the MailCLI access-gate or account-binding file.
+Mailbox listing/resolution, selector-based message listing, search and filter preserve `unsupported_mail_store_schema` with terminal/no-effect guidance and `next.do:"stop"`, consistent with `doctor`; an unsupported schema never requests permission changes or store initialization.
 Draft-state and mailbox-cache permission causes require correcting file access with no replay; malformed state is terminal.
 IMAP certificate and hostname failures keep `imap_connect_failed` but require correcting TLS configuration, never disabling verification; connection refusal, disconnect and timeout stay transient.
 `imap_fetch_failed` permits replay only with a preserved network or truncated-connection cause.
