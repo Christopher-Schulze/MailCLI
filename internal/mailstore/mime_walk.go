@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	"mailcli/internal/mail"
@@ -172,6 +173,9 @@ func parseMIMEEntity(
 	}
 	rank := mimeTextPlain
 	var text string
+	if !utf8.Valid(body) {
+		markMissingPart(document, "mime-decoding")
+	}
 	if mediaType == "text/html" {
 		maximumOutput := int64(len(body)) + document.budget.remainingTextBytes()
 		var conversionErr error
@@ -192,7 +196,11 @@ func parseMIMEEntity(
 		}
 		rank = mimeTextHTML
 	} else {
-		text = string(bytes.TrimSpace(body))
+		if strings.EqualFold(parameters["format"], "flowed") {
+			text = strings.TrimSpace(decodePlainText(body, parameters))
+		} else {
+			text = string(bytes.TrimSpace(body))
+		}
 	}
 	if text == "" {
 		return mimeTextRepresentation{}, err

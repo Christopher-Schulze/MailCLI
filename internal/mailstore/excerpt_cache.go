@@ -34,9 +34,9 @@ type excerptCache struct {
 	dir string
 }
 
-// excerptCacheVersion marks entries written by this layout; entries without it
-// or with another value are ignored and overwritten.
-const excerptCacheVersion = 2
+// excerptCacheVersion binds entries to the text decoding/completeness policy;
+// older results must not hide fixes until their normal expiry.
+const excerptCacheVersion = 3
 
 type cachedExcerpt struct {
 	Version  int    `json:"v"`

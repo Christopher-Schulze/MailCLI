@@ -24,9 +24,10 @@ func TestMIMEPlainTextTrimAndOwnership(t *testing.T) {
 	for index, input := range inputs {
 		t.Run(fmt.Sprint(index), func(t *testing.T) {
 			want := strings.TrimSpace(string(input))
+			wantComplete := utf8.Valid(input)
 			raw := append([]byte("Content-Type: text/plain\r\n\r\n"), input...)
 			document, err := parseMIMEDocument(bytes.NewReader(raw), false, false, true)
-			if err != nil || !document.Complete || document.Content != want {
+			if err != nil || document.Complete != wantComplete || document.Content != want {
 				t.Fatalf("trimmed text = %q, want %q, complete=%t, error=%v", document.Content, want, document.Complete, err)
 			}
 			clear(raw)

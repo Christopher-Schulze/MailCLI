@@ -12,6 +12,49 @@ func htmlToText(source []byte) string {
 	return mail.HTMLToPlainText(source)
 }
 
+// decodePlainText applies RFC 3676 only to explicitly flowed text. Its output
+// never exceeds the decoded input; fixed text and raw MIME stay unchanged.
+func decodePlainText(body []byte, parameters map[string]string) string {
+	text := string(body)
+	if !strings.EqualFold(parameters["format"], "flowed") {
+		return text
+	}
+	deleteSpace := strings.EqualFold(parameters["delsp"], "yes")
+	var output strings.Builder
+	output.Grow(len(text))
+	first := true
+	previousFlowed := false
+	previousDepth := 0
+	for text != "" {
+		line, remaining, newline := strings.Cut(text, "\n")
+		text = remaining
+		if newline {
+			line = strings.TrimSuffix(line, "\r")
+		}
+		content := strings.TrimLeft(line, ">")
+		depth := len(line) - len(content)
+		content = strings.TrimPrefix(content, " ")
+		signature := content == "-- "
+		flowed := !signature && strings.HasSuffix(content, " ")
+		join := !first && previousFlowed && previousDepth == depth && !signature
+		if !first && !join {
+			output.WriteByte('\n')
+		}
+		if !join {
+			output.WriteString(line[:depth])
+		}
+		if flowed && deleteSpace {
+			content = strings.TrimSuffix(content, " ")
+		}
+		output.WriteString(content)
+		first, previousFlowed, previousDepth = false, flowed, depth
+		if newline && text == "" {
+			output.WriteByte('\n')
+		}
+	}
+	return output.String()
+}
+
 func isASCIIWhitespace(value byte) bool {
 	return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'
 }

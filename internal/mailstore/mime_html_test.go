@@ -33,10 +33,10 @@ func TestMIMEHTMLExpansionConsumesTextBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		if limit == 1 {
-			if document.Complete || document.Content != "" || len(document.MissingParts) != 1 || document.MissingParts[0] != "mime:html:render" {
+			if document.Complete || document.Content != "" || len(document.MissingParts) != 2 || document.MissingParts[0] != "mime-decoding" || document.MissingParts[1] != "mime:html:render" {
 				t.Fatalf("unbounded output: %+v", document)
 			}
-		} else if !document.Complete || document.Content != "�" || document.budget.textBytes != 3 {
+		} else if document.Complete || document.Content != "�" || document.budget.textBytes != 3 || len(document.MissingParts) != 1 || document.MissingParts[0] != "mime-decoding" {
 			t.Fatalf("expanded text not charged: %+v, bytes=%d", document, document.budget.textBytes)
 		}
 	}

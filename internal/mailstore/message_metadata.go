@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	messageMail "github.com/emersion/go-message/mail"
 	"golang.org/x/sync/errgroup"
@@ -404,13 +405,14 @@ func excerptText(ctx context.Context, data []byte) (string, bool, error) {
 	}
 	var plain, html strings.Builder
 	remaining := mail.MaximumExcerptSourceBytes
+	decodedComplete := true
 	for count := 0; count < 64; count++ {
 		if ctx.Err() != nil {
 			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
 		part, partErr := reader.NextPart()
 		if errors.Is(partErr, io.EOF) {
-			return preferredExcerptText(ctx, plain.String(), html.String(), true)
+			return preferredExcerptText(ctx, plain.String(), html.String(), decodedComplete)
 		}
 		if partErr != nil || part == nil {
 			return preferredExcerptText(ctx, plain.String(), html.String(), false)
@@ -419,7 +421,7 @@ func excerptText(ctx context.Context, data []byte) (string, bool, error) {
 		if !inline {
 			continue
 		}
-		kind, _, typeErr := header.ContentType()
+		kind, parameters, typeErr := header.ContentType()
 		if typeErr != nil {
 			return preferredExcerptText(ctx, plain.String(), html.String(), false)
 		}
@@ -428,9 +430,18 @@ func excerptText(ctx context.Context, data []byte) (string, bool, error) {
 		}
 		text, readErr := io.ReadAll(io.LimitReader(part.Body, remaining))
 		remaining -= int64(len(text))
+		if !utf8.Valid(text) {
+			decodedComplete = false
+		}
 		if kind == "text/plain" {
-			plain.Write(text)
+			if plain.Len() > 0 {
+				plain.WriteByte('\n')
+			}
+			plain.WriteString(decodePlainText(text, parameters))
 		} else {
+			if html.Len() > 0 {
+				html.WriteByte('\n')
+			}
 			html.Write(text)
 		}
 		if readErr != nil || remaining == 0 {
