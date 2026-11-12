@@ -209,7 +209,9 @@ func tableIndexes(ctx context.Context, connection *sql.Conn, table string) ([][]
 			joinCloseError(&resultErr, rows, "Envelope Index index rows")
 			return nil, resultErr
 		}
-		names = append(names, name)
+		if partial == 0 {
+			names = append(names, name)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		resultErr := fmt.Errorf("iterate Envelope Index %s indexes: %w", table, err)
@@ -229,13 +231,15 @@ func tableIndexes(ctx context.Context, connection *sql.Conn, table string) ([][]
 		for indexRows.Next() {
 			var sequence int
 			var identifier int
-			var column string
+			var column sql.NullString
 			if err := indexRows.Scan(&sequence, &identifier, &column); err != nil {
 				resultErr := fmt.Errorf("scan Envelope Index index %s: %w", name, err)
 				joinCloseError(&resultErr, indexRows, "Envelope Index index detail rows")
 				return nil, resultErr
 			}
-			columns = append(columns, column)
+			// SQLite reports NULL for expression/rowid keys. Keep their
+			// positions so they cannot become named-column capabilities.
+			columns = append(columns, column.String)
 		}
 		if err := indexRows.Err(); err != nil {
 			resultErr := fmt.Errorf("iterate Envelope Index index %s: %w", name, err)
