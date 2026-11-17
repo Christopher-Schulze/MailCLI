@@ -67,7 +67,7 @@ func TestStoredRichDraftsFromThePreviousRenderingGenerationStayValid(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := prepareDraftContentWithObserver(withLegacyDraftRendering(context.Background()), DraftBodyMarkdown, source, nil)
+	legacy, err := prepareDraftContentWithObserver(withDraftRendering(context.Background(), singleBreakDraftRendering), DraftBodyMarkdown, source, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +179,53 @@ func TestHTMLToPlainTextGolden(t *testing.T) {
 	}
 	if got := HTMLToPlainText([]byte(source)); got != strings.TrimSuffix(string(want), "\n") {
 		t.Fatalf("HTMLToPlainText() = %q, want %q", got, strings.TrimSuffix(string(want), "\n"))
+	}
+}
+
+func TestHTMLToPlainTextPreservesDistinctLinkDestinations(t *testing.T) {
+	for _, test := range []struct {
+		name, label, target string
+		wantTarget          bool
+	}{
+		{"scheme and host", "HTTPS://Example.COM/Report", "https://example.com/Report", false},
+		{"path", "https://example.com/report", "https://example.com/Report", true},
+		{"query", "https://example.com/?q=report", "https://example.com/?q=Report", true},
+		{"fragment", "https://example.com/#report", "https://example.com/#Report", true},
+		{"userinfo", "https://reader@example.com/", "https://Reader@example.com/", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := `<a href="` + test.target + `">` + test.label + `</a>`
+			want := test.label
+			if test.wantTarget {
+				want += " (" + test.target + ")"
+			}
+			got, err := HTMLToPlainTextContext(context.Background(), []byte(source), maximumIncomingTextBytes)
+			if err != nil || got != want {
+				t.Fatalf("incoming text = %q, error = %v; want %q", got, err, want)
+			}
+			if got := HTMLToPlainText([]byte(source)); got != want {
+				t.Fatalf("unbounded text = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestStoredRichDraftsWithCaseFoldedLinkTargetsStayValid(t *testing.T) {
+	const label = "https://example.com/report"
+	const target = "https://example.com/Report"
+	const source = `<p>First</p><p><a href="` + target + `">` + label + `</a></p>`
+	content, err := prepareDraftContent(DraftBodyHTML, source)
+	if err != nil || content.Plain != "First\n\n"+label+" ("+target+")" {
+		t.Fatalf("new draft text = %q, error = %v", content.Plain, err)
+	}
+	for _, text := range []string{"First\n\n" + label, "First\n" + label} {
+		draft := Draft{BodyFormat: content.Format, BodySource: source, BodyHTML: content.HTML, Body: text}
+		if err := validateStoredDraftContent(draft); err != nil {
+			t.Fatalf("stored text %q rejected: %v", text, err)
+		}
+		if err := validateStoredDraftContentStructuralWithObserver(&draft, nil); err != nil || draft.Body != text {
+			t.Fatalf("stored text %q changed to %q, error = %v", text, draft.Body, err)
+		}
 	}
 }
 

@@ -36,7 +36,7 @@ type excerptCache struct {
 
 // excerptCacheVersion binds entries to the text decoding/completeness policy;
 // older results must not hide fixes until their normal expiry.
-const excerptCacheVersion = 3
+const excerptCacheVersion = 4
 
 type cachedExcerpt struct {
 	Version  int    `json:"v"`

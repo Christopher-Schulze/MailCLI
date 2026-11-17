@@ -46,8 +46,27 @@ func normalizeLinkLabel(value []byte) string {
 	return strings.TrimSpace(output.String())
 }
 
-func redundantLinkTarget(label, href string) bool {
-	if strings.EqualFold(label, strings.TrimSpace(href)) {
+func equalLinkTargets(left, right string, legacy bool) bool {
+	if left == right {
+		return true
+	}
+	if !strings.EqualFold(left, right) {
+		return false
+	}
+	if legacy {
+		return true
+	}
+	// Scheme and host can differ in case. Preserve case-sensitive URL data.
+	first, firstErr := url.Parse(left)
+	second, secondErr := url.Parse(right)
+	return firstErr == nil && secondErr == nil && first.Scheme == second.Scheme &&
+		strings.EqualFold(first.Host, second.Host) && first.User.String() == second.User.String() &&
+		first.Opaque == second.Opaque && first.EscapedPath() == second.EscapedPath() &&
+		first.RawQuery == second.RawQuery && first.EscapedFragment() == second.EscapedFragment()
+}
+
+func redundantLinkTarget(label, href string, legacy bool) bool {
+	if equalLinkTargets(label, href, legacy) {
 		return true
 	}
 	parsed, err := url.Parse(href)
@@ -64,9 +83,9 @@ func redundantLinkTarget(label, href string) bool {
 	return strings.EqualFold(label, address)
 }
 
-func containsLinkTarget(targets []string, target string) bool {
+func containsLinkTarget(targets []string, target string, legacy bool) bool {
 	for _, value := range targets {
-		if strings.EqualFold(value, target) {
+		if equalLinkTargets(value, target, legacy) {
 			return true
 		}
 	}

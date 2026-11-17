@@ -1754,8 +1754,9 @@ func TestBodySearchDoesNotOpenCandidatesBeyondSmallResultWindow(t *testing.T) {
 
 func TestBodySearchStopsLoadingAfterFullPage(t *testing.T) {
 	t.Parallel()
-	// The newest candidate matches, while the fixture contains 603 rows. A
-	// full-page outer-loop regression would load the trailing 91-row chunk.
+	// The newest candidate matches, while the fixture contains 603 rows.
+	// Only the small initial prefix should be loaded for a one-result page.
+	const firstChunk = 32
 	store, inboxRef := newSearchFixture(t, 600)
 	closeTestResource(t, store, "test store")
 	prepared, err := mail.PrepareQuery(mail.Query{
@@ -1768,28 +1769,28 @@ func TestBodySearchStopsLoadingAfterFullPage(t *testing.T) {
 	if err != nil || len(page.Messages) != 1 || page.NextCursor == "" {
 		t.Fatalf("SearchMessages() = %#v, error = %v", page, err)
 	}
-	if got := store.searchCandidateRowsLoaded.Load(); got != int64(candidateChunkSize) {
-		t.Fatalf("candidate rows loaded = %d, want first chunk size %d", got, candidateChunkSize)
+	if got := store.searchCandidateRowsLoaded.Load(); got != firstChunk {
+		t.Fatalf("candidate rows loaded = %d, want first chunk size %d", got, firstChunk)
 	}
-	if page.Coverage.CandidateMessages != candidateChunkSize || page.Coverage.CandidateMessagesExact || page.Coverage.Complete {
+	if page.Coverage.CandidateMessages != firstChunk || page.Coverage.CandidateMessagesExact || page.Coverage.Complete {
 		t.Fatalf("coverage = %#v, want the loaded lower-bound prefix", page.Coverage)
 	}
 }
 
 func TestBodySearchPaginationPreservesSparseChunkBoundaryMatches(t *testing.T) {
 	t.Parallel()
-	// Matches at the last row of chunk one and the first row of chunk two
-	// exercise the one-row lookahead and the strict cursor anchor together.
+	// With limit 1, rows 135 and 136 straddle the first 32-row chunk.
+	// The earlier hit exercises the one-row lookahead at the boundary.
 	store, inboxRef := newSearchFixture(t, 600)
 	closeTestResource(t, store, "test store")
-	for _, rowID := range []int64{615, 616, 703} {
+	for _, rowID := range []int64{135, 136, 703} {
 		writeFixtureEMLX(t, store, rowID, "imap://"+testAccountID+"/INBOX", sentFixtureSource(rowID, sentMessageFixture{
 			Body: "needle sparse",
 		}))
 	}
 	paginated := collectBodySearchRowIDs(t, store, inboxRef, "needle sparse", 1)
 	complete := collectBodySearchRowIDs(t, store, inboxRef, "needle sparse", 25)
-	want := []string{"615", "616", "703"}
+	want := []string{"135", "136", "703"}
 	assertSearchRowIDs(t, paginated, want)
 	assertSearchRowIDs(t, complete, want)
 }

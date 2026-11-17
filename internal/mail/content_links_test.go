@@ -20,6 +20,10 @@ func TestShortenLinks(t *testing.T) {
 		{"host keeps the label form", LinkModeHost, "Report (" + long + ") end", "Report (<click.example.com>) end"},
 		{"none drops the label suffix", LinkModeNone, "Report (" + long + ") end", "Report end"},
 		{"none drops a short url too", LinkModeNone, "read https://example.com/a now", "read  now"},
+		{"none keeps text after nonbreaking space", LinkModeNone, "https://example.com/a\u00a0Weiter", "\u00a0Weiter"},
+		{"host keeps text after narrow nonbreaking space", LinkModeHost, long + "\u202fWeiter", "<click.example.com>\u202fWeiter"},
+		{"none keeps text after next line", LinkModeNone, "https://example.com/a\u0085Next", "\u0085Next"},
+		{"none keeps text after vertical tab", LinkModeNone, "https://example.com/a\vNext", "\vNext"},
 		{"trailing punctuation stays", LinkModeHost, "Go to " + long + ".", "Go to <click.example.com>."},
 		{"angle brackets are reused", LinkModeHost, "mail <" + long + "> ok", "mail <click.example.com> ok"},
 		{"none drops angle brackets", LinkModeNone, "mail <" + long + "> ok", "mail  ok"},
@@ -32,6 +36,7 @@ func TestShortenLinks(t *testing.T) {
 		{"other schemes are not links", LinkModeHost, "ftp://files.example.com/a/very/long/path/that/keeps/going/on/and/on and mailto:a@b.c", "ftp://files.example.com/a/very/long/path/that/keeps/going/on/and/on and mailto:a@b.c"},
 		{"blank lines collapse", LinkModeHost, "a\n\n\n\n\nb\n\nc", "a\n\nb\n\nc"},
 		{"none collapses blank lines", LinkModeNone, "a\n\n\n\nb", "a\n\nb"},
+		{"none collapses blank lines joined by removing a URL", LinkModeNone, "a\n\nhttps://example.com/a\n\nb", "a\n\nb"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -40,6 +45,20 @@ func TestShortenLinks(t *testing.T) {
 				t.Fatalf("ShortenLinks(%q, %s) = %q, want %q", test.in, test.mode, got, test.want)
 			}
 		})
+	}
+}
+
+func TestShortenLinksDoesNotAllocateForUnchangedText(t *testing.T) {
+	text := strings.Repeat("First paragraph.\n\nSecond paragraph.\n\n", 128)
+	for _, mode := range []LinkMode{LinkModeHost, LinkModeNone} {
+		allocations := testing.AllocsPerRun(100, func() {
+			if got := ShortenLinks(text, mode); got != text {
+				t.Fatal("unchanged text was modified")
+			}
+		})
+		if allocations != 0 {
+			t.Errorf("mode %s allocated %.1f times, want zero", mode, allocations)
+		}
 	}
 }
 

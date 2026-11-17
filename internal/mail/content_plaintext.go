@@ -66,6 +66,7 @@ type plainTextRenderer struct {
 	tableCellDepth int
 	linePrefix     bool
 	legacy         bool
+	legacyLinks    bool
 }
 
 func htmlDraftText(reader io.Reader) (string, error) {
@@ -87,26 +88,31 @@ func renderDraftText(ctx context.Context, root *html.Node, maximumBytes int) (st
 	return text, err
 }
 
-// legacyRenderingKey marks a context whose rendering must reproduce the
-// previous generation: single line breaks between all blocks, no GFM.
-type legacyRenderingKey struct{}
+type draftRenderingKey struct{}
 
-// withLegacyDraftRendering selects the rendering that produced drafts stored
-// before blank-line paragraph separation. Stored rich drafts are verified
-// against their canonical rendering, so both generations stay valid.
-func withLegacyDraftRendering(ctx context.Context) context.Context {
-	return context.WithValue(ctx, legacyRenderingKey{}, true)
+type draftRenderingGeneration uint8
+
+const (
+	currentDraftRendering draftRenderingGeneration = iota
+	caseFoldedLinkDraftRendering
+	singleBreakDraftRendering
+)
+
+func withDraftRendering(ctx context.Context, generation draftRenderingGeneration) context.Context {
+	return context.WithValue(ctx, draftRenderingKey{}, generation)
 }
 
-func legacyDraftRendering(ctx context.Context) bool {
-	legacy, _ := ctx.Value(legacyRenderingKey{}).(bool)
-	return legacy
+func draftRendering(ctx context.Context) draftRenderingGeneration {
+	generation, _ := ctx.Value(draftRenderingKey{}).(draftRenderingGeneration)
+	return generation
 }
 
 func renderPlainText(ctx context.Context, root *html.Node, maximumBytes int) (string, error) {
-	legacy := legacyDraftRendering(ctx)
+	generation := draftRendering(ctx)
+	legacy := generation == singleBreakDraftRendering
 	renderer := plainTextRenderer{ctx: ctx, maximumBytes: maximumBytes, legacy: legacy,
-		output: plainTextOutput{ctx: ctx, maximumBytes: maximumBytes, legacyBreaks: legacy}}
+		legacyLinks: generation != currentDraftRendering,
+		output:      plainTextOutput{ctx: ctx, maximumBytes: maximumBytes, legacyBreaks: legacy}}
 	capacity := 256
 	if maximumBytes > 0 {
 		capacity = min(capacity, maximumBytes)
@@ -244,7 +250,8 @@ func (renderer *plainTextRenderer) renderLink(node *html.Node) {
 	label := normalizeLinkLabel(link.label)
 	nestedTargets := link.nestedTargets
 	represented := label != "" && href != ""
-	if represented && !redundantLinkTarget(label, href) && !containsLinkTarget(nestedTargets, href) {
+	if represented && !redundantLinkTarget(label, href, renderer.legacyLinks) &&
+		!containsLinkTarget(nestedTargets, href, renderer.legacyLinks) {
 		renderer.appendRaw(" (" + href + ")")
 	}
 	renderer.links = renderer.links[:len(renderer.links)-1]

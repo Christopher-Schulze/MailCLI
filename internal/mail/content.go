@@ -21,21 +21,21 @@ var markdown = goldmark.New(goldmark.WithExtensions(extension.Table, extension.S
 var markdownLegacy = goldmark.New()
 
 // matchStoredDraftRendering renders a stored rich draft's source with the
-// current generation and, when the stored rendering came from the previous
-// one, returns that generation instead. A draft that matches neither keeps the
-// current result so the caller reports the mismatch.
+// current generation and accepts an exact match from a prior generation.
+// A draft that matches none keeps the current result or rendering error.
 func matchStoredDraftRendering(draft *Draft, observer draftContentObserver) (preparedDraftContent, error) {
 	prepared, err := prepareDraftContentWithObserver(context.Background(), draft.BodyFormat, draft.BodySource, observer)
-	if err != nil || (prepared.Plain == draft.Body && prepared.HTML == draft.BodyHTML) {
-		return prepared, err
+	if err == nil && prepared.Plain == draft.Body && prepared.HTML == draft.BodyHTML {
+		return prepared, nil
 	}
-	legacy, legacyErr := prepareDraftContentWithObserver(
-		withLegacyDraftRendering(context.Background()), draft.BodyFormat, draft.BodySource, nil,
-	)
-	if legacyErr == nil && legacy.Plain == draft.Body && legacy.HTML == draft.BodyHTML {
-		return legacy, nil
+	for _, generation := range []draftRenderingGeneration{caseFoldedLinkDraftRendering, singleBreakDraftRendering} {
+		ctx := withDraftRendering(context.Background(), generation)
+		legacy, legacyErr := prepareDraftContentWithObserver(ctx, draft.BodyFormat, draft.BodySource, nil)
+		if legacyErr == nil && legacy.Plain == draft.Body && legacy.HTML == draft.BodyHTML {
+			return legacy, nil
+		}
 	}
-	return prepared, nil
+	return prepared, err
 }
 
 type draftContentObserver interface {
@@ -165,7 +165,7 @@ func validateStoredDraftContentStructuralWithObserver(draft *Draft, observer dra
 func renderMarkdownContent(ctx context.Context, source string) (preparedDraftContent, error) {
 	rendered := draftHTMLWriter{ctx: ctx}
 	converter := markdown
-	if legacyDraftRendering(ctx) {
+	if draftRendering(ctx) == singleBreakDraftRendering {
 		converter = markdownLegacy
 	}
 	if err := converter.Convert([]byte(source), &rendered); err != nil {

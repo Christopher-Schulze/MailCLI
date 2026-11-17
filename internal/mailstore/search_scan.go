@@ -71,6 +71,10 @@ func (s *Store) scanSearchRecordsChunked(
 	results := make([]mail.SearchMessage, 0, prepared.Query.Limit+1)
 	var reservedBytes int64
 	batchSize := min(searchBatchSize, max(searchWorkerCount, prepared.Query.Limit+1))
+	// Small result pages often fill in the first few rows. If the prefix
+	// runs out, switch to the normal chunk size to amortize SQLite work.
+	const minimumFirstChunkSize = 32
+	chunkSize := min(candidateChunkSize, max(minimumFirstChunkSize, 2*prepared.Query.Limit))
 	loaded := 0
 	// progressCount tracks candidates fully classified by the scan. A
 	// byte-blocked candidate stays at an inclusive continuation boundary; if
@@ -83,7 +87,7 @@ chunkLoop:
 	// A loaded chunk can contain an unscanned tail after the page fills. Keep
 	// that tail out of later queries: lastScanned remains the resumable cursor.
 	for loaded < maximum && len(results) < prepared.Query.Limit {
-		chunkWant := min(candidateChunkSize, maximum-loaded)
+		chunkWant := min(chunkSize, maximum-loaded)
 		items, err := stream.next(chunkWant)
 		if err != nil {
 			return mail.SearchPage{}, err
@@ -93,6 +97,7 @@ chunkLoop:
 		}
 		chunkStart := loaded
 		loaded += len(items)
+		chunkSize = candidateChunkSize
 		for start := 0; start < len(items) && len(results) < prepared.Query.Limit; {
 			matchesBefore := len(results)
 			remaining := prepared.Query.Limit - len(results)

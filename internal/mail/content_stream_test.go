@@ -246,7 +246,7 @@ func (renderer *bufferedReferenceRenderer) renderLink(node *html.Node) {
 	label := normalizeLinkLabel(link.label)
 	nestedTargets := link.nestedTargets
 	represented := label != "" && href != ""
-	if represented && !redundantLinkTarget(label, href) && !containsLinkTarget(nestedTargets, href) {
+	if represented && !redundantLinkTarget(label, href, false) && !containsLinkTarget(nestedTargets, href, false) {
 		renderer.appendRaw(" (" + href + ")")
 	}
 	renderer.links = renderer.links[:len(renderer.links)-1]

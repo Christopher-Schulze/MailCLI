@@ -23,7 +23,9 @@ const (
 // shortenedLinkLength is the length from which host mode replaces a URL.
 const shortenedLinkLength = 40
 
-var linkPattern = regexp.MustCompile(`(?i)https?://[^\s<>"]+`)
+// Unicode whitespace consists of separator characters, ASCII whitespace
+// controls and NEXT LINE (U+0085).
+var linkPattern = regexp.MustCompile(`(?i)https?://[^\x09-\x0d\p{Z}\x{0085}<>"]+`)
 
 var blankLineRun = regexp.MustCompile(`\n{3,}`)
 
@@ -49,16 +51,27 @@ func ShortenLinks(text string, mode LinkMode) string {
 	}
 	// One forward pass over a byte buffer: removing a wrapper only shortens the
 	// buffer, so the text already produced is never copied again.
-	output := make([]byte, 0, len(text))
+	var output []byte
+	var matches [][]int
+	if strings.Contains(text, "://") {
+		matches = linkPattern.FindAllStringIndex(text, -1)
+	}
 	last := 0
-	for _, match := range linkPattern.FindAllStringIndex(text, -1) {
+	for _, match := range matches {
 		address, tail := splitLinkTail(text[match[0]:match[1]])
-		parsed, err := url.Parse(address)
-		if err != nil || parsed.Hostname() == "" {
-			continue
-		}
 		if mode == LinkModeHost && len(address) < shortenedLinkLength {
 			continue
+		}
+		parsed, err := url.Parse(address)
+		if err != nil {
+			continue
+		}
+		host := parsed.Hostname()
+		if host == "" {
+			continue
+		}
+		if output == nil {
+			output = make([]byte, 0, len(text))
 		}
 		output = append(output, text[last:match[0]]...)
 		last = match[1]
@@ -66,9 +79,9 @@ func ShortenLinks(text string, mode LinkMode) string {
 		wrappedInParentheses := bytes.HasSuffix(output, []byte(" (")) && strings.HasPrefix(tail, ")")
 		switch {
 		case mode == LinkModeHost && wrappedInBrackets:
-			output = append(output, parsed.Hostname()...)
+			output = append(output, host...)
 		case mode == LinkModeHost:
-			output = append(output, "<"+parsed.Hostname()+">"...)
+			output = append(output, "<"+host+">"...)
 		case wrappedInBrackets:
 			output = output[:len(output)-len("<")]
 			last++
@@ -78,8 +91,13 @@ func ShortenLinks(text string, mode LinkMode) string {
 		}
 		output = append(output, tail...)
 	}
-	output = append(output, text[last:]...)
-	return blankLineRun.ReplaceAllString(string(output), "\n\n")
+	if output != nil {
+		text = string(append(output, text[last:]...))
+	}
+	if strings.Contains(text, "\n\n\n") {
+		return blankLineRun.ReplaceAllString(text, "\n\n")
+	}
+	return text
 }
 
 // splitLinkTail separates trailing punctuation and unbalanced closing
